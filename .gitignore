@@ -1,0 +1,16 @@
+/lockd
+/server.pem
+/client*.pem
+/ca.pem
+/.gocache
+bin/
+\#*\#
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.log
+vendor/
+.env
+.env.local

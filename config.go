@@ -1,0 +1,63 @@
+package lockd
+
+import (
+	"fmt"
+	"time"
+)
+
+// Config captures the tunables for a lockd.Server instance.
+type Config struct {
+	Listen          string
+	Store           string
+	JSONMaxBytes    int64
+	DefaultTTL      time.Duration
+	MaxTTL          time.Duration
+	AcquireBlock    time.Duration
+	SweeperInterval time.Duration
+
+	// mTLS
+	MTLS         bool
+	BundlePath   string
+	DenylistPath string
+
+	// S3-specific options.
+	S3Region      string
+	S3Endpoint    string
+	S3SSE         string
+	S3KMSKeyID    string
+	S3MaxPartSize int64
+	S3ForcePath   bool
+	S3DisableTLS  bool
+}
+
+// Validate applies defaults and sanity-checks the configuration.
+func (c *Config) Validate() error {
+	if c.Listen == "" {
+		c.Listen = ":8443"
+	}
+	if c.Store == "" {
+		return fmt.Errorf("config: store is required")
+	}
+	if c.JSONMaxBytes <= 0 {
+		c.JSONMaxBytes = 100 * 1024 * 1024 // 100 MB
+	}
+	if c.DefaultTTL <= 0 {
+		c.DefaultTTL = 30 * time.Second
+	}
+	if c.MaxTTL <= 0 {
+		c.MaxTTL = 5 * time.Minute
+	}
+	if c.MaxTTL < c.DefaultTTL {
+		return fmt.Errorf("config: max ttl must be >= default ttl")
+	}
+	if c.AcquireBlock <= 0 {
+		c.AcquireBlock = 60 * time.Second
+	}
+	if c.SweeperInterval <= 0 {
+		c.SweeperInterval = 5 * time.Second
+	}
+	if c.S3MaxPartSize <= 0 {
+		c.S3MaxPartSize = 16 * 1024 * 1024
+	}
+	return nil
+}

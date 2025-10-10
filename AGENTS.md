@@ -245,3 +245,11 @@ No multi-holder per key; no clustering/consensus; no advanced policy; no JSON sc
 5. `Release()`.
 
 All over **host-agnostic mTLS** with **object-store-backed CAS** so you can run it anywhere without POSIX.
+
+## Stretch goals
+
+### `lockc`, the lockd CLI client
+
+Location: `cmd/lockc` (e.g `cmd/lockc/main.go`)
+
+Should be able to acquire the lock like `lockc acquire -s server -i client.pem <key>`, continue with a context somehow, then be able to `lockc state get -o dump.json` or `-o dump.yaml`, edit json or yaml, then `lockc state update -i dump.yaml` (serializes back to json, that's the underlying format), also be able to do `lockc keepalive --ttl 30s`, and `lockc release [key]` when done.

@@ -46,3 +46,13 @@ func TestBuildS3Config(t *testing.T) {
 		t.Fatalf("expected error for non-s3 store")
 	}
 }
+
+func TestOpenBackendPebble(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{Store: "pebble:///" + dir}
+	backend, err := openBackend(cfg)
+	if err != nil {
+		t.Fatalf("open backend: %v", err)
+	}
+	defer backend.Close()
+}

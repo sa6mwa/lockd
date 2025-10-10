@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -73,12 +74,86 @@ func New(baseURL string, opts ...Option) (*Client, error) {
 }
 
 // Acquire requests a lease for the given key.
-func (c *Client) Acquire(ctx context.Context, req AcquireRequest) (*AcquireResponse, error) {
-	var resp AcquireResponse
-	if err := c.postJSON(ctx, "/v1/acquire", req, &resp, nil); err != nil {
-		return nil, err
+// AcquireConfig controls Acquire behaviour (client-side retries, etc).
+type AcquireConfig struct {
+	MaxAttempts int
+	BaseDelay   time.Duration
+	MaxDelay    time.Duration
+	Multiplier  float64
+}
+
+// AcquireOption customises Acquire behaviour.
+type AcquireOption func(*AcquireConfig)
+
+// WithAcquireMaxAttempts sets client retry attempts.
+func WithAcquireMaxAttempts(n int) AcquireOption {
+	return func(c *AcquireConfig) {
+		if n > 0 {
+			c.MaxAttempts = n
+		}
 	}
-	return &resp, nil
+}
+
+// WithAcquireBackoff adjusts backoff parameters.
+func WithAcquireBackoff(base, max time.Duration, multiplier float64) AcquireOption {
+	return func(c *AcquireConfig) {
+		if base > 0 {
+			c.BaseDelay = base
+		}
+		if max > 0 {
+			c.MaxDelay = max
+		}
+		if multiplier > 0 {
+			c.Multiplier = multiplier
+		}
+	}
+}
+
+// Acquire acquires a lease, retrying conflicts and transient errors.
+func (c *Client) Acquire(ctx context.Context, req AcquireRequest, opts ...AcquireOption) (*AcquireResponse, error) {
+	cfg := AcquireConfig{
+		MaxAttempts: 20,
+		BaseDelay:   100 * time.Millisecond,
+		MaxDelay:    3 * time.Second,
+		Multiplier:  2.0,
+	}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	delay := cfg.BaseDelay
+	for attempt := 1; attempt <= cfg.MaxAttempts; attempt++ {
+		var resp AcquireResponse
+		if err := c.postJSON(ctx, "/v1/acquire", req, &resp, nil); err != nil {
+			var apiErr *APIError
+			if errors.As(err, &apiErr) {
+				if apiErr.Status == http.StatusConflict && req.BlockSecs > 0 {
+					// continue to retry while blocking.
+				} else if apiErr.Status >= 500 || apiErr.Status == http.StatusTooManyRequests {
+					// retry on server-side/transient failures.
+				} else {
+					return nil, err
+				}
+			} else {
+				return nil, err
+			}
+			if attempt == cfg.MaxAttempts {
+				return nil, err
+			}
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(delay):
+			}
+			next := time.Duration(float64(delay) * cfg.Multiplier)
+			if next > cfg.MaxDelay {
+				next = cfg.MaxDelay
+			}
+			delay = next
+			continue
+		}
+		return &resp, nil
+	}
+	return nil, fmt.Errorf("acquire retry exhausted")
 }
 
 // KeepAlive extends a lease.

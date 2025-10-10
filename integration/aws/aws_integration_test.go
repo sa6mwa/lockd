@@ -38,7 +38,10 @@ func TestAWSLockLifecycle(t *testing.T) {
 
 	ctx := context.Background()
 	key := "aws-lifecycle-" + uuid.NewString()
-	lease := acquireWithRetry(t, ctx, cli, key, "aws-lifecycle", 30, 1)
+	lease, err := cli.Acquire(ctx, lockdclient.AcquireRequest{Key: key, Owner: "aws-lifecycle", TTLSeconds: 30, BlockSecs: 5})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
 
 	state, etag, version := getStateJSON(t, ctx, cli, key, lease.LeaseID)
 	if state != nil {
@@ -64,7 +67,10 @@ func TestAWSLockLifecycle(t *testing.T) {
 
 	releaseLease(t, ctx, cli, key, lease.LeaseID)
 
-	secondLease := acquireWithRetry(t, ctx, cli, key, "aws-lifecycle-2", 30, 1)
+	secondLease, err := cli.Acquire(ctx, lockdclient.AcquireRequest{Key: key, Owner: "aws-lifecycle-2", TTLSeconds: 30, BlockSecs: 5})
+	if err != nil {
+		t.Fatalf("second acquire: %v", err)
+	}
 	if secondLease.LeaseID == lease.LeaseID {
 		t.Fatal("expected new lease id")
 	}
@@ -91,7 +97,10 @@ func TestAWSLockConcurrency(t *testing.T) {
 			defer wg.Done()
 			owner := fmt.Sprintf("worker-%d", workerID)
 			for iter := 0; iter < iterations; iter++ {
-				lease := acquireWithRetry(t, ctx, cli, key, owner, ttl, 5)
+				lease, err := cli.Acquire(ctx, lockdclient.AcquireRequest{Key: key, Owner: owner, TTLSeconds: ttl, BlockSecs: 20})
+				if err != nil {
+					t.Fatalf("worker %d acquire: %v", workerID, err)
+				}
 				state, etag, version := getStateJSON(t, ctx, cli, key, lease.LeaseID)
 				if version == "" {
 					version = strconv.FormatInt(lease.Version, 10)
@@ -113,7 +122,10 @@ func TestAWSLockConcurrency(t *testing.T) {
 	}
 	wg.Wait()
 
-	verifier := acquireWithRetry(t, ctx, cli, key, "verifier", ttl, 5)
+	verifier, err := cli.Acquire(ctx, lockdclient.AcquireRequest{Key: key, Owner: "verifier", TTLSeconds: ttl, BlockSecs: 5})
+	if err != nil {
+		t.Fatalf("verifier acquire: %v", err)
+	}
 	finalState, _, _ := getStateJSON(t, ctx, cli, key, verifier.LeaseID)
 	releaseLease(t, ctx, cli, key, verifier.LeaseID)
 	cleanupS3(t, cfg, key)
@@ -167,6 +179,15 @@ func startLockdServer(t *testing.T, cfg lockd.Config) *lockdclient.Client {
 	cfg.MaxTTL = 2 * time.Minute
 	cfg.AcquireBlock = 5 * time.Second
 	cfg.SweeperInterval = 5 * time.Second
+	if cfg.StorageRetryMaxAttempts < 12 {
+		cfg.StorageRetryMaxAttempts = 12
+	}
+	if cfg.StorageRetryBaseDelay < 500*time.Millisecond {
+		cfg.StorageRetryBaseDelay = 500 * time.Millisecond
+	}
+	if cfg.StorageRetryMaxDelay < 15*time.Second {
+		cfg.StorageRetryMaxDelay = 15 * time.Second
+	}
 
 	srv, err := lockd.NewServer(cfg, lockd.WithLogger(port.NoopLogger()))
 	if err != nil {
@@ -226,11 +247,6 @@ func acquireWithRetry(t *testing.T, ctx context.Context, cli *lockdclient.Client
 		if apiErr := (*lockdclient.APIError)(nil); errors.As(err, &apiErr) {
 			if apiErr.Status == http.StatusConflict {
 				time.Sleep(200 * time.Millisecond)
-				continue
-			}
-			if apiErr.Status >= 500 {
-				t.Logf("acquire transient error %d: %s", apiErr.Status, apiErr.Error())
-				time.Sleep(300 * time.Millisecond)
 				continue
 			}
 		}

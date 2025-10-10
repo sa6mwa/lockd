@@ -71,17 +71,32 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("config: s3 region or endpoint must be provided for store %q", c.Store)
 		}
 	}
-	if c.StorageRetryMaxAttempts <= 0 {
-		c.StorageRetryMaxAttempts = 4
-	}
-	if c.StorageRetryBaseDelay <= 0 {
-		c.StorageRetryBaseDelay = 50 * time.Millisecond
-	}
-	if c.StorageRetryMultiplier <= 0 {
-		c.StorageRetryMultiplier = 2.0
-	}
-	if c.StorageRetryMaxDelay <= 0 {
-		c.StorageRetryMaxDelay = 2 * time.Second
+	if strings.HasPrefix(strings.ToLower(c.Store), "s3://") {
+		if c.StorageRetryMaxAttempts <= 0 {
+			c.StorageRetryMaxAttempts = 12
+		}
+		if c.StorageRetryBaseDelay <= 0 {
+			c.StorageRetryBaseDelay = 500 * time.Millisecond
+		}
+		if c.StorageRetryMultiplier <= 0 {
+			c.StorageRetryMultiplier = 2.0
+		}
+		if c.StorageRetryMaxDelay <= 0 {
+			c.StorageRetryMaxDelay = 15 * time.Second
+		}
+	} else {
+		if c.StorageRetryMaxAttempts <= 0 {
+			c.StorageRetryMaxAttempts = 6
+		}
+		if c.StorageRetryBaseDelay <= 0 {
+			c.StorageRetryBaseDelay = 100 * time.Millisecond
+		}
+		if c.StorageRetryMultiplier <= 0 {
+			c.StorageRetryMultiplier = 2.0
+		}
+		if c.StorageRetryMaxDelay <= 0 {
+			c.StorageRetryMaxDelay = 5 * time.Second
+		}
 	}
 	return nil
 }

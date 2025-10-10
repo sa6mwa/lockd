@@ -7,6 +7,7 @@ import (
 
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/memory"
+	pebblestore "pkt.systems/lockd/internal/storage/pebble"
 	"pkt.systems/lockd/internal/storage/s3"
 )
 
@@ -28,6 +29,12 @@ func openBackend(cfg Config) (storage.Backend, error) {
 			return nil, err
 		}
 		return backend, nil
+	case "pebble":
+		path := strings.TrimPrefix(u.Path, "/")
+		if path == "" {
+			return nil, fmt.Errorf("pebble store path required (e.g. pebble:///var/lib/lockd)")
+		}
+		return pebblestore.Open(path)
 	default:
 		return nil, fmt.Errorf("store scheme %q not supported yet", u.Scheme)
 	}

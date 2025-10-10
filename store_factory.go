@@ -50,6 +50,9 @@ func BuildS3Config(cfg Config) (s3.Config, string, string, error) {
 	secure := !cfg.S3DisableTLS
 	endpoint := cfg.S3Endpoint
 	forcePath := cfg.S3ForcePath
+	if endpoint == "" && cfg.S3Region == "" {
+		return s3.Config{}, "", "", fmt.Errorf("s3 region or endpoint required for bucket %s", bucket)
+	}
 	if endpoint != "" {
 		eu, err := url.Parse(endpoint)
 		if err != nil {
@@ -67,6 +70,8 @@ func BuildS3Config(cfg Config) (s3.Config, string, string, error) {
 			endpoint = eu.Host
 		}
 		forcePath = true
+	} else if cfg.S3Region != "" {
+		endpoint = fmt.Sprintf("s3.%s.amazonaws.com", cfg.S3Region)
 	}
 	return s3.Config{
 		Endpoint:       endpoint,

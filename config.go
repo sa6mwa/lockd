@@ -2,6 +2,7 @@ package lockd
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -58,6 +59,11 @@ func (c *Config) Validate() error {
 	}
 	if c.S3MaxPartSize <= 0 {
 		c.S3MaxPartSize = 16 * 1024 * 1024
+	}
+	if strings.HasPrefix(strings.ToLower(c.Store), "s3://") {
+		if c.S3Region == "" && c.S3Endpoint == "" {
+			return fmt.Errorf("config: s3 region or endpoint must be provided for store %q", c.Store)
+		}
 	}
 	return nil
 }

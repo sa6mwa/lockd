@@ -62,6 +62,10 @@ func verifyS3(ctx context.Context, cfg lockd.Config) (Result, error) {
 	client := store.Client()
 	result := Result{Provider: "aws-s3", Bucket: bucket, Prefix: prefix}
 
+	if loc, err := client.GetBucketLocation(ctx, bucket); err == nil && loc != "" && !strings.EqualFold(loc, s3cfg.Region) {
+		result.AdditionalMessage = fmt.Sprintf("Bucket region is %s; set LOCKD_S3_REGION or LOCKD_S3_ENDPOINT to match.", loc)
+	}
+
 	run := func(name string, fn func(context.Context) error) {
 		err := fn(ctx)
 		result.Checks = append(result.Checks, CheckResult{Name: name, Err: err})
@@ -134,12 +138,16 @@ func buildAWSPolicy(bucket, prefix string) string {
 	trim := strings.Trim(prefix, "/")
 	metaRes := fmt.Sprintf("arn:aws:s3:::%s/meta/*", bucket)
 	stateRes := fmt.Sprintf("arn:aws:s3:::%s/state/*", bucket)
+	diagMeta := fmt.Sprintf("arn:aws:s3:::%s/lockd-diagnostics/meta/*", bucket)
+	diagState := fmt.Sprintf("arn:aws:s3:::%s/lockd-diagnostics/state/*", bucket)
 	if trim != "" {
 		metaRes = fmt.Sprintf("arn:aws:s3:::%s/%s/meta/*", bucket, trim)
 		stateRes = fmt.Sprintf("arn:aws:s3:::%s/%s/state/*", bucket, trim)
+		diagMeta = fmt.Sprintf("arn:aws:s3:::%s/%s/lockd-diagnostics/meta/*", bucket, trim)
+		diagState = fmt.Sprintf("arn:aws:s3:::%s/%s/lockd-diagnostics/state/*", bucket, trim)
 		resources = append(resources, fmt.Sprintf("arn:aws:s3:::%s/%s", bucket, trim))
 	}
-	resources = append(resources, metaRes, stateRes)
+	resources = append(resources, metaRes, stateRes, diagMeta, diagState)
 	policy := map[string]any{
 		"Version": "2012-10-17",
 		"Statement": []any{

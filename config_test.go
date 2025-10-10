@@ -36,4 +36,8 @@ func TestConfigValidateErrors(t *testing.T) {
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected error for max ttl < default ttl")
 	}
+	cfg = Config{Store: "s3://bucket"}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for missing s3 region/endpoint")
+	}
 }

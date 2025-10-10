@@ -3,12 +3,10 @@
 package awsintegration
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"os"
@@ -21,7 +19,7 @@ import (
 	"github.com/google/uuid"
 
 	"pkt.systems/lockd"
-	"pkt.systems/lockd/internal/api"
+	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/internal/diagnostics/storagecheck"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/s3"
@@ -36,41 +34,41 @@ func TestAWSStoreVerification(t *testing.T) {
 func TestAWSLockLifecycle(t *testing.T) {
 	cfg := loadAWSConfig(t)
 	ensureStoreReady(t, context.Background(), cfg)
-	baseURL, httpClient := startLockdServer(t, cfg)
+	cli := startLockdServer(t, cfg)
 
-	key := "aws-integration-" + uuid.NewString()
-	leaseTTL := int64(30)
+	ctx := context.Background()
+	key := "aws-lifecycle-" + uuid.NewString()
+	lease := acquireWithRetry(t, ctx, cli, key, "aws-lifecycle", 30, 1)
 
-	// Acquire initial lease
-	acqResp := acquireWithRetry(t, httpClient, baseURL, key, "aws-integration", leaseTTL, 1)
-	if acqResp.LeaseID == "" {
-		t.Fatal("expected lease id")
-	}
-
-	// Initial state should be empty (204)
-	if hasState := getState(t, httpClient, baseURL, key, acqResp.LeaseID); hasState {
+	state, etag, version := getStateJSON(t, ctx, cli, key, lease.LeaseID)
+	if state != nil {
 		t.Fatal("expected no initial state")
 	}
 
-	// Update state
-	statePayload := map[string]any{"cursor": 42, "source": "aws"}
-	updateState(t, httpClient, baseURL, key, acqResp.LeaseID, statePayload, "", strconv.FormatInt(acqResp.Version, 10))
+	payload, _ := json.Marshal(map[string]any{"cursor": 42, "source": "aws"})
+	opts := lockdclient.UpdateStateOptions{IfVersion: version}
+	if opts.IfVersion == "" {
+		opts.IfVersion = strconv.FormatInt(lease.Version, 10)
+	}
+	if etag != "" {
+		opts.IfETag = etag
+	}
+	if _, err := cli.UpdateState(ctx, key, lease.LeaseID, payload, opts); err != nil {
+		t.Fatalf("update state: %v", err)
+	}
 
-	// Fetch state again, expect JSON with cursor 42
-	state, _, _ := readState(t, httpClient, baseURL, key, acqResp.LeaseID)
-	if state["cursor"].(float64) != 42 {
+	state, _, _ = getStateJSON(t, ctx, cli, key, lease.LeaseID)
+	if cursor, ok := state["cursor"].(float64); !ok || cursor != 42 {
 		t.Fatalf("expected cursor 42, got %v", state["cursor"])
 	}
 
-	// Release lease
-	releaseLease(t, httpClient, baseURL, key, acqResp.LeaseID)
+	releaseLease(t, ctx, cli, key, lease.LeaseID)
 
-	// Acquire again to ensure release worked
-	secondAcquire := acquireWithRetry(t, httpClient, baseURL, key, "aws-integration-2", leaseTTL, 1)
-	if secondAcquire.LeaseID == acqResp.LeaseID {
+	secondLease := acquireWithRetry(t, ctx, cli, key, "aws-lifecycle-2", 30, 1)
+	if secondLease.LeaseID == lease.LeaseID {
 		t.Fatal("expected new lease id")
 	}
-	releaseLease(t, httpClient, baseURL, key, secondAcquire.LeaseID)
+	releaseLease(t, ctx, cli, key, secondLease.LeaseID)
 
 	cleanupS3(t, cfg, key)
 }
@@ -78,12 +76,13 @@ func TestAWSLockLifecycle(t *testing.T) {
 func TestAWSLockConcurrency(t *testing.T) {
 	cfg := loadAWSConfig(t)
 	ensureStoreReady(t, context.Background(), cfg)
-	baseURL, httpClient := startLockdServer(t, cfg)
+	cli := startLockdServer(t, cfg)
 
+	ctx := context.Background()
 	key := "aws-concurrency-" + uuid.NewString()
 	workers := 5
 	iterations := 3
-	leaseTTL := int64(45)
+	ttl := int64(45)
 
 	var wg sync.WaitGroup
 	wg.Add(workers)
@@ -92,37 +91,38 @@ func TestAWSLockConcurrency(t *testing.T) {
 			defer wg.Done()
 			owner := fmt.Sprintf("worker-%d", workerID)
 			for iter := 0; iter < iterations; iter++ {
-				lease := acquireWithRetry(t, httpClient, baseURL, key, owner, leaseTTL, 5)
-				payload, etag, _ := readState(t, httpClient, baseURL, key, lease.LeaseID)
+				lease := acquireWithRetry(t, ctx, cli, key, owner, ttl, 5)
+				state, etag, version := getStateJSON(t, ctx, cli, key, lease.LeaseID)
+				if version == "" {
+					version = strconv.FormatInt(lease.Version, 10)
+				}
 				var counter float64
-				if payload != nil {
-					if v, ok := payload["counter"]; ok {
+				if state != nil {
+					if v, ok := state["counter"]; ok {
 						counter, _ = v.(float64)
 					}
 				}
-				newCounter := counter + 1
-				newState := map[string]any{
-					"counter": newCounter,
-					"last":    owner,
+				counter++
+				body, _ := json.Marshal(map[string]any{"counter": counter, "last": owner})
+				if _, err := cli.UpdateState(ctx, key, lease.LeaseID, body, lockdclient.UpdateStateOptions{IfETag: etag, IfVersion: version}); err != nil {
+					t.Fatalf("update state: %v", err)
 				}
-				updateState(t, httpClient, baseURL, key, lease.LeaseID, newState, etag, strconv.FormatInt(lease.Version, 10))
-				releaseLease(t, httpClient, baseURL, key, lease.LeaseID)
+				releaseLease(t, ctx, cli, key, lease.LeaseID)
 			}
 		}(id)
 	}
 	wg.Wait()
 
-	verifier := acquireWithRetry(t, httpClient, baseURL, key, "verifier", leaseTTL, 5)
-	finalState, _, _ := readState(t, httpClient, baseURL, key, verifier.LeaseID)
-	releaseLease(t, httpClient, baseURL, key, verifier.LeaseID)
+	verifier := acquireWithRetry(t, ctx, cli, key, "verifier", ttl, 5)
+	finalState, _, _ := getStateJSON(t, ctx, cli, key, verifier.LeaseID)
+	releaseLease(t, ctx, cli, key, verifier.LeaseID)
 	cleanupS3(t, cfg, key)
 
 	if finalState == nil {
 		t.Fatal("expected final state")
 	}
 	expected := float64(workers * iterations)
-	value, ok := finalState["counter"].(float64)
-	if !ok || value != expected {
+	if value, ok := finalState["counter"].(float64); !ok || value != expected {
 		t.Fatalf("expected counter %.0f, got %v", expected, finalState["counter"])
 	}
 }
@@ -158,7 +158,7 @@ func ensureStoreReady(t *testing.T, ctx context.Context, cfg lockd.Config) {
 	}
 }
 
-func startLockdServer(t *testing.T, cfg lockd.Config) (string, *http.Client) {
+func startLockdServer(t *testing.T, cfg lockd.Config) *lockdclient.Client {
 	addr := pickPort(t)
 	cfg.Listen = addr
 	cfg.MTLS = false
@@ -181,10 +181,15 @@ func startLockdServer(t *testing.T, cfg lockd.Config) (string, *http.Client) {
 		<-done
 	})
 
-	client := &http.Client{Timeout: 15 * time.Second}
+	httpClient := &http.Client{Timeout: 15 * time.Second}
 	baseURL := fmt.Sprintf("http://%s", addr)
-	waitForReady(t, client, baseURL)
-	return baseURL, client
+	waitForReady(t, httpClient, baseURL)
+
+	cli, err := lockdclient.New(baseURL, lockdclient.WithHTTPClient(httpClient))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	return cli
 }
 
 func pickPort(t *testing.T) string {
@@ -212,145 +217,55 @@ func waitForReady(t *testing.T, client *http.Client, baseURL string) {
 	}
 }
 
-func postJSON(t *testing.T, client *http.Client, url string, body any) (int, []byte) {
-	buf := new(bytes.Buffer)
-	if err := json.NewEncoder(buf).Encode(body); err != nil {
-		t.Fatalf("encode body: %v", err)
-	}
-	req, err := http.NewRequest(http.MethodPost, url, buf)
-	if err != nil {
-		t.Fatalf("new request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("do request: %v", err)
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	return resp.StatusCode, data
-}
-
-func request[T any](t *testing.T, client *http.Client, url string, body any, out *T) {
-	status, data := postJSON(t, client, url, body)
-	if status >= 300 {
-		t.Fatalf("request to %s failed: %s", url, string(data))
-	}
-	if out != nil {
-		if err := json.Unmarshal(data, out); err != nil {
-			t.Fatalf("decode response: %v", err)
+func acquireWithRetry(t *testing.T, ctx context.Context, cli *lockdclient.Client, key, owner string, ttl, block int64) *lockdclient.AcquireResponse {
+	for attempt := 0; attempt < 60; attempt++ {
+		resp, err := cli.Acquire(ctx, lockdclient.AcquireRequest{Key: key, Owner: owner, TTLSeconds: ttl, BlockSecs: block})
+		if err == nil {
+			return resp
 		}
+		if apiErr := (*lockdclient.APIError)(nil); errors.As(err, &apiErr) {
+			if apiErr.Status == http.StatusConflict {
+				time.Sleep(200 * time.Millisecond)
+				continue
+			}
+			if apiErr.Status >= 500 {
+				t.Logf("acquire transient error %d: %s", apiErr.Status, apiErr.Error())
+				time.Sleep(300 * time.Millisecond)
+				continue
+			}
+		}
+		t.Fatalf("acquire failed: %v", err)
 	}
+	t.Fatal("acquire retry limit exceeded")
+	return nil
 }
 
-func getState(t *testing.T, client *http.Client, baseURL, key, leaseID string) bool {
-	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/v1/get_state?key=%s", baseURL, key), http.NoBody)
+func getStateJSON(t *testing.T, ctx context.Context, cli *lockdclient.Client, key, leaseID string) (map[string]any, string, string) {
+	data, etag, version, err := cli.GetState(ctx, key, leaseID)
 	if err != nil {
-		t.Fatalf("new request: %v", err)
-	}
-	req.Header.Set("X-Lease-ID", leaseID)
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("get state: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNoContent {
-		return false
-	}
-	if resp.StatusCode != http.StatusOK {
-		data, _ := io.ReadAll(resp.Body)
-		t.Fatalf("get_state unexpected status %d: %s", resp.StatusCode, string(data))
-	}
-	return true
-}
-
-func readState(t *testing.T, client *http.Client, baseURL, key, leaseID string) (map[string]any, string, string) {
-	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/v1/get_state?key=%s", baseURL, key), http.NoBody)
-	if err != nil {
-		t.Fatalf("new request: %v", err)
-	}
-	req.Header.Set("X-Lease-ID", leaseID)
-	resp, err := client.Do(req)
-	if err != nil {
+		if apiErr := (*lockdclient.APIError)(nil); errors.As(err, &apiErr) && apiErr.Status == http.StatusNoContent {
+			return nil, "", ""
+		}
 		t.Fatalf("get_state: %v", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNoContent {
-		return nil, "", ""
-	}
-	if resp.StatusCode != http.StatusOK {
-		data, _ := io.ReadAll(resp.Body)
-		t.Fatalf("get_state unexpected status %d: %s", resp.StatusCode, string(data))
+	if len(data) == 0 {
+		return nil, etag, version
 	}
 	var payload map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+	if err := json.Unmarshal(data, &payload); err != nil {
 		t.Fatalf("decode state: %v", err)
 	}
-	etag := resp.Header.Get("ETag")
-	version := resp.Header.Get("X-Key-Version")
 	return payload, etag, version
 }
 
-func updateState(t *testing.T, client *http.Client, baseURL, key, leaseID string, body any, etag, version string) {
-	buf := new(bytes.Buffer)
-	if err := json.NewEncoder(buf).Encode(body); err != nil {
-		t.Fatalf("encode state: %v", err)
-	}
-	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/v1/update_state?key=%s", baseURL, key), buf)
+func releaseLease(t *testing.T, ctx context.Context, cli *lockdclient.Client, key, leaseID string) {
+	resp, err := cli.Release(ctx, lockdclient.ReleaseRequest{Key: key, LeaseID: leaseID})
 	if err != nil {
-		t.Fatalf("new request: %v", err)
+		t.Fatalf("release: %v", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Lease-ID", leaseID)
-	if etag != "" {
-		req.Header.Set("X-If-State-ETag", etag)
-	}
-	if version != "" {
-		req.Header.Set("X-If-Version", version)
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("update state: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		data, _ := io.ReadAll(resp.Body)
-		t.Fatalf("update_state failed: %s", string(data))
-	}
-}
-
-func releaseLease(t *testing.T, client *http.Client, baseURL, key, leaseID string) {
-	releaseReq := api.ReleaseRequest{Key: key, LeaseID: leaseID}
-	var releaseResp api.ReleaseResponse
-	request(t, client, baseURL+"/v1/release", releaseReq, &releaseResp)
-	if !releaseResp.Released {
+	if !resp.Released {
 		t.Fatalf("expected release success for lease %s", leaseID)
 	}
-}
-
-func acquireWithRetry(t *testing.T, client *http.Client, baseURL, key, owner string, ttl, block int64) api.AcquireResponse {
-	reqURL := baseURL + "/v1/acquire"
-	for attempt := 0; attempt < 60; attempt++ {
-		payload := api.AcquireRequest{Key: key, Owner: owner, TTLSeconds: ttl, BlockSecs: block}
-		status, data := postJSON(t, client, reqURL, payload)
-		if status == http.StatusOK {
-			var resp api.AcquireResponse
-			if err := json.Unmarshal(data, &resp); err != nil {
-				t.Fatalf("decode acquire: %v", err)
-			}
-			return resp
-		}
-		if status == http.StatusConflict {
-			time.Sleep(200 * time.Millisecond)
-			continue
-		}
-		t.Fatalf("unexpected acquire response %d: %s", status, string(data))
-	}
-	t.Fatal("acquire retry limit exceeded")
-	return api.AcquireResponse{}
 }
 
 func cleanupS3(t *testing.T, cfg lockd.Config, key string) {

@@ -72,3 +72,24 @@ type Backend interface {
 	// Close releases backend resources.
 	Close() error
 }
+
+type transientError struct {
+	err error
+}
+
+func (t transientError) Error() string { return t.err.Error() }
+func (t transientError) Unwrap() error { return t.err }
+
+// NewTransientError marks err as retryable.
+func NewTransientError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return transientError{err: err}
+}
+
+// IsTransient reports whether err was marked as retryable.
+func IsTransient(err error) bool {
+	var te transientError
+	return errors.As(err, &te)
+}

@@ -25,6 +25,9 @@ func TestConfigValidateDefaults(t *testing.T) {
 	if cfg.S3MaxPartSize <= 0 {
 		t.Fatal("expected s3 max part size default")
 	}
+	if cfg.StorageRetryMaxAttempts <= 0 || cfg.StorageRetryBaseDelay <= 0 || cfg.StorageRetryMultiplier <= 0 {
+		t.Fatal("expected storage retry defaults")
+	}
 }
 
 func TestConfigValidateErrors(t *testing.T) {

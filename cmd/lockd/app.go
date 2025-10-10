@@ -101,6 +101,10 @@ func newRootCommand(logger port.ForLogging) *cobra.Command {
 	flags.String("s3-max-part-size", "16MB", "maximum S3 multipart upload part size")
 	flags.Bool("s3-path-style", false, "force path-style addressing for S3 requests")
 	flags.Bool("s3-disable-tls", false, "disable TLS when connecting to the S3 endpoint (testing only)")
+	flags.Int("storage-retry-attempts", 4, "maximum storage retry attempts")
+	flags.Duration("storage-retry-base-delay", 50*time.Millisecond, "initial backoff for storage retries")
+	flags.Duration("storage-retry-max-delay", 2*time.Second, "maximum backoff delay for storage retries")
+	flags.Float64("storage-retry-multiplier", 2.0, "backoff multiplier for storage retries")
 	flags.StringVar(&logLevel, "log-level", "info", "log level (trace,debug,info,...)")
 
 	bindFlag := func(name string) {
@@ -117,7 +121,8 @@ func newRootCommand(logger port.ForLogging) *cobra.Command {
 		"listen", "store", "json-max", "default-ttl", "max-ttl", "acquire-block",
 		"sweeper-interval", "mtls", "bundle", "denylist-path", "s3-region",
 		"s3-endpoint", "s3-sse", "s3-kms-key-id", "s3-max-part-size", "s3-path-style",
-		"s3-disable-tls", "log-level",
+		"s3-disable-tls", "storage-retry-attempts", "storage-retry-base-delay",
+		"storage-retry-max-delay", "storage-retry-multiplier", "log-level",
 	}
 	for _, name := range names {
 		bindFlag(name)
@@ -159,6 +164,10 @@ func bindConfig(cfg *lockd.Config) error {
 	}
 	cfg.S3ForcePath = viper.GetBool("s3-path-style")
 	cfg.S3DisableTLS = viper.GetBool("s3-disable-tls")
+	cfg.StorageRetryMaxAttempts = viper.GetInt("storage-retry-attempts")
+	cfg.StorageRetryBaseDelay = viper.GetDuration("storage-retry-base-delay")
+	cfg.StorageRetryMaxDelay = viper.GetDuration("storage-retry-max-delay")
+	cfg.StorageRetryMultiplier = viper.GetFloat64("storage-retry-multiplier")
 	return nil
 }
 

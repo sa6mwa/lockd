@@ -29,6 +29,12 @@ type Config struct {
 	S3MaxPartSize int64
 	S3ForcePath   bool
 	S3DisableTLS  bool
+
+	// Storage retry tuning.
+	StorageRetryMaxAttempts int
+	StorageRetryBaseDelay   time.Duration
+	StorageRetryMaxDelay    time.Duration
+	StorageRetryMultiplier  float64
 }
 
 // Validate applies defaults and sanity-checks the configuration.
@@ -64,6 +70,18 @@ func (c *Config) Validate() error {
 		if c.S3Region == "" && c.S3Endpoint == "" {
 			return fmt.Errorf("config: s3 region or endpoint must be provided for store %q", c.Store)
 		}
+	}
+	if c.StorageRetryMaxAttempts <= 0 {
+		c.StorageRetryMaxAttempts = 4
+	}
+	if c.StorageRetryBaseDelay <= 0 {
+		c.StorageRetryBaseDelay = 50 * time.Millisecond
+	}
+	if c.StorageRetryMultiplier <= 0 {
+		c.StorageRetryMultiplier = 2.0
+	}
+	if c.StorageRetryMaxDelay <= 0 {
+		c.StorageRetryMaxDelay = 2 * time.Second
 	}
 	return nil
 }

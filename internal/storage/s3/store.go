@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"path"
 	"strings"
@@ -98,11 +99,11 @@ func (s *Store) LoadMeta(ctx context.Context, key string) (*storage.Meta, string
 		if isNotFound(err) {
 			return nil, "", storage.ErrNotFound
 		}
-		return nil, "", fmt.Errorf("s3: stat meta: %w", err)
+		return nil, "", s.wrapError(err, "s3: stat meta")
 	}
 	reader, err := s.client.GetObject(ctx, s.cfg.Bucket, object, minio.GetObjectOptions{})
 	if err != nil {
-		return nil, "", fmt.Errorf("s3: get meta: %w", err)
+		return nil, "", s.wrapError(err, "s3: get meta")
 	}
 	defer reader.Close()
 	var meta storage.Meta
@@ -129,7 +130,7 @@ func (s *Store) StoreMeta(ctx context.Context, key string, meta *storage.Meta, e
 		if isPreconditionFailed(err) {
 			return "", storage.ErrCASMismatch
 		}
-		return "", fmt.Errorf("s3: put meta: %w", err)
+		return "", s.wrapError(err, "s3: put meta")
 	}
 	return stripETag(info.ETag), nil
 }
@@ -149,7 +150,7 @@ func (s *Store) DeleteMeta(ctx context.Context, key string, expectedETag string)
 		}
 	}
 	if err := s.client.RemoveObject(ctx, s.cfg.Bucket, object, minio.RemoveObjectOptions{}); err != nil {
-		return fmt.Errorf("s3: remove meta: %w", err)
+		return s.wrapError(err, "s3: remove meta")
 	}
 	return nil
 }
@@ -164,7 +165,7 @@ func (s *Store) ListMetaKeys(ctx context.Context) ([]string, error) {
 	var keys []string
 	for object := range s.client.ListObjects(ctx, s.cfg.Bucket, opts) {
 		if object.Err != nil {
-			return nil, fmt.Errorf("s3: list meta: %w", object.Err)
+			return nil, s.wrapError(object.Err, "s3: list meta")
 		}
 		key := strings.TrimPrefix(object.Key, metaPrefix)
 		key = strings.TrimSuffix(key, ".json")
@@ -183,11 +184,11 @@ func (s *Store) ReadState(ctx context.Context, key string) (io.ReadCloser, *stor
 		if isNotFound(err) {
 			return nil, nil, storage.ErrNotFound
 		}
-		return nil, nil, fmt.Errorf("s3: stat state: %w", err)
+		return nil, nil, s.wrapError(err, "s3: stat state")
 	}
 	obj, err := s.client.GetObject(ctx, s.cfg.Bucket, object, minio.GetObjectOptions{})
 	if err != nil {
-		return nil, nil, fmt.Errorf("s3: get state: %w", err)
+		return nil, nil, s.wrapError(err, "s3: get state")
 	}
 	infoOut := &storage.StateInfo{
 		Size:       info.Size,
@@ -224,7 +225,7 @@ func (s *Store) WriteState(ctx context.Context, key string, body io.Reader, opts
 		if isPreconditionFailed(err) {
 			return nil, storage.ErrCASMismatch
 		}
-		return nil, fmt.Errorf("s3: put state: %w", err)
+		return nil, s.wrapError(err, "s3: put state")
 	}
 	return &storage.PutStateResult{
 		BytesWritten: info.Size,
@@ -247,7 +248,7 @@ func (s *Store) RemoveState(ctx context.Context, key string, expectedETag string
 		}
 	}
 	if err := s.client.RemoveObject(ctx, s.cfg.Bucket, object, minio.RemoveObjectOptions{}); err != nil {
-		return fmt.Errorf("s3: remove state: %w", err)
+		return s.wrapError(err, "s3: remove state")
 	}
 	return nil
 }
@@ -296,6 +297,44 @@ func isPreconditionFailed(err error) bool {
 	errResp := minio.ErrorResponse{}
 	if errors.As(err, &errResp) {
 		return errResp.StatusCode == http.StatusPreconditionFailed
+	}
+	return false
+}
+
+func (s *Store) wrapError(err error, msg string) error {
+	if err == nil {
+		return nil
+	}
+	retryable := isRetryable(err)
+	if msg != "" {
+		err = fmt.Errorf("%s: %w", msg, err)
+	}
+	if retryable {
+		return storage.NewTransientError(err)
+	}
+	return err
+}
+
+func isRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary()) {
+		return true
+	}
+	resp := minio.ToErrorResponse(err)
+	if resp.StatusCode >= http.StatusInternalServerError && resp.StatusCode != 0 {
+		return true
+	}
+	switch resp.StatusCode {
+	case http.StatusTooManyRequests, http.StatusServiceUnavailable, http.StatusRequestTimeout, 0:
+		if resp.StatusCode != 0 {
+			return true
+		}
 	}
 	return false
 }

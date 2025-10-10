@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"sync"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/google/uuid"
@@ -19,7 +20,29 @@ import (
 
 // Store implements storage.Backend backed by Pebble.
 type Store struct {
-	db *pebble.DB
+	db    *pebble.DB
+	locks sync.Map
+}
+
+func (s *Store) keyLock(key string) *sync.Mutex {
+	mu, _ := s.locks.LoadOrStore(key, &sync.Mutex{})
+	return mu.(*sync.Mutex)
+}
+
+func (s *Store) loadMetaValue(key string) (*metaRecord, error) {
+	val, closer, err := s.db.Get(metaKey(key))
+	if errors.Is(err, pebble.ErrNotFound) {
+		return nil, storage.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer closer.Close()
+	var rec metaRecord
+	if err := json.Unmarshal(val, &rec); err != nil {
+		return nil, fmt.Errorf("pebble: decode meta: %w", err)
+	}
+	return &rec, nil
 }
 
 type metaRecord struct {
@@ -44,26 +67,25 @@ func (s *Store) Close() error {
 }
 
 func (s *Store) LoadMeta(_ context.Context, key string) (*storage.Meta, string, error) {
-	val, closer, err := s.db.Get(metaKey(key))
-	if errors.Is(err, pebble.ErrNotFound) {
-		return nil, "", storage.ErrNotFound
-	}
+	rec, err := s.loadMetaValue(key)
 	if err != nil {
 		return nil, "", err
-	}
-	defer closer.Close()
-	var rec metaRecord
-	if err := json.Unmarshal(val, &rec); err != nil {
-		return nil, "", fmt.Errorf("pebble: decode meta: %w", err)
 	}
 	return &rec.Meta, rec.ETag, nil
 }
 
 func (s *Store) StoreMeta(ctx context.Context, key string, meta *storage.Meta, expectedETag string) (string, error) {
-	var currentETag string
-	_, currentETag, err := s.LoadMeta(ctx, key)
+	mu := s.keyLock(key)
+	mu.Lock()
+	defer mu.Unlock()
+
+	current, err := s.loadMetaValue(key)
+	currentETag := ""
 	if err != nil && !errors.Is(err, storage.ErrNotFound) {
 		return "", err
+	}
+	if current != nil {
+		currentETag = current.ETag
 	}
 	if expectedETag != "" {
 		if errors.Is(err, storage.ErrNotFound) {
@@ -88,12 +110,16 @@ func (s *Store) StoreMeta(ctx context.Context, key string, meta *storage.Meta, e
 }
 
 func (s *Store) DeleteMeta(ctx context.Context, key string, expectedETag string) error {
+	mu := s.keyLock(key)
+	mu.Lock()
+	defer mu.Unlock()
+
 	if expectedETag != "" {
-		_, currentETag, err := s.LoadMeta(ctx, key)
+		current, err := s.loadMetaValue(key)
 		if err != nil {
 			return err
 		}
-		if currentETag != expectedETag {
+		if current.ETag != expectedETag {
 			return storage.ErrCASMismatch
 		}
 	}

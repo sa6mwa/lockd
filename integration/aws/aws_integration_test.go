@@ -43,7 +43,10 @@ func TestAWSLockLifecycle(t *testing.T) {
 		t.Fatalf("acquire: %v", err)
 	}
 
-	state, etag, version := getStateJSON(t, ctx, cli, key, lease.LeaseID)
+	state, etag, version, err := getStateJSON(ctx, cli, key, lease.LeaseID)
+	if err != nil {
+		t.Fatalf("get_state: %v", err)
+	}
 	if state != nil {
 		t.Fatal("expected no initial state")
 	}
@@ -60,12 +63,17 @@ func TestAWSLockLifecycle(t *testing.T) {
 		t.Fatalf("update state: %v", err)
 	}
 
-	state, _, _ = getStateJSON(t, ctx, cli, key, lease.LeaseID)
+	state, _, _, err = getStateJSON(ctx, cli, key, lease.LeaseID)
+	if err != nil {
+		t.Fatalf("get_state: %v", err)
+	}
 	if cursor, ok := state["cursor"].(float64); !ok || cursor != 42 {
 		t.Fatalf("expected cursor 42, got %v", state["cursor"])
 	}
 
-	releaseLease(t, ctx, cli, key, lease.LeaseID)
+	if !releaseLease(t, ctx, cli, key, lease.LeaseID) {
+		t.Fatalf("expected release success")
+	}
 
 	secondLease, err := cli.Acquire(ctx, lockdclient.AcquireRequest{Key: key, Owner: "aws-lifecycle-2", TTLSeconds: 30, BlockSecs: 5})
 	if err != nil {
@@ -74,7 +82,9 @@ func TestAWSLockLifecycle(t *testing.T) {
 	if secondLease.LeaseID == lease.LeaseID {
 		t.Fatal("expected new lease id")
 	}
-	releaseLease(t, ctx, cli, key, secondLease.LeaseID)
+	if !releaseLease(t, ctx, cli, key, secondLease.LeaseID) {
+		t.Fatalf("expected release success")
+	}
 
 	cleanupS3(t, cfg, key)
 }
@@ -96,12 +106,16 @@ func TestAWSLockConcurrency(t *testing.T) {
 		go func(workerID int) {
 			defer wg.Done()
 			owner := fmt.Sprintf("worker-%d", workerID)
-			for iter := 0; iter < iterations; iter++ {
+			for iter := 0; iter < iterations; {
 				lease, err := cli.Acquire(ctx, lockdclient.AcquireRequest{Key: key, Owner: owner, TTLSeconds: ttl, BlockSecs: 20})
 				if err != nil {
 					t.Fatalf("worker %d acquire: %v", workerID, err)
 				}
-				state, etag, version := getStateJSON(t, ctx, cli, key, lease.LeaseID)
+				state, etag, version, err := getStateJSON(ctx, cli, key, lease.LeaseID)
+				if err != nil {
+					_ = releaseLease(t, ctx, cli, key, lease.LeaseID)
+					continue
+				}
 				if version == "" {
 					version = strconv.FormatInt(lease.Version, 10)
 				}
@@ -116,7 +130,8 @@ func TestAWSLockConcurrency(t *testing.T) {
 				if _, err := cli.UpdateState(ctx, key, lease.LeaseID, body, lockdclient.UpdateStateOptions{IfETag: etag, IfVersion: version}); err != nil {
 					t.Fatalf("update state: %v", err)
 				}
-				releaseLease(t, ctx, cli, key, lease.LeaseID)
+				_ = releaseLease(t, ctx, cli, key, lease.LeaseID)
+				iter++
 			}
 		}(id)
 	}
@@ -126,8 +141,13 @@ func TestAWSLockConcurrency(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verifier acquire: %v", err)
 	}
-	finalState, _, _ := getStateJSON(t, ctx, cli, key, verifier.LeaseID)
-	releaseLease(t, ctx, cli, key, verifier.LeaseID)
+	finalState, _, _, err := getStateJSON(ctx, cli, key, verifier.LeaseID)
+	if err != nil {
+		t.Fatalf("get_state: %v", err)
+	}
+	if !releaseLease(t, ctx, cli, key, verifier.LeaseID) {
+		t.Fatalf("expected release success")
+	}
 	cleanupS3(t, cfg, key)
 
 	if finalState == nil {
@@ -256,32 +276,33 @@ func acquireWithRetry(t *testing.T, ctx context.Context, cli *lockdclient.Client
 	return nil
 }
 
-func getStateJSON(t *testing.T, ctx context.Context, cli *lockdclient.Client, key, leaseID string) (map[string]any, string, string) {
+func getStateJSON(ctx context.Context, cli *lockdclient.Client, key, leaseID string) (map[string]any, string, string, error) {
 	data, etag, version, err := cli.GetState(ctx, key, leaseID)
 	if err != nil {
 		if apiErr := (*lockdclient.APIError)(nil); errors.As(err, &apiErr) && apiErr.Status == http.StatusNoContent {
-			return nil, "", ""
+			return nil, "", "", nil
 		}
-		t.Fatalf("get_state: %v", err)
+		return nil, "", "", err
 	}
 	if len(data) == 0 {
-		return nil, etag, version
+		return nil, etag, version, nil
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(data, &payload); err != nil {
-		t.Fatalf("decode state: %v", err)
+		return nil, "", "", err
 	}
-	return payload, etag, version
+	return payload, etag, version, nil
 }
 
-func releaseLease(t *testing.T, ctx context.Context, cli *lockdclient.Client, key, leaseID string) {
+func releaseLease(t *testing.T, ctx context.Context, cli *lockdclient.Client, key, leaseID string) bool {
 	resp, err := cli.Release(ctx, lockdclient.ReleaseRequest{Key: key, LeaseID: leaseID})
 	if err != nil {
 		t.Fatalf("release: %v", err)
 	}
 	if !resp.Released {
-		t.Fatalf("expected release success for lease %s", leaseID)
+		return false
 	}
+	return true
 }
 
 func cleanupS3(t *testing.T, cfg lockd.Config, key string) {

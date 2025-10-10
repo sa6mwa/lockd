@@ -1,4 +1,7 @@
 /lockd
+/lockc
+/cmd/lockd/lockd
+/cmd/lockc/lockc
 /server.pem
 /client*.pem
 /ca.pem

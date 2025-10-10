@@ -1,6 +1,11 @@
 package tlsutil
 
 import (
+	"bytes"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
@@ -8,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 )
 
@@ -15,8 +21,16 @@ import (
 // CA certificates, a server certificate, and the associated private key.
 type Bundle struct {
 	ServerCertificate tls.Certificate
+	ServerCert        *x509.Certificate
+	ServerCertPEM     []byte
+	ServerKeyPEM      []byte
+	CACertificate     *x509.Certificate
+	CACertPEM         []byte
+	CAPrivateKey      crypto.Signer
+	CAPrivateKeyPEM   []byte
 	CAPool            *x509.CertPool
 	Denylist          map[string]struct{}
+	DenylistEntries   []string
 }
 
 // LoadBundle parses a lockd server bundle from path, optionally applying a
@@ -26,32 +40,56 @@ func LoadBundle(bundlePath, denylistPath string) (*Bundle, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read bundle: %w", err)
 	}
-	cas, serverCert, serverKey, err := parseBundle(data)
+	parsed, err := parseBundle(data)
 	if err != nil {
 		return nil, err
 	}
-	if serverCert == nil || serverKey == nil {
+	if parsed.ServerCertPEM == nil || parsed.ServerKeyPEM == nil {
 		return nil, errors.New("bundle: missing server certificate or key")
 	}
-	tlsCert, err := tls.X509KeyPair(serverCert, serverKey)
+	tlsCert, err := tls.X509KeyPair(parsed.ServerCertPEM, parsed.ServerKeyPEM)
 	if err != nil {
 		return nil, fmt.Errorf("bundle: build key pair: %w", err)
 	}
 	caPool := x509.NewCertPool()
-	for _, ca := range cas {
+	for _, ca := range parsed.CACerts {
 		caPool.AddCert(ca)
 	}
-	var deny map[string]struct{}
+	entries := append([]string(nil), parsed.DenylistEntries...)
+	external := map[string]struct{}{}
 	if denylistPath != "" {
-		deny, err = loadDenylist(denylistPath)
+		deny, err := loadDenylist(denylistPath)
 		if err != nil {
 			return nil, err
+		}
+		for serial := range deny {
+			entries = append(entries, serial)
+			external[serial] = struct{}{}
+		}
+	}
+	entries = NormalizeSerials(entries)
+	denyMap := make(map[string]struct{}, len(entries))
+	for _, serial := range entries {
+		denyMap[serial] = struct{}{}
+	}
+	serverCert := parsed.ServerCert
+	if serverCert == nil && len(parsed.ServerCertPEM) > 0 {
+		if cert, err := FirstCertificateFromPEM(parsed.ServerCertPEM); err == nil {
+			serverCert = cert
 		}
 	}
 	return &Bundle{
 		ServerCertificate: tlsCert,
+		ServerCert:        serverCert,
+		ServerCertPEM:     parsed.ServerCertPEM,
+		ServerKeyPEM:      parsed.ServerKeyPEM,
+		CACertificate:     parsed.CACert,
+		CACertPEM:         parsed.CACertPEM,
+		CAPrivateKey:      parsed.CAPrivateKey,
+		CAPrivateKeyPEM:   parsed.CAPrivateKeyPEM,
 		CAPool:            caPool,
-		Denylist:          deny,
+		Denylist:          denyMap,
+		DenylistEntries:   entries,
 	}, nil
 }
 
@@ -77,14 +115,25 @@ func loadDenylist(path string) (map[string]struct{}, error) {
 	return out, nil
 }
 
-func parseBundle(data []byte) ([]*x509.Certificate, []byte, []byte, error) {
-	var (
-		cas         []*x509.Certificate
-		serverCert  []byte
-		serverKey   []byte
-		leafCert    *x509.Certificate
-		privateKeys = make([][]byte, 0, 2)
-	)
+type parsedBundle struct {
+	CACerts         []*x509.Certificate
+	CACert          *x509.Certificate
+	CACertPEM       []byte
+	CAPrivateKey    crypto.Signer
+	CAPrivateKeyPEM []byte
+	ServerCert      *x509.Certificate
+	ServerCertPEM   []byte
+	ServerKeyPEM    []byte
+	DenylistEntries []string
+}
+
+func parseBundle(data []byte) (*parsedBundle, error) {
+	result := &parsedBundle{}
+	var privKeys []struct {
+		pem    []byte
+		signer crypto.Signer
+	}
+	var leafCerts []*x509.Certificate
 
 	rest := data
 	for {
@@ -95,42 +144,184 @@ func parseBundle(data []byte) ([]*x509.Certificate, []byte, []byte, error) {
 		}
 		switch block.Type {
 		case "CERTIFICATE":
+			pemBytes := pem.EncodeToMemory(block)
 			cert, err := x509.ParseCertificate(block.Bytes)
 			if err != nil {
-				return nil, nil, nil, fmt.Errorf("bundle: parse certificate: %w", err)
+				return nil, fmt.Errorf("bundle: parse certificate: %w", err)
 			}
 			if cert.IsCA {
-				cas = append(cas, cert)
-			} else if leafCert == nil {
-				serverCert = pem.EncodeToMemory(block)
-				leafCert = cert
+				result.CACerts = append(result.CACerts, cert)
+				if result.CACert == nil {
+					result.CACert = cert
+					result.CACertPEM = pemBytes
+				}
 			} else {
-				// Additional intermediates appended.
-				serverCert = append(serverCert, pem.EncodeToMemory(block)...)
+				leafCerts = append(leafCerts, cert)
+				if result.ServerCertPEM == nil {
+					result.ServerCertPEM = pemBytes
+				} else {
+					result.ServerCertPEM = append(result.ServerCertPEM, pemBytes...)
+				}
 			}
 		case "PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY":
-			privateKeys = append(privateKeys, pem.EncodeToMemory(block))
+			signer, err := parsePrivateKey(block)
+			if err != nil {
+				return nil, fmt.Errorf("bundle: parse private key: %w", err)
+			}
+			privKeys = append(privKeys, struct {
+				pem    []byte
+				signer crypto.Signer
+			}{pem: pem.EncodeToMemory(block), signer: signer})
+		case "LOCKD DENYLIST":
+			lines := strings.Split(string(block.Bytes), "\n")
+			for _, line := range lines {
+				serial := strings.TrimSpace(strings.ToLower(line))
+				if serial == "" {
+					continue
+				}
+				result.DenylistEntries = append(result.DenylistEntries, serial)
+			}
 		default:
-			// Ignore unknown blocks.
+			// ignore
 		}
 	}
 
-	if leafCert == nil {
-		return cas, nil, nil, errors.New("bundle: no server certificate found")
+	if len(leafCerts) == 0 {
+		return nil, errors.New("bundle: no server certificate found")
 	}
+	leaf := leafCerts[0]
+	result.ServerCert = leaf
 
-	// Attempt to match private key by trying all available ones.
-	for _, keyPEM := range privateKeys {
-		if keyPEM == nil {
-			continue
-		}
-		if _, err := tls.X509KeyPair(serverCert, keyPEM); err == nil {
-			serverKey = keyPEM
+	for _, key := range privKeys {
+		if publicKeysEqual(leaf.PublicKey, key.signer.Public()) {
+			result.ServerKeyPEM = key.pem
 			break
 		}
 	}
-	if serverKey == nil {
-		return cas, nil, nil, errors.New("bundle: unable to match server key")
+	if result.ServerKeyPEM == nil {
+		return nil, errors.New("bundle: unable to match server key")
 	}
-	return cas, serverCert, serverKey, nil
+
+	if result.CACert != nil {
+		for _, key := range privKeys {
+			if publicKeysEqual(result.CACert.PublicKey, key.signer.Public()) {
+				result.CAPrivateKey = key.signer
+				result.CAPrivateKeyPEM = key.pem
+				break
+			}
+		}
+	}
+
+	return result, nil
+}
+
+func parsePrivateKey(block *pem.Block) (crypto.Signer, error) {
+	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		if k, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+			return k, nil
+		}
+		if k, err := x509.ParseECPrivateKey(block.Bytes); err == nil {
+			return k, nil
+		}
+		return nil, err
+	}
+	switch k := key.(type) {
+	case ed25519.PrivateKey:
+		return k, nil
+	case *rsa.PrivateKey:
+		return k, nil
+	case *ecdsa.PrivateKey:
+		return k, nil
+	default:
+		return nil, fmt.Errorf("unsupported private key type %T", key)
+	}
+}
+
+func publicKeysEqual(a, b crypto.PublicKey) bool {
+	switch ak := a.(type) {
+	case ed25519.PublicKey:
+		bk, ok := b.(ed25519.PublicKey)
+		return ok && bytes.Equal(ak, bk)
+	case *rsa.PublicKey:
+		bk, ok := b.(*rsa.PublicKey)
+		if !ok {
+			return false
+		}
+		return ak.E == bk.E && ak.N.Cmp(bk.N) == 0
+	case *ecdsa.PublicKey:
+		bk, ok := b.(*ecdsa.PublicKey)
+		if !ok {
+			return false
+		}
+		return ak.Curve == bk.Curve && ak.X.Cmp(bk.X) == 0 && ak.Y.Cmp(bk.Y) == 0
+	default:
+		return false
+	}
+}
+
+// NormalizeSerials lowercases, trims, de-duplicates, and sorts serials.
+func NormalizeSerials(serials []string) []string {
+	set := make(map[string]struct{}, len(serials))
+	for _, s := range serials {
+		s = strings.TrimSpace(strings.ToLower(s))
+		if s == "" {
+			continue
+		}
+		set[s] = struct{}{}
+	}
+	out := make([]string, 0, len(set))
+	for s := range set {
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// EncodeServerBundle encodes the server bundle components into PEM.
+func EncodeServerBundle(caCertPEM, caKeyPEM, serverCertPEM, serverKeyPEM []byte, denylist []string) ([]byte, error) {
+	if len(caCertPEM) == 0 || len(caKeyPEM) == 0 || len(serverCertPEM) == 0 || len(serverKeyPEM) == 0 {
+		return nil, errors.New("encode bundle: missing components")
+	}
+	denylist = NormalizeSerials(denylist)
+	var buf bytes.Buffer
+	buf.Write(caCertPEM)
+	buf.Write(caKeyPEM)
+	buf.Write(serverCertPEM)
+	buf.Write(serverKeyPEM)
+	if len(denylist) > 0 {
+		block := &pem.Block{Type: "LOCKD DENYLIST", Bytes: []byte(strings.Join(denylist, "\n"))}
+		buf.Write(pem.EncodeToMemory(block))
+	}
+	return buf.Bytes(), nil
+}
+
+// EncodeClientBundle encodes a client PEM (CA cert + client cert + key).
+func EncodeClientBundle(caCertPEM, clientCertPEM, clientKeyPEM []byte) ([]byte, error) {
+	if len(clientCertPEM) == 0 || len(clientKeyPEM) == 0 {
+		return nil, errors.New("encode client bundle: missing components")
+	}
+	var buf bytes.Buffer
+	if len(caCertPEM) > 0 {
+		buf.Write(caCertPEM)
+	}
+	buf.Write(clientCertPEM)
+	buf.Write(clientKeyPEM)
+	return buf.Bytes(), nil
+}
+
+// FirstCertificateFromPEM returns the first certificate contained in pemBytes.
+func FirstCertificateFromPEM(pemBytes []byte) (*x509.Certificate, error) {
+	rest := pemBytes
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if block.Type == "CERTIFICATE" {
+			return x509.ParseCertificate(block.Bytes)
+		}
+	}
+	return nil, errors.New("no certificate found")
 }

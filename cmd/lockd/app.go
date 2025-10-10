@@ -26,7 +26,7 @@ func submain(ctx context.Context) int {
 	ctx = withSignalCancel(ctx)
 	if err := cmd.ExecuteContext(ctx); err != nil {
 		if err != context.Canceled {
-			fmt.Fprintln(os.Stderr, err)
+			logger.Error("command failed", "error", err)
 		}
 		return 1
 	}
@@ -38,8 +38,9 @@ func newRootCommand(logger port.ForLogging) *cobra.Command {
 	var logLevel string
 
 	cmd := &cobra.Command{
-		Use:   "lockd",
-		Short: "lockd is a minimal lock + state coordination service",
+		Use:           "lockd",
+		Short:         "lockd is a minimal lock + state coordination service",
+		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			cmd.SilenceUsage = true
@@ -129,6 +130,7 @@ func newRootCommand(logger port.ForLogging) *cobra.Command {
 	}
 
 	cmd.AddCommand(newVerifyCommand(logger))
+	cmd.AddCommand(newAuthCommand())
 
 	return cmd
 }

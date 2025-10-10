@@ -2,6 +2,8 @@ package lockd
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -66,6 +68,19 @@ func (c *Config) Validate() error {
 	if c.S3MaxPartSize <= 0 {
 		c.S3MaxPartSize = 16 * 1024 * 1024
 	}
+	if c.MTLS {
+		if c.BundlePath == "" {
+			path, err := DefaultBundlePath()
+			if err != nil {
+				return fmt.Errorf("config: resolve bundle path: %w", err)
+			}
+			c.BundlePath = path
+		}
+		if _, err := os.Stat(c.BundlePath); err != nil {
+			return fmt.Errorf("config: bundle %q not found (run 'lockd auth new server')", c.BundlePath)
+		}
+	}
+
 	if strings.HasPrefix(strings.ToLower(c.Store), "s3://") {
 		if c.S3Region == "" && c.S3Endpoint == "" {
 			return fmt.Errorf("config: s3 region or endpoint must be provided for store %q", c.Store)
@@ -99,4 +114,22 @@ func (c *Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+// DefaultConfigDir returns the default configuration directory ($HOME/.lockd).
+func DefaultConfigDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".lockd"), nil
+}
+
+// DefaultBundlePath returns the default server bundle location.
+func DefaultBundlePath() (string, error) {
+	dir, err := DefaultConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "server.pem"), nil
 }

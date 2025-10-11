@@ -16,12 +16,13 @@ func TestParseMutations(t *testing.T) {
 		"path.list++",
 		"path.sum=-3",
 		"time:meta.timestamp=NOW",
+		"rm:legacy.field",
 	}, now)
 	if err != nil {
 		t.Fatalf("parseMutations: %v", err)
 	}
-	if len(muts) != 6 {
-		t.Fatalf("expected 6 mutations, got %d", len(muts))
+	if len(muts) != 7 {
+		t.Fatalf("expected 7 mutations, got %d", len(muts))
 	}
 	if muts[0].Kind != mutationSet || muts[0].Value != int64(42) {
 		t.Fatalf("unexpected mutation[0]: %+v", muts[0])
@@ -32,8 +33,22 @@ func TestParseMutations(t *testing.T) {
 	if muts[4].Kind != mutationIncrement || muts[4].Delta != -3 {
 		t.Fatalf("unexpected mutation[4]: %+v", muts[4])
 	}
-	if s, ok := muts[5].Value.(string); !ok || s == "" {
-		t.Fatalf("expected timestamp string, got %#v", muts[5].Value)
+	timeMut := muts[5]
+	if s, ok := timeMut.Value.(string); !ok || s == "" {
+		t.Fatalf("expected timestamp string, got %#v", timeMut.Value)
+	}
+	hasRemove := false
+	for _, mut := range muts {
+		if mut.Kind == mutationRemove {
+			hasRemove = true
+			if len(mut.Path) == 0 {
+				t.Fatalf("remove mutation missing path: %+v", mut)
+			}
+			break
+		}
+	}
+	if !hasRemove {
+		t.Fatalf("expected remove mutation in %+v", muts)
 	}
 }
 
@@ -45,6 +60,8 @@ func TestApplyMutations(t *testing.T) {
 		"nested.value=hello",
 		"nested.answer=41",
 		"nested.answer=+1",
+		"delete:nested.value",
+		"rm:missing.field",
 	}, time.Now())
 	if err != nil {
 		t.Fatalf("parseMutations: %v", err)
@@ -56,8 +73,8 @@ func TestApplyMutations(t *testing.T) {
 		t.Fatalf("expected counter=2 got %#v", v)
 	}
 	nested := doc["nested"].(map[string]any)
-	if nested["value"] != "hello" {
-		t.Fatalf("unexpected nested value: %#v", nested["value"])
+	if _, ok := nested["value"]; ok {
+		t.Fatalf("expected nested.value to be removed, doc=%v", doc)
 	}
 	if nested["answer"] != int64(42) {
 		t.Fatalf("expected answer=42 got %#v", nested["answer"])

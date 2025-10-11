@@ -216,7 +216,8 @@ lockd client edit checkpoint.json progress.step="done" progress.count=+5
 The CLI auto-discovers `client*.pem` bundles under `$HOME/.lockd/` (or use
 `--bundle`) and performs the same host-agnostic mTLS verification as the SDK.
 `set` accepts simple `path=value` expressions, arithmetic updates (`++`, `--`,
-`=+3`), and `time:` prefixes for RFC3339 timestamps.
+`=+3`), `rm:`/`delete:` prefixes to remove keys, and `time:` prefixes for
+RFC3339 timestamps.
 
 Use `-` with `--output` to stream results to standard output or with file inputs
 to read from standard input (e.g. `-o -`, `lockd client updatestate ... -`).

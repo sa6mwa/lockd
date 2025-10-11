@@ -20,6 +20,7 @@ type mutationKind int
 const (
 	mutationSet mutationKind = iota
 	mutationIncrement
+	mutationRemove
 )
 
 type mutation struct {
@@ -52,10 +53,39 @@ func parseMutations(exprs []string, now time.Time) ([]mutation, error) {
 }
 
 func parseMutation(expr string, now time.Time) (mutation, error) {
+	removeMode := false
+	switch {
+	case strings.HasPrefix(expr, "rm:"):
+		removeMode = true
+		expr = strings.TrimPrefix(expr, "rm:")
+	case strings.HasPrefix(expr, "remove:"):
+		removeMode = true
+		expr = strings.TrimPrefix(expr, "remove:")
+	case strings.HasPrefix(expr, "delete:"):
+		removeMode = true
+		expr = strings.TrimPrefix(expr, "delete:")
+	case strings.HasPrefix(expr, "del:"):
+		removeMode = true
+		expr = strings.TrimPrefix(expr, "del:")
+	}
+
 	timeMode := false
 	if strings.HasPrefix(expr, "time:") {
+		if removeMode {
+			return mutation{}, fmt.Errorf("time-prefixed mutation cannot be combined with delete/remove (%s)", expr)
+		}
 		timeMode = true
 		expr = strings.TrimPrefix(expr, "time:")
+	}
+	if removeMode {
+		path := strings.TrimSpace(expr)
+		if path == "" {
+			return mutation{}, fmt.Errorf("remove mutation missing key path")
+		}
+		return mutation{
+			Path: splitPath(path),
+			Kind: mutationRemove,
+		}, nil
 	}
 	if strings.HasSuffix(expr, "++") {
 		if timeMode {
@@ -186,8 +216,12 @@ func applyMutation(doc map[string]any, mut mutation) error {
 	if len(mut.Path) == 0 {
 		return fmt.Errorf("mutation has empty path")
 	}
-	parent, key, err := navigate(doc, mut.Path, true)
+	create := mut.Kind != mutationRemove
+	parent, key, err := navigate(doc, mut.Path, create)
 	if err != nil {
+		if mut.Kind == mutationRemove {
+			return nil
+		}
 		return err
 	}
 	switch mut.Kind {
@@ -204,6 +238,10 @@ func applyMutation(doc map[string]any, mut mutation) error {
 			return fmt.Errorf("value at %s is not numeric", strings.Join(mut.Path, "."))
 		}
 		parent[key] = normalizeNumber(num + mut.Delta)
+	case mutationRemove:
+		if parent != nil {
+			delete(parent, key)
+		}
 	default:
 		return fmt.Errorf("unknown mutation kind")
 	}

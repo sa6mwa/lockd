@@ -331,15 +331,17 @@ func newAuthVerifyServerCommand() *cobra.Command {
 				}
 				in = path
 			}
+			out := cmd.OutOrStdout()
+			errOut := cmd.ErrOrStderr()
 			bundle, err := tlsutil.LoadBundle(in, "")
 			if err != nil {
 				return fmt.Errorf("load bundle: %w", err)
 			}
 			issues := serverVerificationIssues(bundle)
 			if len(issues) > 0 {
-				fmt.Fprintf(cmd.OutOrStdout(), "Server bundle %s verification failed:\n", in)
+				fmt.Fprintf(errOut, "Server bundle %s verification failed:\n", in)
 				for _, issue := range issues {
-					fmt.Fprintf(cmd.OutOrStdout(), "  - %s\n", issue)
+					fmt.Fprintf(errOut, "  - %s\n", issue)
 				}
 				return fmt.Errorf("server verification failed")
 			}
@@ -351,7 +353,7 @@ func newAuthVerifyServerCommand() *cobra.Command {
 			if bundle.ServerCert != nil {
 				serverSerial = bundle.ServerCert.SerialNumber.Text(16)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Server bundle %s verified OK (CA serial %s, server serial %s)\n", in, caSerial, serverSerial)
+			fmt.Fprintf(out, "Server bundle %s verified OK (CA serial %s, server serial %s)\n", in, caSerial, serverSerial)
 			return nil
 		},
 	}
@@ -374,6 +376,8 @@ func newAuthVerifyClientCommand() *cobra.Command {
 				}
 				serverBundlePath = path
 			}
+			out := cmd.OutOrStdout()
+			errOut := cmd.ErrOrStderr()
 			serverBundle, err := tlsutil.LoadBundle(serverBundlePath, "")
 			if err != nil {
 				return fmt.Errorf("load server bundle: %w", err)
@@ -386,33 +390,33 @@ func newAuthVerifyClientCommand() *cobra.Command {
 				return err
 			}
 			if len(targets) == 0 {
-				fmt.Fprintf(cmd.OutOrStdout(), "No client bundles found.\n")
+				fmt.Fprintf(errOut, "No client bundles found.\n")
 				return nil
 			}
 			var failures int
 			for _, path := range targets {
 				clientBundle, err := tlsutil.LoadClientBundle(path)
 				if err != nil {
-					fmt.Fprintf(cmd.OutOrStdout(), "Client bundle %s verification failed: %v\n", path, err)
+					fmt.Fprintf(errOut, "Client bundle %s verification failed: %v\n", path, err)
 					failures++
 					continue
 				}
 				issues := clientVerificationIssues(clientBundle, serverBundle)
 				if len(issues) > 0 {
-					fmt.Fprintf(cmd.OutOrStdout(), "Client bundle %s verification failed:\n", path)
+					fmt.Fprintf(errOut, "Client bundle %s verification failed:\n", path)
 					for _, issue := range issues {
-						fmt.Fprintf(cmd.OutOrStdout(), "  - %s\n", issue)
+						fmt.Fprintf(errOut, "  - %s\n", issue)
 					}
 					failures++
 					continue
 				}
-				fmt.Fprintf(cmd.OutOrStdout(), "Client bundle %s verified OK (serial %s)\n", path, clientBundle.ClientCert.SerialNumber.Text(16))
+				fmt.Fprintf(out, "Client bundle %s verified OK (serial %s)\n", path, clientBundle.ClientCert.SerialNumber.Text(16))
 			}
 			if failures > 0 {
-				fmt.Fprintf(cmd.OutOrStdout(), "Client verification failed for %d bundle(s).\n", failures)
+				fmt.Fprintf(errOut, "Client verification failed for %d bundle(s).\n", failures)
 				return fmt.Errorf("client verification failed for %d bundle(s)", failures)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Client verification succeeded for %d bundle(s).\n", len(targets))
+			fmt.Fprintf(out, "Client verification succeeded for %d bundle(s).\n", len(targets))
 			return nil
 		},
 	}

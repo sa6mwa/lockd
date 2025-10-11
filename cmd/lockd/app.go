@@ -21,7 +21,7 @@ import (
 )
 
 func submain(ctx context.Context) int {
-	logger := zerologger.NewStructured(os.Stdout).WithLogLevel().With("component", "cli")
+	logger := zerologger.NewStructured(os.Stderr).WithLogLevel().With("component", "cli")
 	cmd := newRootCommand(logger)
 	targetCmd := cmd
 	if len(os.Args) > 1 {

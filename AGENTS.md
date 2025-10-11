@@ -62,8 +62,23 @@ Blocking semantics: `acquire` long-polls/loops up to `block_seconds`; on timeout
 lockd auth new server --out server.pem --cn "lockd-anywhere" --hosts "*" --ca-pass-prompt
 lockd auth new client --server-in server.pem --out client1.pem --cn "worker-1"
 lockd auth revoke client --server-in server.pem --out server.pem <hex-serial>...
-lockd auth inspect --in server.pem
+lockd auth inspect server --in server.pem
+lockd auth inspect client --in client1.pem
+lockd auth verify server --in server.pem
+lockd auth verify client --server-in server.pem --in client1.pem
+
+# bundled client CLI (mTLS by default, auto-discovers client*.pem when possible)
+lockd client acquire --server https://localhost:8443 --owner worker-1 --ttl 30s orders
+lockd client keepalive --lease <id> --ttl 45s orders
+lockd client getstate --lease <id> -o - orders
+lockd client updatestate --lease <id> --type yaml orders new-state.yaml
+lockd client set --ttl 30s orders progress.step=fetch progress.count++ time:progress.updated=NOW
+lockd client edit checkpoint.json progress.step="done" progress.count=+5
+lockd client release --lease <id> orders
 ```
+
+* `lockd auth verify` validates that bundles contain the expected CA/server material and that revoked client serials are surfaced from the denylist.
+* `lockd client` subcommands wrap the Go SDK and honour the same mTLS defaults; the `set` helper acquires, mutates, and CAS-updates JSON fields atomically before releasing the lease.
 
 ## Storage model
 

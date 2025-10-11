@@ -149,12 +149,21 @@ lockd auth new client --cn worker-1
 lockd auth revoke client <hex-serial> [<hex-serial>...]
 
 # Inspect bundle details (CA, server cert, denylist)
-lockd auth inspect
+lockd auth inspect server
+lockd auth inspect client --in $HOME/.lockd/client-*.pem
+
+# Verify bundles (validity, EKUs, denylist enforcement)
+lockd auth verify server --in $HOME/.lockd/server.pem
+lockd auth verify client --server-in $HOME/.lockd/server.pem
 ```
 
 The commands default to `$HOME/.lockd/`, creating the directory with 0700 and
 files with 0600 permissions. Use `--out` to override and `--force` to overwrite
 existing files.
+
+`lockd auth verify` ensures that the server bundle presents a CA + ServerAuth
+certificate (with matching private keys) and that client bundles were issued by
+the same CA and are not present on the denylist.
 
 ---
 
@@ -180,6 +189,37 @@ cli.Release(ctx, client.ReleaseRequest{Key: "orders", LeaseID: lease.LeaseID})
 
 `Acquire` automatically retries conflicts and transient 5xx/429 responses with
 exponential backoff.
+
+### Client CLI
+
+`lockd client` ships alongside the server binary for quick interactions with a
+running cluster. Flags mirror the Go SDK defaults and honour `LOCKD_CLIENT_*`
+environment variables.
+
+```
+# Acquire and release leases
+lockd client acquire --server https://127.0.0.1:8443 --owner worker-1 --ttl 30s orders
+lockd client keepalive --lease <lease-id> --ttl 45s orders
+lockd client release --lease <lease-id> orders
+
+# State operations
+lockd client getstate --lease <lease-id> -o - orders
+lockd client updatestate --lease <lease-id> --type yaml orders new-state.yaml
+
+# Atomic JSON mutations (acquire → mutate → update → release)
+lockd client set --ttl 30s orders progress.step=fetch progress.count++ time:progress.updated=NOW
+
+# Local JSON helper (no server interaction)
+lockd client edit checkpoint.json progress.step="done" progress.count=+5
+```
+
+The CLI auto-discovers `client*.pem` bundles under `$HOME/.lockd/` (or use
+`--bundle`) and performs the same host-agnostic mTLS verification as the SDK.
+`set` accepts simple `path=value` expressions, arithmetic updates (`++`, `--`,
+`=+3`), and `time:` prefixes for RFC3339 timestamps.
+
+Use `-` with `--output` to stream results to standard output or with file inputs
+to read from standard input (e.g. `-o -`, `lockd client updatestate ... -`).
 
 ---
 

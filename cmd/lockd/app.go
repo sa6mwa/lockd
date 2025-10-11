@@ -23,10 +23,20 @@ import (
 func submain(ctx context.Context) int {
 	logger := zerologger.NewStructured(os.Stdout).WithLogLevel().With("component", "cli")
 	cmd := newRootCommand(logger)
+	targetCmd := cmd
+	if len(os.Args) > 1 {
+		if found, _, err := cmd.Find(os.Args[1:]); err == nil && found != nil {
+			targetCmd = found
+		}
+	}
 	ctx = withSignalCancel(ctx)
 	if err := cmd.ExecuteContext(ctx); err != nil {
 		if err != context.Canceled {
-			logger.Error("command failed", "error", err)
+			if targetCmd == cmd {
+				logger.Error("command failed", "error", err)
+			} else {
+				fmt.Fprintf(os.Stderr, "%s\n", err)
+			}
 		}
 		return 1
 	}
@@ -131,6 +141,7 @@ func newRootCommand(logger port.ForLogging) *cobra.Command {
 
 	cmd.AddCommand(newVerifyCommand(logger))
 	cmd.AddCommand(newAuthCommand())
+	cmd.AddCommand(newClientCommand())
 
 	return cmd
 }

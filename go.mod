@@ -10,7 +10,7 @@ require (
 	github.com/minio/minio-go/v7 v7.0.95
 	github.com/spf13/cobra v1.0.0
 	github.com/spf13/viper v1.4.0
-	pkt.systems/logport v0.9.0
+	pkt.systems/logport v0.10.0
 	pkt.systems/psi v0.1.0
 )
 

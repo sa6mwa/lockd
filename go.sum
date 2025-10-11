@@ -329,5 +329,7 @@ gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
 honnef.co/go/tools v0.0.0-20190102054323-c2f93a96b099/go.mod h1:rf3lG4BRIbNafJWhAfAdb/ePZxsR/4RtNHQocxwk9r4=
 pkt.systems/logport v0.9.0 h1:UGNxTTuYgJxEBsXfeRvGKwUF9R81SZ/+kri6czPCgW8=
 pkt.systems/logport v0.9.0/go.mod h1:3121XUFsk0g9Dw9Dyycarb4RTXFgD39QSpfCOMfH4qw=
+pkt.systems/logport v0.10.0 h1:Q4WUbKNI4QmLjGJZo/hlsdfX+5aWWdoyyaazOXcaKoU=
+pkt.systems/logport v0.10.0/go.mod h1:3121XUFsk0g9Dw9Dyycarb4RTXFgD39QSpfCOMfH4qw=
 pkt.systems/psi v0.1.0 h1:Pxo9jMBQkvNbOuROKNy3t/eofkZfKUaoK66kFSF0kuY=
 pkt.systems/psi v0.1.0/go.mod h1:MhPo0PA6V2mUR6TZFOYEmijGOglmy/WT5AlcqXUI9/M=

@@ -1,23 +1,23 @@
 package lockd
 
 import (
-    "context"
-    "crypto/tls"
-    "crypto/x509"
-    "errors"
-    "fmt"
-    "net"
-    "net/http"
-    "strings"
-    "sync"
-    "time"
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
 
 	port "pkt.systems/logport"
 
 	"pkt.systems/lockd/internal/clock"
 	"pkt.systems/lockd/internal/httpapi"
-    "pkt.systems/lockd/internal/storage"
-    "pkt.systems/lockd/internal/storage/retry"
+	"pkt.systems/lockd/internal/storage"
+	"pkt.systems/lockd/internal/storage/retry"
 	"pkt.systems/lockd/internal/tlsutil"
 )
 
@@ -120,6 +120,7 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 			return context.Background()
 		},
 	}
+	httpSrv.ErrorLog = port.LogLogger(logger.With("component", "http"))
 
 	if cfg.MTLS {
 		bundle, err := tlsutil.LoadBundle(cfg.BundlePath, cfg.DenylistPath)

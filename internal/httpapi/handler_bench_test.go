@@ -87,3 +87,4 @@ func (benchmarkLogger) Enabled(context.Context, slog.Level) bool                
 func (benchmarkLogger) Handle(context.Context, slog.Record) error                             { return nil }
 func (benchmarkLogger) WithAttrs([]slog.Attr) slog.Handler                                    { return benchmarkLogger{} }
 func (benchmarkLogger) WithGroup(string) slog.Handler                                         { return benchmarkLogger{} }
+func (benchmarkLogger) Write(p []byte) (int, error)                                           { return len(p), nil }

@@ -280,13 +280,15 @@ func NormalizeSerials(serials []string) []string {
 
 // EncodeServerBundle encodes the server bundle components into PEM.
 func EncodeServerBundle(caCertPEM, caKeyPEM, serverCertPEM, serverKeyPEM []byte, denylist []string) ([]byte, error) {
-	if len(caCertPEM) == 0 || len(caKeyPEM) == 0 || len(serverCertPEM) == 0 || len(serverKeyPEM) == 0 {
+	if len(caCertPEM) == 0 || len(serverCertPEM) == 0 || len(serverKeyPEM) == 0 {
 		return nil, errors.New("encode bundle: missing components")
 	}
 	denylist = NormalizeSerials(denylist)
 	var buf bytes.Buffer
 	buf.Write(caCertPEM)
-	buf.Write(caKeyPEM)
+	if len(caKeyPEM) > 0 {
+		buf.Write(caKeyPEM)
+	}
 	buf.Write(serverCertPEM)
 	buf.Write(serverKeyPEM)
 	if len(denylist) > 0 {
@@ -307,6 +309,17 @@ func EncodeClientBundle(caCertPEM, clientCertPEM, clientKeyPEM []byte) ([]byte, 
 	}
 	buf.Write(clientCertPEM)
 	buf.Write(clientKeyPEM)
+	return buf.Bytes(), nil
+}
+
+// EncodeCABundle concatenates the CA certificate and private key into a PEM file.
+func EncodeCABundle(caCertPEM, caKeyPEM []byte) ([]byte, error) {
+	if len(caCertPEM) == 0 || len(caKeyPEM) == 0 {
+		return nil, errors.New("encode ca bundle: missing components")
+	}
+	var buf bytes.Buffer
+	buf.Write(caCertPEM)
+	buf.Write(caKeyPEM)
 	return buf.Bytes(), nil
 }
 

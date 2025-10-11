@@ -13,3 +13,7 @@ PASS
 ok      pkt.systems/lockd/integration/aws       0.006s
 ```
 
+### Use OpenBAO for storing and retrieving certificates and keys
+
+TODO: describe the implementation, not sure how this should look like yet.
+

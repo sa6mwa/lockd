@@ -54,6 +54,7 @@ func newAuthNewServerCommand() *cobra.Command {
 	var caCN string
 	var validity time.Duration
 	var force bool
+	var caOut string
 
 	cmd := &cobra.Command{
 		Use:   "server",
@@ -66,6 +67,13 @@ func newAuthNewServerCommand() *cobra.Command {
 				}
 				out = path
 			}
+			if caOut == "" {
+				dir, err := lockd.DefaultConfigDir()
+				if err != nil {
+					return err
+				}
+				caOut = filepath.Join(dir, "ca.pem")
+			}
 			ca, err := tlsutil.GenerateCA(caCN, validity)
 			if err != nil {
 				return err
@@ -76,15 +84,23 @@ func newAuthNewServerCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			bundleBytes, err := tlsutil.EncodeServerBundle(ca.CertPEM, ca.KeyPEM, serverCert, serverKey, nil)
+			bundleBytes, err := tlsutil.EncodeServerBundle(ca.CertPEM, nil, serverCert, serverKey, nil)
 			if err != nil {
 				return err
 			}
 			if err := writeFile(out, bundleBytes, force); err != nil {
 				return err
 			}
+			caBundle, err := tlsutil.EncodeCABundle(ca.CertPEM, ca.KeyPEM)
+			if err != nil {
+				return err
+			}
+			if err := writeFile(caOut, caBundle, force); err != nil {
+				return err
+			}
 
 			fmt.Fprintf(cmd.OutOrStdout(), "server bundle written to %s\n", out)
+			fmt.Fprintf(cmd.OutOrStdout(), "ca certificate written to %s\n", caOut)
 			return nil
 		},
 	}
@@ -95,38 +111,32 @@ func newAuthNewServerCommand() *cobra.Command {
 	cmd.Flags().StringVar(&caCN, "ca-cn", "lockd-ca", "CA common name")
 	cmd.Flags().DurationVar(&validity, "valid-for", 365*24*time.Hour, "certificate validity period")
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite existing bundle if present")
+	cmd.Flags().StringVar(&caOut, "ca-out", "", "output path for CA certificate (default $HOME/.lockd/ca.pem)")
 	return cmd
 }
 
 func newAuthNewClientCommand() *cobra.Command {
 	var out string
-	var serverBundle string
+	var caBundle string
 	var cn string
 	var validity time.Duration
 	var force bool
 
 	cmd := &cobra.Command{
 		Use:   "client",
-		Short: "Issue a new client certificate using the server bundle",
+		Short: "Issue a new client certificate using the CA bundle",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if serverBundle == "" {
+			if caBundle == "" {
 				path, err := lockd.DefaultBundlePath()
 				if err != nil {
 					return err
 				}
-				serverBundle = path
+				caBundle = filepath.Join(filepath.Dir(path), "ca.pem")
 			}
 
-			bundle, err := tlsutil.LoadBundle(serverBundle, "")
+			ca, err := tlsutil.LoadCA(caBundle)
 			if err != nil {
-				return fmt.Errorf("load bundle: %w", err)
-			}
-			if bundle.CACertificate == nil || bundle.CAPrivateKey == nil {
-				return fmt.Errorf("bundle does not contain CA private key")
-			}
-			ca, err := tlsutil.CAFromBundle(bundle)
-			if err != nil {
-				return err
+				return fmt.Errorf("load ca: %w", err)
 			}
 
 			if out == "" {
@@ -153,7 +163,7 @@ func newAuthNewClientCommand() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&serverBundle, "server-in", "", "path to server bundle (default $HOME/.lockd/server.pem)")
+	cmd.Flags().StringVar(&caBundle, "ca-in", "", "path to CA bundle (default $HOME/.lockd/ca.pem)")
 	cmd.Flags().StringVar(&out, "out", "", "client output path (default $HOME/.lockd/client-<uuid>.pem)")
 	cmd.Flags().StringVar(&cn, "cn", "lockd-client", "client certificate common name")
 	cmd.Flags().DurationVar(&validity, "valid-for", 365*24*time.Hour, "certificate validity period")
@@ -181,9 +191,6 @@ func newAuthRevokeClientCommand() *cobra.Command {
 			bundle, err := tlsutil.LoadBundle(bundlePath, "")
 			if err != nil {
 				return fmt.Errorf("load bundle: %w", err)
-			}
-			if bundle.CAPrivateKey == nil || len(bundle.CAPrivateKeyPEM) == 0 {
-				return fmt.Errorf("bundle does not contain CA private key")
 			}
 			serials := append([]string{}, bundle.DenylistEntries...)
 			serials = append(serials, args...)

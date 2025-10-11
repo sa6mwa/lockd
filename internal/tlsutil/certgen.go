@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"os"
 	"strings"
 	"time"
 )
@@ -185,5 +186,62 @@ func CAFromBundle(b *Bundle) (*CA, error) {
 		CertPEM: b.CACertPEM,
 		Key:     signer,
 		KeyPEM:  b.CAPrivateKeyPEM,
+	}, nil
+}
+
+// LoadCA reads a CA certificate + private key PEM from path.
+func LoadCA(path string) (*CA, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read ca bundle: %w", err)
+	}
+	var cert *x509.Certificate
+	var certPEM []byte
+	var keyPEM []byte
+	var key ed25519.PrivateKey
+	rest := data
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		switch block.Type {
+		case "CERTIFICATE":
+			if cert == nil {
+				parsed, err := x509.ParseCertificate(block.Bytes)
+				if err != nil {
+					return nil, fmt.Errorf("parse ca certificate: %w", err)
+				}
+				cert = parsed
+				certPEM = pem.EncodeToMemory(block)
+			}
+		case "PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY":
+			parsed, err := parsePrivateKey(block)
+			if err != nil {
+				return nil, fmt.Errorf("parse ca private key: %w", err)
+			}
+			edKey, ok := parsed.(ed25519.PrivateKey)
+			if !ok {
+				return nil, fmt.Errorf("ca private key must be ed25519, got %T", parsed)
+			}
+			key = edKey
+			keyPEM = pem.EncodeToMemory(block)
+		}
+	}
+	if cert == nil {
+		return nil, fmt.Errorf("ca certificate not found in %s", path)
+	}
+	if key == nil {
+		return nil, fmt.Errorf("ca private key not found in %s", path)
+	}
+	if !cert.IsCA {
+		return nil, fmt.Errorf("certificate in %s is not a CA", path)
+	}
+	return &CA{
+		Cert:    cert,
+		CertPEM: certPEM,
+		Key:     key,
+		KeyPEM:  keyPEM,
 	}, nil
 }

@@ -77,6 +77,7 @@ lockd client edit checkpoint.json progress.step="done" progress.count=+5
 lockd client release --lease <id> orders
 ```
 
+* `lockd auth new server` writes both `server.pem` and `ca.pem` so the CA cert can be stored separately (secure vault, etc.).
 * `lockd auth verify` validates that bundles contain the expected CA/server material and that revoked client serials are surfaced from the denylist.
 * `lockd client` subcommands wrap the Go SDK and honour the same mTLS defaults; the `set` helper acquires, mutates, and CAS-updates JSON fields atomically before releasing the lease (supports `path=value`, arithmetic `++/--/=+N`, `rm:/delete:` removals, and `time:` assignments).
 

@@ -139,7 +139,7 @@ Bundle format (PEM concatenated):
 ### Generating certificates
 
 ```sh
-# Generate CA + server certificate bundle
+# Generate CA + server certificate bundle (server.pem + ca.pem)
 lockd auth new server --hosts "lockd.example.com,127.0.0.1"
 
 # Issue a new client certificate signed by the bundle CA
@@ -158,8 +158,9 @@ lockd auth verify client --server-in $HOME/.lockd/server.pem
 ```
 
 The commands default to `$HOME/.lockd/`, creating the directory with 0700 and
-files with 0600 permissions. Use `--out` to override and `--force` to overwrite
-existing files.
+files with 0600 permissions. Use `--out`/`--ca-out`/`--force` to override file
+locations. `ca.pem` contains the trust anchor and is intended to be stored in a
+secure location separate from the server runtime bundle.
 
 `lockd auth verify` ensures that the server bundle presents a CA + ServerAuth
 certificate (with matching private keys) and that client bundles were issued by

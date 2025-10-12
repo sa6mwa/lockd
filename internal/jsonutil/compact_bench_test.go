@@ -3,12 +3,15 @@ package jsonutil
 import (
 	"bytes"
 	"encoding/json"
+	"strconv"
+	"strings"
 	"testing"
 )
 
 var (
-	benchSmallInput = []byte(`{"foo": [1, 2, 3], "bar": {"baz": true}, "str": "hello world"}`)
-	benchLargeInput = buildLargeFixture()
+	benchSmallInput  = []byte(`{"foo": [1, 2, 3], "bar": {"baz": true}, "str": "hello world"}`)
+	benchLargeInput  = buildLargeFixture()
+	benchMediumInput = buildMediumFixture()
 )
 
 type benchRecord struct {
@@ -31,6 +34,27 @@ func buildLargeFixture() []byte {
 	}
 	data, _ := json.Marshal(benchEnvelope{Records: records})
 	return data
+}
+
+func buildMediumFixture() []byte {
+	var sb strings.Builder
+	sb.Grow(60_000)
+	sb.WriteString(`{"list":[`)
+	for i := 0; i < 128; i++ {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		sb.WriteString(strconv.Itoa(i))
+		sb.WriteByte(',')
+		sb.WriteString(strconv.FormatFloat(float64(i)/3.14, 'f', 4, 64))
+		sb.WriteString(`,{"msg":"`)
+		sb.WriteString(strings.Repeat("x", 100))
+		sb.WriteString(`","flag":`)
+		sb.WriteString(strconv.FormatBool(i%2 == 0))
+		sb.WriteString(`}`)
+	}
+	sb.WriteString(`],"meta":{"count":128}}`)
+	return []byte(sb.String())
 }
 
 func benchmarkCompact(b *testing.B, name string, data []byte) {
@@ -60,4 +84,8 @@ func BenchmarkCompactSmall(b *testing.B) {
 
 func BenchmarkCompactLarge(b *testing.B) {
 	benchmarkCompact(b, "large", benchLargeInput)
+}
+
+func BenchmarkCompactMedium(b *testing.B) {
+	benchmarkCompact(b, "medium", benchMediumInput)
 }

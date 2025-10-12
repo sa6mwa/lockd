@@ -159,6 +159,27 @@ The generated file contains the same keys as the CLI flags (for example
 is read before environment variables so you can override individual settings via
 `LOCKD_*` exports or command-line flags.
 
+### Benchmarking with MinIO
+
+With MinIO running locally (for example on `localhost:9000`) you can compare raw
+object-store performance against `lockd` by running the benchmark suite:
+
+```sh
+# Large (5 MiB) and small payload benchmarks + concurrency tests
+go test -bench . -run '^$' -tags "integration minio bench" ./integration/minio
+```
+
+The harness measures:
+
+- Raw MinIO `PutObject` throughput for large and small JSON payloads.
+- Equivalent `lockd` acquire/update/release cycles for those payloads.
+- Concurrent writers operating on distinct keys to simulate many clients.
+
+Benchmarks assume the same environment variables as the MinIO integration tests
+(`LOCKD_STORE`, `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`, etc.). Use
+`LOCKD_STORE=minio://localhost:9000/lockd-integration?insecure=1` for a default
+local setup, or point it at HTTPS by omitting the `?insecure=1` query string.
+
 Health endpoints:
 
 - `/healthz` – liveness probe

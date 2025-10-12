@@ -148,14 +148,14 @@ func TestMinioLockConcurrency(t *testing.T) {
 	}
 }
 
-func loadMinioConfig(t *testing.T) lockd.Config {
-	ensureMinioCredentials(t)
+func loadMinioConfig(tb testing.TB) lockd.Config {
+	ensureMinioCredentials(tb)
 	store := os.Getenv("LOCKD_STORE")
 	if store == "" {
 		store = "minio://localhost:9000/lockd-integration?insecure=1"
 	}
 	if !strings.HasPrefix(store, "minio://") {
-		t.Skip("LOCKD_STORE must reference a minio:// URI for MinIO integration test")
+		tb.Skip("LOCKD_STORE must reference a minio:// URI for MinIO integration test")
 	}
 
 	cfg := lockd.Config{
@@ -167,73 +167,73 @@ func loadMinioConfig(t *testing.T) lockd.Config {
 	if v := os.Getenv("LOCKD_MINIO_SECURE"); v != "" {
 		secure, err := strconv.ParseBool(v)
 		if err != nil {
-			t.Fatalf("parse LOCKD_MINIO_SECURE: %v", err)
+			tb.Fatalf("parse LOCKD_MINIO_SECURE: %v", err)
 		}
 		cfg.S3DisableTLS = !secure
 	}
 	if v := os.Getenv("LOCKD_S3_DISABLE_TLS"); v != "" {
 		disabled, err := strconv.ParseBool(v)
 		if err != nil {
-			t.Fatalf("parse LOCKD_S3_DISABLE_TLS: %v", err)
+			tb.Fatalf("parse LOCKD_S3_DISABLE_TLS: %v", err)
 		}
 		cfg.S3DisableTLS = disabled
 	}
 
 	if err := cfg.Validate(); err != nil {
-		t.Fatalf("config validation: %v", err)
+		tb.Fatalf("config validation: %v", err)
 	}
 	return cfg
 }
 
-func ensureMinioCredentials(t *testing.T) {
+func ensureMinioCredentials(tb testing.TB) {
 	if _, ok := os.LookupEnv("MINIO_ROOT_USER"); !ok {
-		t.Setenv("MINIO_ROOT_USER", "minioadmin")
+		tb.Setenv("MINIO_ROOT_USER", "minioadmin")
 	}
 	if _, ok := os.LookupEnv("MINIO_ROOT_PASSWORD"); !ok {
-		t.Setenv("MINIO_ROOT_PASSWORD", "minioadmin")
+		tb.Setenv("MINIO_ROOT_PASSWORD", "minioadmin")
 	}
 	if _, ok := os.LookupEnv("MINIO_ACCESS_KEY"); !ok {
-		t.Setenv("MINIO_ACCESS_KEY", "minioadmin")
+		tb.Setenv("MINIO_ACCESS_KEY", "minioadmin")
 	}
 	if _, ok := os.LookupEnv("MINIO_SECRET_KEY"); !ok {
-		t.Setenv("MINIO_SECRET_KEY", "minioadmin")
+		tb.Setenv("MINIO_SECRET_KEY", "minioadmin")
 	}
 }
 
-func ensureMinioBucket(t *testing.T, cfg lockd.Config) {
+func ensureMinioBucket(tb testing.TB, cfg lockd.Config) {
 	minioCfg, err := lockd.BuildMinioConfig(cfg)
 	if err != nil {
-		t.Fatalf("build minio config: %v", err)
+		tb.Fatalf("build minio config: %v", err)
 	}
 	store, err := s3.New(minioCfg)
 	if err != nil {
-		t.Fatalf("new minio store: %v", err)
+		tb.Fatalf("new minio store: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	exists, err := store.Client().BucketExists(ctx, minioCfg.Bucket)
 	if err != nil {
-		t.Fatalf("bucket exists: %v", err)
+		tb.Fatalf("bucket exists: %v", err)
 	}
 	if !exists {
 		if err := store.Client().MakeBucket(ctx, minioCfg.Bucket, minio.MakeBucketOptions{Region: minioCfg.Region}); err != nil {
-			t.Fatalf("make bucket: %v", err)
+			tb.Fatalf("make bucket: %v", err)
 		}
 	}
 }
 
-func ensureStoreReady(t *testing.T, ctx context.Context, cfg lockd.Config) {
+func ensureStoreReady(tb testing.TB, ctx context.Context, cfg lockd.Config) {
 	res, err := storagecheck.VerifyStore(ctx, cfg)
 	if err != nil {
-		t.Fatalf("verify store: %v", err)
+		tb.Fatalf("verify store: %v", err)
 	}
 	if !res.Passed() {
-		t.Fatalf("store verification failed: %+v", res)
+		tb.Fatalf("store verification failed: %+v", res)
 	}
 }
 
-func startLockdServer(t *testing.T, cfg lockd.Config) *lockdclient.Client {
-	addr := pickPort(t)
+func startLockdServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client {
+	addr := pickPort(tb)
 	cfg.Listen = addr
 	cfg.MTLS = false
 	cfg.JSONMaxBytes = 100 << 20
@@ -253,11 +253,11 @@ func startLockdServer(t *testing.T, cfg lockd.Config) *lockdclient.Client {
 
 	srv, err := lockd.NewServer(cfg, lockd.WithLogger(port.NoopLogger()))
 	if err != nil {
-		t.Fatalf("new server: %v", err)
+		tb.Fatalf("new server: %v", err)
 	}
 	done := make(chan error, 1)
 	go func() { done <- srv.Start() }()
-	t.Cleanup(func() {
+	tb.Cleanup(func() {
 		shutdownCtx, stop := context.WithTimeout(context.Background(), 10*time.Second)
 		defer stop()
 		_ = srv.Shutdown(shutdownCtx)
@@ -266,26 +266,26 @@ func startLockdServer(t *testing.T, cfg lockd.Config) *lockdclient.Client {
 
 	httpClient := &http.Client{Timeout: 15 * time.Second}
 	baseURL := fmt.Sprintf("http://%s", addr)
-	waitForReady(t, httpClient, baseURL)
+	waitForReady(tb, httpClient, baseURL)
 
 	cli, err := lockdclient.New(baseURL, lockdclient.WithHTTPClient(httpClient))
 	if err != nil {
-		t.Fatalf("new client: %v", err)
+		tb.Fatalf("new client: %v", err)
 	}
 	return cli
 }
 
-func pickPort(t *testing.T) string {
+func pickPort(tb testing.TB) string {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("listen: %v", err)
+		tb.Fatalf("listen: %v", err)
 	}
 	addr := ln.Addr().String()
 	ln.Close()
 	return addr
 }
 
-func waitForReady(t *testing.T, client *http.Client, baseURL string) {
+func waitForReady(tb testing.TB, client *http.Client, baseURL string) {
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		resp, err := client.Get(baseURL + "/healthz")
@@ -294,7 +294,7 @@ func waitForReady(t *testing.T, client *http.Client, baseURL string) {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("server not ready: %v", err)
+			tb.Fatalf("server not ready: %v", err)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -347,21 +347,21 @@ func releaseLease(t *testing.T, ctx context.Context, cli *lockdclient.Client, ke
 	return true
 }
 
-func cleanupMinio(t *testing.T, cfg lockd.Config, key string) {
+func cleanupMinio(tb testing.TB, cfg lockd.Config, key string) {
 	minioCfg, err := lockd.BuildMinioConfig(cfg)
 	if err != nil {
-		t.Fatalf("build minio config: %v", err)
+		tb.Fatalf("build minio config: %v", err)
 	}
 	store, err := s3.New(minioCfg)
 	if err != nil {
-		t.Fatalf("new minio store: %v", err)
+		tb.Fatalf("new minio store: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := store.RemoveState(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
-		t.Logf("remove state failed: %v", err)
+		tb.Logf("remove state failed: %v", err)
 	}
 	if err := store.DeleteMeta(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
-		t.Logf("delete meta failed: %v", err)
+		tb.Logf("delete meta failed: %v", err)
 	}
 }

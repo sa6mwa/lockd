@@ -65,6 +65,21 @@ worker to resume from the last committed state.
 
 ## Storage Backends
 
+### Selecting a backend
+
+`lockd` picks the storage implementation from the `--store` flag (or `LOCKD_STORE`
+environment variable) by inspecting the URL scheme:
+
+| Scheme | Example | Backend | Notes |
+|--------|---------|---------|-------|
+| `mem://` or empty | `mem://` | In-memory | Ephemeral; test only. |
+| `s3://` | `s3://my-bucket/prefix` | AWS S3 (or any S3-compatible endpoint) | Provide AWS credentials via `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` (and optional `AWS_SESSION_TOKEN`). Requires `--s3-region` or `--s3-endpoint`. |
+| `minio://` | `minio://localhost:9000/lockd-data?insecure=1` | MinIO | TLS **enabled by default**. Append `?insecure=1` (or set `LOCKD_S3_DISABLE_TLS=1`) to use plain HTTP. Supply credentials with `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD` or `MINIO_ACCESS_KEY`/`MINIO_SECRET_KEY`. |
+| `pebble://` | `pebble:///var/lib/lockd` | Embedded Pebble KV | Directory must exist and be writable by the process. |
+
+Credentials are loaded from the standard environment variables that the MinIO
+SDK supports. No secret keys are stored in the `lockd` config file.
+
 ### S3 / S3-compatible
 
 - Uses temp uploads + `CopyObject` with conditional headers for CAS.
@@ -100,15 +115,26 @@ Configuration (flags or env via `LOCKD_` prefix):
 `lockd` exposes flags mirrored by `LOCKD_*` environment variables. Example:
 
 ```sh
+# AWS S3 with region-based endpoint
+export LOCKD_STORE="s3://my-bucket/prefix"
+export LOCKD_S3_REGION="us-west-2"
+export AWS_ACCESS_KEY_ID="AKIA..."
+export AWS_SECRET_ACCESS_KEY="..."
 lockd \
   --listen :9341 \
-  --store s3://my-bucket/prefix \
+  --store "$LOCKD_STORE" \
   --json-max 100MB \
   --default-ttl 30s \
   --max-ttl 2m \
   --acquire-block 60s \
   --sweeper-interval 5s \
   --bundle $HOME/.lockd/server.pem
+
+# MinIO running locally over HTTP
+export LOCKD_STORE="minio://localhost:9000/lockd-data?insecure=1"
+export MINIO_ROOT_USER="minioadmin"
+export MINIO_ROOT_PASSWORD="minioadmin"
+lockd --store "$LOCKD_STORE" --listen :9341 --bundle $HOME/.lockd/server.pem
 ```
 
 The default listen address is `:9341`, chosen from the unassigned IANA space to
@@ -261,3 +287,11 @@ values; when `--mtls=false` it assumes HTTP. Supplying an explicit
 ## License
 
 MIT – see [`LICENSE`](LICENSE).
+
+## Third-Party Notices
+
+- All bundled dependencies and their original license texts are recorded in [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md); regenerate the file with `go run ./cmd/licensegen` as part of the release pipeline.
+- Apache-2.0 components (for example `github.com/minio/minio-go/v7`, `github.com/spf13/cobra`, `github.com/prometheus/client_golang`, AWS SDK submodules) require preserving their license text and any `NOTICE` files; both are embedded in the generated third-party bundle.
+- The MPL-2.0 dependency (`github.com/hashicorp/hcl`, pulled in by Viper) allows dynamic/static linking without additional obligations, but any direct modifications to MPL-covered source must be published under MPL-2.0.
+- BSD-2-Clause / BSD-3-Clause libraries (e.g. `github.com/cockroachdb/pebble`, `golang.org/x/*`, `github.com/google/uuid`) and MIT-licensed packages are satisfied by retaining their copyright and disclaimer text inside the third-party report.
+- When distributing binaries or container images, ship the `LICENSE` file together with `THIRD_PARTY_LICENSES.md` to meet attribution requirements.

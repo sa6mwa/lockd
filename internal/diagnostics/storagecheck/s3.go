@@ -45,25 +45,34 @@ type CheckResult struct {
 // VerifyStore runs provider-specific diagnostics for the configured backend.
 func VerifyStore(ctx context.Context, cfg lockd.Config) (Result, error) {
 	if strings.HasPrefix(cfg.Store, "s3://") {
-		return verifyS3(ctx, cfg)
+		s3cfg, bucket, prefix, err := lockd.BuildS3Config(cfg)
+		if err != nil {
+			return Result{}, err
+		}
+		return verifyObjectStore(ctx, "aws-s3", s3cfg, bucket, prefix, true)
+	}
+	if strings.HasPrefix(cfg.Store, "minio://") {
+		minioCfg, err := lockd.BuildMinioConfig(cfg)
+		if err != nil {
+			return Result{}, err
+		}
+		return verifyObjectStore(ctx, "minio", minioCfg, minioCfg.Bucket, minioCfg.Prefix, false)
 	}
 	return Result{}, storage.ErrNotImplemented
 }
 
-func verifyS3(ctx context.Context, cfg lockd.Config) (Result, error) {
-	s3cfg, bucket, prefix, err := lockd.BuildS3Config(cfg)
-	if err != nil {
-		return Result{}, err
-	}
+func verifyObjectStore(ctx context.Context, provider string, s3cfg s3.Config, bucket, prefix string, includePolicy bool) (Result, error) {
 	store, err := s3.New(s3cfg)
 	if err != nil {
-		return Result{}, fmt.Errorf("init s3 store: %w", err)
+		return Result{}, fmt.Errorf("init %s store: %w", provider, err)
 	}
 	client := store.Client()
-	result := Result{Provider: "aws-s3", Bucket: bucket, Prefix: prefix}
+	result := Result{Provider: provider, Bucket: bucket, Prefix: prefix}
 
-	if loc, err := client.GetBucketLocation(ctx, bucket); err == nil && loc != "" && !strings.EqualFold(loc, s3cfg.Region) {
-		result.AdditionalMessage = fmt.Sprintf("Bucket region is %s; set LOCKD_S3_REGION or LOCKD_S3_ENDPOINT to match.", loc)
+	if provider == "aws-s3" {
+		if loc, err := client.GetBucketLocation(ctx, bucket); err == nil && loc != "" && !strings.EqualFold(loc, s3cfg.Region) {
+			result.AdditionalMessage = fmt.Sprintf("Bucket region is %s; set LOCKD_S3_REGION or LOCKD_S3_ENDPOINT to match.", loc)
+		}
 	}
 
 	run := func(name string, fn func(context.Context) error) {
@@ -127,7 +136,7 @@ func verifyS3(ctx context.Context, cfg lockd.Config) (Result, error) {
 		return nil
 	})
 
-	if !result.Passed() {
+	if includePolicy && !result.Passed() {
 		result.RecommendedPolicy = buildAWSPolicy(bucket, prefix)
 	}
 	return result, nil

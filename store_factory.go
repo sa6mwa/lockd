@@ -29,6 +29,16 @@ func openBackend(cfg Config) (storage.Backend, error) {
 			return nil, err
 		}
 		return backend, nil
+	case "minio":
+		minioCfg, err := BuildMinioConfig(cfg)
+		if err != nil {
+			return nil, err
+		}
+		backend, err := s3.New(minioCfg)
+		if err != nil {
+			return nil, err
+		}
+		return backend, nil
 	case "pebble":
 		path := strings.TrimPrefix(u.Path, "/")
 		if path == "" {
@@ -85,10 +95,78 @@ func BuildS3Config(cfg Config) (s3.Config, string, string, error) {
 		Region:         cfg.S3Region,
 		Bucket:         bucket,
 		Prefix:         prefix,
-		Secure:         secure,
+		Insecure:       !secure,
 		ForcePathStyle: forcePath,
 		PartSize:       cfg.S3MaxPartSize,
 		ServerSideEnc:  cfg.S3SSE,
 		KMSKeyID:       cfg.S3KMSKeyID,
 	}, bucket, prefix, nil
+}
+
+// BuildMinioConfig adapts a minio:// store URL into an S3 configuration.
+func BuildMinioConfig(cfg Config) (s3.Config, error) {
+	u, err := url.Parse(cfg.Store)
+	if err != nil {
+		return s3.Config{}, fmt.Errorf("parse store URL: %w", err)
+	}
+	if u.Scheme != "minio" {
+		return s3.Config{}, fmt.Errorf("store scheme %q not supported", u.Scheme)
+	}
+	endpoint := u.Host
+	if endpoint == "" {
+		return s3.Config{}, fmt.Errorf("minio store missing host (expected minio://host:port/bucket[/prefix])")
+	}
+	path := strings.Trim(strings.TrimPrefix(u.Path, "/"), "/")
+	if path == "" {
+		return s3.Config{}, fmt.Errorf("minio store missing bucket (expected minio://host:port/bucket[/prefix])")
+	}
+	parts := strings.SplitN(path, "/", 2)
+	bucket := parts[0]
+	if bucket == "" {
+		return s3.Config{}, fmt.Errorf("minio store missing bucket name")
+	}
+	var prefix string
+	if len(parts) == 2 {
+		prefix = parts[1]
+	}
+	query := u.Query()
+	secure := !cfg.S3DisableTLS
+	if v := query.Get("secure"); v != "" {
+		if v == "0" || strings.EqualFold(v, "false") || strings.EqualFold(v, "no") {
+			secure = false
+		} else if v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes") {
+			secure = true
+		}
+	}
+	if v := query.Get("tls"); v != "" {
+		if v == "0" || strings.EqualFold(v, "false") || strings.EqualFold(v, "no") {
+			secure = false
+		} else if v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes") {
+			secure = true
+		}
+	}
+	if v := query.Get("scheme"); v != "" {
+		if strings.EqualFold(v, "http") {
+			secure = false
+		} else if strings.EqualFold(v, "https") {
+			secure = true
+		}
+	}
+	if v := query.Get("insecure"); v != "" {
+		if v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes") {
+			secure = false
+		}
+	}
+
+	return s3.Config{
+		Endpoint:       endpoint,
+		Region:         cfg.S3Region,
+		Bucket:         bucket,
+		Prefix:         prefix,
+		Insecure:       !secure,
+		ForcePathStyle: true,
+		PartSize:       cfg.S3MaxPartSize,
+		ServerSideEnc:  cfg.S3SSE,
+		KMSKeyID:       cfg.S3KMSKeyID,
+	}, nil
 }

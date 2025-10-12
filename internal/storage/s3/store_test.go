@@ -3,9 +3,13 @@ package s3
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
+	"net"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/johannesboyne/gofakes3"
@@ -109,8 +113,42 @@ func setupFakeS3(t *testing.T) (*httptest.Server, Config) {
 		Endpoint:       endpoint,
 		Region:         "us-east-1",
 		Bucket:         bucket,
-		Secure:         false,
+		Insecure:       true,
 		ForcePathStyle: true,
 	}
 	return server, cfg
+}
+
+type fakeTimeoutErr struct{}
+
+func (fakeTimeoutErr) Error() string   { return "timeout" }
+func (fakeTimeoutErr) Timeout() bool   { return true }
+func (fakeTimeoutErr) Temporary() bool { return true }
+
+func TestIsRetryableNetworkErrors(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{name: "nil", err: nil, expected: false},
+		{name: "context deadline", err: context.DeadlineExceeded, expected: true},
+		{name: "net timeout", err: fakeTimeoutErr{}, expected: true},
+		{name: "dns temporary", err: &net.DNSError{IsTemporary: true}, expected: true},
+		{name: "net op timeout", err: &net.OpError{Err: fakeTimeoutErr{}}, expected: true},
+		{name: "connection reset", err: syscall.ECONNRESET, expected: true},
+		{name: "connection refused", err: syscall.ECONNREFUSED, expected: true},
+		{name: "io EOF", err: io.EOF, expected: true},
+		{name: "non retryable", err: errors.New("boom"), expected: false},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := isRetryable(tc.err)
+			if got != tc.expected {
+				t.Fatalf("expected %v, got %v for %T", tc.expected, got, tc.err)
+			}
+		})
+	}
 }

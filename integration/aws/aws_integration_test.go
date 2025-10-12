@@ -161,8 +161,11 @@ func TestAWSLockConcurrency(t *testing.T) {
 
 func loadAWSConfig(t *testing.T) lockd.Config {
 	store := os.Getenv("LOCKD_STORE")
-	if store == "" || !strings.HasPrefix(store, "s3://") {
-		t.Skip("LOCKD_STORE must reference an s3:// URI for AWS integration test")
+	if store == "" {
+		t.Fatalf("LOCKD_STORE must be set to an s3:// URI for AWS integration tests")
+	}
+	if !strings.HasPrefix(store, "s3://") {
+		t.Fatalf("LOCKD_STORE must reference an s3:// URI, got %q", store)
 	}
 	cfg := lockd.Config{
 		Store:         store,

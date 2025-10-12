@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	"syscall"
 
 	minio "github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -25,7 +26,7 @@ type Config struct {
 	Region         string
 	Bucket         string
 	Prefix         string
-	Secure         bool
+	Insecure       bool
 	ForcePathStyle bool
 	PartSize       int64
 	ServerSideEnc  string
@@ -70,7 +71,7 @@ func New(cfg Config) (*Store, error) {
 	}
 	options := &minio.Options{
 		Creds:     creds,
-		Secure:    cfg.Secure,
+		Secure:    !cfg.Insecure,
 		Region:    cfg.Region,
 		Transport: cfg.Transport,
 	}
@@ -322,9 +323,21 @@ func isRetryable(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
-	var netErr net.Error
-	if errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary()) {
+	if isNetworkConnectionError(err) {
 		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		if netErr.Timeout() {
+			return true
+		}
+		var dnsErr *net.DNSError
+		if errors.As(err, &dnsErr) && dnsErr.IsTemporary {
+			return true
+		}
+		if isNetworkConnectionError(err) {
+			return true
+		}
 	}
 	resp := minio.ToErrorResponse(err)
 	if resp.StatusCode >= http.StatusInternalServerError && resp.StatusCode != 0 {
@@ -333,6 +346,26 @@ func isRetryable(err error) bool {
 	switch resp.StatusCode {
 	case http.StatusTooManyRequests, http.StatusServiceUnavailable, http.StatusRequestTimeout, 0:
 		if resp.StatusCode != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func isNetworkConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+		return true
+	}
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNABORTED) || errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ENETUNREACH) {
+		return true
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		if isNetworkConnectionError(opErr.Err) {
 			return true
 		}
 	}

@@ -12,19 +12,18 @@ import (
 	"sync"
 	"time"
 
-	port "pkt.systems/logport"
-
 	"pkt.systems/lockd/internal/clock"
 	"pkt.systems/lockd/internal/httpapi"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/retry"
 	"pkt.systems/lockd/internal/tlsutil"
+	"pkt.systems/logport"
 )
 
 // Server wraps the HTTP server, storage backend, and supporting components.
 type Server struct {
 	cfg      Config
-	logger   port.ForLogging
+	logger   logport.ForLogging
 	backend  storage.Backend
 	handler  *httpapi.Handler
 	httpSrv  *http.Server
@@ -41,13 +40,13 @@ type Server struct {
 type Option func(*options)
 
 type options struct {
-	Logger  port.ForLogging
+	Logger  logport.ForLogging
 	Backend storage.Backend
 	Clock   clock.Clock
 }
 
 // WithLogger supplies a custom logger.
-func WithLogger(l port.ForLogging) Option {
+func WithLogger(l logport.ForLogging) Option {
 	return func(o *options) {
 		o.Logger = l
 	}
@@ -78,7 +77,7 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 	}
 	logger := o.Logger
 	if logger == nil {
-		logger = port.NoopLogger()
+		logger = logport.NoopLogger()
 	}
 	backend := o.Backend
 	var err error
@@ -120,7 +119,7 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 			return context.Background()
 		},
 	}
-	httpSrv.ErrorLog = port.LogLogger(logger.With("component", "http"))
+	httpSrv.ErrorLog = logport.LogLoggerWithLevel(logger.With("component", "http"), logport.ErrorLevel)
 
 	if cfg.MTLS {
 		bundle, err := tlsutil.LoadBundle(cfg.BundlePath, cfg.DenylistPath)

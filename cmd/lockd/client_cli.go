@@ -317,7 +317,7 @@ func newClientAcquireCommand(cfg *clientCLIConfig) *cobra.Command {
 		Use:   "acquire <key>",
 		Short: "Acquire a lease for a key",
 		Example: `  # Acquire a lease and export environment variables
-	  eval "$(lockd client acquire --server https://127.0.0.1:9341 --ttl 30s orders)"`,
+  eval "$(lockd client acquire --server https://127.0.0.1:9341 --ttl 30s orders)"`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Args:          cobra.ExactArgs(1),

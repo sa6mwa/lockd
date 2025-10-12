@@ -81,12 +81,13 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	if strings.HasPrefix(strings.ToLower(c.Store), "s3://") {
+	storeLower := strings.ToLower(c.Store)
+	if strings.HasPrefix(storeLower, "s3://") {
 		if c.S3Region == "" && c.S3Endpoint == "" {
 			return fmt.Errorf("config: s3 region or endpoint must be provided for store %q", c.Store)
 		}
 	}
-	if strings.HasPrefix(strings.ToLower(c.Store), "s3://") {
+	if strings.HasPrefix(storeLower, "s3://") || strings.HasPrefix(storeLower, "minio://") {
 		if c.StorageRetryMaxAttempts <= 0 {
 			c.StorageRetryMaxAttempts = 12
 		}

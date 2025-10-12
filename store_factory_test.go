@@ -38,12 +38,41 @@ func TestBuildS3Config(t *testing.T) {
 	if prefix != "prefix" {
 		t.Fatalf("prefix mismatch: %s", prefix)
 	}
-	if s3cfg.Region != "us-west-2" || !s3cfg.ForcePathStyle || !s3cfg.Secure {
+	if s3cfg.Region != "us-west-2" || !s3cfg.ForcePathStyle || s3cfg.Insecure {
 		t.Fatalf("unexpected cfg: %+v", s3cfg)
 	}
 
 	if _, _, _, err := BuildS3Config(Config{Store: "mem://"}); err == nil {
 		t.Fatalf("expected error for non-s3 store")
+	}
+}
+
+func TestBuildMinioConfig(t *testing.T) {
+	cfg := Config{
+		Store:         "minio://localhost:9000/test-bucket/prefix/path",
+		S3MaxPartSize: 4 << 20,
+	}
+	minioCfg, err := BuildMinioConfig(cfg)
+	if err != nil {
+		t.Fatalf("BuildMinioConfig: %v", err)
+	}
+	if minioCfg.Endpoint != "localhost:9000" {
+		t.Fatalf("unexpected endpoint: %s", minioCfg.Endpoint)
+	}
+	if minioCfg.Bucket != "test-bucket" {
+		t.Fatalf("unexpected bucket: %s", minioCfg.Bucket)
+	}
+	if minioCfg.Prefix != "prefix/path" {
+		t.Fatalf("unexpected prefix: %s", minioCfg.Prefix)
+	}
+	if minioCfg.Insecure {
+		t.Fatalf("expected TLS enabled by default for minio backend")
+	}
+	if _, err := BuildMinioConfig(Config{Store: "minio://localhost:9000"}); err == nil {
+		t.Fatalf("expected error for missing bucket")
+	}
+	if _, err := BuildMinioConfig(Config{Store: "s3://bucket"}); err == nil {
+		t.Fatalf("expected error for non-minio store")
 	}
 }
 

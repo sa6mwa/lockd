@@ -5,6 +5,7 @@
 /server.pem
 /client*.pem
 /ca.pem
+/THIRD_PARTY_LICENSES.md
 /.gocache
 bin/
 \#*\#

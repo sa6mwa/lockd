@@ -15,13 +15,13 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	port "pkt.systems/logport"
-	"pkt.systems/logport/adapters/zerologger"
+	"pkt.systems/logport/adapters/psl"
 
 	"pkt.systems/lockd"
 )
 
 func submain(ctx context.Context) int {
-	logger := zerologger.NewStructured(os.Stderr).WithLogLevel().With("component", "cli")
+	logger := psl.NewStructured(os.Stderr).WithLogLevel().With("app", "lockd")
 	cmd := newRootCommand(logger)
 	targetCmd := cmd
 	if len(os.Args) > 1 {
@@ -51,6 +51,19 @@ func newRootCommand(logger port.ForLogging) *cobra.Command {
 		Use:           "lockd",
 		Short:         "lockd is a minimal lock + state coordination service",
 		SilenceErrors: true,
+		Example: `
+  # AWS S3 backend (expects AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY)
+  LOCKD_STORE=s3://my-bucket/prefix LOCKD_S3_REGION=us-west-2 lockd
+
+  # MinIO backend (TLS on by default; use ?insecure=1 or LOCKD_S3_DISABLE_TLS=1 for HTTP)
+  LOCKD_STORE=minio://localhost:9000/lockd-data?insecure=1 MINIO_ROOT_USER=minioadmin MINIO_ROOT_PASSWORD=minioadmin lockd
+
+  # Embedded Pebble storage
+  lockd --store pebble:///var/lib/lockd --listen :9341
+
+  # In-memory storage (tests/dev only)
+  lockd --store mem://
+`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			cmd.SilenceUsage = true
@@ -96,7 +109,7 @@ func newRootCommand(logger port.ForLogging) *cobra.Command {
 
 	flags := cmd.Flags()
 	flags.String("listen", ":9341", "listen address")
-	flags.String("store", "", "storage backend URL (e.g. s3://bucket/prefix or mem://)")
+	flags.String("store", "", "storage backend URL (mem://, s3://bucket/prefix, minio://host:port/bucket, pebble:///path)")
 	flags.String("json-max", "100MB", "maximum JSON payload size")
 	flags.Duration("default-ttl", 30*time.Second, "default lease TTL")
 	flags.Duration("max-ttl", 5*time.Minute, "maximum lease TTL")

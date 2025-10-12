@@ -63,6 +63,9 @@ func newRootCommand(logger port.ForLogging) *cobra.Command {
 
   # In-memory storage (tests/dev only)
   lockd --store mem://
+
+  # Prefer stdlib JSON compaction for tiny payloads
+  lockd --store mem:// --json-util stdlib
 `,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
@@ -112,6 +115,7 @@ func newRootCommand(logger port.ForLogging) *cobra.Command {
 	flags.String("listen-proto", "tcp", "listen network (tcp, tcp4, tcp6)")
 	flags.String("store", "", "storage backend URL (mem://, s3://bucket/prefix, minio://host:port/bucket, pebble:///path)")
 	flags.String("json-max", "100MB", "maximum JSON payload size")
+	flags.String("json-util", lockd.JSONUtilLockd, fmt.Sprintf("JSON compaction engine (%s)", strings.Join(lockd.ValidJSONUtils(), ", ")))
 	flags.Duration("default-ttl", 30*time.Second, "default lease TTL")
 	flags.Duration("max-ttl", 5*time.Minute, "maximum lease TTL")
 	flags.Duration("acquire-block", 60*time.Second, "maximum time to wait on acquire conflicts")
@@ -143,7 +147,7 @@ func newRootCommand(logger port.ForLogging) *cobra.Command {
 	viper.AutomaticEnv()
 
 	names := []string{
-		"listen", "listen-proto", "store", "json-max", "default-ttl", "max-ttl", "acquire-block",
+		"listen", "listen-proto", "store", "json-max", "json-util", "default-ttl", "max-ttl", "acquire-block",
 		"sweeper-interval", "mtls", "bundle", "denylist-path", "s3-region",
 		"s3-endpoint", "s3-sse", "s3-kms-key-id", "s3-max-part-size", "s3-path-style",
 		"s3-disable-tls", "storage-retry-attempts", "storage-retry-base-delay",
@@ -173,6 +177,7 @@ func bindConfig(cfg *lockd.Config) error {
 		}
 		cfg.JSONMaxBytes = int64(size)
 	}
+	cfg.JSONUtil = strings.ToLower(strings.TrimSpace(viper.GetString("json-util")))
 	cfg.DefaultTTL = viper.GetDuration("default-ttl")
 	cfg.MaxTTL = viper.GetDuration("max-ttl")
 	cfg.AcquireBlock = viper.GetDuration("acquire-block")

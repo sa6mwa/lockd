@@ -28,6 +28,7 @@ type Handler struct {
 	logger       port.ForLogging
 	clock        clock.Clock
 	jsonMaxBytes int64
+	compactFunc  func(io.Reader, int64) ([]byte, error)
 	defaultTTL   time.Duration
 	maxTTL       time.Duration
 	acquireBlock time.Duration
@@ -39,6 +40,7 @@ type Config struct {
 	Logger       port.ForLogging
 	Clock        clock.Clock
 	JSONMaxBytes int64
+	Compact      func(io.Reader, int64) ([]byte, error)
 	DefaultTTL   time.Duration
 	MaxTTL       time.Duration
 	AcquireBlock time.Duration
@@ -54,11 +56,16 @@ func New(cfg Config) *Handler {
 	if clk == nil {
 		clk = clock.Real{}
 	}
+	compact := cfg.Compact
+	if compact == nil {
+		compact = jsonutil.CompactToBuffer
+	}
 	return &Handler{
 		store:        cfg.Store,
 		logger:       logger,
 		clock:        clk,
 		jsonMaxBytes: cfg.JSONMaxBytes,
+		compactFunc:  compact,
 		defaultTTL:   cfg.DefaultTTL,
 		maxTTL:       cfg.MaxTTL,
 		acquireBlock: cfg.AcquireBlock,
@@ -331,7 +338,7 @@ func (h *Handler) handleUpdateState(w http.ResponseWriter, r *http.Request) erro
 	body := http.MaxBytesReader(w, r.Body, h.jsonMaxBytes)
 	defer body.Close()
 
-	payload, err := jsonutil.CompactToBuffer(body, h.jsonMaxBytes)
+	payload, err := h.compactFunc(body, h.jsonMaxBytes)
 	if err != nil {
 		return err
 	}

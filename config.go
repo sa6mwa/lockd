@@ -8,12 +8,41 @@ import (
 	"time"
 )
 
+const (
+	JSONUtilLockd  = "lockd"
+	JSONUtilJSONV2 = "jsonv2"
+	JSONUtilStdlib = "stdlib"
+)
+
+var jsonUtilChoices = []string{
+	JSONUtilLockd,
+	JSONUtilJSONV2,
+	JSONUtilStdlib,
+}
+
+// ValidJSONUtils returns the supported jsonutil implementations.
+func ValidJSONUtils() []string {
+	out := make([]string, len(jsonUtilChoices))
+	copy(out, jsonUtilChoices)
+	return out
+}
+
+func isValidJSONUtil(name string) bool {
+	for _, option := range jsonUtilChoices {
+		if option == name {
+			return true
+		}
+	}
+	return false
+}
+
 // Config captures the tunables for a lockd.Server instance.
 type Config struct {
 	Listen          string
 	ListenProto     string
 	Store           string
 	JSONMaxBytes    int64
+	JSONUtil        string
 	DefaultTTL      time.Duration
 	MaxTTL          time.Duration
 	AcquireBlock    time.Duration
@@ -53,6 +82,12 @@ func (c *Config) Validate() error {
 	}
 	if c.JSONMaxBytes <= 0 {
 		c.JSONMaxBytes = 100 * 1024 * 1024 // 100 MB
+	}
+	if c.JSONUtil == "" {
+		c.JSONUtil = JSONUtilLockd
+	}
+	if !isValidJSONUtil(c.JSONUtil) {
+		return fmt.Errorf("config: unknown json util %q (options: %s)", c.JSONUtil, strings.Join(ValidJSONUtils(), ", "))
 	}
 	if c.DefaultTTL <= 0 {
 		c.DefaultTTL = 30 * time.Second

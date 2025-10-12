@@ -100,15 +100,24 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 		Multiplier:  cfg.StorageRetryMultiplier,
 	}
 	backend = retry.Wrap(backend, logger.With("component", "storage"), serverClock, retryCfg)
+	jsonUtil, err := selectJSONUtil(cfg.JSONUtil)
+	if err != nil {
+		if ownedBackend {
+			_ = backend.Close()
+		}
+		return nil, err
+	}
 	handler := httpapi.New(httpapi.Config{
 		Store:        backend,
 		Logger:       logger.With("component", "api"),
 		Clock:        serverClock,
 		JSONMaxBytes: cfg.JSONMaxBytes,
+		Compact:      jsonUtil.compactToBuffer,
 		DefaultTTL:   cfg.DefaultTTL,
 		MaxTTL:       cfg.MaxTTL,
 		AcquireBlock: cfg.AcquireBlock,
 	})
+	logger.Info("json compaction configured", "impl", jsonUtil.name)
 	mux := http.NewServeMux()
 	handler.Register(mux)
 

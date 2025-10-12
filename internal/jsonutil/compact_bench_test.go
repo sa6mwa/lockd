@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	jsonutilv2 "pkt.systems/lockd/internal/jsonutilv2"
 )
 
 var (
@@ -67,12 +69,21 @@ func benchmarkCompact(b *testing.B, name string, data []byte) {
 			}
 		}
 	})
-	b.Run(name+"/compact_writer", func(b *testing.B) {
+	b.Run(name+"/compact_lockd", func(b *testing.B) {
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
 			var buf bytes.Buffer
 			if err := CompactWriter(&buf, bytes.NewReader(data), int64(len(data))); err != nil {
 				b.Fatalf("CompactWriter failed: %v", err)
+			}
+		}
+	})
+	b.Run(name+"/compact_jsonv2", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			var buf bytes.Buffer
+			if err := jsonutilv2.CompactWriter(&buf, bytes.NewReader(data), int64(len(data))); err != nil {
+				b.Fatalf("CompactWriter v2 failed: %v", err)
 			}
 		}
 	})

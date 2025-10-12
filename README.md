@@ -138,6 +138,9 @@ lockd --store "$LOCKD_STORE" --listen :9341 --bundle $HOME/.lockd/server.pem
 
 # IPv4-only binding
 lockd --listen-proto tcp4 --listen 0.0.0.0:9341 --store "$LOCKD_STORE"
+
+# Prefer stdlib JSON compaction for tiny payloads
+lockd --store mem:// --json-util stdlib
 ```
 
 The default listen address is `:9341`, chosen from the unassigned IANA space to
@@ -155,9 +158,34 @@ lockd config gen --out /tmp/lockd.yaml --force
 ```
 
 The generated file contains the same keys as the CLI flags (for example
-`listen-proto`, `json-max`, `s3-region`, `s3-disable-tls`). When present, the configuration file
+`listen-proto`, `json-max`, `json-util`, `s3-region`, `s3-disable-tls`). When present, the configuration file
 is read before environment variables so you can override individual settings via
 `LOCKD_*` exports or command-line flags.
+
+### JSON Compaction Engines
+
+Lockd ships with three drop-in JSON compactors. Select one with `--json-util` or
+the `LOCKD_JSON_UTIL` environment variable:
+
+- `lockd` (default) – streaming writer tuned for multi-megabyte payloads.
+- `jsonv2` – tokenizer inspired by Go 1.25’s experimental JSONv2 runtime.
+- `stdlib` – Go’s stock `encoding/json.Compact` helper for minimal dependencies.
+
+Benchmarks on a 13th Gen Intel Core i7-1355U (Go 1.25.2):
+
+| Implementation | Small (~150B) ns/op (allocs) | Medium (~60KB) ns/op (allocs) | Large (~2MB) ns/op (allocs) |
+|---------------|-------------------------------|--------------------------------|-------------------------------|
+| `encoding/json` | **380 (1)** | **69,818 (1)** | 4,032,017 (1) |
+| `lockd` | 1,609 (5) | 98,083 (20) | **2,818,759 (26)** |
+| `jsonv2` | 1,572 (5) | 92,892 (16) | 3,046,118 (23) |
+
+The default remains `lockd`, which provides the best throughput on large payloads
+— the primary lockd use-case — while `jsonv2` or `stdlib` can be selected for
+small, latency-sensitive workloads. Re-run the suite locally with:
+
+```sh
+go test -bench=BenchmarkCompact -benchmem ./internal/jsonutil
+```
 
 ### Example Use-cases
 

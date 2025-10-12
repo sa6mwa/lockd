@@ -19,6 +19,9 @@ func TestConfigValidateDefaults(t *testing.T) {
 	if cfg.JSONMaxBytes == 0 {
 		t.Fatal("expected json max default")
 	}
+	if cfg.JSONUtil != JSONUtilLockd {
+		t.Fatalf("expected json util default %q, got %q", JSONUtilLockd, cfg.JSONUtil)
+	}
 	if cfg.DefaultTTL <= 0 || cfg.MaxTTL <= 0 {
 		t.Fatal("expected ttl defaults")
 	}
@@ -45,5 +48,9 @@ func TestConfigValidateErrors(t *testing.T) {
 	cfg = Config{Store: "s3://bucket"}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected error for missing s3 region/endpoint")
+	}
+	cfg = Config{Store: "mem://", JSONUtil: "nope"}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for invalid json util")
 	}
 }

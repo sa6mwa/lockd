@@ -375,14 +375,11 @@ func (c *compactor) writeString() error {
 			return fmt.Errorf("json: invalid control character in string")
 		}
 		if b < utf8.RuneSelf {
-			ascii, err := c.collectASCII(b)
-			if err != nil {
+			if err := c.writeByte(b); err != nil {
 				return err
 			}
-			if len(ascii) > 0 {
-				if _, err := c.bw.Write(ascii); err != nil {
-					return err
-				}
+			if err := c.emitASCII(); err != nil {
+				return err
 			}
 			continue
 		}
@@ -541,40 +538,32 @@ DONE:
 	return err
 }
 
-func (c *compactor) collectASCII(first byte) ([]byte, error) {
-	buf := c.asciiBuf[:0]
-	buf = append(buf, first)
+func (c *compactor) emitASCII() error {
 	for {
 		buffered := c.br.Buffered()
 		if buffered == 0 {
-			// Need to fetch at least one more byte to detect special chars.
 			next, err := c.br.ReadByte()
 			if err != nil {
 				if errors.Is(err, io.EOF) {
-					return buf, nil
+					return nil
 				}
-				return nil, err
+				return err
 			}
 			if next == '"' || next == '\\' || next < 0x20 || next >= utf8.RuneSelf {
 				if err := c.br.UnreadByte(); err != nil {
-					return nil, err
+					return err
 				}
-				return buf, nil
+				return nil
 			}
-			buf = append(buf, next)
-			if len(buf) == cap(c.asciiBuf) {
-				return buf, nil
+			if err := c.bw.WriteByte(next); err != nil {
+				return err
 			}
 			continue
 		}
 
-		limit := buffered
-		if remaining := cap(c.asciiBuf) - len(buf); remaining < limit {
-			limit = remaining
-		}
-		data, err := c.br.Peek(limit)
+		data, err := c.br.Peek(buffered)
 		if err != nil && !errors.Is(err, bufio.ErrBufferFull) && !errors.Is(err, io.EOF) {
-			return nil, err
+			return err
 		}
 		n := 0
 		for n < len(data) {
@@ -585,14 +574,13 @@ func (c *compactor) collectASCII(first byte) ([]byte, error) {
 			n++
 		}
 		if n > 0 {
-			buf = append(buf, data[:n]...)
+			if _, err := c.bw.Write(data[:n]); err != nil {
+				return err
+			}
 			c.br.Discard(n)
 		}
-		if len(buf) == cap(c.asciiBuf) || n < len(data) {
-			return buf, nil
-		}
-		if errors.Is(err, io.EOF) {
-			return buf, nil
+		if n < len(data) || errors.Is(err, io.EOF) {
+			return nil
 		}
 	}
 }

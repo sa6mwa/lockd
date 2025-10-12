@@ -653,28 +653,28 @@ func utf8RuneLen(b byte) int {
 }
 
 func compactSmallIfPossible(w io.Writer, r io.Reader, maxBytes int64) (io.Reader, bool, error) {
-	threshold := int64(smallJSONThreshold)
-	if maxBytes > 0 && maxBytes < threshold {
-		threshold = maxBytes
+	threshold := smallJSONThreshold
+	if maxBytes > 0 && maxBytes < int64(threshold) {
+		threshold = int(maxBytes)
 	}
 	if threshold <= 0 {
 		return r, false, nil
 	}
 
-	var buf [smallJSONThreshold + 1]byte
-	target := int(threshold) + 1
+	limit := threshold + 1
+	var stack [smallJSONThreshold + 1]byte
+	buf := stack[:limit]
 	total := 0
-	limited := io.LimitReader(r, threshold+1)
 
-	for total < target {
-		n, err := limited.Read(buf[total:target])
+	for total < limit {
+		n, err := r.Read(buf[total:limit])
 		total += n
 		if maxBytes > 0 && int64(total) > maxBytes {
 			return nil, true, fmt.Errorf("json: payload exceeds %d bytes", maxBytes)
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				if total <= int(threshold) {
+				if total <= threshold {
 					var compact bytes.Buffer
 					compact.Grow(total)
 					if err := json.Compact(&compact, buf[:total]); err != nil {
@@ -691,13 +691,7 @@ func compactSmallIfPossible(w io.Writer, r io.Reader, maxBytes int64) (io.Reader
 		}
 	}
 
-	copied := append([]byte(nil), buf[:min(total, target)]...)
-	return io.MultiReader(bytes.NewReader(copied), r), false, nil
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
+	data := make([]byte, total)
+	copy(data, buf[:total])
+	return io.MultiReader(bytes.NewReader(data), r), false, nil
 }

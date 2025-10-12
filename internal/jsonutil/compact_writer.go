@@ -661,27 +661,43 @@ func compactSmallIfPossible(w io.Writer, r io.Reader, maxBytes int64) (io.Reader
 		return r, false, nil
 	}
 
+	var buf [smallJSONThreshold + 1]byte
+	target := int(threshold) + 1
+	total := 0
 	limited := io.LimitReader(r, threshold+1)
-	data, err := io.ReadAll(limited)
-	if err != nil && !errors.Is(err, io.EOF) {
-		return nil, true, err
-	}
 
-	if maxBytes > 0 && int64(len(data)) > maxBytes {
-		return nil, true, fmt.Errorf("json: payload exceeds %d bytes", maxBytes)
-	}
-
-	if int64(len(data)) <= threshold && errors.Is(err, io.EOF) {
-		var compact bytes.Buffer
-		compact.Grow(len(data))
-		if err := json.Compact(&compact, data); err != nil {
+	for total < target {
+		n, err := limited.Read(buf[total:target])
+		total += n
+		if maxBytes > 0 && int64(total) > maxBytes {
+			return nil, true, fmt.Errorf("json: payload exceeds %d bytes", maxBytes)
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				if total <= int(threshold) {
+					var compact bytes.Buffer
+					compact.Grow(total)
+					if err := json.Compact(&compact, buf[:total]); err != nil {
+						return nil, true, err
+					}
+					if _, err := compact.WriteTo(w); err != nil {
+						return nil, true, err
+					}
+					return nil, true, nil
+				}
+				break
+			}
 			return nil, true, err
 		}
-		if _, err := compact.WriteTo(w); err != nil {
-			return nil, true, err
-		}
-		return nil, true, nil
 	}
 
-	return io.MultiReader(bytes.NewReader(data), r), false, nil
+	copied := append([]byte(nil), buf[:min(total, target)]...)
+	return io.MultiReader(bytes.NewReader(copied), r), false, nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

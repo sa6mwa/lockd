@@ -110,14 +110,15 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 		return nil, err
 	}
 	handler := httpapi.New(httpapi.Config{
-		Store:         backend,
-		Logger:        logger.With("component", "api"),
-		Clock:         serverClock,
-		JSONMaxBytes:  cfg.JSONMaxBytes,
-		CompactWriter: jsonUtil.compactWriter,
-		DefaultTTL:    cfg.DefaultTTL,
-		MaxTTL:        cfg.MaxTTL,
-		AcquireBlock:  cfg.AcquireBlock,
+		Store:                backend,
+		Logger:               logger.With("component", "api"),
+		Clock:                serverClock,
+		JSONMaxBytes:         cfg.JSONMaxBytes,
+		CompactWriter:        jsonUtil.compactWriter,
+		DefaultTTL:           cfg.DefaultTTL,
+		MaxTTL:               cfg.MaxTTL,
+		AcquireBlock:         cfg.AcquireBlock,
+		SpoolMemoryThreshold: cfg.SpoolMemoryThreshold,
 	})
 	logger.Info("json compaction configured", "impl", jsonUtil.name)
 	mux := http.NewServeMux()

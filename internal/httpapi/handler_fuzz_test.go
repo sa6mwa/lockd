@@ -23,14 +23,15 @@ func FuzzCompactJSON(f *testing.F) {
 	}
 	f.Fuzz(func(t *testing.T, input []byte) {
 		h := New(Config{
-			Store:        memory.New(),
-			Logger:       port.NoopLogger(),
-			JSONMaxBytes: 1 << 20,
-			DefaultTTL:   time.Second,
-			MaxTTL:       time.Minute,
-			AcquireBlock: time.Second,
+			Store:                memory.New(),
+			Logger:               port.NoopLogger(),
+			JSONMaxBytes:         1 << 20,
+			DefaultTTL:           time.Second,
+			MaxTTL:               time.Minute,
+			AcquireBlock:         time.Second,
+			SpoolMemoryThreshold: defaultPayloadSpoolMemoryThreshold,
 		})
-		spool := newPayloadSpool(payloadSpoolMemoryThreshold)
+		spool := newPayloadSpool(defaultPayloadSpoolMemoryThreshold)
 		defer spool.Close()
 		if err := h.compactWriter(spool, bytes.NewReader(input), h.jsonMaxBytes); err != nil {
 			return

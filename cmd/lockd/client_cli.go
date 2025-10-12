@@ -510,9 +510,17 @@ func newClientGetCommand(cfg *clientCLIConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			data, etag, version, err := cli.GetState(cmd.Context(), args[0], lease)
+			reader, etag, version, err := cli.GetState(cmd.Context(), args[0], lease)
 			if err != nil {
 				return err
+			}
+			var data []byte
+			if reader != nil {
+				defer reader.Close()
+				data, err = io.ReadAll(reader)
+				if err != nil {
+					return err
+				}
 			}
 			fmtChoice := parseStateFormat(stateFormat(format), outputPath)
 			payload, err := formatStatePayload(data, fmtChoice)
@@ -576,7 +584,7 @@ func newClientUpdateCommand(cfg *clientCLIConfig) *cobra.Command {
 				return err
 			}
 			opts := lockdclient.UpdateStateOptions{IfVersion: ifVersion, IfETag: ifETag}
-			result, err := cli.UpdateState(cmd.Context(), args[0], lease, payload, opts)
+			result, err := cli.UpdateStateBytes(cmd.Context(), args[0], lease, payload, opts)
 			if err != nil {
 				return err
 			}
@@ -622,7 +630,7 @@ func newClientSetCommand(cfg *clientCLIConfig) *cobra.Command {
 				return err
 			}
 			ctx := cmd.Context()
-			stateBytes, etag, version, err := cli.GetState(ctx, key, lease)
+			stateBytes, etag, version, err := cli.GetStateBytes(ctx, key, lease)
 			if err != nil {
 				return err
 			}
@@ -651,7 +659,7 @@ func newClientSetCommand(cfg *clientCLIConfig) *cobra.Command {
 			if ifETag != "" {
 				opts.IfETag = ifETag
 			}
-			result, err := cli.UpdateState(ctx, key, lease, payload, opts)
+			result, err := cli.UpdateStateBytes(ctx, key, lease, payload, opts)
 			if err != nil {
 				return err
 			}

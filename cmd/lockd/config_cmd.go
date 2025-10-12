@@ -82,6 +82,7 @@ type configDefaults struct {
 	Store                   string  `yaml:"store"`
 	JSONMax                 string  `yaml:"json-max"`
 	JSONUtil                string  `yaml:"json-util"`
+	PayloadSpoolMem         string  `yaml:"payload-spool-mem"`
 	DefaultTTL              string  `yaml:"default-ttl"`
 	MaxTTL                  string  `yaml:"max-ttl"`
 	AcquireBlock            string  `yaml:"acquire-block"`
@@ -110,6 +111,7 @@ func defaultConfigYAML() ([]byte, error) {
 		Store:                   "mem://",
 		JSONMax:                 "100MB",
 		JSONUtil:                lockd.JSONUtilLockd,
+		PayloadSpoolMem:         "4MB",
 		DefaultTTL:              (30 * time.Second).String(),
 		MaxTTL:                  (5 * time.Minute).String(),
 		AcquireBlock:            (60 * time.Second).String(),

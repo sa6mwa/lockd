@@ -9,9 +9,10 @@ import (
 )
 
 const (
-	JSONUtilLockd  = "lockd"
-	JSONUtilJSONV2 = "jsonv2"
-	JSONUtilStdlib = "stdlib"
+	JSONUtilLockd               = "lockd"
+	JSONUtilJSONV2              = "jsonv2"
+	JSONUtilStdlib              = "stdlib"
+	defaultSpoolMemoryThreshold = 4 << 20
 )
 
 var jsonUtilChoices = []string{
@@ -38,15 +39,16 @@ func isValidJSONUtil(name string) bool {
 
 // Config captures the tunables for a lockd.Server instance.
 type Config struct {
-	Listen          string
-	ListenProto     string
-	Store           string
-	JSONMaxBytes    int64
-	JSONUtil        string
-	DefaultTTL      time.Duration
-	MaxTTL          time.Duration
-	AcquireBlock    time.Duration
-	SweeperInterval time.Duration
+	Listen               string
+	ListenProto          string
+	Store                string
+	JSONMaxBytes         int64
+	JSONUtil             string
+	SpoolMemoryThreshold int64
+	DefaultTTL           time.Duration
+	MaxTTL               time.Duration
+	AcquireBlock         time.Duration
+	SweeperInterval      time.Duration
 
 	// mTLS
 	MTLS         bool
@@ -88,6 +90,9 @@ func (c *Config) Validate() error {
 	}
 	if !isValidJSONUtil(c.JSONUtil) {
 		return fmt.Errorf("config: unknown json util %q (options: %s)", c.JSONUtil, strings.Join(ValidJSONUtils(), ", "))
+	}
+	if c.SpoolMemoryThreshold <= 0 {
+		c.SpoolMemoryThreshold = defaultSpoolMemoryThreshold
 	}
 	if c.DefaultTTL <= 0 {
 		c.DefaultTTL = 30 * time.Second

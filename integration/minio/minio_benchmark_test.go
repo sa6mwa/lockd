@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"path"
 	"runtime"
 	"strconv"
@@ -110,6 +111,71 @@ func nextKey(prefix string, i int) string {
 	return fmt.Sprintf("%s-%d-%d", prefix, time.Now().UnixNano(), i)
 }
 
+type jsonPayloadStream struct {
+	prefix    []byte
+	remaining int64
+	suffix    []byte
+	stage     int
+}
+
+func newJSONPayloadStream(bodyLen int64) io.Reader {
+	return &jsonPayloadStream{
+		prefix:    []byte(`{"payload":"`),
+		remaining: bodyLen,
+		suffix:    []byte(`"}`),
+	}
+}
+
+func (s *jsonPayloadStream) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	var total int
+	for len(p) > 0 {
+		switch s.stage {
+		case 0:
+			if len(s.prefix) == 0 {
+				s.stage = 1
+				continue
+			}
+			n := copy(p, s.prefix)
+			s.prefix = s.prefix[n:]
+			total += n
+			p = p[n:]
+		case 1:
+			if s.remaining == 0 {
+				s.stage = 2
+				continue
+			}
+			chunk := int64(len(p))
+			if chunk > s.remaining {
+				chunk = s.remaining
+			}
+			for i := 0; i < int(chunk); i++ {
+				p[i] = 'x'
+			}
+			s.remaining -= chunk
+			total += int(chunk)
+			p = p[chunk:]
+		case 2:
+			if len(s.suffix) == 0 {
+				s.stage = 3
+				continue
+			}
+			n := copy(p, s.suffix)
+			s.suffix = s.suffix[n:]
+			total += n
+			p = p[n:]
+		case 3:
+			if total == 0 {
+				return 0, io.EOF
+			}
+			return total, nil
+		}
+	}
+	return total, nil
+}
+
 func BenchmarkMinioRawLargeJSON(b *testing.B) {
 	env := setupBenchmarkEnv(b, false)
 	payload := makeLargeJSON()
@@ -139,6 +205,7 @@ func BenchmarkLockdLargeJSON(b *testing.B) {
 	client := env.client
 
 	b.ReportAllocs()
+	b.SetBytes(int64(len(payload)))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		key := nextKey("bench-lockd-large", i)
@@ -147,8 +214,35 @@ func BenchmarkLockdLargeJSON(b *testing.B) {
 			b.Fatalf("acquire: %v", err)
 		}
 		opts := lockdclient.UpdateStateOptions{IfVersion: strconv.FormatInt(lease.Version, 10)}
-		if _, err := client.UpdateState(ctx, key, lease.LeaseID, payload, opts); err != nil {
+		if _, err := client.UpdateStateBytes(ctx, key, lease.LeaseID, payload, opts); err != nil {
 			b.Fatalf("update state: %v", err)
+		}
+		if _, err := client.Release(ctx, lockdclient.ReleaseRequest{Key: key, LeaseID: lease.LeaseID}); err != nil {
+			b.Fatalf("release: %v", err)
+		}
+		env.cleanupKey(b, key)
+	}
+}
+
+func BenchmarkLockdLargeJSONStream(b *testing.B) {
+	env := setupBenchmarkEnv(b, true)
+	ctx := context.Background()
+	client := env.client
+	payloadSize := len(makeLargeJSON())
+
+	b.ReportAllocs()
+	b.SetBytes(int64(payloadSize))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		key := nextKey("bench-lockd-large-stream", i)
+		lease, err := client.Acquire(ctx, lockdclient.AcquireRequest{Key: key, Owner: "bench-large-stream", TTLSeconds: benchmarkLeaseTTL, BlockSecs: benchmarkBlockSecs})
+		if err != nil {
+			b.Fatalf("acquire: %v", err)
+		}
+		opts := lockdclient.UpdateStateOptions{IfVersion: strconv.FormatInt(lease.Version, 10)}
+		reader := newJSONPayloadStream(largeJSONSize)
+		if _, err := client.UpdateState(ctx, key, lease.LeaseID, reader, opts); err != nil {
+			b.Fatalf("update state (stream): %v", err)
 		}
 		if _, err := client.Release(ctx, lockdclient.ReleaseRequest{Key: key, LeaseID: lease.LeaseID}); err != nil {
 			b.Fatalf("release: %v", err)
@@ -188,6 +282,9 @@ func BenchmarkLockdSmallJSON(b *testing.B) {
 	client := env.client
 
 	b.ReportAllocs()
+	if len(batch) > 0 {
+		b.SetBytes(int64(len(batch[0])))
+	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		key := nextKey("bench-lockd-small", i)
@@ -197,10 +294,37 @@ func BenchmarkLockdSmallJSON(b *testing.B) {
 		}
 		version := strconv.FormatInt(lease.Version, 10)
 		for _, payload := range batch {
-			if _, err := client.UpdateState(ctx, key, lease.LeaseID, payload, lockdclient.UpdateStateOptions{IfVersion: version}); err != nil {
+			if _, err := client.UpdateStateBytes(ctx, key, lease.LeaseID, payload, lockdclient.UpdateStateOptions{IfVersion: version}); err != nil {
 				b.Fatalf("update state: %v", err)
 			}
 			version = "" // after first update we rely on lease sequencing
+		}
+		if _, err := client.Release(ctx, lockdclient.ReleaseRequest{Key: key, LeaseID: lease.LeaseID}); err != nil {
+			b.Fatalf("release: %v", err)
+		}
+		env.cleanupKey(b, key)
+	}
+}
+
+func BenchmarkLockdSmallJSONStream(b *testing.B) {
+	env := setupBenchmarkEnv(b, true)
+	ctx := context.Background()
+	client := env.client
+	payloadSize := len(makeSmallJSONBatch()[0])
+
+	b.ReportAllocs()
+	b.SetBytes(int64(payloadSize))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		key := nextKey("bench-lockd-small-stream", i)
+		lease, err := client.Acquire(ctx, lockdclient.AcquireRequest{Key: key, Owner: "bench-small-stream", TTLSeconds: benchmarkLeaseTTL, BlockSecs: benchmarkBlockSecs})
+		if err != nil {
+			b.Fatalf("acquire: %v", err)
+		}
+		version := strconv.FormatInt(lease.Version, 10)
+		stream := newJSONPayloadStream(int64(smallJSONSize))
+		if _, err := client.UpdateState(ctx, key, lease.LeaseID, stream, lockdclient.UpdateStateOptions{IfVersion: version}); err != nil {
+			b.Fatalf("update state (stream): %v", err)
 		}
 		if _, err := client.Release(ctx, lockdclient.ReleaseRequest{Key: key, LeaseID: lease.LeaseID}); err != nil {
 			b.Fatalf("release: %v", err)
@@ -230,7 +354,7 @@ func BenchmarkLockdConcurrentDistinctKeys(b *testing.B) {
 				b.Fatalf("acquire: %v", err)
 			}
 			opts := lockdclient.UpdateStateOptions{IfVersion: strconv.FormatInt(lease.Version, 10)}
-			if _, err := client.UpdateState(ctx, key, lease.LeaseID, payload, opts); err != nil {
+			if _, err := client.UpdateStateBytes(ctx, key, lease.LeaseID, payload, opts); err != nil {
 				b.Fatalf("update state: %v", err)
 			}
 			if _, err := client.Release(ctx, lockdclient.ReleaseRequest{Key: key, LeaseID: lease.LeaseID}); err != nil {
@@ -320,7 +444,7 @@ func BenchmarkLockdConcurrentLarge(b *testing.B) {
 				b.Fatalf("acquire: %v", err)
 			}
 			opts := lockdclient.UpdateStateOptions{IfVersion: strconv.FormatInt(lease.Version, 10)}
-			if _, err := client.UpdateState(ctx, key, lease.LeaseID, payload, opts); err != nil {
+			if _, err := client.UpdateStateBytes(ctx, key, lease.LeaseID, payload, opts); err != nil {
 				b.Fatalf("update state: %v", err)
 			}
 			if _, err := client.Release(ctx, lockdclient.ReleaseRequest{Key: key, LeaseID: lease.LeaseID}); err != nil {

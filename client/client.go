@@ -196,8 +196,9 @@ func (c *Client) Describe(ctx context.Context, key string) (*DescribeResponse, e
 	return &describe, nil
 }
 
-// GetState streams the JSON state for a key. Returns nil body when no state exists.
-func (c *Client) GetState(ctx context.Context, key, leaseID string) ([]byte, string, string, error) {
+// GetState streams the JSON state for a key. Caller must close the returned reader.
+// When the key has no state the returned reader is nil.
+func (c *Client) GetState(ctx context.Context, key, leaseID string) (io.ReadCloser, string, string, error) {
 	url := fmt.Sprintf("%s/v1/get_state?key=%s", c.baseURL, key)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, http.NoBody)
 	if err != nil {
@@ -208,24 +209,42 @@ func (c *Client) GetState(ctx context.Context, key, leaseID string) ([]byte, str
 	if err != nil {
 		return nil, "", "", err
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNoContent {
+		resp.Body.Close()
 		return nil, "", "", nil
 	}
 	if resp.StatusCode != http.StatusOK {
+		defer resp.Body.Close()
 		return nil, "", "", c.decodeError(resp)
 	}
-	data, err := io.ReadAll(resp.Body)
+	return resp.Body, resp.Header.Get("ETag"), resp.Header.Get("X-Key-Version"), nil
+}
+
+// GetStateBytes fetches the JSON state into memory and returns it along with metadata.
+func (c *Client) GetStateBytes(ctx context.Context, key, leaseID string) ([]byte, string, string, error) {
+	reader, etag, version, err := c.GetState(ctx, key, leaseID)
 	if err != nil {
 		return nil, "", "", err
 	}
-	return data, resp.Header.Get("ETag"), resp.Header.Get("X-Key-Version"), nil
+	if reader == nil {
+		return nil, etag, version, nil
+	}
+	defer reader.Close()
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, "", "", err
+	}
+	return data, etag, version, nil
 }
 
-// UpdateState uploads new JSON state. body should contain valid JSON payload.
-func (c *Client) UpdateState(ctx context.Context, key, leaseID string, body []byte, opts UpdateStateOptions) (*UpdateStateResult, error) {
+// UpdateState uploads new JSON state from the provided reader.
+func (c *Client) UpdateState(ctx context.Context, key, leaseID string, body io.Reader, opts UpdateStateOptions) (*UpdateStateResult, error) {
 	url := fmt.Sprintf("%s/v1/update_state?key=%s", c.baseURL, key)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	var payload io.Reader = body
+	if payload == nil {
+		payload = http.NoBody
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, payload)
 	if err != nil {
 		return nil, err
 	}
@@ -250,6 +269,11 @@ func (c *Client) UpdateState(ctx context.Context, key, leaseID string, body []by
 		return nil, err
 	}
 	return &result, nil
+}
+
+// UpdateStateBytes uploads new JSON state from the provided byte slice.
+func (c *Client) UpdateStateBytes(ctx context.Context, key, leaseID string, body []byte, opts UpdateStateOptions) (*UpdateStateResult, error) {
+	return c.UpdateState(ctx, key, leaseID, bytes.NewReader(body), opts)
 }
 
 // APIError describes an error response from lockd.

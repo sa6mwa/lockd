@@ -22,6 +22,9 @@ func TestConfigValidateDefaults(t *testing.T) {
 	if cfg.JSONUtil != JSONUtilLockd {
 		t.Fatalf("expected json util default %q, got %q", JSONUtilLockd, cfg.JSONUtil)
 	}
+	if cfg.SpoolMemoryThreshold <= 0 {
+		t.Fatal("expected payload spool memory default")
+	}
 	if cfg.DefaultTTL <= 0 || cfg.MaxTTL <= 0 {
 		t.Fatal("expected ttl defaults")
 	}

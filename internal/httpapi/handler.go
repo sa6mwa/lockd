@@ -24,31 +24,33 @@ import (
 	"pkt.systems/lockd/internal/storage"
 )
 
-const payloadSpoolMemoryThreshold = 4 << 20 // 4 MiB in-memory, then spill to disk
+const defaultPayloadSpoolMemoryThreshold = 4 << 20 // 4 MiB in-memory, then spill to disk
 
 // Handler wires HTTP endpoints to backend operations.
 type Handler struct {
-	store         storage.Backend
-	logger        port.ForLogging
-	clock         clock.Clock
-	jsonMaxBytes  int64
-	compactWriter func(io.Writer, io.Reader, int64) error
-	defaultTTL    time.Duration
-	maxTTL        time.Duration
-	acquireBlock  time.Duration
-	leaseCache    sync.Map
+	store          storage.Backend
+	logger         port.ForLogging
+	clock          clock.Clock
+	jsonMaxBytes   int64
+	compactWriter  func(io.Writer, io.Reader, int64) error
+	defaultTTL     time.Duration
+	maxTTL         time.Duration
+	acquireBlock   time.Duration
+	spoolThreshold int64
+	leaseCache     sync.Map
 }
 
 // Config groups the dependencies required by Handler.
 type Config struct {
-	Store         storage.Backend
-	Logger        port.ForLogging
-	Clock         clock.Clock
-	JSONMaxBytes  int64
-	CompactWriter func(io.Writer, io.Reader, int64) error
-	DefaultTTL    time.Duration
-	MaxTTL        time.Duration
-	AcquireBlock  time.Duration
+	Store                storage.Backend
+	Logger               port.ForLogging
+	Clock                clock.Clock
+	JSONMaxBytes         int64
+	CompactWriter        func(io.Writer, io.Reader, int64) error
+	DefaultTTL           time.Duration
+	MaxTTL               time.Duration
+	AcquireBlock         time.Duration
+	SpoolMemoryThreshold int64
 }
 
 // New constructs a Handler using the supplied configuration.
@@ -65,15 +67,20 @@ func New(cfg Config) *Handler {
 	if cw == nil {
 		cw = jsonutil.CompactWriter
 	}
+	threshold := cfg.SpoolMemoryThreshold
+	if threshold <= 0 {
+		threshold = defaultPayloadSpoolMemoryThreshold
+	}
 	return &Handler{
-		store:         cfg.Store,
-		logger:        logger,
-		clock:         clk,
-		jsonMaxBytes:  cfg.JSONMaxBytes,
-		compactWriter: cw,
-		defaultTTL:    cfg.DefaultTTL,
-		maxTTL:        cfg.MaxTTL,
-		acquireBlock:  cfg.AcquireBlock,
+		store:          cfg.Store,
+		logger:         logger,
+		clock:          clk,
+		jsonMaxBytes:   cfg.JSONMaxBytes,
+		compactWriter:  cw,
+		defaultTTL:     cfg.DefaultTTL,
+		maxTTL:         cfg.MaxTTL,
+		acquireBlock:   cfg.AcquireBlock,
+		spoolThreshold: threshold,
 	}
 }
 
@@ -410,7 +417,7 @@ func (h *Handler) handleUpdateState(w http.ResponseWriter, r *http.Request) erro
 		}
 	}
 
-	spool := newPayloadSpool(payloadSpoolMemoryThreshold)
+	spool := newPayloadSpool(h.spoolThreshold)
 	defer spool.Close()
 	if err := h.compactWriter(spool, body, h.jsonMaxBytes); err != nil {
 		return err

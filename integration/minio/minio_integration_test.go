@@ -56,7 +56,7 @@ func TestMinioLockLifecycle(t *testing.T) {
 	if opts.IfVersion == "" {
 		opts.IfVersion = strconv.FormatInt(lease.Version, 10)
 	}
-	if _, err := cli.UpdateState(ctx, key, lease.LeaseID, payload, opts); err != nil {
+	if _, err := cli.UpdateStateBytes(ctx, key, lease.LeaseID, payload, opts); err != nil {
 		t.Fatalf("update state: %v", err)
 	}
 
@@ -119,7 +119,7 @@ func TestMinioLockConcurrency(t *testing.T) {
 				}
 				counter++
 				body, _ := json.Marshal(map[string]any{"counter": counter, "last": owner})
-				if _, err := cli.UpdateState(ctx, key, lease.LeaseID, body, lockdclient.UpdateStateOptions{IfETag: etag, IfVersion: version}); err != nil {
+				if _, err := cli.UpdateStateBytes(ctx, key, lease.LeaseID, body, lockdclient.UpdateStateOptions{IfETag: etag, IfVersion: version}); err != nil {
 					t.Fatalf("update state: %v", err)
 				}
 				_ = releaseLease(t, ctx, cli, key, lease.LeaseID)
@@ -319,7 +319,7 @@ func acquireWithRetry(t *testing.T, ctx context.Context, cli *lockdclient.Client
 }
 
 func getStateJSON(ctx context.Context, cli *lockdclient.Client, key, leaseID string) (map[string]any, string, string, error) {
-	data, etag, version, err := cli.GetState(ctx, key, leaseID)
+	data, etag, version, err := cli.GetStateBytes(ctx, key, leaseID)
 	if err != nil {
 		if apiErr := (*lockdclient.APIError)(nil); errors.As(err, &apiErr) && apiErr.Status == http.StatusNoContent {
 			return nil, "", "", nil

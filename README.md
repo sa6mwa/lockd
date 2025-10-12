@@ -158,7 +158,7 @@ lockd config gen --out /tmp/lockd.yaml --force
 ```
 
 The generated file contains the same keys as the CLI flags (for example
-`listen-proto`, `json-max`, `json-util`, `s3-region`, `s3-disable-tls`). When present, the configuration file
+`listen-proto`, `json-max`, `json-util`, `payload-spool-mem`, `s3-region`, `s3-disable-tls`). When present, the configuration file
 is read before environment variables so you can override individual settings via
 `LOCKD_*` exports or command-line flags.
 
@@ -185,6 +185,50 @@ small, latency-sensitive workloads. Re-run the suite locally with:
 
 ```sh
 go test -bench=BenchmarkCompact -benchmem ./internal/jsonutil
+```
+
+### Streaming State Updates & Payload Spooling
+
+The client SDK now exposes streaming helpers so large JSON blobs no longer need
+to be buffered in memory. On the same 13th Gen Intel Core i7-1355U host:
+
+| Benchmark | ns/op | MB/s | B/op | allocs/op |
+|-----------|------:|-----:|-----:|----------:|
+| `BenchmarkClientGetStateBytes` | 707,158 | 370.72 | 1,218,417 | 131 |
+| `BenchmarkClientGetStateStream` | **219,847** | **1,192.45** | **8,100** | 97 |
+| `BenchmarkClientUpdateStateBytes` | **241,807** | **1,084.16** | 43,330 | 114 |
+| `BenchmarkClientUpdateStateStream` | 402,225 | 651.74 | **9,759** | 122 |
+
+Streaming reads cut allocations by ~150× and uploads by ~4.4×; throughput is a
+touch lower for uploads because the payload is generated on the fly, but avoids
+materialising entire documents in memory.
+
+On the server side, lockd compacts JSON through an in-memory spool that spills
+to disk once a threshold is exceeded. By default up to 4 MiB of the request is
+kept in RAM. You can tune this via `--payload-spool-mem` /
+`LOCKD_PAYLOAD_SPOOL_MEM` / `payload-spool-mem` in the config file to trade
+memory for CPU (or vice versa).
+
+Running the MinIO-backed benchmarks with the default threshold:
+
+| Benchmark | ns/op | MB/s | B/op | allocs/op |
+|-----------|------:|-----:|-----:|----------:|
+| `BenchmarkLockdLargeJSON` | 112,064,222 | 46.78 | 22,309,298 | 6,166 |
+| `BenchmarkLockdLargeJSONStream` | **59,486,906** | **88.14** | 22,279,726 | 6,315 |
+| `BenchmarkLockdSmallJSON` | 76,891,365 | 0.01 | 1,790,225 | 7,513 |
+| `BenchmarkLockdSmallJSONStream` | **18,178,942** | **0.03** | **439,805** | **2,261** |
+
+Large uploads still allocate heavily because the spool buffers the first 4 MiB
+before spilling to disk. Lowering the threshold (for example `--payload-spool-mem=1MB`)
+pushes more work onto disk IO, which may improve tail latency on constrained
+hosts. Small updates benefit significantly from streaming even with the default
+threshold. Choose a value that matches your workload and disk characteristics;
+the benchmarks above were gathered via:
+
+```sh
+set -a && source .env.local && set +a && go test -run=^$ -bench=BenchmarkClientGetState -benchmem ./client
+set -a && source .env.local && set +a && go test -run=^$ -bench=BenchmarkClientUpdateState -benchmem ./client
+set -a && source .env.local && set +a && go test -run='^$' -bench='BenchmarkLockd(LargeJSON|SmallJSON)' -benchmem ./integration/minio -tags "integration minio bench"
 ```
 
 ### Example Use-cases
@@ -224,6 +268,32 @@ Benchmarks assume the same environment variables as the MinIO integration tests
 (`LOCKD_STORE`, `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`, etc.). Use
 `LOCKD_STORE=minio://localhost:9000/lockd-integration?insecure=1` for a default
 local setup, or point it at HTTPS by omitting the `?insecure=1` query string.
+
+### Benchmarking with Pebble
+
+The Pebble suite mirrors the MinIO scenarios, contrasting raw Pebble API usage
+with the lockd HTTP path (bytes vs streaming updates). Run it with:
+
+```sh
+set -a && source .env.local && set +a && go test -run=^$ -bench='Benchmark(Pebble|LockdPebble)' -benchmem ./integration/pebble -tags "integration pebble bench"
+```
+
+Recent measurements on the same host:
+
+| Benchmark | ns/op | MB/s | B/op | allocs/op |
+|-----------|------:|-----:|-----:|----------:|
+| `BenchmarkPebbleRawLargeJSON` | 27,881,303 | 188.04 | 14,003,307 | 585 |
+| `BenchmarkLockdPebbleLargeJSON` | 49,827,087 | 105.22 | 75,057,644 | 1,446 |
+| `BenchmarkLockdPebbleLargeJSONStream` | 52,101,989 | 100.63 | 77,212,850 | 1,861 |
+| `BenchmarkPebbleRawSmallJSON` | 11,229,583 | 0.05 | 2,644 | 32 |
+| `BenchmarkLockdPebbleSmallJSON` | 18,707,014 | 0.03 | 179,173 | 1,624 |
+| `BenchmarkLockdPebbleSmallJSONStream` | 4,288,340 | 0.12 | 43,350 | 452 |
+| `BenchmarkPebbleRawConcurrent` | 242,977 | 2.12 | 110 | 1 |
+| `BenchmarkLockdPebbleConcurrent` | 665,014 | 0.78 | 114,455 | 549 |
+
+As with the MinIO numbers, streaming updates cut allocations and reduce the
+cost of small payloads. Large payloads still benefit from tuning
+`--payload-spool-mem` based on the host’s disk and memory profile.
 
 Health endpoints:
 
@@ -294,11 +364,17 @@ lease, err := cli.Acquire(ctx, client.AcquireRequest{
     BlockSecs:  20,
 })
 if err != nil { log.Fatal(err) }
-state, etag, version, err := cli.GetState(ctx, "orders", lease.LeaseID)
-...
-_, err = cli.UpdateState(ctx, "orders", lease.LeaseID, newStateBytes,
+body, etag, version, err := cli.GetState(ctx, "orders", lease.LeaseID)
+if err != nil { log.Fatal(err) }
+var state []byte
+if body != nil {
+    defer body.Close()
+    state, err = io.ReadAll(body)
+    if err != nil { log.Fatal(err) }
+}
+_, err = cli.UpdateState(ctx, "orders", lease.LeaseID, bytes.NewReader(newStateBytes),
     client.UpdateStateOptions{IfETag: etag, IfVersion: version})
-...
+if err != nil { log.Fatal(err) }
 cli.Release(ctx, client.ReleaseRequest{Key: "orders", LeaseID: lease.LeaseID})
 ```
 

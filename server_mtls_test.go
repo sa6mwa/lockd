@@ -120,18 +120,19 @@ func startMTLSServer(t *testing.T, bundlePath string) *runningServer {
 	go func() {
 		errCh <- srv.Start()
 	}()
-
-	deadline := time.Now().Add(2 * time.Second)
-	for srv.listener == nil && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := srv.WaitUntilReady(ctx); err != nil {
+		t.Fatalf("server listener not ready: %v", err)
 	}
-	if srv.listener == nil {
-		t.Fatal("server listener not ready")
+	addr := srv.ListenerAddr()
+	if addr == nil {
+		t.Fatal("server listener not available")
 	}
 
 	return &runningServer{
 		srv:   srv,
-		addr:  srv.listener.Addr().String(),
+		addr:  addr.String(),
 		errCh: errCh,
 	}
 }

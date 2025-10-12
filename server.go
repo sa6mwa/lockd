@@ -34,6 +34,8 @@ type Server struct {
 	shutdown    bool
 	sweeperStop chan struct{}
 	sweeperDone sync.WaitGroup
+	readyOnce   sync.Once
+	readyCh     chan struct{}
 }
 
 // Option configures server instances.
@@ -148,6 +150,7 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 		handler: handler,
 		httpSrv: httpSrv,
 		clock:   serverClock,
+		readyCh: make(chan struct{}),
 	}, nil
 }
 
@@ -163,6 +166,7 @@ func (s *Server) Start() error {
 		return fmt.Errorf("listen (%s %s): %w", s.cfg.ListenProto, s.cfg.Listen, err)
 	}
 	s.listener = ln
+	s.signalReady()
 	s.logger.Info("listening", "network", s.cfg.ListenProto, "address", ln.Addr().String(), "mtls", s.cfg.MTLS)
 	s.startSweeper()
 	defer s.stopSweeper()
@@ -197,6 +201,30 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 func (s *Server) Close() error {
 	return s.Shutdown(context.Background())
+}
+
+func (s *Server) signalReady() {
+	s.readyOnce.Do(func() {
+		close(s.readyCh)
+	})
+}
+
+// WaitUntilReady blocks until the server listener is initialized or context ends.
+func (s *Server) WaitUntilReady(ctx context.Context) error {
+	select {
+	case <-s.readyCh:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// ListenerAddr returns the bound listener address once available.
+func (s *Server) ListenerAddr() net.Addr {
+	if l := s.listener; l != nil {
+		return l.Addr()
+	}
+	return nil
 }
 
 func (s *Server) startSweeper() {

@@ -149,12 +149,12 @@ func (s *Server) Handler() http.Handler {
 
 // Start begins serving requests and blocks until the server stops.
 func (s *Server) Start() error {
-	ln, err := net.Listen("tcp", s.cfg.Listen)
+	ln, err := net.Listen(s.cfg.ListenProto, s.cfg.Listen)
 	if err != nil {
-		return fmt.Errorf("listen: %w", err)
+		return fmt.Errorf("listen (%s %s): %w", s.cfg.ListenProto, s.cfg.Listen, err)
 	}
 	s.listener = ln
-	s.logger.Info("listening", "address", ln.Addr().String(), "mtls", s.cfg.MTLS)
+	s.logger.Info("listening", "network", s.cfg.ListenProto, "address", ln.Addr().String(), "mtls", s.cfg.MTLS)
 	s.startSweeper()
 	defer s.stopSweeper()
 	var serveErr error

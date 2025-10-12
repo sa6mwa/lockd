@@ -109,6 +109,7 @@ func newRootCommand(logger port.ForLogging) *cobra.Command {
 
 	flags := cmd.Flags()
 	flags.String("listen", ":9341", "listen address")
+	flags.String("listen-proto", "tcp", "listen network (tcp, tcp4, tcp6)")
 	flags.String("store", "", "storage backend URL (mem://, s3://bucket/prefix, minio://host:port/bucket, pebble:///path)")
 	flags.String("json-max", "100MB", "maximum JSON payload size")
 	flags.Duration("default-ttl", 30*time.Second, "default lease TTL")
@@ -142,7 +143,7 @@ func newRootCommand(logger port.ForLogging) *cobra.Command {
 	viper.AutomaticEnv()
 
 	names := []string{
-		"listen", "store", "json-max", "default-ttl", "max-ttl", "acquire-block",
+		"listen", "listen-proto", "store", "json-max", "default-ttl", "max-ttl", "acquire-block",
 		"sweeper-interval", "mtls", "bundle", "denylist-path", "s3-region",
 		"s3-endpoint", "s3-sse", "s3-kms-key-id", "s3-max-part-size", "s3-path-style",
 		"s3-disable-tls", "storage-retry-attempts", "storage-retry-base-delay",
@@ -155,12 +156,14 @@ func newRootCommand(logger port.ForLogging) *cobra.Command {
 	cmd.AddCommand(newVerifyCommand(logger))
 	cmd.AddCommand(newAuthCommand())
 	cmd.AddCommand(newClientCommand())
+	cmd.AddCommand(newConfigCommand())
 
 	return cmd
 }
 
 func bindConfig(cfg *lockd.Config) error {
 	cfg.Listen = viper.GetString("listen")
+	cfg.ListenProto = viper.GetString("listen-proto")
 	cfg.Store = viper.GetString("store")
 	maxBytes := viper.GetString("json-max")
 	if maxBytes != "" {

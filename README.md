@@ -135,10 +135,29 @@ export LOCKD_STORE="minio://localhost:9000/lockd-data?insecure=1"
 export MINIO_ROOT_USER="minioadmin"
 export MINIO_ROOT_PASSWORD="minioadmin"
 lockd --store "$LOCKD_STORE" --listen :9341 --bundle $HOME/.lockd/server.pem
+
+# IPv4-only binding
+lockd --listen-proto tcp4 --listen 0.0.0.0:9341 --store "$LOCKD_STORE"
 ```
 
 The default listen address is `:9341`, chosen from the unassigned IANA space to
 avoid clashes with common cloud-native services.
+
+### Configuration files
+
+`lockd` can also read a YAML configuration file (loaded via Viper). Generate a
+template with sensible defaults using the helper command:
+
+```sh
+lockd config gen            # writes $HOME/.lockd/config.yaml
+lockd config gen --stdout   # print the template instead of writing a file
+lockd config gen --out /tmp/lockd.yaml --force
+```
+
+The generated file contains the same keys as the CLI flags (for example
+`listen-proto`, `json-max`, `s3-region`, `s3-disable-tls`). When present, the configuration file
+is read before environment variables so you can override individual settings via
+`LOCKD_*` exports or command-line flags.
 
 Health endpoints:
 

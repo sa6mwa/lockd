@@ -13,6 +13,9 @@ func TestConfigValidateDefaults(t *testing.T) {
 	if cfg.Listen == "" {
 		t.Fatal("expected listen default")
 	}
+	if cfg.ListenProto != "tcp" {
+		t.Fatalf("expected listen proto default tcp, got %s", cfg.ListenProto)
+	}
 	if cfg.JSONMaxBytes == 0 {
 		t.Fatal("expected json max default")
 	}

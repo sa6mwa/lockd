@@ -11,6 +11,7 @@ import (
 // Config captures the tunables for a lockd.Server instance.
 type Config struct {
 	Listen          string
+	ListenProto     string
 	Store           string
 	JSONMaxBytes    int64
 	DefaultTTL      time.Duration
@@ -43,6 +44,9 @@ type Config struct {
 func (c *Config) Validate() error {
 	if c.Listen == "" {
 		c.Listen = ":9341"
+	}
+	if c.ListenProto == "" {
+		c.ListenProto = "tcp"
 	}
 	if c.Store == "" {
 		return fmt.Errorf("config: store is required")

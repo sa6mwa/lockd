@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -22,13 +23,15 @@ import (
 
 // Server wraps the HTTP server, storage backend, and supporting components.
 type Server struct {
-	cfg      Config
-	logger   logport.ForLogging
-	backend  storage.Backend
-	handler  *httpapi.Handler
-	httpSrv  *http.Server
-	listener net.Listener
-	clock    clock.Clock
+	cfg          Config
+	logger       logport.ForLogging
+	backend      storage.Backend
+	handler      *httpapi.Handler
+	httpSrv      *http.Server
+	listener     net.Listener
+	socketPath   string
+	clock        clock.Clock
+	lastServeErr error
 
 	mu          sync.Mutex
 	shutdown    bool
@@ -69,6 +72,14 @@ func WithClock(c clock.Clock) Option {
 }
 
 // NewServer constructs a lockd server according to cfg.
+// Example:
+//
+//	cfg := lockd.Config{Store: "mem://", Listen: ":9341", ListenProto: "tcp"}
+//	srv, err := lockd.NewServer(cfg)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	go srv.Start()
 func NewServer(cfg Config, opts ...Option) (*Server, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -155,18 +166,27 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 	}, nil
 }
 
-// Handler exposes the server's HTTP handler, useful when embedding into other servers.
+// Handler returns the underlying HTTP handler so lockd can be mounted inside an
+// existing mux when embedding the server into another program.
 func (s *Server) Handler() http.Handler {
 	return s.httpSrv.Handler
 }
 
 // Start begins serving requests and blocks until the server stops.
 func (s *Server) Start() error {
+	if s.cfg.ListenProto == "unix" {
+		if err := os.Remove(s.cfg.Listen); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove stale unix socket: %w", err)
+		}
+	}
 	ln, err := net.Listen(s.cfg.ListenProto, s.cfg.Listen)
 	if err != nil {
 		return fmt.Errorf("listen (%s %s): %w", s.cfg.ListenProto, s.cfg.Listen, err)
 	}
 	s.listener = ln
+	if s.cfg.ListenProto == "unix" {
+		s.socketPath = s.cfg.Listen
+	}
 	s.signalReady()
 	s.logger.Info("listening", "network", s.cfg.ListenProto, "address", ln.Addr().String(), "mtls", s.cfg.MTLS)
 	s.startSweeper()
@@ -177,13 +197,18 @@ func (s *Server) Start() error {
 	} else {
 		serveErr = s.httpSrv.Serve(ln)
 	}
+	s.recordServeErr(serveErr)
 	if errors.Is(serveErr, http.ErrServerClosed) {
 		return nil
 	}
-	return serveErr
+	if serveErr != nil {
+		return fmt.Errorf("http serve: %w", serveErr)
+	}
+	return nil
 }
 
-// Shutdown gracefully stops the server.
+// Shutdown gracefully stops the server and returns any fatal serve/shutdown
+// error. The returned error will be nil for clean shutdowns.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
 	if s.shutdown {
@@ -193,11 +218,26 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.shutdown = true
 	s.mu.Unlock()
 
-	if err := s.httpSrv.Shutdown(ctx); err != nil {
-		return err
+	if err := s.httpSrv.Shutdown(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("http shutdown: %w", err)
+	}
+	if l := s.listener; l != nil {
+		_ = l.Close()
+		s.listener = nil
 	}
 	s.stopSweeper()
-	return s.backend.Close()
+	if err := s.backend.Close(); err != nil {
+		return err
+	}
+	if s.cfg.ListenProto == "unix" && s.socketPath != "" {
+		if err := os.Remove(s.socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	if err := s.LastServeError(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
 }
 
 func (s *Server) Close() error {
@@ -304,6 +344,21 @@ func (s *Server) sweepExpired(ctx context.Context) error {
 	return nil
 }
 
+func (s *Server) recordServeErr(err error) {
+	s.mu.Lock()
+	s.lastServeErr = err
+	s.mu.Unlock()
+}
+
+// LastServeError returns the most recent error reported by the underlying HTTP
+// server. It is primarily useful for diagnostics; Shutdown already reports any
+// fatal serve/shutdown errors to callers.
+func (s *Server) LastServeError() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastServeErr
+}
+
 func buildServerTLS(bundle *tlsutil.Bundle) *tls.Config {
 	tlsCfg := &tls.Config{
 		MinVersion:   tls.VersionTLS12,
@@ -322,6 +377,65 @@ func buildServerTLS(bundle *tlsutil.Bundle) *tls.Config {
 		}
 	}
 	return tlsCfg
+}
+
+// StartServer starts a lockd server in a background goroutine and waits until it
+// is ready to accept connections. It returns the running server alongside a
+// stop function that gracefully shuts it down.
+// Example:
+//
+//	cfg := lockd.Config{Store: "mem://", ListenProto: "unix", Listen: "/tmp/lockd.sock", MTLS: false}
+//	srv, stop, err := lockd.StartServer(ctx, cfg)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	defer stop(context.Background())
+func StartServer(ctx context.Context, cfg Config, opts ...Option) (*Server, func(context.Context) error, error) {
+	srv, err := NewServer(cfg, opts...)
+	if err != nil {
+		return nil, nil, err
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.Start()
+	}()
+	waitCtx := ctx
+	if waitCtx == nil {
+		waitCtx = context.Background()
+	}
+	if err := srv.WaitUntilReady(waitCtx); err != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+		<-errCh
+		return nil, nil, err
+	}
+	var (
+		stopOnce sync.Once
+		stopErr  error
+	)
+	stop := func(shutdownCtx context.Context) error {
+		stopOnce.Do(func() {
+			if shutdownCtx == nil {
+				shutdownCtx = context.Background()
+			}
+			if err := srv.Shutdown(shutdownCtx); err != nil {
+				stopErr = err
+				return
+			}
+			if err := <-errCh; err != nil && !errors.Is(err, http.ErrServerClosed) {
+				stopErr = err
+			}
+		})
+		return stopErr
+	}
+	if ctx != nil {
+		go func() {
+			<-ctx.Done()
+			_ = stop(context.Background())
+		}()
+	}
+	return srv, stop, nil
 }
 
 func verifyClientCert(rawCerts [][]byte, bundle *tlsutil.Bundle) error {

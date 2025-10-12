@@ -116,6 +116,7 @@ func newRootCommand(logger port.ForLogging) *cobra.Command {
 	flags.String("store", "", "storage backend URL (mem://, s3://bucket/prefix, minio://host:port/bucket, pebble:///path)")
 	flags.String("json-max", "100MB", "maximum JSON payload size")
 	flags.String("json-util", lockd.JSONUtilLockd, fmt.Sprintf("JSON compaction engine (%s)", strings.Join(lockd.ValidJSONUtils(), ", ")))
+	flags.String("payload-spool-mem", "4MB", "bytes to buffer JSON bodies in memory before spooling to disk")
 	flags.String("payload-spool-mem", "4MB", "bytes to keep JSON updates in memory before spooling to disk")
 	flags.Duration("default-ttl", 30*time.Second, "default lease TTL")
 	flags.Duration("max-ttl", 5*time.Minute, "maximum lease TTL")

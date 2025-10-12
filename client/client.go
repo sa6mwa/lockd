@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -58,14 +60,27 @@ func WithHTTPClient(cli *http.Client) Option {
 }
 
 // New creates a new client targeting baseURL (e.g. https://localhost:9341).
+// Unix-domain sockets are supported via base URLs such as unix:///var/run/lockd.sock;
+// ensure the server is running with mTLS disabled or supply a compatible client bundle.
+// Example:
+//
+//	cli, err := client.New("unix:///tmp/lockd.sock")
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	lease, _ := cli.Acquire(ctx, client.AcquireRequest{Key: "demo", Owner: "worker", TTLSeconds: 20})
+//	defer cli.Release(ctx, client.ReleaseRequest{Key: "demo", LeaseID: lease.LeaseID})
 func New(baseURL string, opts ...Option) (*Client, error) {
 	if baseURL == "" {
 		return nil, fmt.Errorf("baseURL required")
 	}
-	trimmed := strings.TrimRight(baseURL, "/")
+	httpClient, resolvedBase, err := buildHTTPClient(baseURL)
+	if err != nil {
+		return nil, err
+	}
 	c := &Client{
-		baseURL:    trimmed,
-		httpClient: &http.Client{Timeout: 15 * time.Second},
+		baseURL:    resolvedBase,
+		httpClient: httpClient,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -176,7 +191,7 @@ func (c *Client) Release(ctx context.Context, req ReleaseRequest) (*ReleaseRespo
 
 // Describe fetches key metadata without state.
 func (c *Client) Describe(ctx context.Context, key string) (*DescribeResponse, error) {
-	url := fmt.Sprintf("%s/v1/describe?key=%s", c.baseURL, key)
+	url := fmt.Sprintf("%s/v1/describe?key=%s", c.baseURL, url.QueryEscape(key))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
 		return nil, err
@@ -199,7 +214,7 @@ func (c *Client) Describe(ctx context.Context, key string) (*DescribeResponse, e
 // GetState streams the JSON state for a key. Caller must close the returned reader.
 // When the key has no state the returned reader is nil.
 func (c *Client) GetState(ctx context.Context, key, leaseID string) (io.ReadCloser, string, string, error) {
-	url := fmt.Sprintf("%s/v1/get_state?key=%s", c.baseURL, key)
+	url := fmt.Sprintf("%s/v1/get_state?key=%s", c.baseURL, url.QueryEscape(key))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, http.NoBody)
 	if err != nil {
 		return nil, "", "", err
@@ -338,4 +353,52 @@ func (c *Client) decodeError(resp *http.Response) error {
 		}
 	}
 	return &APIError{Status: resp.StatusCode, Response: errResp, Body: data}
+}
+
+func buildHTTPClient(rawBase string) (*http.Client, string, error) {
+	trimmed := strings.TrimRight(rawBase, "/")
+	if strings.HasPrefix(rawBase, "unix://") {
+		cli, base, err := newUnixHTTPClient(rawBase)
+		if err != nil {
+			return nil, "", err
+		}
+		return cli, base, nil
+	}
+	return &http.Client{Timeout: 15 * time.Second}, trimmed, nil
+}
+
+func newUnixHTTPClient(raw string) (*http.Client, string, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, "", fmt.Errorf("parse unix baseURL: %w", err)
+	}
+	socketPath := u.Path
+	if u.Host != "" {
+		if socketPath == "" || socketPath == "/" {
+			socketPath = "/" + u.Host
+		} else {
+			socketPath = "/" + u.Host + socketPath
+		}
+	}
+	if socketPath == "" {
+		return nil, "", fmt.Errorf("unix baseURL missing socket path")
+	}
+	query := u.Query()
+	basePath := strings.TrimRight(query.Get("path"), "/")
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	dialer := &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 15 * time.Second}
+	transport.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return dialer.DialContext(ctx, "unix", socketPath)
+	}
+	transport.DialTLSContext = nil
+	transport.TLSClientConfig = nil
+	client := &http.Client{Timeout: 15 * time.Second, Transport: transport}
+	base := "http://unix"
+	if basePath != "" {
+		if !strings.HasPrefix(basePath, "/") {
+			basePath = "/" + basePath
+		}
+		base += basePath
+	}
+	return client, base, nil
 }

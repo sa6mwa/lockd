@@ -295,6 +295,41 @@ As with the MinIO numbers, streaming updates cut allocations and reduce the
 cost of small payloads. Large payloads still benefit from tuning
 `--payload-spool-mem` based on the host’s disk and memory profile.
 
+### In-process client & background server helper
+
+For tests or embedded use-cases you can run lockd entirely in-process. The
+`client/inprocess` package starts a private Unix-socket server and returns a
+regular client facade:
+
+```go
+ctx := context.Background()
+cfg := lockd.Config{Store: "mem://", MTLS: false}
+inproc, err := inprocess.New(ctx, cfg)
+if err != nil { log.Fatal(err) }
+defer inproc.Close(ctx)
+
+lease, err := inproc.Acquire(ctx, client.AcquireRequest{Key: "jobs", Owner: "worker", TTLSeconds: 15})
+if err != nil { log.Fatal(err) }
+defer inproc.Release(ctx, client.ReleaseRequest{Key: "jobs", LeaseID: lease.LeaseID})
+```
+
+Behind the scenes it relies on `lockd.StartServer`, which launches the server in
+a goroutine and returns a shutdown function. You can use the helper directly
+when wiring tests around Unix-domain sockets:
+
+```go
+cfg := lockd.Config{Store: "mem://", ListenProto: "unix", Listen: "/tmp/lockd.sock", MTLS: false}
+srv, stop, err := lockd.StartServer(ctx, cfg)
+if err != nil { log.Fatal(err) }
+defer stop(context.Background())
+
+cli, err := client.New("unix:///tmp/lockd.sock")
+if err != nil { log.Fatal(err) }
+lease, err := cli.Acquire(ctx, client.AcquireRequest{Key: "demo", Owner: "worker", TTLSeconds: 20})
+if err != nil { log.Fatal(err) }
+defer cli.Release(ctx, client.ReleaseRequest{Key: "demo", LeaseID: lease.LeaseID})
+```
+
 Health endpoints:
 
 - `/healthz` – liveness probe
@@ -376,6 +411,18 @@ _, err = cli.UpdateState(ctx, "orders", lease.LeaseID, bytes.NewReader(newStateB
     client.UpdateStateOptions{IfETag: etag, IfVersion: version})
 if err != nil { log.Fatal(err) }
 cli.Release(ctx, client.ReleaseRequest{Key: "orders", LeaseID: lease.LeaseID})
+```
+
+To connect over a Unix domain socket (useful when the server runs on the same
+host), point the client at `unix:///path/to/lockd.sock`:
+
+```go
+cli, err := client.New("unix:///var/run/lockd.sock")
+if err != nil { log.Fatal(err) }
+// run the server with --mtls=false (or supply a client bundle)
+lease, err := cli.Acquire(ctx, client.AcquireRequest{Key: "orders", Owner: "worker-uds", TTLSeconds: 30})
+if err != nil { log.Fatal(err) }
+defer cli.Release(ctx, client.ReleaseRequest{Key: "orders", LeaseID: lease.LeaseID})
 ```
 
 `Acquire` automatically retries conflicts and transient 5xx/429 responses with

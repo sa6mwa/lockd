@@ -61,6 +61,9 @@ func newRootCommand(logger port.ForLogging) *cobra.Command {
   # Embedded Pebble storage
   lockd --store pebble:///var/lib/lockd --listen :9341
 
+  # SSD-optimised disk backend rooted at /var/lib/lockd-data
+  lockd --store disk:///var/lib/lockd-data --disk-retention=0
+
   # In-memory storage (tests/dev only)
   lockd --store mem://
 
@@ -113,15 +116,16 @@ func newRootCommand(logger port.ForLogging) *cobra.Command {
 	flags := cmd.Flags()
 	flags.String("listen", ":9341", "listen address")
 	flags.String("listen-proto", "tcp", "listen network (tcp, tcp4, tcp6)")
-	flags.String("store", "", "storage backend URL (mem://, s3://bucket/prefix, minio://host:port/bucket, pebble:///path)")
+	flags.String("store", "", "storage backend URL (mem://, s3://bucket/prefix, minio://host:port/bucket, pebble:///path, disk:///path)")
 	flags.String("json-max", "100MB", "maximum JSON payload size")
 	flags.String("json-util", lockd.JSONUtilLockd, fmt.Sprintf("JSON compaction engine (%s)", strings.Join(lockd.ValidJSONUtils(), ", ")))
 	flags.String("payload-spool-mem", "4MB", "bytes to buffer JSON bodies in memory before spooling to disk")
-	flags.String("payload-spool-mem", "4MB", "bytes to keep JSON updates in memory before spooling to disk")
 	flags.Duration("default-ttl", 30*time.Second, "default lease TTL")
 	flags.Duration("max-ttl", 5*time.Minute, "maximum lease TTL")
 	flags.Duration("acquire-block", 60*time.Second, "maximum time to wait on acquire conflicts")
 	flags.Duration("sweeper-interval", 5*time.Second, "sweeper interval for background tasks")
+	flags.Duration("disk-retention", 0, "optional retention window for disk backend (0 keeps state indefinitely)")
+	flags.Duration("disk-janitor-interval", 0, "override janitor sweep interval for disk backend (default derived from retention)")
 	flags.Bool("mtls", true, "enable mutual TLS")
 	flags.String("bundle", "", "path to combined server bundle PEM")
 	flags.String("denylist-path", "", "path to certificate denylist (optional)")
@@ -150,7 +154,7 @@ func newRootCommand(logger port.ForLogging) *cobra.Command {
 
 	names := []string{
 		"listen", "listen-proto", "store", "json-max", "json-util", "payload-spool-mem", "default-ttl", "max-ttl", "acquire-block",
-		"sweeper-interval", "mtls", "bundle", "denylist-path", "s3-region",
+		"sweeper-interval", "disk-retention", "disk-janitor-interval", "mtls", "bundle", "denylist-path", "s3-region",
 		"s3-endpoint", "s3-sse", "s3-kms-key-id", "s3-max-part-size", "s3-path-style",
 		"s3-disable-tls", "storage-retry-attempts", "storage-retry-base-delay",
 		"storage-retry-max-delay", "storage-retry-multiplier", "log-level",
@@ -191,6 +195,8 @@ func bindConfig(cfg *lockd.Config) error {
 	cfg.MaxTTL = viper.GetDuration("max-ttl")
 	cfg.AcquireBlock = viper.GetDuration("acquire-block")
 	cfg.SweeperInterval = viper.GetDuration("sweeper-interval")
+	cfg.DiskRetention = viper.GetDuration("disk-retention")
+	cfg.DiskJanitorInterval = viper.GetDuration("disk-janitor-interval")
 	cfg.MTLS = viper.GetBool("mtls")
 	cfg.BundlePath = viper.GetString("bundle")
 	cfg.DenylistPath = viper.GetString("denylist-path")

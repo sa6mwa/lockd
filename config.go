@@ -45,6 +45,8 @@ type Config struct {
 	JSONMaxBytes         int64
 	JSONUtil             string
 	SpoolMemoryThreshold int64
+	DiskRetention        time.Duration
+	DiskJanitorInterval  time.Duration
 	DefaultTTL           time.Duration
 	MaxTTL               time.Duration
 	AcquireBlock         time.Duration
@@ -108,6 +110,26 @@ func (c *Config) Validate() error {
 	}
 	if c.SweeperInterval <= 0 {
 		c.SweeperInterval = 5 * time.Second
+	}
+	if c.DiskRetention < 0 {
+		return fmt.Errorf("config: disk retention must be >= 0")
+	}
+	if c.DiskJanitorInterval < 0 {
+		return fmt.Errorf("config: disk janitor interval must be >= 0")
+	}
+	if c.DiskJanitorInterval == 0 {
+		if c.DiskRetention > 0 {
+			half := c.DiskRetention / 2
+			if half < time.Minute {
+				half = time.Minute
+			}
+			if half > time.Hour {
+				half = time.Hour
+			}
+			c.DiskJanitorInterval = half
+		} else {
+			c.DiskJanitorInterval = time.Hour
+		}
 	}
 	if c.S3MaxPartSize <= 0 {
 		c.S3MaxPartSize = 16 * 1024 * 1024

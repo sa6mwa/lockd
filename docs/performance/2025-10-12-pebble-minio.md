@@ -40,3 +40,23 @@ go test -bench . -benchmem -tags "integration minio bench" ./integration/minio
 
 No regressions were observed relative to the 2025-10-12 baseline recorded prior to the Pebble-focused changes.
 
+### Disk backend baseline
+
+| Benchmark | Result (2025-10-12T21:58Z) |
+| --- | --- |
+| `BenchmarkDiskRawLargeJSON` | 11.6 ms/op, 452 MB/s, 5.3 KB allocs/op (69 allocs) |
+| `BenchmarkLockdDiskLargeJSON` | 34.6 ms/op, 151 MB/s, 488 KB allocs/op (586 allocs) |
+| `BenchmarkLockdDiskLargeJSONStream` | 36.0 ms/op, 145 MB/s, 814 KB allocs/op (749 allocs) |
+| `BenchmarkDiskRawSmallJSON` | 90.3 ms/op, 0.01 MB/s, 42.7 KB allocs/op (563 allocs) |
+| `BenchmarkLockdDiskSmallJSON` | 55.4 ms/op, 0.01 MB/s, 943 KB allocs/op (2,177 allocs) |
+| `BenchmarkLockdDiskSmallJSONStream` | 11.1 ms/op, 0.05 MB/s, 346 KB allocs/op (567 allocs) |
+| `BenchmarkDiskRawConcurrent` | 0.56 ms/op, 0.93 MB/s, 5.1 KB allocs/op (68 allocs) |
+| `BenchmarkLockdDiskConcurrent` | 1.29 ms/op, 0.40 MB/s, 124 KB allocs/op (589 allocs) |
+| `BenchmarkLockdDiskLargeJSONNFS` | 51.8 ms/op, 101 MB/s, 1.08 MB allocs/op (593 allocs) |
+
+Commands:
+
+```sh
+set -a && source .env.local && set +a && go test -bench . -benchmem -tags "integration disk bench" ./integration/disk
+set -a && source .env.local && set +a && go test -run ^$ -bench BenchmarkLockdDiskLargeJSONNFS -benchmem -tags "integration disk bench" ./integration/disk
+```

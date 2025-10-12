@@ -3,9 +3,11 @@ package lockd
 import (
 	"fmt"
 	"net/url"
+	"path/filepath"
 	"strings"
 
 	"pkt.systems/lockd/internal/storage"
+	"pkt.systems/lockd/internal/storage/disk"
 	"pkt.systems/lockd/internal/storage/memory"
 	pebblestore "pkt.systems/lockd/internal/storage/pebble"
 	"pkt.systems/lockd/internal/storage/s3"
@@ -45,6 +47,24 @@ func openBackend(cfg Config) (storage.Backend, error) {
 			return nil, fmt.Errorf("pebble store path required (e.g. pebble:///var/lib/lockd)")
 		}
 		return pebblestore.Open(path)
+	case "disk":
+		path := strings.TrimSpace(u.Path)
+		host := strings.TrimSpace(u.Host)
+		if host != "" {
+			if path == "" || path == "/" {
+				path = "/" + host
+			} else {
+				path = "/" + host + "/" + strings.TrimPrefix(path, "/")
+			}
+		}
+		if path == "" || path == "/" {
+			return nil, fmt.Errorf("disk store path required (e.g. disk:///var/lib/lockd-data)")
+		}
+		return disk.New(disk.Config{
+			Root:            filepath.Clean(path),
+			Retention:       cfg.DiskRetention,
+			JanitorInterval: cfg.DiskJanitorInterval,
+		})
 	default:
 		return nil, fmt.Errorf("store scheme %q not supported yet", u.Scheme)
 	}

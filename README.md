@@ -24,6 +24,7 @@ worker to resume from the last committed state.
 - **Simple HTTP/JSON API** (no gRPC) capable of running with or without TLS.
 - **Storage backends**
   - **S3 / S3-compatible** object stores using a conditional copy pattern.
+  - **Disk** backend optimised for SSD/NVMe with optional retention.
   - **Pebble** embedded KV store for single-node deployments.
   - **In-memory** backend for tests.
 - **Go SDK** (`client` package) with automatic retries and structured errors.
@@ -76,6 +77,7 @@ environment variable) by inspecting the URL scheme:
 | `s3://` | `s3://my-bucket/prefix` | AWS S3 (or any S3-compatible endpoint) | Provide AWS credentials via `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` (and optional `AWS_SESSION_TOKEN`). Requires `--s3-region` or `--s3-endpoint`. |
 | `minio://` | `minio://localhost:9000/lockd-data?insecure=1` | MinIO | TLS **enabled by default**. Append `?insecure=1` (or set `LOCKD_S3_DISABLE_TLS=1`) to use plain HTTP. Supply credentials with `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD` or `MINIO_ACCESS_KEY`/`MINIO_SECRET_KEY`. |
 | `pebble://` | `pebble:///var/lib/lockd` | Embedded Pebble KV | Directory must exist and be writable by the process. |
+| `disk://` | `disk:///var/lib/lockd-data` | SSD/NVMe-tailored disk backend | Stores state/meta beneath the provided root; optional retention window. |
 
 Credentials are loaded from the standard environment variables that the MinIO
 SDK supports. No secret keys are stored in the `lockd` config file.
@@ -158,7 +160,7 @@ lockd config gen --out /tmp/lockd.yaml --force
 ```
 
 The generated file contains the same keys as the CLI flags (for example
-`listen-proto`, `json-max`, `json-util`, `payload-spool-mem`, `s3-region`, `s3-disable-tls`). When present, the configuration file
+`listen-proto`, `json-max`, `json-util`, `payload-spool-mem`, `disk-retention`, `disk-janitor-interval`, `s3-region`, `s3-disable-tls`). When present, the configuration file
 is read before environment variables so you can override individual settings via
 `LOCKD_*` exports or command-line flags.
 
@@ -294,6 +296,21 @@ Recent measurements on the same host:
 As with the MinIO numbers, streaming updates cut allocations and reduce the
 cost of small payloads. Large payloads still benefit from tuning
 `--payload-spool-mem` based on the host’s disk and memory profile.
+
+### Benchmarking with Disk
+
+The disk backend benchmarks pit raw `disk.Store` throughput against the HTTP API
+and include an optional NFS-targeted scenario. Run them with:
+
+```sh
+set -a && source .env.local && set +a && go test -run=^$ -bench='Benchmark(Disk|LockdDisk)' -benchmem ./integration/disk -tags "integration disk bench"
+set -a && source .env.local && set +a && go test -run ^$ -bench BenchmarkLockdDiskLargeJSONNFS -benchmem ./integration/disk -tags "integration disk bench"
+```
+
+By default the suite uses a temporary directory. Override with
+`LOCKD_DISK_ROOT=/path/to/ssd`. For NFS measurements set
+`LOCKD_DISK_NFS_ROOT=/mnt/nfs4-lockd` (falls back to `/mnt/nfs-lockd` if the
+preferred mount is absent).
 
 ### In-process client & background server helper
 
@@ -503,3 +520,10 @@ MIT – see [`LICENSE`](LICENSE).
 - The MPL-2.0 dependency (`github.com/hashicorp/hcl`, pulled in by Viper) allows dynamic/static linking without additional obligations, but any direct modifications to MPL-covered source must be published under MPL-2.0.
 - BSD-2-Clause / BSD-3-Clause libraries (e.g. `github.com/cockroachdb/pebble`, `golang.org/x/*`, `github.com/google/uuid`) and MIT-licensed packages are satisfied by retaining their copyright and disclaimer text inside the third-party report.
 - When distributing binaries or container images, ship the `LICENSE` file together with `THIRD_PARTY_LICENSES.md` to meet attribution requirements.
+### Disk (SSD/NVMe)
+
+- Streams JSON payloads directly to files beneath the store root, hashing on the fly to produce deterministic ETags.
+- Keeps metadata in per-key JSON documents; state lives under `state/<encoded-key>/data`.
+- Optional retention (`--disk-retention`, `LOCKD_DISK_RETENTION`) prunes keys whose metadata `updated_at_unix` is older than the configured duration. Set to `0` (default) to keep data indefinitely.
+- The janitor sweep interval defaults to half the retention window (clamped between 1 minute and 1 hour). Override via `--disk-janitor-interval`.
+- Configure with `--store disk:///var/lib/lockd-data`. All files live beneath the specified root; lockd creates `meta/`, `state/`, and `tmp/` directories automatically.

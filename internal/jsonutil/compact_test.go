@@ -94,6 +94,8 @@ func FuzzCompactWriter(f *testing.F) {
 		`{ "foo": [1, 2, 3], "bar": {"baz": true} }`,
 		`"string with \"quotes\""`,
 		`[null, false, true, 0, 1e10, -3.14]`,
+		`{"emoji":"😀","music":"\uD834\uDD1E","newline":"line1\nline2"}`,
+		`{"big":"` + strings.Repeat("x", smallJSONThreshold+50) + `"}`,
 	}
 	for _, seed := range corpus {
 		f.Add(seed)

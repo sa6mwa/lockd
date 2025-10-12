@@ -3,6 +3,7 @@ package jsonutil
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +19,8 @@ type containerState struct {
 	arrCount       int
 }
 
+const smallJSONThreshold = 2048
+
 type objPhase int
 
 const (
@@ -32,11 +35,17 @@ const (
 // Inspired by github.com/tdewolff/minify/v2/json (MIT license) with custom
 // implementation tailored for lockd.
 func CompactWriter(w io.Writer, r io.Reader, maxBytes int64) error {
+	if newReader, handled, err := compactSmallIfPossible(w, r, maxBytes); handled {
+		return err
+	} else if newReader != nil {
+		r = newReader
+	}
+
 	c := &compactor{
 		br:       bufio.NewReader(r),
 		bw:       bufio.NewWriter(w),
 		max:      maxBytes,
-		asciiBuf: make([]byte, 0, 4096),
+		asciiBuf: make([]byte, 0, 256),
 		numBuf:   make([]byte, 0, 64),
 	}
 	if err := c.run(); err != nil {
@@ -366,31 +375,9 @@ func (c *compactor) writeString() error {
 			return fmt.Errorf("json: invalid control character in string")
 		}
 		if b < utf8.RuneSelf {
-			ascii := c.asciiBuf[:0]
-			ascii = append(ascii, b)
-			for {
-				next, err := c.readByte()
-				if err != nil {
-					return fmt.Errorf("json: unterminated string")
-				}
-				if next == '"' || next == '\\' {
-					c.unread()
-					break
-				}
-				if next < 0x20 {
-					return fmt.Errorf("json: invalid control character in string")
-				}
-				if next >= utf8.RuneSelf {
-					c.unread()
-					break
-				}
-				ascii = append(ascii, next)
-				if len(ascii) == cap(c.asciiBuf) {
-					if _, err := c.bw.Write(ascii); err != nil {
-						return err
-					}
-					ascii = c.asciiBuf[:0]
-				}
+			ascii, err := c.collectASCII(b)
+			if err != nil {
+				return err
 			}
 			if len(ascii) > 0 {
 				if _, err := c.bw.Write(ascii); err != nil {
@@ -554,6 +541,62 @@ DONE:
 	return err
 }
 
+func (c *compactor) collectASCII(first byte) ([]byte, error) {
+	buf := c.asciiBuf[:0]
+	buf = append(buf, first)
+	for {
+		buffered := c.br.Buffered()
+		if buffered == 0 {
+			// Need to fetch at least one more byte to detect special chars.
+			next, err := c.br.ReadByte()
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					return buf, nil
+				}
+				return nil, err
+			}
+			if next == '"' || next == '\\' || next < 0x20 || next >= utf8.RuneSelf {
+				if err := c.br.UnreadByte(); err != nil {
+					return nil, err
+				}
+				return buf, nil
+			}
+			buf = append(buf, next)
+			if len(buf) == cap(c.asciiBuf) {
+				return buf, nil
+			}
+			continue
+		}
+
+		limit := buffered
+		if remaining := cap(c.asciiBuf) - len(buf); remaining < limit {
+			limit = remaining
+		}
+		data, err := c.br.Peek(limit)
+		if err != nil && !errors.Is(err, bufio.ErrBufferFull) && !errors.Is(err, io.EOF) {
+			return nil, err
+		}
+		n := 0
+		for n < len(data) {
+			ch := data[n]
+			if ch == '"' || ch == '\\' || ch < 0x20 || ch >= utf8.RuneSelf {
+				break
+			}
+			n++
+		}
+		if n > 0 {
+			buf = append(buf, data[:n]...)
+			c.br.Discard(n)
+		}
+		if len(buf) == cap(c.asciiBuf) || n < len(data) {
+			return buf, nil
+		}
+		if errors.Is(err, io.EOF) {
+			return buf, nil
+		}
+	}
+}
+
 const (
 	numStart = iota
 	numAfterZero
@@ -619,4 +662,38 @@ func utf8RuneLen(b byte) int {
 	default:
 		return 0
 	}
+}
+
+func compactSmallIfPossible(w io.Writer, r io.Reader, maxBytes int64) (io.Reader, bool, error) {
+	threshold := int64(smallJSONThreshold)
+	if maxBytes > 0 && maxBytes < threshold {
+		threshold = maxBytes
+	}
+	if threshold <= 0 {
+		return r, false, nil
+	}
+
+	limited := io.LimitReader(r, threshold+1)
+	data, err := io.ReadAll(limited)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, true, err
+	}
+
+	if maxBytes > 0 && int64(len(data)) > maxBytes {
+		return nil, true, fmt.Errorf("json: payload exceeds %d bytes", maxBytes)
+	}
+
+	if int64(len(data)) <= threshold && errors.Is(err, io.EOF) {
+		var compact bytes.Buffer
+		compact.Grow(len(data))
+		if err := json.Compact(&compact, data); err != nil {
+			return nil, true, err
+		}
+		if _, err := compact.WriteTo(w); err != nil {
+			return nil, true, err
+		}
+		return nil, true, nil
+	}
+
+	return io.MultiReader(bytes.NewReader(data), r), false, nil
 }

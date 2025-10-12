@@ -9,7 +9,6 @@ import (
 	"io"
 	"math"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -332,18 +331,10 @@ func (h *Handler) handleUpdateState(w http.ResponseWriter, r *http.Request) erro
 	body := http.MaxBytesReader(w, r.Body, h.jsonMaxBytes)
 	defer body.Close()
 
-	tmpFile, err := os.CreateTemp("", "lockd-state-*.json")
+	payload, err := jsonutil.CompactToBuffer(body, h.jsonMaxBytes)
 	if err != nil {
-		return fmt.Errorf("compact: create temp file: %w", err)
+		return err
 	}
-	defer func() {
-		name := tmpFile.Name()
-		_ = tmpFile.Close()
-		_ = os.Remove(name)
-	}()
-
-	firstAttempt := true
-	var compactErr error
 
 	for {
 		now := h.clock.Now()
@@ -370,51 +361,10 @@ func (h *Handler) handleUpdateState(w http.ResponseWriter, r *http.Request) erro
 			}
 		}
 
-		var reader io.Reader
-		var streamErrCh <-chan error
-		if firstAttempt {
-			if err := tmpFile.Truncate(0); err != nil {
-				return fmt.Errorf("compact: truncate temp file: %w", err)
-			}
-			if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
-				return fmt.Errorf("compact: seek temp file: %w", err)
-			}
-			pr, pw := io.Pipe()
-			errCh := make(chan error, 1)
-			streamErrCh = errCh
-			go func() {
-				mw := io.MultiWriter(pw, tmpFile)
-				err := jsonutil.CompactWriter(mw, body, h.jsonMaxBytes)
-				pw.CloseWithError(err)
-				errCh <- err
-			}()
-			reader = pr
-		} else {
-			if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
-				return fmt.Errorf("compact: seek temp file: %w", err)
-			}
-			reader = tmpFile
-		}
-
+		reader := bytes.NewReader(payload)
 		putRes, err := h.store.WriteState(ctx, key, reader, storage.PutStateOptions{
 			ExpectedETag: ifMatch,
 		})
-		if firstAttempt {
-			if streamErrCh != nil {
-				compactErr = <-streamErrCh
-			}
-			firstAttempt = false
-			if compactErr != nil {
-				if httpErr, ok := compactErr.(httpError); ok {
-					return httpErr
-				}
-				return fmt.Errorf("compact json: %w", compactErr)
-			}
-			// Ensure subsequent reads start at beginning.
-			if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
-				return fmt.Errorf("compact: rewind temp file: %w", err)
-			}
-		}
 		if err != nil {
 			if errors.Is(err, storage.ErrCASMismatch) {
 				return httpError{

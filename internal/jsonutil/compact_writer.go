@@ -33,9 +33,10 @@ const (
 // implementation tailored for lockd.
 func CompactWriter(w io.Writer, r io.Reader, maxBytes int64) error {
 	c := &compactor{
-		br:  bufio.NewReader(r),
-		bw:  bufio.NewWriter(w),
-		max: maxBytes,
+		br:    bufio.NewReader(r),
+		bw:    bufio.NewWriter(w),
+		max:   maxBytes,
+		tmpBuf: make([]byte, 0, 64),
 	}
 	if err := c.run(); err != nil {
 		return err
@@ -363,8 +364,28 @@ func (c *compactor) writeString() error {
 			return fmt.Errorf("json: invalid control character in string")
 		}
 		if b < utf8.RuneSelf {
-			if err := c.writeByte(b); err != nil {
+			if err := c.bw.WriteByte(b); err != nil {
 				return err
+			}
+			for {
+				next, err := c.readByte()
+				if err != nil {
+					return fmt.Errorf("json: unterminated string")
+				}
+				if next == '"' || next == '\\' {
+					c.unread()
+					break
+				}
+				if next < 0x20 {
+					return fmt.Errorf("json: invalid control character in string")
+				}
+				if next >= utf8.RuneSelf {
+					c.unread()
+					break
+				}
+				if err := c.bw.WriteByte(next); err != nil {
+					return err
+				}
 			}
 			continue
 		}

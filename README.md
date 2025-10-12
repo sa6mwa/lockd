@@ -198,17 +198,17 @@ running cluster. Flags mirror the Go SDK defaults and honour `LOCKD_CLIENT_*`
 environment variables.
 
 ```
-# Acquire and release leases
-lockd client acquire --server https://127.0.0.1:8443 --owner worker-1 --ttl 30s orders
-lockd client keepalive --lease <lease-id> --ttl 45s orders
-lockd client release --lease <lease-id> orders
+# Acquire and release leases (exports LOCKD_CLIENT_* env vars)
+eval "$(lockd client acquire --server https://127.0.0.1:8443 --owner worker-1 --ttl 30s orders)"
+lockd client keepalive --ttl 45s orders
+lockd client release orders
 
 # State operations
-lockd client getstate --lease <lease-id> -o - orders
-lockd client updatestate --lease <lease-id> --type yaml orders new-state.yaml
+lockd client get orders -o -
+lockd client update orders --type yaml new-state.yaml
 
-# Atomic JSON mutations (acquire → mutate → update → release)
-lockd client set --ttl 30s orders progress.step=fetch progress.count++ time:progress.updated=NOW
+# Atomic JSON mutations (mutate using an existing lease)
+lockd client set orders progress.step=fetch progress.count++ time:progress.updated=NOW
 
 # Local JSON helper (no server interaction)
 lockd client edit checkpoint.json progress.step="done" progress.count=+5
@@ -216,12 +216,15 @@ lockd client edit checkpoint.json progress.step="done" progress.count=+5
 
 The CLI auto-discovers `client*.pem` bundles under `$HOME/.lockd/` (or use
 `--bundle`) and performs the same host-agnostic mTLS verification as the SDK.
-`set` accepts simple `path=value` expressions, arithmetic updates (`++`, `--`,
-`=+3`), `rm:`/`delete:` prefixes to remove keys, and `time:` prefixes for
-RFC3339 timestamps.
+`set` operates on an existing lease and accepts simple `path=value`
+expressions, arithmetic updates (`++`, `--`, `=+3`), `rm:`/`delete:` prefixes to
+remove keys, and `time:` prefixes for RFC3339 timestamps.
 
 Use `-` with `--output` to stream results to standard output or with file inputs
-to read from standard input (e.g. `-o -`, `lockd client updatestate ... -`).
+to read from standard input (e.g. `-o -`, `lockd client update ... -`). When the
+acquire command runs in text mode it prints shell-compatible `export
+LOCKD_CLIENT_*=` assignments, making `eval "$(lockd client acquire ...)"` a
+convenient way to populate environment variables for subsequent commands.
 
 ---
 

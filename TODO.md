@@ -17,3 +17,6 @@ ok      pkt.systems/lockd/integration/aws       0.006s
 
 TODO: describe the implementation, not sure how this should look like yet.
 
+### Debug loglevel should output all ops by all clients
+
+`acquire`, `getstate`, etc, all of them, should be logged if log level is `debug`.

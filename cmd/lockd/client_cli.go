@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -11,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,6 +27,15 @@ const (
 	clientBundleKey  = "client.bundle"
 	clientMTLSKey    = "client.mtls"
 	clientTimeoutKey = "client.timeout"
+
+	envLeaseID    = "LOCKD_CLIENT_LEASE"
+	envKey        = "LOCKD_CLIENT_KEY"
+	envOwner      = "LOCKD_CLIENT_OWNER"
+	envVersion    = "LOCKD_CLIENT_VERSION"
+	envETag       = "LOCKD_CLIENT_ETAG"
+	envExpires    = "LOCKD_CLIENT_EXPIRES_UNIX"
+	envServerURL  = "LOCKD_CLIENT_SERVER"
+	envRetryAfter = "LOCKD_CLIENT_RETRY_AFTER"
 )
 
 func newClientCommand() *cobra.Command {
@@ -51,8 +60,8 @@ func newClientCommand() *cobra.Command {
 		newClientAcquireCommand(cfg),
 		newClientKeepAliveCommand(cfg),
 		newClientReleaseCommand(cfg),
-		newClientGetStateCommand(cfg),
-		newClientUpdateStateCommand(cfg),
+		newClientGetCommand(cfg),
+		newClientUpdateCommand(cfg),
 		newClientSetCommand(cfg),
 		newClientEditCommand(cfg),
 	)
@@ -91,10 +100,11 @@ func (c *clientCLIConfig) load() error {
 	if server == "" {
 		server = "https://127.0.0.1:8443"
 	}
-	if !strings.HasPrefix(server, "http://") && !strings.HasPrefix(server, "https://") {
-		server = "https://" + server
+	normalized, err := normalizeServerURL(server, c.mtls)
+	if err != nil {
+		return err
 	}
-	c.server = server
+	c.server = normalized
 	c.bundle = viper.GetString(clientBundleKey)
 	c.mtls = viper.GetBool(clientMTLSKey)
 	// Ensure default true if flag/env not set.
@@ -265,6 +275,36 @@ func defaultOwner() string {
 	return fmt.Sprintf("%s-%d", host, os.Getpid())
 }
 
+func resolveLease(lease string) (string, error) {
+	if lease != "" {
+		return lease, nil
+	}
+	if env := os.Getenv(envLeaseID); env != "" {
+		return env, nil
+	}
+	return "", fmt.Errorf("--lease is required (or set %s)", envLeaseID)
+}
+
+func normalizeServerURL(raw string, mtls bool) (string, error) {
+	if raw == "" {
+		return "", fmt.Errorf("server URL is empty")
+	}
+	if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
+		return raw, nil
+	}
+	host := raw
+	if !strings.Contains(host, ":") {
+		if mtls {
+			return "https://" + host, nil
+		}
+		return "http://" + host, nil
+	}
+	if mtls {
+		return "https://" + host, nil
+	}
+	return "http://" + host, nil
+}
+
 func newClientAcquireCommand(cfg *clientCLIConfig) *cobra.Command {
 	var ttl time.Duration
 	var block time.Duration
@@ -276,7 +316,11 @@ func newClientAcquireCommand(cfg *clientCLIConfig) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "acquire <key>",
 		Short: "Acquire a lease for a key",
-		Args:  cobra.ExactArgs(1),
+		Example: `  # Acquire a lease and export environment variables
+  eval "$(lockd client acquire --server https://127.0.0.1:8443 --ttl 30s orders)"`,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Args:          cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			key := args[0]
 			if err := cfg.load(); err != nil {
@@ -313,15 +357,27 @@ func newClientAcquireCommand(cfg *clientCLIConfig) *cobra.Command {
 			case outputJSON:
 				return writeJSON(cmd.OutOrStdout(), resp)
 			default:
-				fmt.Fprintf(cmd.OutOrStdout(), "lease_id: %s\n", resp.LeaseID)
-				fmt.Fprintf(cmd.OutOrStdout(), "owner: %s\n", resp.Owner)
-				fmt.Fprintf(cmd.OutOrStdout(), "expires_at_unix: %d (%s)\n", resp.ExpiresAt, formatTime(resp.ExpiresAt))
-				fmt.Fprintf(cmd.OutOrStdout(), "version: %d\n", resp.Version)
-				if resp.StateETag != "" {
-					fmt.Fprintf(cmd.OutOrStdout(), "state_etag: %s\n", resp.StateETag)
+				out := cmd.OutOrStdout()
+				exports := []struct {
+					name  string
+					value string
+				}{
+					{name: envLeaseID, value: resp.LeaseID},
+					{name: envKey, value: resp.Key},
+					{name: envOwner, value: resp.Owner},
+					{name: envServerURL, value: cfg.server},
+					{name: envVersion, value: strconv.FormatInt(resp.Version, 10)},
+					{name: envETag, value: resp.StateETag},
+					{name: envExpires, value: strconv.FormatInt(resp.ExpiresAt, 10)},
 				}
 				if resp.RetryAfter > 0 {
-					fmt.Fprintf(cmd.OutOrStdout(), "retry_after_seconds: %d\n", resp.RetryAfter)
+					exports = append(exports, struct {
+						name  string
+						value string
+					}{name: envRetryAfter, value: strconv.FormatInt(resp.RetryAfter, 10)})
+				}
+				for _, ex := range exports {
+					fmt.Fprintf(out, "export %s=%q\n", ex.name, ex.value)
 				}
 			}
 			return nil
@@ -343,10 +399,15 @@ func newClientKeepAliveCommand(cfg *clientCLIConfig) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "keepalive <key>",
 		Short: "Keep an existing lease alive",
-		Args:  cobra.ExactArgs(1),
+		Example: `  # Extend the current lease using the exported environment variable
+  lockd client keepalive --ttl 1m orders`,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Args:          cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if leaseID == "" {
-				return fmt.Errorf("--lease is required")
+			lease, err := resolveLease(leaseID)
+			if err != nil {
+				return err
 			}
 			if err := cfg.load(); err != nil {
 				return err
@@ -357,7 +418,7 @@ func newClientKeepAliveCommand(cfg *clientCLIConfig) *cobra.Command {
 			}
 			req := lockdclient.KeepAliveRequest{
 				Key:        args[0],
-				LeaseID:    leaseID,
+				LeaseID:    lease,
 				TTLSeconds: mustDurationSeconds(ttl),
 			}
 			if req.TTLSeconds <= 0 {
@@ -388,10 +449,15 @@ func newClientReleaseCommand(cfg *clientCLIConfig) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "release <key>",
 		Short: "Release a lease",
-		Args:  cobra.ExactArgs(1),
+		Example: `  # Release the current lease
+  lockd client release orders`,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Args:          cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if leaseID == "" {
-				return fmt.Errorf("--lease is required")
+			lease, err := resolveLease(leaseID)
+			if err != nil {
+				return err
 			}
 			if err := cfg.load(); err != nil {
 				return err
@@ -400,7 +466,7 @@ func newClientReleaseCommand(cfg *clientCLIConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			req := lockdclient.ReleaseRequest{Key: args[0], LeaseID: leaseID}
+			req := lockdclient.ReleaseRequest{Key: args[0], LeaseID: lease}
 			resp, err := cli.Release(cmd.Context(), req)
 			if err != nil {
 				return err
@@ -419,18 +485,23 @@ func newClientReleaseCommand(cfg *clientCLIConfig) *cobra.Command {
 	return cmd
 }
 
-func newClientGetStateCommand(cfg *clientCLIConfig) *cobra.Command {
+func newClientGetCommand(cfg *clientCLIConfig) *cobra.Command {
 	var leaseID string
 	var outputPath string
 	var format string
 	var showMeta bool
 	cmd := &cobra.Command{
-		Use:   "getstate <key>",
+		Use:   "get <key>",
 		Short: "Fetch state JSON for a key",
-		Args:  cobra.ExactArgs(1),
+		Example: `  # Pretty-print the current state to stdout
+  lockd client get orders -o -`,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Args:          cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if leaseID == "" {
-				return fmt.Errorf("--lease is required")
+			lease, err := resolveLease(leaseID)
+			if err != nil {
+				return err
 			}
 			if err := cfg.load(); err != nil {
 				return err
@@ -439,7 +510,7 @@ func newClientGetStateCommand(cfg *clientCLIConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			data, etag, version, err := cli.GetState(cmd.Context(), args[0], leaseID)
+			data, etag, version, err := cli.GetState(cmd.Context(), args[0], lease)
 			if err != nil {
 				return err
 			}
@@ -468,18 +539,25 @@ func newClientGetStateCommand(cfg *clientCLIConfig) *cobra.Command {
 	return cmd
 }
 
-func newClientUpdateStateCommand(cfg *clientCLIConfig) *cobra.Command {
+func newClientUpdateCommand(cfg *clientCLIConfig) *cobra.Command {
 	var leaseID string
 	var format string
 	var ifVersion string
 	var ifETag string
 	cmd := &cobra.Command{
-		Use:   "updatestate <key> <input>",
+		Use:   "update <key> [input]",
 		Short: "Upload new state from a file",
-		Args:  cobra.ExactArgs(2),
+		Example: `  # Pipe edited state back into the server
+  lockd client get orders -o - \
+    | lockd client edit status.counter++ \
+    | lockd client update orders`,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Args:          cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if leaseID == "" {
-				return fmt.Errorf("--lease is required")
+			lease, err := resolveLease(leaseID)
+			if err != nil {
+				return err
 			}
 			if err := cfg.load(); err != nil {
 				return err
@@ -488,14 +566,17 @@ func newClientUpdateStateCommand(cfg *clientCLIConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			path := args[1]
+			path := "-"
+			if len(args) == 2 {
+				path = args[1]
+			}
 			fmtChoice := parseStateFormat(stateFormat(format), path)
 			payload, err := loadStatePayload(path, fmtChoice)
 			if err != nil {
 				return err
 			}
 			opts := lockdclient.UpdateStateOptions{IfVersion: ifVersion, IfETag: ifETag}
-			result, err := cli.UpdateState(cmd.Context(), args[0], leaseID, payload, opts)
+			result, err := cli.UpdateState(cmd.Context(), args[0], lease, payload, opts)
 			if err != nil {
 				return err
 			}
@@ -511,16 +592,25 @@ func newClientUpdateStateCommand(cfg *clientCLIConfig) *cobra.Command {
 }
 
 func newClientSetCommand(cfg *clientCLIConfig) *cobra.Command {
-	var owner string
-	var ttl time.Duration
-	var block time.Duration
+	var leaseID string
+	var ifVersion string
+	var ifETag string
+	var noCAS bool
 	cmd := &cobra.Command{
 		Use:   "set <key> mutation [mutation...]",
-		Short: "Atomically mutate JSON state fields",
-		Args:  cobra.MinimumNArgs(2),
+		Short: "Mutate JSON state fields for an active lease",
+		Example: `  # Increment a counter and stamp the current time
+  lockd client set orders progress.counter++ time:progress.updated=NOW`,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Args:          cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			key := args[0]
 			mutations, err := parseMutations(args[1:], time.Now())
+			if err != nil {
+				return err
+			}
+			lease, err := resolveLease(leaseID)
 			if err != nil {
 				return err
 			}
@@ -531,28 +621,8 @@ func newClientSetCommand(cfg *clientCLIConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			ownerVal := owner
-			if ownerVal == "" {
-				ownerVal = defaultOwner()
-			}
-			req := lockdclient.AcquireRequest{
-				Key:        key,
-				Owner:      ownerVal,
-				TTLSeconds: mustDurationSeconds(ttl),
-				BlockSecs:  mustDurationSeconds(block),
-			}
-			if req.TTLSeconds <= 0 {
-				return fmt.Errorf("ttl must be > 0")
-			}
 			ctx := cmd.Context()
-			lease, err := cli.Acquire(ctx, req)
-			if err != nil {
-				return err
-			}
-			defer func() {
-				_, _ = cli.Release(context.Background(), lockdclient.ReleaseRequest{Key: key, LeaseID: lease.LeaseID})
-			}()
-			stateBytes, etag, version, err := cli.GetState(ctx, key, lease.LeaseID)
+			stateBytes, etag, version, err := cli.GetState(ctx, key, lease)
 			if err != nil {
 				return err
 			}
@@ -570,8 +640,18 @@ func newClientSetCommand(cfg *clientCLIConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			opts := lockdclient.UpdateStateOptions{IfVersion: version, IfETag: etag}
-			result, err := cli.UpdateState(ctx, key, lease.LeaseID, payload, opts)
+			opts := lockdclient.UpdateStateOptions{}
+			if !noCAS {
+				opts.IfVersion = version
+				opts.IfETag = etag
+			}
+			if ifVersion != "" {
+				opts.IfVersion = ifVersion
+			}
+			if ifETag != "" {
+				opts.IfETag = ifETag
+			}
+			result, err := cli.UpdateState(ctx, key, lease, payload, opts)
 			if err != nil {
 				return err
 			}
@@ -579,24 +659,31 @@ func newClientSetCommand(cfg *clientCLIConfig) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&owner, "owner", "", "owner identity (default hostname + pid)")
-	cmd.Flags().DurationVar(&ttl, "ttl", 30*time.Second, "lease TTL duration")
-	cmd.Flags().DurationVar(&block, "block", 60*time.Second, "time to wait on conflicts before retrying")
+	cmd.Flags().StringVar(&leaseID, "lease", "", "active lease identifier")
+	cmd.Flags().StringVar(&ifVersion, "if-version", "", "override version used for CAS (default from fetched state)")
+	cmd.Flags().StringVar(&ifETag, "if-etag", "", "override ETag used for CAS (default from fetched state)")
+	cmd.Flags().BoolVar(&noCAS, "no-cas", false, "skip conditional update using fetched version/etag")
 	return cmd
 }
 
 func newClientEditCommand(_ *clientCLIConfig) *cobra.Command {
+	var inputPath string
 	var format string
 	cmd := &cobra.Command{
-		Use:   "edit <file> mutation [mutation...]",
+		Use:   "edit mutation [mutation...]",
 		Short: "Apply JSON field mutations to a local file",
-		Args:  cobra.MinimumNArgs(2),
+		Example: `  # Increment counter in place
+  lockd client edit --file checkpoint.json status.counter++`,
+		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if format != "" && strings.ToLower(format) != "json" && strings.ToLower(format) != "auto" {
 				return fmt.Errorf("only json format is supported for edit")
 			}
-			path := args[0]
-			mutations, err := parseMutations(args[1:], time.Now())
+			path := inputPath
+			if path == "" {
+				path = "-"
+			}
+			mutations, err := parseMutations(args, time.Now())
 			if err != nil {
 				return err
 			}
@@ -624,6 +711,7 @@ func newClientEditCommand(_ *clientCLIConfig) *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().StringVarP(&inputPath, "file", "f", "", "input/output file path (default stdin/stdout)")
 	cmd.Flags().StringVar(&format, "type", "json", "input type (currently only json supported)")
 	return cmd
 }

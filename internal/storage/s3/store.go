@@ -95,21 +95,32 @@ func (s *Store) Client() *minio.Client {
 
 func (s *Store) LoadMeta(ctx context.Context, key string) (*storage.Meta, string, error) {
 	object := s.metaObject(key)
-	info, err := s.client.StatObject(ctx, s.cfg.Bucket, object, minio.StatObjectOptions{})
+	obj, err := s.client.GetObject(ctx, s.cfg.Bucket, object, minio.GetObjectOptions{})
+	if err != nil {
+		if isNotFound(err) {
+			return nil, "", storage.ErrNotFound
+		}
+		return nil, "", s.wrapError(err, "s3: get meta")
+	}
+	defer obj.Close()
+
+	var meta storage.Meta
+	if err := json.NewDecoder(io.LimitReader(obj, 1<<20)).Decode(&meta); err != nil {
+		var errResp minio.ErrorResponse
+		if errors.As(err, &errResp) && errResp.StatusCode == http.StatusNotFound {
+			return nil, "", storage.ErrNotFound
+		}
+		if errors.Is(err, io.EOF) {
+			return nil, "", storage.ErrNotFound
+		}
+		return nil, "", fmt.Errorf("s3: decode meta: %w", err)
+	}
+	info, err := obj.Stat()
 	if err != nil {
 		if isNotFound(err) {
 			return nil, "", storage.ErrNotFound
 		}
 		return nil, "", s.wrapError(err, "s3: stat meta")
-	}
-	reader, err := s.client.GetObject(ctx, s.cfg.Bucket, object, minio.GetObjectOptions{})
-	if err != nil {
-		return nil, "", s.wrapError(err, "s3: get meta")
-	}
-	defer reader.Close()
-	var meta storage.Meta
-	if err := json.NewDecoder(io.LimitReader(reader, 1<<20)).Decode(&meta); err != nil {
-		return nil, "", fmt.Errorf("s3: decode meta: %w", err)
 	}
 	return &meta, stripETag(info.ETag), nil
 }

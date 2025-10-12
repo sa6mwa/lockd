@@ -20,6 +20,7 @@ type containerState struct {
 }
 
 const smallJSONThreshold = 2048
+const defaultStackDepth = 64
 
 type objPhase int
 
@@ -69,6 +70,7 @@ type compactor struct {
 	max          int64
 	read         int64
 	stack        []containerState
+	stackBuf     [defaultStackDepth]containerState
 	topValueSeen bool
 	asciiBuf     []byte
 	numBuf       []byte

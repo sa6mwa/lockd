@@ -693,7 +693,6 @@ func compactSmallIfPossible(w io.Writer, r io.Reader, maxBytes int64) (io.Reader
 		}
 	}
 
-	data := make([]byte, total)
-	copy(data, buf[:total])
-	return io.MultiReader(bytes.NewReader(data), r), false, nil
+	remaining := append([]byte(nil), buf[:total]...)
+	return &smallReader{prefix: remaining, reader: r}, false, nil
 }

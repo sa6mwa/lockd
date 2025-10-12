@@ -39,7 +39,6 @@ func TestDiskLockLifecycle(t *testing.T) {
 }
 
 func TestDiskConcurrency(t *testing.T) {
-	t.Skip("disk backend concurrency retries need investigation (meta_conflict under heavy contention)")
 	root := prepareDiskRoot(t, "")
 	cfg := buildDiskConfig(t, root, 0)
 	cli := startDiskServer(t, cfg)
@@ -205,7 +204,7 @@ func prepareDiskRoot(tb testing.TB, base string) string {
 	} else if env := os.Getenv("LOCKD_DISK_ROOT"); env != "" {
 		root = filepath.Join(env, "lockd-"+uuid.NewString())
 	} else {
-		root = filepath.Join(tb.TempDir(), "disk")
+		tb.Fatalf("LOCKD_DISK_ROOT must be set (source .env.disk before running disk integration/benchmarks)")
 	}
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		tb.Fatalf("mkdir disk root: %v", err)

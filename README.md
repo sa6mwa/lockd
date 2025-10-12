@@ -307,10 +307,13 @@ set -a && source .env.local && set +a && go test -run=^$ -bench='Benchmark(Disk|
 set -a && source .env.local && set +a && go test -run ^$ -bench BenchmarkLockdDiskLargeJSONNFS -benchmem ./integration/disk -tags "integration disk bench"
 ```
 
-By default the suite uses a temporary directory. Override with
-`LOCKD_DISK_ROOT=/path/to/ssd`. For NFS measurements set
-`LOCKD_DISK_NFS_ROOT=/mnt/nfs4-lockd` (falls back to `/mnt/nfs-lockd` if the
-preferred mount is absent).
+Source `.env.disk` (or export the variables manually) before running; the suite
+fails fast if the required paths are missing:
+
+- `LOCKD_DISK_ROOT` – absolute path on SSD/NVMe for local disk benchmarks.
+- `LOCKD_DISK_NFS_ROOT` – absolute path to an NFS mount (optional but required
+  for the NFS benchmark). If both `/mnt/nfs4-lockd` and `/mnt/nfs-lockd` are
+  unset/unavailable the test fails.
 
 ### In-process client & background server helper
 

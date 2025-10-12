@@ -186,7 +186,6 @@ func (h *Handler) handleAcquire(w http.ResponseWriter, r *http.Request) error {
 			}
 			return fmt.Errorf("store meta: %w", err)
 		}
-		meta.StateETag = newMetaETag
 		h.cacheLease(leaseID, payload.Key, *meta, newMetaETag)
 
 		resp := api.AcquireResponse{
@@ -263,11 +262,11 @@ func (h *Handler) handleKeepAlive(w http.ResponseWriter, r *http.Request) error 
 		newMetaETag, err := h.store.StoreMeta(ctx, key, &meta, metaETag)
 		if err != nil {
 			if errors.Is(err, storage.ErrCASMismatch) {
+				h.dropLease(payload.LeaseID)
 				continue
 			}
 			return fmt.Errorf("store meta: %w", err)
 		}
-		meta.StateETag = newMetaETag
 		h.cacheLease(payload.LeaseID, key, meta, newMetaETag)
 		resp := api.KeepAliveResponse{ExpiresAt: meta.Lease.ExpiresAtUnix}
 		h.writeJSON(w, http.StatusOK, resp, nil)
@@ -316,11 +315,11 @@ func (h *Handler) handleRelease(w http.ResponseWriter, r *http.Request) error {
 		newMetaETag, err := h.store.StoreMeta(ctx, payload.Key, &meta, metaETag)
 		if err != nil {
 			if errors.Is(err, storage.ErrCASMismatch) {
+				h.dropLease(payload.LeaseID)
 				continue
 			}
 			return fmt.Errorf("store meta: %w", err)
 		}
-		meta.StateETag = newMetaETag
 		if released {
 			h.dropLease(payload.LeaseID)
 		} else {
@@ -459,7 +458,6 @@ func (h *Handler) handleUpdateState(w http.ResponseWriter, r *http.Request) erro
 		}
 		return fmt.Errorf("store meta: %w", err)
 	}
-	meta.StateETag = newMetaETag
 	h.cacheLease(leaseID, key, meta, newMetaETag)
 	resp := map[string]any{
 		"new_version":    meta.Version,

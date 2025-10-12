@@ -16,5 +16,5 @@ bin/
 *~
 *.log
 vendor/
-.env
+.env*
 .env.local

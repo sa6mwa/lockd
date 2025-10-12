@@ -68,18 +68,20 @@ lockd auth verify server --in server.pem
 lockd auth verify client --server-in server.pem --in client1.pem
 
 # bundled client CLI (mTLS by default, auto-discovers client*.pem when possible)
-lockd client acquire --server https://localhost:8443 --owner worker-1 --ttl 30s orders
-lockd client keepalive --lease <id> --ttl 45s orders
-lockd client get --lease <id> -o - orders
-lockd client update --lease <id> --type yaml orders new-state.yaml
-lockd client set --lease <id> orders progress.step=fetch progress.count++ time:progress.updated=NOW
-lockd client edit checkpoint.json progress.step="done" progress.count=+5
-lockd client release --lease <id> orders
+eval "$(lockd client acquire --server localhost:8443 --owner worker-1 --ttl 30s orders)"
+lockd client keepalive --ttl 45s orders
+lockd client get orders -o - \
+  | lockd client edit status.counter++ \
+  | lockd client update orders
+lockd client set orders progress.step=fetch progress.count++ time:progress.updated=NOW
+lockd client edit --file checkpoint.json progress.step="done" progress.count=+5
+lockd client release orders
 ```
 
 * `lockd auth new server` writes both `server.pem` and `ca.pem` so the CA cert can be stored separately (secure vault, etc.).
 * `lockd auth verify` validates that bundles contain the expected CA/server material and that revoked client serials are surfaced from the denylist.
 * `lockd client` subcommands wrap the Go SDK and honour the same mTLS defaults; the `set` helper mutates JSON using an existing lease (supports `path=value`, arithmetic `++/--/=+N`, `rm:/delete:` removals, and `time:` assignments). `lockd client acquire` prints `export LOCKD_CLIENT_*=` assignments so `eval "$(...)"` seeds the environment for follow-up commands.
+* Bare `host[:port]` values default to HTTPS when mTLS is enabled (HTTP when `--mtls=false`); explicit `http://` / `https://` URLs are always honoured.
 
 ## Storage model
 

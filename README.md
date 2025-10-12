@@ -199,13 +199,14 @@ environment variables.
 
 ```
 # Acquire and release leases (exports LOCKD_CLIENT_* env vars)
-eval "$(lockd client acquire --server https://127.0.0.1:8443 --owner worker-1 --ttl 30s orders)"
+eval "$(lockd client acquire --server 127.0.0.1:8443 --owner worker-1 --ttl 30s orders)"
 lockd client keepalive --ttl 45s orders
 lockd client release orders
 
-# State operations
-lockd client get orders -o -
-lockd client update orders --type yaml new-state.yaml
+# State operations / pipe through edit
+lockd client get orders -o - \
+  | lockd client edit status.counter++ \
+  | lockd client update orders --type yaml
 
 # Atomic JSON mutations (mutate using an existing lease)
 lockd client set orders progress.step=fetch progress.count++ time:progress.updated=NOW
@@ -225,6 +226,10 @@ to read from standard input (e.g. `-o -`, `lockd client update ... -`). When the
 acquire command runs in text mode it prints shell-compatible `export
 LOCKD_CLIENT_*=` assignments, making `eval "$(lockd client acquire ...)"` a
 convenient way to populate environment variables for subsequent commands.
+
+When `--mtls` is enabled (default) the CLI assumes HTTPS for bare `host[:port]`
+values; when `--mtls=false` it assumes HTTP. Supplying an explicit
+`http://...`/`https://...` URL is always honoured.
 
 ---
 

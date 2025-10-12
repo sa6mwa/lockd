@@ -168,42 +168,50 @@ func (s *Store) ReadState(_ context.Context, key string) (io.ReadCloser, *storag
 }
 
 func (s *Store) WriteState(ctx context.Context, key string, body io.Reader, opts storage.PutStateOptions) (*storage.PutStateResult, error) {
-	data, err := io.ReadAll(body)
+	data, err := readAllSeekable(body)
 	if err != nil {
 		return nil, err
 	}
 	if opts.ExpectedETag != "" {
-		current, _, err := s.ReadState(ctx, key)
+		val, closer, err := s.db.Get(stateKey(key))
+		if errors.Is(err, pebble.ErrNotFound) {
+			return nil, storage.ErrNotFound
+		}
 		if err != nil {
-			if errors.Is(err, storage.ErrNotFound) {
-				return nil, storage.ErrNotFound
-			}
 			return nil, err
 		}
-		currentData, _ := io.ReadAll(current)
-		current.Close()
-		if hashBytes(currentData) != opts.ExpectedETag {
+		match := hashBytes(val) == opts.ExpectedETag
+		if err := closer.Close(); err != nil {
+			return nil, err
+		}
+		if !match {
 			return nil, storage.ErrCASMismatch
 		}
 	}
+	newETag := hashBytes(data)
 	if err := s.db.Set(stateKey(key), data, pebble.Sync); err != nil {
 		return nil, err
 	}
 	return &storage.PutStateResult{
 		BytesWritten: int64(len(data)),
-		NewETag:      hashBytes(data),
+		NewETag:      newETag,
 	}, nil
 }
 
 func (s *Store) RemoveState(ctx context.Context, key string, expectedETag string) error {
 	if expectedETag != "" {
-		reader, _, err := s.ReadState(ctx, key)
+		val, closer, err := s.db.Get(stateKey(key))
+		if errors.Is(err, pebble.ErrNotFound) {
+			return storage.ErrNotFound
+		}
 		if err != nil {
 			return err
 		}
-		data, _ := io.ReadAll(reader)
-		reader.Close()
-		if hashBytes(data) != expectedETag {
+		match := hashBytes(val) == expectedETag
+		if err := closer.Close(); err != nil {
+			return err
+		}
+		if !match {
 			return storage.ErrCASMismatch
 		}
 	}
@@ -227,4 +235,32 @@ func stateKey(key string) []byte {
 func hashBytes(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
+}
+
+func readAllSeekable(body io.Reader) ([]byte, error) {
+	if seeker, ok := body.(io.Seeker); ok {
+		start, err := seeker.Seek(0, io.SeekCurrent)
+		if err == nil {
+			end, err := seeker.Seek(0, io.SeekEnd)
+			if err == nil {
+				if _, err := seeker.Seek(start, io.SeekStart); err == nil {
+					size := end - start
+					if size < 0 {
+						return nil, fmt.Errorf("pebble: negative payload size")
+					}
+					maxInt := int64(^uint(0) >> 1)
+					if size > maxInt {
+						return nil, fmt.Errorf("pebble: payload too large: %d bytes", size)
+					}
+					buf := make([]byte, int(size))
+					if _, err := io.ReadFull(body, buf); err != nil {
+						return nil, err
+					}
+					return buf, nil
+				}
+			}
+			_, _ = seeker.Seek(start, io.SeekStart)
+		}
+	}
+	return io.ReadAll(body)
 }

@@ -600,10 +600,41 @@ type payloadSpool struct {
 	threshold int64
 	buf       []byte
 	file      *os.File
+	pooled    bool
+}
+
+var payloadBufferPool = sync.Pool{
+	New: func() any {
+		return make([]byte, 0, defaultPayloadSpoolMemoryThreshold)
+	},
 }
 
 func newPayloadSpool(threshold int64) *payloadSpool {
-	return &payloadSpool{threshold: threshold}
+	ps := &payloadSpool{threshold: threshold}
+	if threshold <= 0 {
+		return ps
+	}
+	maxInt := int64(^uint(0) >> 1)
+	if threshold > maxInt {
+		threshold = maxInt
+	}
+	bufCap := int(threshold)
+	if threshold == defaultPayloadSpoolMemoryThreshold {
+		if buf, ok := payloadBufferPool.Get().([]byte); ok {
+			if cap(buf) < bufCap {
+				buf = make([]byte, 0, bufCap)
+			} else {
+				buf = buf[:0]
+			}
+			ps.buf = buf
+			ps.pooled = true
+			return ps
+		}
+	}
+	if bufCap > 0 {
+		ps.buf = make([]byte, 0, bufCap)
+	}
+	return ps
 }
 
 func (p *payloadSpool) Write(data []byte) (int, error) {
@@ -624,6 +655,10 @@ func (p *payloadSpool) Write(data []byte) (int, error) {
 			os.Remove(f.Name())
 			return 0, err
 		}
+	}
+	if p.pooled && p.buf != nil {
+		payloadBufferPool.Put(p.buf[:0])
+		p.pooled = false
 	}
 	n, err := f.Write(data)
 	if err != nil {
@@ -659,6 +694,10 @@ func (p *payloadSpool) Close() error {
 		_ = os.Remove(name)
 		p.file = nil
 		return err
+	}
+	if p.pooled && p.buf != nil {
+		payloadBufferPool.Put(p.buf[:0])
+		p.pooled = false
 	}
 	p.buf = nil
 	return nil

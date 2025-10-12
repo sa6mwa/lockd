@@ -16,7 +16,11 @@ This repo delivers a tiny, single-binary **lock + state** service—“just enou
 
   * `/` → server library (export `lockd.Server`, `lockd.Config`, etc.).
   * `cmd/lockd/` → main server app using the library.
-  * `client/` → Go client SDK (`client.New(...)`).
+* `client/` → Go client SDK (`client.New(...)`).
+
+## Workflow notes
+
+* Record every performance-related experiment (benchmarks, profiling-driven optimizations, regression checks) in `docs/performance/` as a dated markdown note. Include the commands used, environment details, before/after metrics, and a short description of the code changes that produced the measurements.
 
 ## Primary use-case
 

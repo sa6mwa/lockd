@@ -169,11 +169,13 @@ object-store performance against `lockd` by running the benchmark suite:
 go test -bench . -run '^$' -tags "integration minio bench" ./integration/minio
 ```
 
-The harness measures:
+The harness measures both sequential and concurrent scenarios for large (~5 MiB)
+and small (~512 B) payloads:
 
-- Raw MinIO `PutObject` throughput for large and small JSON payloads.
-- Equivalent `lockd` acquire/update/release cycles for those payloads.
-- Concurrent writers operating on distinct keys to simulate many clients.
+- Raw MinIO `PutObject` throughput (large/small).
+- `lockd` acquire/update/release cycles (large/small).
+- Raw MinIO concurrent writers on distinct keys (large/small).
+- `lockd` concurrent writers on distinct keys (large/small).
 
 Benchmarks assume the same environment variables as the MinIO integration tests
 (`LOCKD_STORE`, `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`, etc.). Use

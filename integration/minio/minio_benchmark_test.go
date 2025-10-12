@@ -85,15 +85,10 @@ func (env *benchmarkEnv) cleanupKey(b testing.TB, key string) {
 }
 
 func makeLargeJSON() []byte {
-	payload := make(map[string]any)
-	payload["records"] = strings.Repeat("X", largeJSONSize-32)
-	out, _ := json.Marshal(payload)
-	if len(out) < largeJSONSize {
-		pad := largeJSONSize - len(out)
-		buf := bytes.NewBuffer(out)
-		buf.Write(bytes.Repeat([]byte("Y"), pad))
-		return buf.Bytes()
+	payload := map[string]any{
+		"records": strings.Repeat("X", largeJSONSize),
 	}
+	out, _ := json.Marshal(payload)
 	return out
 }
 
@@ -215,6 +210,7 @@ func BenchmarkLockdSmallJSON(b *testing.B) {
 }
 
 func BenchmarkLockdConcurrentDistinctKeys(b *testing.B) {
+	b.Helper()
 	env := setupBenchmarkEnv(b, true)
 	payload := makeSmallJSONBatch()[0]
 	ctx := context.Background()
@@ -246,6 +242,7 @@ func BenchmarkLockdConcurrentDistinctKeys(b *testing.B) {
 }
 
 func BenchmarkMinioRawConcurrent(b *testing.B) {
+	b.Helper()
 	env := setupBenchmarkEnv(b, false)
 	payload := makeSmallJSONBatch()[0]
 	ctx := context.Background()
@@ -269,6 +266,67 @@ func BenchmarkMinioRawConcurrent(b *testing.B) {
 			if err := env.rawClient.RemoveObject(ctx, bucket, key, minio.RemoveObjectOptions{}); err != nil {
 				b.Fatalf("remove object: %v", err)
 			}
+		}
+	})
+}
+
+func BenchmarkMinioRawConcurrentLarge(b *testing.B) {
+	b.Helper()
+	env := setupBenchmarkEnv(b, false)
+	payload := makeLargeJSON()
+	ctx := context.Background()
+	bucket := env.minioCfg.Bucket
+	basePrefix := path.Join(strings.Trim(env.minioCfg.Prefix, "/"), "bench/raw-concurrent-large")
+	var counter uint64
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		id := atomic.AddUint64(&counter, 1)
+		var seq int
+		for pb.Next() {
+			key := path.Join(basePrefix, fmt.Sprintf("%d-%d", id, seq))
+			seq++
+			reader := bytes.NewReader(payload)
+			_, err := env.rawClient.PutObject(ctx, bucket, key, reader, int64(len(payload)), minio.PutObjectOptions{ContentType: "application/json"})
+			if err != nil {
+				b.Fatalf("put object: %v", err)
+			}
+			if err := env.rawClient.RemoveObject(ctx, bucket, key, minio.RemoveObjectOptions{}); err != nil {
+				b.Fatalf("remove object: %v", err)
+			}
+		}
+	})
+}
+
+func BenchmarkLockdConcurrentLarge(b *testing.B) {
+	b.Helper()
+	env := setupBenchmarkEnv(b, true)
+	payload := makeLargeJSON()
+	ctx := context.Background()
+	client := env.client
+	var counter uint64
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		id := atomic.AddUint64(&counter, 1)
+		var seq int
+		for pb.Next() {
+			key := fmt.Sprintf("bench-lockd-concurrent-large-%d-%d", id, seq)
+			seq++
+			lease, err := client.Acquire(ctx, lockdclient.AcquireRequest{Key: key, Owner: fmt.Sprintf("worker-large-%d", id), TTLSeconds: benchmarkLeaseTTL, BlockSecs: benchmarkBlockSecs})
+			if err != nil {
+				b.Fatalf("acquire: %v", err)
+			}
+			opts := lockdclient.UpdateStateOptions{IfVersion: strconv.FormatInt(lease.Version, 10)}
+			if _, err := client.UpdateState(ctx, key, lease.LeaseID, payload, opts); err != nil {
+				b.Fatalf("update state: %v", err)
+			}
+			if _, err := client.Release(ctx, lockdclient.ReleaseRequest{Key: key, LeaseID: lease.LeaseID}); err != nil {
+				b.Fatalf("release: %v", err)
+			}
+			env.cleanupKey(b, key)
 		}
 	})
 }

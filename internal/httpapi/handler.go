@@ -18,6 +18,7 @@ import (
 
 	"pkt.systems/lockd/internal/api"
 	"pkt.systems/lockd/internal/clock"
+	"pkt.systems/lockd/internal/jsonutil"
 	"pkt.systems/lockd/internal/storage"
 )
 
@@ -330,7 +331,7 @@ func (h *Handler) handleUpdateState(w http.ResponseWriter, r *http.Request) erro
 	body := http.MaxBytesReader(w, r.Body, h.jsonMaxBytes)
 	defer body.Close()
 
-	payload, err := h.compactJSON(body)
+	payload, err := jsonutil.CompactToBuffer(body, h.jsonMaxBytes)
 	if err != nil {
 		return err
 	}
@@ -523,18 +524,22 @@ func validateLease(meta *storage.Meta, leaseID string, now time.Time) error {
 }
 
 func (h *Handler) compactJSON(body io.Reader) ([]byte, error) {
-	var buf bytes.Buffer
-	limited := io.LimitReader(body, h.jsonMaxBytes)
-	dec := json.NewDecoder(limited)
-	dec.UseNumber()
-	var v any
-	if err := dec.Decode(&v); err != nil {
-		return nil, httpError{Status: http.StatusBadRequest, Code: "invalid_json", Detail: err.Error()}
+	limited := io.LimitReader(body, h.jsonMaxBytes+1)
+	raw, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, fmt.Errorf("read json: %w", err)
 	}
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
-		return nil, fmt.Errorf("json encode: %w", err)
+	if int64(len(raw)) > h.jsonMaxBytes {
+		return nil, httpError{Status: http.StatusRequestEntityTooLarge, Code: "json_too_large", Detail: fmt.Sprintf("json exceeds limit of %d bytes", h.jsonMaxBytes)}
+	}
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return nil, httpError{Status: http.StatusBadRequest, Code: "invalid_json", Detail: "empty body"}
+	}
+	buf := bytes.NewBuffer(raw[:0])
+	buf.Reset()
+	if err := json.Compact(buf, trimmed); err != nil {
+		return nil, httpError{Status: http.StatusBadRequest, Code: "invalid_json", Detail: err.Error()}
 	}
 	return buf.Bytes(), nil
 }

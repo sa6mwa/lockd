@@ -11,30 +11,26 @@ import (
 )
 
 type jsonUtilImpl struct {
-	name            string
-	compactWriter   func(io.Writer, io.Reader, int64) error
-	compactToBuffer func(io.Reader, int64) ([]byte, error)
+	name          string
+	compactWriter func(io.Writer, io.Reader, int64) error
 }
 
 func selectJSONUtil(name string) (jsonUtilImpl, error) {
 	switch name {
 	case JSONUtilLockd:
 		return jsonUtilImpl{
-			name:            JSONUtilLockd,
-			compactWriter:   jsonutil.CompactWriter,
-			compactToBuffer: jsonutil.CompactToBuffer,
+			name:          JSONUtilLockd,
+			compactWriter: jsonutil.CompactWriter,
 		}, nil
 	case JSONUtilJSONV2:
 		return jsonUtilImpl{
-			name:            JSONUtilJSONV2,
-			compactWriter:   jsonutilv2.CompactWriter,
-			compactToBuffer: jsonutilv2.CompactToBuffer,
+			name:          JSONUtilJSONV2,
+			compactWriter: jsonutilv2.CompactWriter,
 		}, nil
 	case JSONUtilStdlib:
 		return jsonUtilImpl{
-			name:            JSONUtilStdlib,
-			compactWriter:   stdlibCompactWriter,
-			compactToBuffer: stdlibCompactToBuffer,
+			name:          JSONUtilStdlib,
+			compactWriter: stdlibCompactWriter,
 		}, nil
 	default:
 		return jsonUtilImpl{}, fmt.Errorf("unknown json util %q", name)
@@ -52,18 +48,6 @@ func stdlibCompactWriter(w io.Writer, r io.Reader, maxBytes int64) error {
 	}
 	_, err = io.Copy(w, &buf)
 	return err
-}
-
-func stdlibCompactToBuffer(r io.Reader, maxBytes int64) ([]byte, error) {
-	data, err := readAllWithLimit(r, maxBytes)
-	if err != nil {
-		return nil, err
-	}
-	var buf bytes.Buffer
-	if err := json.Compact(&buf, data); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
 }
 
 func readAllWithLimit(r io.Reader, maxBytes int64) ([]byte, error) {

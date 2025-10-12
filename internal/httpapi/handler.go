@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -22,28 +23,30 @@ import (
 	"pkt.systems/lockd/internal/storage"
 )
 
+const payloadSpoolMemoryThreshold = 4 << 20 // 4 MiB in-memory, then spill to disk
+
 // Handler wires HTTP endpoints to backend operations.
 type Handler struct {
-	store        storage.Backend
-	logger       port.ForLogging
-	clock        clock.Clock
-	jsonMaxBytes int64
-	compactFunc  func(io.Reader, int64) ([]byte, error)
-	defaultTTL   time.Duration
-	maxTTL       time.Duration
-	acquireBlock time.Duration
+	store         storage.Backend
+	logger        port.ForLogging
+	clock         clock.Clock
+	jsonMaxBytes  int64
+	compactWriter func(io.Writer, io.Reader, int64) error
+	defaultTTL    time.Duration
+	maxTTL        time.Duration
+	acquireBlock  time.Duration
 }
 
 // Config groups the dependencies required by Handler.
 type Config struct {
-	Store        storage.Backend
-	Logger       port.ForLogging
-	Clock        clock.Clock
-	JSONMaxBytes int64
-	Compact      func(io.Reader, int64) ([]byte, error)
-	DefaultTTL   time.Duration
-	MaxTTL       time.Duration
-	AcquireBlock time.Duration
+	Store         storage.Backend
+	Logger        port.ForLogging
+	Clock         clock.Clock
+	JSONMaxBytes  int64
+	CompactWriter func(io.Writer, io.Reader, int64) error
+	DefaultTTL    time.Duration
+	MaxTTL        time.Duration
+	AcquireBlock  time.Duration
 }
 
 // New constructs a Handler using the supplied configuration.
@@ -56,19 +59,19 @@ func New(cfg Config) *Handler {
 	if clk == nil {
 		clk = clock.Real{}
 	}
-	compact := cfg.Compact
-	if compact == nil {
-		compact = jsonutil.CompactToBuffer
+	cw := cfg.CompactWriter
+	if cw == nil {
+		cw = jsonutil.CompactWriter
 	}
 	return &Handler{
-		store:        cfg.Store,
-		logger:       logger,
-		clock:        clk,
-		jsonMaxBytes: cfg.JSONMaxBytes,
-		compactFunc:  compact,
-		defaultTTL:   cfg.DefaultTTL,
-		maxTTL:       cfg.MaxTTL,
-		acquireBlock: cfg.AcquireBlock,
+		store:         cfg.Store,
+		logger:        logger,
+		clock:         clk,
+		jsonMaxBytes:  cfg.JSONMaxBytes,
+		compactWriter: cw,
+		defaultTTL:    cfg.DefaultTTL,
+		maxTTL:        cfg.MaxTTL,
+		acquireBlock:  cfg.AcquireBlock,
 	}
 }
 
@@ -338,74 +341,82 @@ func (h *Handler) handleUpdateState(w http.ResponseWriter, r *http.Request) erro
 	body := http.MaxBytesReader(w, r.Body, h.jsonMaxBytes)
 	defer body.Close()
 
-	payload, err := h.compactFunc(body, h.jsonMaxBytes)
+	now := h.clock.Now()
+	meta, metaETag, err := h.ensureMeta(ctx, key)
+	if err != nil {
+		return err
+	}
+	if err := validateLease(meta, leaseID, now); err != nil {
+		return err
+	}
+	if ifVersion != "" {
+		want, parseErr := strconv.ParseInt(ifVersion, 10, 64)
+		if parseErr != nil {
+			return httpError{Status: http.StatusBadRequest, Code: "invalid_version", Detail: parseErr.Error()}
+		}
+		if meta.Version != want {
+			return httpError{
+				Status:  http.StatusConflict,
+				Code:    "version_conflict",
+				Detail:  "state version mismatch",
+				Version: meta.Version,
+				ETag:    meta.StateETag,
+			}
+		}
+	}
+
+	spool := newPayloadSpool(payloadSpoolMemoryThreshold)
+	defer spool.Close()
+	if err := h.compactWriter(spool, body, h.jsonMaxBytes); err != nil {
+		return err
+	}
+	payloadReader, err := spool.Reader()
 	if err != nil {
 		return err
 	}
 
-	for {
-		now := h.clock.Now()
-		meta, metaETag, err := h.ensureMeta(ctx, key)
-		if err != nil {
-			return err
-		}
-		if err := validateLease(meta, leaseID, now); err != nil {
-			return err
-		}
-		if ifVersion != "" {
-			want, parseErr := strconv.ParseInt(ifVersion, 10, 64)
-			if parseErr != nil {
-				return httpError{Status: http.StatusBadRequest, Code: "invalid_version", Detail: parseErr.Error()}
-			}
-			if meta.Version != want {
-				return httpError{
-					Status:  http.StatusConflict,
-					Code:    "version_conflict",
-					Detail:  "state version mismatch",
-					Version: meta.Version,
-					ETag:    meta.StateETag,
-				}
+	putRes, err := h.store.WriteState(ctx, key, payloadReader, storage.PutStateOptions{
+		ExpectedETag: ifMatch,
+	})
+	if err != nil {
+		if errors.Is(err, storage.ErrCASMismatch) {
+			return httpError{
+				Status:  http.StatusConflict,
+				Code:    "etag_mismatch",
+				Detail:  "state etag mismatch",
+				Version: meta.Version,
+				ETag:    meta.StateETag,
 			}
 		}
-
-		reader := bytes.NewReader(payload)
-		putRes, err := h.store.WriteState(ctx, key, reader, storage.PutStateOptions{
-			ExpectedETag: ifMatch,
-		})
-		if err != nil {
-			if errors.Is(err, storage.ErrCASMismatch) {
-				return httpError{
-					Status:  http.StatusConflict,
-					Code:    "etag_mismatch",
-					Detail:  "state etag mismatch",
-					Version: meta.Version,
-					ETag:    meta.StateETag,
-				}
-			}
-			return fmt.Errorf("write state: %w", err)
-		}
-
-		meta.Version++
-		meta.StateETag = putRes.NewETag
-		meta.UpdatedAtUnix = now.Unix()
-		if _, err := h.store.StoreMeta(ctx, key, meta, metaETag); err != nil {
-			if errors.Is(err, storage.ErrCASMismatch) {
-				continue
-			}
-			return fmt.Errorf("store meta: %w", err)
-		}
-		resp := map[string]any{
-			"new_version":    meta.Version,
-			"new_state_etag": meta.StateETag,
-			"bytes":          putRes.BytesWritten,
-		}
-		headers := map[string]string{
-			"X-Key-Version": strconv.FormatInt(meta.Version, 10),
-			"ETag":          meta.StateETag,
-		}
-		h.writeJSON(w, http.StatusOK, resp, headers)
-		return nil
+		return fmt.Errorf("write state: %w", err)
 	}
+
+	meta.Version++
+	meta.StateETag = putRes.NewETag
+	meta.UpdatedAtUnix = h.clock.Now().Unix()
+	if _, err := h.store.StoreMeta(ctx, key, meta, metaETag); err != nil {
+		if errors.Is(err, storage.ErrCASMismatch) {
+			return httpError{
+				Status:  http.StatusConflict,
+				Code:    "meta_conflict",
+				Detail:  "state metadata changed concurrently",
+				Version: meta.Version,
+				ETag:    meta.StateETag,
+			}
+		}
+		return fmt.Errorf("store meta: %w", err)
+	}
+	resp := map[string]any{
+		"new_version":    meta.Version,
+		"new_state_etag": meta.StateETag,
+		"bytes":          putRes.BytesWritten,
+	}
+	headers := map[string]string{
+		"X-Key-Version": strconv.FormatInt(meta.Version, 10),
+		"ETag":          meta.StateETag,
+	}
+	h.writeJSON(w, http.StatusOK, resp, headers)
+	return nil
 }
 
 func (h *Handler) handleDescribe(w http.ResponseWriter, r *http.Request) error {
@@ -530,25 +541,72 @@ func validateLease(meta *storage.Meta, leaseID string, now time.Time) error {
 	return nil
 }
 
-func (h *Handler) compactJSON(body io.Reader) ([]byte, error) {
-	limited := io.LimitReader(body, h.jsonMaxBytes+1)
-	raw, err := io.ReadAll(limited)
+type payloadSpool struct {
+	threshold int64
+	buf       []byte
+	file      *os.File
+}
+
+func newPayloadSpool(threshold int64) *payloadSpool {
+	return &payloadSpool{threshold: threshold}
+}
+
+func (p *payloadSpool) Write(data []byte) (int, error) {
+	if p.file != nil {
+		return p.file.Write(data)
+	}
+	if int64(len(p.buf))+int64(len(data)) <= p.threshold {
+		p.buf = append(p.buf, data...)
+		return len(data), nil
+	}
+	f, err := os.CreateTemp("", "lockd-json-")
 	if err != nil {
-		return nil, fmt.Errorf("read json: %w", err)
+		return 0, err
 	}
-	if int64(len(raw)) > h.jsonMaxBytes {
-		return nil, httpError{Status: http.StatusRequestEntityTooLarge, Code: "json_too_large", Detail: fmt.Sprintf("json exceeds limit of %d bytes", h.jsonMaxBytes)}
+	if len(p.buf) > 0 {
+		if _, err := f.Write(p.buf); err != nil {
+			f.Close()
+			os.Remove(f.Name())
+			return 0, err
+		}
 	}
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 {
-		return nil, httpError{Status: http.StatusBadRequest, Code: "invalid_json", Detail: "empty body"}
+	n, err := f.Write(data)
+	if err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		return n, err
 	}
-	buf := bytes.NewBuffer(raw[:0])
-	buf.Reset()
-	if err := json.Compact(buf, trimmed); err != nil {
-		return nil, httpError{Status: http.StatusBadRequest, Code: "invalid_json", Detail: err.Error()}
+	if _, err := f.Seek(0, io.SeekEnd); err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		return n, err
 	}
-	return buf.Bytes(), nil
+	// ensure subsequent writes append to file
+	p.file = f
+	p.buf = nil
+	return n, nil
+}
+
+func (p *payloadSpool) Reader() (io.ReadSeeker, error) {
+	if p.file != nil {
+		if _, err := p.file.Seek(0, io.SeekStart); err != nil {
+			return nil, err
+		}
+		return p.file, nil
+	}
+	return bytes.NewReader(p.buf), nil
+}
+
+func (p *payloadSpool) Close() error {
+	if p.file != nil {
+		name := p.file.Name()
+		err := p.file.Close()
+		_ = os.Remove(name)
+		p.file = nil
+		return err
+	}
+	p.buf = nil
+	return nil
 }
 
 type httpError struct {

@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"testing"
 	"time"
 
@@ -29,7 +30,16 @@ func FuzzCompactJSON(f *testing.F) {
 			MaxTTL:       time.Minute,
 			AcquireBlock: time.Second,
 		})
-		payload, err := h.compactJSON(bytes.NewReader(input))
+		spool := newPayloadSpool(payloadSpoolMemoryThreshold)
+		defer spool.Close()
+		if err := h.compactWriter(spool, bytes.NewReader(input), h.jsonMaxBytes); err != nil {
+			return
+		}
+		reader, err := spool.Reader()
+		if err != nil {
+			return
+		}
+		payload, err := io.ReadAll(reader)
 		if err != nil {
 			return
 		}

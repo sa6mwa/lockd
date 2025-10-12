@@ -159,6 +159,21 @@ The generated file contains the same keys as the CLI flags (for example
 is read before environment variables so you can override individual settings via
 `LOCKD_*` exports or command-line flags.
 
+### Example Use-cases
+
+In addition to coordinating workflow checkpoints, lockd’s lease + atomic JSON
+model unlocks several other patterns once performance and durability goals are
+met:
+
+- **Feature flag shards** – hold per-segment experiment state and atomically
+  roll back under contention without adding a new datastore.
+- **Session handoff / sticky routing** – track live client sessions across
+  stateless edge workers using short leases and JSON metadata blobs.
+- **IoT rollout controller** – drive firmware or configuration rollouts where
+  each device claims work and reports progress exactly once.
+- **Distributed cron / windowing** – serialize recurring jobs (per key) so
+  retries don’t overlap, while keeping per-run state directly in lockd.
+
 ### Benchmarking with MinIO
 
 With MinIO running locally (for example on `localhost:9000`) you can compare raw

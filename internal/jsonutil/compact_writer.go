@@ -33,10 +33,11 @@ const (
 // implementation tailored for lockd.
 func CompactWriter(w io.Writer, r io.Reader, maxBytes int64) error {
 	c := &compactor{
-		br:    bufio.NewReader(r),
-		bw:    bufio.NewWriter(w),
-		max:   maxBytes,
-		tmpBuf: make([]byte, 0, 64),
+		br:       bufio.NewReader(r),
+		bw:       bufio.NewWriter(w),
+		max:      maxBytes,
+		asciiBuf: make([]byte, 0, 4096),
+		numBuf:   make([]byte, 0, 64),
 	}
 	if err := c.run(); err != nil {
 		return err
@@ -60,7 +61,8 @@ type compactor struct {
 	read         int64
 	stack        []containerState
 	topValueSeen bool
-	tmpBuf       []byte
+	asciiBuf     []byte
+	numBuf       []byte
 }
 
 func (c *compactor) run() error {
@@ -364,9 +366,8 @@ func (c *compactor) writeString() error {
 			return fmt.Errorf("json: invalid control character in string")
 		}
 		if b < utf8.RuneSelf {
-			if err := c.bw.WriteByte(b); err != nil {
-				return err
-			}
+			ascii := c.asciiBuf[:0]
+			ascii = append(ascii, b)
 			for {
 				next, err := c.readByte()
 				if err != nil {
@@ -383,7 +384,16 @@ func (c *compactor) writeString() error {
 					c.unread()
 					break
 				}
-				if err := c.bw.WriteByte(next); err != nil {
+				ascii = append(ascii, next)
+				if len(ascii) == cap(c.asciiBuf) {
+					if _, err := c.bw.Write(ascii); err != nil {
+						return err
+					}
+					ascii = c.asciiBuf[:0]
+				}
+			}
+			if len(ascii) > 0 {
+				if _, err := c.bw.Write(ascii); err != nil {
 					return err
 				}
 			}
@@ -393,7 +403,8 @@ func (c *compactor) writeString() error {
 		if size == 0 {
 			return fmt.Errorf("json: invalid utf-8 in string")
 		}
-		buf := append(c.tmpBuf[:0], b)
+		buf := c.numBuf[:0]
+		buf = append(buf, b)
 		for i := 1; i < size; i++ {
 			nb, err := c.readByte()
 			if err != nil {
@@ -411,7 +422,8 @@ func (c *compactor) writeString() error {
 }
 
 func (c *compactor) writeNumber(first byte) error {
-	buf := append(c.tmpBuf[:0], first)
+	buf := c.numBuf[:0]
+	buf = append(buf, first)
 
 	state := numStart
 

@@ -46,7 +46,7 @@ func newClientCommand() *cobra.Command {
 	}
 
 	flags := cmd.PersistentFlags()
-	flags.String("server", "https://127.0.0.1:8443", "lockd server base URL")
+	flags.String("server", "https://127.0.0.1:9341", "lockd server base URL")
 	flags.String("bundle", "", "path to client bundle PEM (default auto-discover under $HOME/.lockd)")
 	flags.Bool("mtls", true, "enable mutual TLS")
 	flags.Duration("timeout", 15*time.Second, "HTTP client timeout")
@@ -98,7 +98,7 @@ func (c *clientCLIConfig) load() error {
 	}
 	server := viper.GetString(clientServerKey)
 	if server == "" {
-		server = "https://127.0.0.1:8443"
+		server = "https://127.0.0.1:9341"
 	}
 	normalized, err := normalizeServerURL(server, c.mtls)
 	if err != nil {
@@ -317,7 +317,7 @@ func newClientAcquireCommand(cfg *clientCLIConfig) *cobra.Command {
 		Use:   "acquire <key>",
 		Short: "Acquire a lease for a key",
 		Example: `  # Acquire a lease and export environment variables
-  eval "$(lockd client acquire --server https://127.0.0.1:8443 --ttl 30s orders)"`,
+	  eval "$(lockd client acquire --server https://127.0.0.1:9341 --ttl 30s orders)"`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Args:          cobra.ExactArgs(1),

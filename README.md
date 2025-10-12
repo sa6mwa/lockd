@@ -101,7 +101,7 @@ Configuration (flags or env via `LOCKD_` prefix):
 
 ```sh
 lockd \
-  --listen :8443 \
+  --listen :9341 \
   --store s3://my-bucket/prefix \
   --json-max 100MB \
   --default-ttl 30s \
@@ -110,6 +110,9 @@ lockd \
   --sweeper-interval 5s \
   --bundle $HOME/.lockd/server.pem
 ```
+
+The default listen address is `:9341`, chosen from the unassigned IANA space to
+avoid clashes with common cloud-native services.
 
 Health endpoints:
 
@@ -199,14 +202,14 @@ environment variables.
 
 ```
 # Acquire and release leases (exports LOCKD_CLIENT_* env vars)
-eval "$(lockd client acquire --server 127.0.0.1:8443 --owner worker-1 --ttl 30s orders)"
+eval "$(lockd client acquire --server 127.0.0.1:9341 --owner worker-1 --ttl 30s orders)"
 lockd client keepalive --ttl 45s orders
 lockd client release orders
 
 # State operations / pipe through edit
 lockd client get orders -o - \
   | lockd client edit status.counter++ \
-  | lockd client update orders --type yaml
+  | lockd client update orders
 
 # Atomic JSON mutations (mutate using an existing lease)
 lockd client set orders progress.step=fetch progress.count++ time:progress.updated=NOW

@@ -95,7 +95,7 @@ func newRootCommand(logger port.ForLogging) *cobra.Command {
 	}
 
 	flags := cmd.Flags()
-	flags.String("listen", ":8443", "listen address")
+	flags.String("listen", ":9341", "listen address")
 	flags.String("store", "", "storage backend URL (e.g. s3://bucket/prefix or mem://)")
 	flags.String("json-max", "100MB", "maximum JSON payload size")
 	flags.Duration("default-ttl", 30*time.Second, "default lease TTL")

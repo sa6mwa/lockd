@@ -57,7 +57,7 @@ func WithHTTPClient(cli *http.Client) Option {
 	}
 }
 
-// New creates a new client targeting baseURL (e.g. http://localhost:8443).
+// New creates a new client targeting baseURL (e.g. https://localhost:9341).
 func New(baseURL string, opts ...Option) (*Client, error) {
 	if baseURL == "" {
 		return nil, fmt.Errorf("baseURL required")

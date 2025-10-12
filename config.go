@@ -42,7 +42,7 @@ type Config struct {
 // Validate applies defaults and sanity-checks the configuration.
 func (c *Config) Validate() error {
 	if c.Listen == "" {
-		c.Listen = ":8443"
+		c.Listen = ":9341"
 	}
 	if c.Store == "" {
 		return fmt.Errorf("config: store is required")

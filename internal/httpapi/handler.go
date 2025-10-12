@@ -12,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -35,6 +36,7 @@ type Handler struct {
 	defaultTTL    time.Duration
 	maxTTL        time.Duration
 	acquireBlock  time.Duration
+	leaseCache    sync.Map
 }
 
 // Config groups the dependencies required by Handler.
@@ -170,12 +172,15 @@ func (h *Handler) handleAcquire(w http.ResponseWriter, r *http.Request) error {
 		}
 		meta.UpdatedAtUnix = now.Unix()
 
-		if _, err := h.store.StoreMeta(ctx, payload.Key, meta, metaETag); err != nil {
+		newMetaETag, err := h.store.StoreMeta(ctx, payload.Key, meta, metaETag)
+		if err != nil {
 			if errors.Is(err, storage.ErrCASMismatch) {
 				continue
 			}
 			return fmt.Errorf("store meta: %w", err)
 		}
+		meta.StateETag = newMetaETag
+		h.cacheLease(leaseID, payload.Key, *meta, newMetaETag)
 
 		resp := api.AcquireResponse{
 			LeaseID:   leaseID,
@@ -213,9 +218,19 @@ func (h *Handler) handleKeepAlive(w http.ResponseWriter, r *http.Request) error 
 	key := payload.Key
 	for {
 		now := h.clock.Now()
-		meta, metaETag, err := h.ensureMeta(ctx, key)
-		if err != nil {
-			return err
+		cachedMeta, cachedETag, cachedKey, cached := h.leaseSnapshot(payload.LeaseID)
+		var meta storage.Meta
+		var metaETag string
+		if cached && cachedKey == key {
+			meta = cachedMeta
+			metaETag = cachedETag
+		} else {
+			loadedMeta, etag, err := h.ensureMeta(ctx, key)
+			if err != nil {
+				return err
+			}
+			meta = *loadedMeta
+			metaETag = etag
 		}
 		if meta.Lease == nil || meta.Lease.ID != payload.LeaseID {
 			return httpError{
@@ -238,12 +253,15 @@ func (h *Handler) handleKeepAlive(w http.ResponseWriter, r *http.Request) error 
 		meta.Lease.ExpiresAtUnix = now.Add(ttl).Unix()
 		meta.UpdatedAtUnix = now.Unix()
 
-		if _, err := h.store.StoreMeta(ctx, key, meta, metaETag); err != nil {
+		newMetaETag, err := h.store.StoreMeta(ctx, key, &meta, metaETag)
+		if err != nil {
 			if errors.Is(err, storage.ErrCASMismatch) {
 				continue
 			}
 			return fmt.Errorf("store meta: %w", err)
 		}
+		meta.StateETag = newMetaETag
+		h.cacheLease(payload.LeaseID, key, meta, newMetaETag)
 		resp := api.KeepAliveResponse{ExpiresAt: meta.Lease.ExpiresAtUnix}
 		h.writeJSON(w, http.StatusOK, resp, nil)
 		return nil
@@ -268,9 +286,19 @@ func (h *Handler) handleRelease(w http.ResponseWriter, r *http.Request) error {
 		return httpError{Status: http.StatusBadRequest, Code: "missing_lease", Detail: "lease_id required"}
 	}
 	for {
-		meta, metaETag, err := h.ensureMeta(ctx, payload.Key)
-		if err != nil {
-			return err
+		cachedMeta, cachedETag, cachedKey, cached := h.leaseSnapshot(payload.LeaseID)
+		var meta storage.Meta
+		var metaETag string
+		if cached && cachedKey == payload.Key {
+			meta = cachedMeta
+			metaETag = cachedETag
+		} else {
+			loadedMeta, etag, err := h.ensureMeta(ctx, payload.Key)
+			if err != nil {
+				return err
+			}
+			meta = *loadedMeta
+			metaETag = etag
 		}
 		released := false
 		if meta.Lease != nil && meta.Lease.ID == payload.LeaseID {
@@ -278,11 +306,18 @@ func (h *Handler) handleRelease(w http.ResponseWriter, r *http.Request) error {
 			meta.UpdatedAtUnix = h.clock.Now().Unix()
 			released = true
 		}
-		if _, err := h.store.StoreMeta(ctx, payload.Key, meta, metaETag); err != nil {
+		newMetaETag, err := h.store.StoreMeta(ctx, payload.Key, &meta, metaETag)
+		if err != nil {
 			if errors.Is(err, storage.ErrCASMismatch) {
 				continue
 			}
 			return fmt.Errorf("store meta: %w", err)
+		}
+		meta.StateETag = newMetaETag
+		if released {
+			h.dropLease(payload.LeaseID)
+		} else {
+			h.cacheLease(payload.LeaseID, payload.Key, meta, newMetaETag)
 		}
 		h.writeJSON(w, http.StatusOK, api.ReleaseResponse{Released: released}, nil)
 		return nil
@@ -342,11 +377,21 @@ func (h *Handler) handleUpdateState(w http.ResponseWriter, r *http.Request) erro
 	defer body.Close()
 
 	now := h.clock.Now()
-	meta, metaETag, err := h.ensureMeta(ctx, key)
-	if err != nil {
-		return err
+	cachedMeta, cachedETag, cachedKey, cached := h.leaseSnapshot(leaseID)
+	var meta storage.Meta
+	var metaETag string
+	if cached && cachedKey == key {
+		meta = cachedMeta
+		metaETag = cachedETag
+	} else {
+		loadedMeta, etag, err := h.ensureMeta(ctx, key)
+		if err != nil {
+			return err
+		}
+		meta = *loadedMeta
+		metaETag = etag
 	}
-	if err := validateLease(meta, leaseID, now); err != nil {
+	if err := validateLease(&meta, leaseID, now); err != nil {
 		return err
 	}
 	if ifVersion != "" {
@@ -394,7 +439,8 @@ func (h *Handler) handleUpdateState(w http.ResponseWriter, r *http.Request) erro
 	meta.Version++
 	meta.StateETag = putRes.NewETag
 	meta.UpdatedAtUnix = h.clock.Now().Unix()
-	if _, err := h.store.StoreMeta(ctx, key, meta, metaETag); err != nil {
+	newMetaETag, err := h.store.StoreMeta(ctx, key, &meta, metaETag)
+	if err != nil {
 		if errors.Is(err, storage.ErrCASMismatch) {
 			return httpError{
 				Status:  http.StatusConflict,
@@ -406,6 +452,8 @@ func (h *Handler) handleUpdateState(w http.ResponseWriter, r *http.Request) erro
 		}
 		return fmt.Errorf("store meta: %w", err)
 	}
+	meta.StateETag = newMetaETag
+	h.cacheLease(leaseID, key, meta, newMetaETag)
 	resp := map[string]any{
 		"new_version":    meta.Version,
 		"new_state_etag": meta.StateETag,
@@ -607,6 +655,28 @@ func (p *payloadSpool) Close() error {
 	}
 	p.buf = nil
 	return nil
+}
+
+type leaseCacheEntry struct {
+	key  string
+	meta storage.Meta
+	etag string
+}
+
+func (h *Handler) cacheLease(leaseID, key string, meta storage.Meta, etag string) {
+	h.leaseCache.Store(leaseID, &leaseCacheEntry{key: key, meta: meta, etag: etag})
+}
+
+func (h *Handler) leaseSnapshot(leaseID string) (storage.Meta, string, string, bool) {
+	if v, ok := h.leaseCache.Load(leaseID); ok {
+		entry := v.(*leaseCacheEntry)
+		return entry.meta, entry.etag, entry.key, true
+	}
+	return storage.Meta{}, "", "", false
+}
+
+func (h *Handler) dropLease(leaseID string) {
+	h.leaseCache.Delete(leaseID)
 }
 
 type httpError struct {

@@ -396,7 +396,7 @@ func (c *Client) Describe(ctx context.Context, key string) (*DescribeResponse, e
 // GetState streams the JSON state for a key. Caller must close the returned reader.
 // When the key has no state the returned reader is nil.
 func (c *Client) GetState(ctx context.Context, key, leaseID string) (io.ReadCloser, string, string, error) {
-	url := fmt.Sprintf("%s/v1/get_state?key=%s", c.baseURL, url.QueryEscape(key))
+	url := fmt.Sprintf("%s/v1/get-state?key=%s", c.baseURL, url.QueryEscape(key))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, http.NoBody)
 	if err != nil {
 		return nil, "", "", err
@@ -444,7 +444,7 @@ func (c *Client) GetStateBytes(ctx context.Context, key, leaseID string) ([]byte
 
 // UpdateState uploads new JSON state from the provided reader.
 func (c *Client) UpdateState(ctx context.Context, key, leaseID string, body io.Reader, opts UpdateStateOptions) (*UpdateStateResult, error) {
-	url := fmt.Sprintf("%s/v1/update_state?key=%s", c.baseURL, key)
+	url := fmt.Sprintf("%s/v1/update-state?key=%s", c.baseURL, url.QueryEscape(key))
 	var payload io.Reader = body
 	if payload == nil {
 		payload = http.NoBody

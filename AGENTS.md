@@ -18,6 +18,13 @@ This repo delivers a tiny, single-binary **lock + state** service—“just enou
   * `cmd/lockd/` → main server app using the library.
 * `client/` → Go client SDK (`client.New(...)`).
 
+## General guidance
+
+- We prefer camelCase for JSON keys over snake_case
+- We prefer kebab-case for URI paths (get-state, update-state, etc)
+- We like all integration tests to finish within 60 seconds in order to iterate fast, adjust technique (not goal of the test) to this constraint
+- We like unit tests to be fast and snappy; a total go test ./... run should finish within 10 seconds
+
 ## Workflow notes
 
 * Record every performance-related experiment (benchmarks, profiling-driven optimizations, regression checks) in `docs/performance/` as a dated markdown note. Include the commands used, environment details, before/after metrics, and a short description of the code changes that produced the measurements.

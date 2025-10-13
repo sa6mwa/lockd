@@ -139,7 +139,7 @@ func TestAcquireForUpdateAndRelease(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	res, err := cli.AcquireForUpdate(ctx, lockdclient.AcquireRequest{Key: "orders", Owner: "worker", TTLSeconds: 30})
+	res, err := cli.AcquireForUpdate(ctx, lockdclient.AcquireRequest{Key: "orders", Owner: "worker", TTLSeconds: 5})
 	if err != nil {
 		t.Fatalf("acquire-for-update: %v", err)
 	}
@@ -151,12 +151,63 @@ func TestAcquireForUpdateAndRelease(t *testing.T) {
 		_ = res.Body.Close()
 	}
 
-	lease, err := cli.Acquire(ctx, lockdclient.AcquireRequest{Key: "orders", Owner: "verifier", TTLSeconds: 30})
+	lease, err := cli.Acquire(ctx, lockdclient.AcquireRequest{Key: "orders", Owner: "verifier", TTLSeconds: 5})
 	if err != nil {
 		t.Fatalf("reacquire after release: %v", err)
 	}
 	if _, err := cli.Release(ctx, lockdclient.ReleaseRequest{Key: "orders", LeaseID: lease.LeaseID}); err != nil {
 		t.Fatalf("cleanup release: %v", err)
+	}
+}
+
+func TestAcquireForUpdateDropAllowsReacquire(t *testing.T) {
+	store := memory.New()
+	clk := newStubClock(time.Unix(1_700_000_000, 0))
+	handler := New(Config{
+		Store:                        store,
+		Logger:                       port.NoopLogger(),
+		Clock:                        clk,
+		JSONMaxBytes:                 1 << 20,
+		DefaultTTL:                   5 * time.Second,
+		MaxTTL:                       10 * time.Second,
+		AcquireBlock:                 2 * time.Second,
+		ForUpdateMaxStreams:          10,
+		ForUpdateMaxHold:             30 * time.Second,
+		ForUpdateMaxStreamsPerClient: 5,
+	})
+	mux := http.NewServeMux()
+	handler.Register(mux)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	cli, err := lockdclient.New(server.URL)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	ctx := context.Background()
+	first, err := cli.AcquireForUpdate(ctx, lockdclient.AcquireRequest{Key: "stream", Owner: "dropper", TTLSeconds: 5})
+	if err != nil {
+		t.Fatalf("acquire-for-update: %v", err)
+	}
+	if first.Body != nil {
+		_ = first.Body.Close()
+	}
+
+	// The second acquire should not block for the full TTL now that the first stream closed.
+	start := time.Now()
+	second, err := cli.Acquire(ctx, lockdclient.AcquireRequest{Key: "stream", Owner: "second", TTLSeconds: 5, BlockSecs: 1})
+	if err != nil {
+		t.Fatalf("reacquire after drop: %v", err)
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatalf("reacquire took too long after stream close")
+	}
+	if second.LeaseID == first.LeaseID {
+		t.Fatalf("expected different lease id after drop")
+	}
+	if _, err := cli.Release(ctx, lockdclient.ReleaseRequest{Key: "stream", LeaseID: second.LeaseID}); err != nil {
+		t.Fatalf("release second: %v", err)
 	}
 }
 

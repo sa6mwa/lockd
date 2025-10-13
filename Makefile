@@ -29,7 +29,7 @@ define ENSURE_ENV
 endef
 
 define RUN_WITH_ENV
-	set -a && source $(1) && set +a && $(2)
+	set -a && source $(1) && set +a && time $(2)
 endef
 
 test:
@@ -39,27 +39,27 @@ test:
 test-integration-aws:
 	$(call ENSURE_ENV,.env.aws,AWS_ENV_EXAMPLE)
 	@echo "Running AWS integration tests"
-	@$(call RUN_WITH_ENV,.env.aws,go test -tags "integration aws" ./integration/aws)
+	@$(call RUN_WITH_ENV,.env.aws,go test -timeout 1m -count 1 -v -tags "integration aws" ./integration/aws)
 
 test-integration-minio:
 	$(call ENSURE_ENV,.env.minio,MINIO_ENV_EXAMPLE)
 	@echo "Running MinIO integration tests"
-	@$(call RUN_WITH_ENV,.env.minio,go test -tags "integration minio" ./integration/minio)
+	@$(call RUN_WITH_ENV,.env.minio,go test -timeout 1m -count 1 -v -tags "integration minio" ./integration/minio)
 
 test-integration-disk:
 	$(call ENSURE_ENV,.env.disk,DISK_ENV_EXAMPLE)
 	@echo "Running disk integration tests"
-	@$(call RUN_WITH_ENV,.env.disk,go test -tags "integration disk" ./integration/disk)
+	@$(call RUN_WITH_ENV,.env.disk,go test -timeout 1m -count 1 -v -tags "integration disk" ./integration/disk)
 
 test-integration-pebble:
 	$(call ENSURE_ENV,.env.pebble,PEBBLE_ENV_EXAMPLE)
 	@echo "Running Pebble integration tests"
-	@$(call RUN_WITH_ENV,.env.pebble,go test -tags "integration pebble" ./integration/pebble)
+	@$(call RUN_WITH_ENV,.env.pebble,go test -timeout 1m -count 1 -v -tags "integration pebble" ./integration/pebble)
 
 test-integration-azure:
 	$(call ENSURE_ENV,.env.azure,AZURE_ENV_EXAMPLE)
 	@echo "Running Azure integration tests"
-	@$(call RUN_WITH_ENV,.env.azure,go test -tags "integration azure" ./integration/azure)
+	@$(call RUN_WITH_ENV,.env.azure,go test -timeout 1m -count 1 -v -tags "integration azure" ./integration/azure)
 
 PLANTUML_SOURCES := $(wildcard docs/diagrams/*.puml)
 PLANTUML_OUT_SVG := $(PLANTUML_SOURCES:.puml=.svg)

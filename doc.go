@@ -95,6 +95,7 @@
 //   - `mem://` – in-memory (tests and local experimentation)
 //   - `pebble:///var/lib/lockd` – embedded Pebble database
 //   - `disk:///var/lib/lockd-data` – SSD/NVMe-oriented disk backend with optional retention
+//   - `azure://account/container` – Azure Blob Storage (Shared Key or SAS auth)
 //   - `s3://bucket/prefix` – AWS S3 (requires region or custom endpoint)
 //   - `minio://host:port/bucket` – MinIO or other S3-compatible stores
 //

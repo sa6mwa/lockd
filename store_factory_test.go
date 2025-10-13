@@ -76,6 +76,32 @@ func TestBuildMinioConfig(t *testing.T) {
 	}
 }
 
+func TestBuildAzureConfig(t *testing.T) {
+	t.Setenv("AZURE_STORAGE_ACCOUNT_KEY", "secret")
+	cfg := Config{Store: "azure://myaccount/container/prefix/path"}
+	azureCfg, err := BuildAzureConfig(cfg)
+	if err != nil {
+		t.Fatalf("BuildAzureConfig: %v", err)
+	}
+	if azureCfg.Account != "myaccount" {
+		t.Fatalf("unexpected account: %s", azureCfg.Account)
+	}
+	if azureCfg.Container != "container" {
+		t.Fatalf("unexpected container: %s", azureCfg.Container)
+	}
+	if azureCfg.Prefix != "prefix/path" {
+		t.Fatalf("unexpected prefix: %s", azureCfg.Prefix)
+	}
+	if azureCfg.AccountKey != "secret" {
+		t.Fatalf("expected account key from env")
+	}
+
+	cfgMissing := Config{Store: "azure:///container"}
+	if _, err := BuildAzureConfig(cfgMissing); err == nil {
+		t.Fatalf("expected error for missing account")
+	}
+}
+
 func TestOpenBackendPebble(t *testing.T) {
 	dir := t.TempDir()
 	cfg := Config{Store: "pebble:///" + dir}

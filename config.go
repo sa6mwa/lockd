@@ -66,6 +66,12 @@ type Config struct {
 	S3ForcePath   bool
 	S3DisableTLS  bool
 
+	// Azure-specific options.
+	AzureAccount    string
+	AzureAccountKey string
+	AzureEndpoint   string
+	AzureSASToken   string
+
 	// Storage retry tuning.
 	StorageRetryMaxAttempts int
 	StorageRetryBaseDelay   time.Duration

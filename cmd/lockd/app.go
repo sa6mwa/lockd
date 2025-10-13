@@ -136,6 +136,10 @@ func newRootCommand(logger port.ForLogging) *cobra.Command {
 	flags.String("s3-max-part-size", "16MB", "maximum S3 multipart upload part size")
 	flags.Bool("s3-path-style", false, "force path-style addressing for S3 requests")
 	flags.Bool("s3-disable-tls", false, "disable TLS when connecting to the S3 endpoint (testing only)")
+	flags.String("azure-account", "", "Azure Storage account name (overrides account in azure:// URL)")
+	flags.String("azure-key", "", "Azure Storage account key (or use LOCKD_AZURE_ACCOUNT_KEY)")
+	flags.String("azure-endpoint", "", "Azure Blob service endpoint (defaults to https://<account>.blob.core.windows.net)")
+	flags.String("azure-sas-token", "", "Azure SAS token (optional alternative to account key)")
 	flags.Int("storage-retry-attempts", 4, "maximum storage retry attempts")
 	flags.Duration("storage-retry-base-delay", 50*time.Millisecond, "initial backoff for storage retries")
 	flags.Duration("storage-retry-max-delay", 2*time.Second, "maximum backoff delay for storage retries")
@@ -156,7 +160,8 @@ func newRootCommand(logger port.ForLogging) *cobra.Command {
 		"listen", "listen-proto", "store", "json-max", "json-util", "payload-spool-mem", "default-ttl", "max-ttl", "acquire-block",
 		"sweeper-interval", "disk-retention", "disk-janitor-interval", "mtls", "bundle", "denylist-path", "s3-region",
 		"s3-endpoint", "s3-sse", "s3-kms-key-id", "s3-max-part-size", "s3-path-style",
-		"s3-disable-tls", "storage-retry-attempts", "storage-retry-base-delay",
+		"s3-disable-tls", "azure-account", "azure-key", "azure-endpoint", "azure-sas-token",
+		"storage-retry-attempts", "storage-retry-base-delay",
 		"storage-retry-max-delay", "storage-retry-multiplier", "log-level",
 	}
 	for _, name := range names {
@@ -209,11 +214,15 @@ func bindConfig(cfg *lockd.Config) error {
 		if err != nil {
 			return fmt.Errorf("parse s3-max-part-size: %w", err)
 		}
-		cfg.S3MaxPartSize = int64(size)
-	}
-	cfg.S3ForcePath = viper.GetBool("s3-path-style")
-	cfg.S3DisableTLS = viper.GetBool("s3-disable-tls")
-	cfg.StorageRetryMaxAttempts = viper.GetInt("storage-retry-attempts")
+	cfg.S3MaxPartSize = int64(size)
+}
+cfg.S3ForcePath = viper.GetBool("s3-path-style")
+cfg.S3DisableTLS = viper.GetBool("s3-disable-tls")
+cfg.AzureAccount = viper.GetString("azure-account")
+cfg.AzureAccountKey = viper.GetString("azure-key")
+cfg.AzureEndpoint = viper.GetString("azure-endpoint")
+cfg.AzureSASToken = viper.GetString("azure-sas-token")
+cfg.StorageRetryMaxAttempts = viper.GetInt("storage-retry-attempts")
 	cfg.StorageRetryBaseDelay = viper.GetDuration("storage-retry-base-delay")
 	cfg.StorageRetryMaxDelay = viper.GetDuration("storage-retry-max-delay")
 	cfg.StorageRetryMultiplier = viper.GetFloat64("storage-retry-multiplier")

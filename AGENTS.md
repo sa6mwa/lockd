@@ -21,6 +21,7 @@ This repo delivers a tiny, single-binary **lock + state** service—“just enou
 ## Workflow notes
 
 * Record every performance-related experiment (benchmarks, profiling-driven optimizations, regression checks) in `docs/performance/` as a dated markdown note. Include the commands used, environment details, before/after metrics, and a short description of the code changes that produced the measurements.
+* When wiring new cloud storage backends, expose configuration via both CLI flags and `LOCKD_*` environment variables, mirroring the behaviour of existing backends (S3/MinIO/Azure). Document how to source `.env.*` helper files in README.md.
 
 ## Primary use-case
 

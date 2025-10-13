@@ -24,6 +24,7 @@ worker to resume from the last committed state.
 - **Simple HTTP/JSON API** (no gRPC) capable of running with or without TLS.
 - **Storage backends**
   - **S3 / S3-compatible** object stores using a conditional copy pattern.
+  - **Azure Blob Storage** with Shared Key or SAS authentication.
   - **Disk** backend optimised for SSD/NVMe with optional retention.
   - **Pebble** embedded KV store for single-node deployments.
   - **In-memory** backend for tests.
@@ -78,6 +79,7 @@ environment variable) by inspecting the URL scheme:
 | `minio://` | `minio://localhost:9000/lockd-data?insecure=1` | MinIO | TLS **enabled by default**. Append `?insecure=1` (or set `LOCKD_S3_DISABLE_TLS=1`) to use plain HTTP. Supply credentials with `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD` or `MINIO_ACCESS_KEY`/`MINIO_SECRET_KEY`. |
 | `pebble://` | `pebble:///var/lib/lockd` | Embedded Pebble KV | Directory must exist and be writable by the process. |
 | `disk://` | `disk:///var/lib/lockd-data` | SSD/NVMe-tailored disk backend | Stores state/meta beneath the provided root; optional retention window. |
+| `azure://` | `azure://account/container/prefix` | Azure Blob Storage | Account name in host, container + optional prefix in path. Authentication via account key or SAS token. |
 
 Credentials are loaded from the standard environment variables that the MinIO
 SDK supports. No secret keys are stored in the `lockd` config file.
@@ -137,6 +139,11 @@ export LOCKD_STORE="minio://localhost:9000/lockd-data?insecure=1"
 export MINIO_ROOT_USER="minioadmin"
 export MINIO_ROOT_PASSWORD="minioadmin"
 lockd --store "$LOCKD_STORE" --listen :9341 --bundle $HOME/.lockd/server.pem
+
+# Azure Blob Storage (account key)
+set -a && source .env.azure && set +a
+export LOCKD_STORE="azure://$LOCKD_AZURE_ACCOUNT/lockd-data/prefix"
+lockd --store "$LOCKD_STORE" --listen :9341 --mtls=false
 
 # IPv4-only binding
 lockd --listen-proto tcp4 --listen 0.0.0.0:9341 --store "$LOCKD_STORE"
@@ -530,3 +537,16 @@ MIT – see [`LICENSE`](LICENSE).
 - Optional retention (`--disk-retention`, `LOCKD_DISK_RETENTION`) prunes keys whose metadata `updated_at_unix` is older than the configured duration. Set to `0` (default) to keep data indefinitely.
 - The janitor sweep interval defaults to half the retention window (clamped between 1 minute and 1 hour). Override via `--disk-janitor-interval`.
 - Configure with `--store disk:///var/lib/lockd-data`. All files live beneath the specified root; lockd creates `meta/`, `state/`, and `tmp/` directories automatically.
+
+### Azure Blob Storage
+
+- URL format: `azure://<account>/<container>/<optional-prefix>`.
+- Supply credentials via flags/env vars (`--azure-account`, `--azure-key`, `--azure-sas-token`, `LOCKD_AZURE_ACCOUNT`, `LOCKD_AZURE_ACCOUNT_KEY`, `LOCKD_AZURE_SAS_TOKEN`). If the account name is present in the URL host it does not need to be repeated via flags.
+- Default endpoint is `https://<account>.blob.core.windows.net`; override with `--azure-endpoint` or `?endpoint=` on the store URL when using custom domains/emulators.
+- Authentication supports either account keys (Shared Key) or SAS tokens. Set `LOCKD_AZURE_ACCOUNT_KEY` for the former, or `LOCKD_AZURE_SAS_TOKEN` for the latter.
+- Example:
+
+```sh
+set -a && source .env.azure && set +a
+lockd --store "azure://lockdintegration/container/pipelines" --listen :9341 --mtls=false
+```

@@ -3,10 +3,12 @@ package lockd
 import (
 	"fmt"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 
 	"pkt.systems/lockd/internal/storage"
+	azurestore "pkt.systems/lockd/internal/storage/azure"
 	"pkt.systems/lockd/internal/storage/disk"
 	"pkt.systems/lockd/internal/storage/memory"
 	pebblestore "pkt.systems/lockd/internal/storage/pebble"
@@ -65,6 +67,12 @@ func openBackend(cfg Config) (storage.Backend, error) {
 			Retention:       cfg.DiskRetention,
 			JanitorInterval: cfg.DiskJanitorInterval,
 		})
+	case "azure":
+		azureCfg, err := BuildAzureConfig(cfg)
+		if err != nil {
+			return nil, err
+		}
+		return azurestore.New(azureCfg)
 	default:
 		return nil, fmt.Errorf("store scheme %q not supported yet", u.Scheme)
 	}
@@ -189,4 +197,74 @@ func BuildMinioConfig(cfg Config) (s3.Config, error) {
 		ServerSideEnc:  cfg.S3SSE,
 		KMSKeyID:       cfg.S3KMSKeyID,
 	}, nil
+}
+
+// BuildAzureConfig derives the Azure backend configuration.
+func BuildAzureConfig(cfg Config) (azurestore.Config, error) {
+	u, err := url.Parse(cfg.Store)
+	if err != nil {
+		return azurestore.Config{}, fmt.Errorf("parse store URL: %w", err)
+	}
+	if u.Scheme != "azure" {
+		return azurestore.Config{}, fmt.Errorf("store scheme %q not supported", u.Scheme)
+	}
+	account := strings.TrimSpace(u.Host)
+	if cfg.AzureAccount != "" {
+		account = cfg.AzureAccount
+	}
+	if account == "" {
+		account = firstEnv("LOCKD_AZURE_ACCOUNT", "AZURE_STORAGE_ACCOUNT", "AZURE_STORAGE_ACCOUNT_NAME", "AZURE_ACCOUNT_NAME")
+	}
+	path := strings.Trim(strings.TrimPrefix(u.Path, "/"), "/")
+	if path == "" {
+		return azurestore.Config{}, fmt.Errorf("azure store missing container (expected azure://account/container[/prefix])")
+	}
+	parts := strings.SplitN(path, "/", 2)
+	container := parts[0]
+	if container == "" {
+		return azurestore.Config{}, fmt.Errorf("azure store missing container name")
+	}
+	prefix := ""
+	if len(parts) == 2 {
+		prefix = parts[1]
+	}
+	query := u.Query()
+	endpoint := strings.TrimSpace(cfg.AzureEndpoint)
+	if v := strings.TrimSpace(query.Get("endpoint")); v != "" {
+		endpoint = v
+	}
+	accountKey := strings.TrimSpace(cfg.AzureAccountKey)
+	if accountKey == "" {
+		accountKey = firstEnv("LOCKD_AZURE_ACCOUNT_KEY", "AZURE_STORAGE_ACCOUNT_KEY", "AZURE_ACCOUNT_KEY", "AZURE_STORAGE_KEY")
+	}
+	sas := strings.TrimSpace(cfg.AzureSASToken)
+	if v := strings.TrimSpace(query.Get("sas")); v != "" {
+		sas = v
+	}
+	if sas == "" {
+		sas = firstEnv("LOCKD_AZURE_SAS_TOKEN", "AZURE_STORAGE_SAS_TOKEN", "AZURE_SAS_TOKEN")
+	}
+	if account == "" {
+		return azurestore.Config{}, fmt.Errorf("azure: account name required (set azure://account/... or LOCKD_AZURE_ACCOUNT)")
+	}
+	return azurestore.Config{
+		Account:    account,
+		AccountKey: accountKey,
+		Endpoint:   endpoint,
+		SASToken:   sas,
+		Container:  container,
+		Prefix:     prefix,
+	}, nil
+}
+
+func firstEnv(names ...string) string {
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		if val := strings.TrimSpace(os.Getenv(name)); val != "" {
+			return val
+		}
+	}
+	return ""
 }

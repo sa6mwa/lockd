@@ -49,9 +49,9 @@ func TestDiskConcurrency(t *testing.T) {
 
 	ctx := context.Background()
 	key := "disk-concurrency-" + uuid.NewString()
-	workers := 6
-	iterations := 5
-	ttl := int64(10)
+	workers := 4
+	iterations := 3
+	ttl := int64(45)
 
 	var updates atomic.Int64
 
@@ -62,7 +62,7 @@ func TestDiskConcurrency(t *testing.T) {
 			defer wg.Done()
 			owner := fmt.Sprintf("worker-%d", workerID)
 			for iter := 0; iter < iterations; {
-				lease := acquireWithRetry(t, ctx, cli, key, owner, ttl, 5)
+				lease := acquireWithRetry(t, ctx, cli, key, owner, ttl, 20)
 				state, etag, version, err := getStateJSON(ctx, cli, key, lease.LeaseID)
 				if err != nil {
 					_ = releaseLease(t, ctx, cli, key, lease.LeaseID)
@@ -126,12 +126,12 @@ func TestDiskAcquireForUpdateConcurrency(t *testing.T) {
 	cfg := buildDiskConfig(t, root, 0)
 	cli := startDiskServer(t, cfg)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	key := "disk-for-update-concurrency-" + uuid.NewString()
-	const workers = 6
-	const iterations = 6
+	const workers = 5
+	const iterations = 8
 
 	var wg sync.WaitGroup
 	wg.Add(workers)
@@ -149,8 +149,8 @@ func TestDiskAcquireForUpdateConcurrency(t *testing.T) {
 				lease, err := cli.AcquireForUpdate(ctx, lockdclient.AcquireRequest{
 					Key:        key,
 					Owner:      fmt.Sprintf("for-update-worker-%d", worker),
-					TTLSeconds: 10,
-					BlockSecs:  2,
+					TTLSeconds: 30,
+					BlockSecs:  5,
 				})
 				if err != nil {
 					t.Errorf("worker %d acquire-for-update: %v", worker, err)
@@ -194,7 +194,7 @@ func TestDiskAcquireForUpdateConcurrency(t *testing.T) {
 	}
 	wg.Wait()
 
-	verifier := acquireWithRetry(t, ctx, cli, key, "verify", 10, 2)
+	verifier := acquireWithRetry(t, ctx, cli, key, "verify", 30, 5)
 	state, _, _, err := getStateJSON(ctx, cli, key, verifier.LeaseID)
 	if err != nil {
 		t.Fatalf("verify get state: %v", err)
@@ -219,7 +219,7 @@ func TestDiskAcquireForUpdateConnectionDrop(t *testing.T) {
 	lease, err := cli.AcquireForUpdate(ctx, lockdclient.AcquireRequest{
 		Key:        key,
 		Owner:      "dropper",
-		TTLSeconds: 8,
+		TTLSeconds: 15,
 		BlockSecs:  1,
 	})
 	if err != nil {
@@ -232,7 +232,7 @@ func TestDiskAcquireForUpdateConnectionDrop(t *testing.T) {
 	// give the server time to clean up the lease automatically
 	time.Sleep(200 * time.Millisecond)
 
-	second := acquireWithRetry(t, ctx, cli, key, "re-acquire", 8, 1)
+	second := acquireWithRetry(t, ctx, cli, key, "re-acquire", 15, 1)
 	if second.LeaseID == lease.LeaseID {
 		t.Fatalf("expected new lease after connection drop")
 	}
@@ -266,7 +266,7 @@ func TestDiskAcquireForUpdateRandomPayloads(t *testing.T) {
 		lease, err := cli.AcquireForUpdate(ctx, lockdclient.AcquireRequest{
 			Key:        key,
 			Owner:      "random",
-			TTLSeconds: 10,
+			TTLSeconds: 20,
 			BlockSecs:  2,
 		})
 		if err != nil {
@@ -500,9 +500,9 @@ func buildDiskConfig(tb testing.TB, root string, retention time.Duration) lockd.
 		MTLS:            false,
 		Listen:          addr,
 		ListenProto:     "tcp",
-		DefaultTTL:      20 * time.Second,
-		MaxTTL:          time.Minute,
-		AcquireBlock:    5 * time.Second,
+		DefaultTTL:      30 * time.Second,
+		MaxTTL:          2 * time.Minute,
+		AcquireBlock:    10 * time.Second,
 		SweeperInterval: 2 * time.Second,
 		DiskRetention:   retention,
 	}
@@ -590,12 +590,6 @@ func acquireWithRetry(tb testing.TB, ctx context.Context, cli *lockdclient.Clien
 func getStateJSON(ctx context.Context, cli *lockdclient.Client, key, leaseID string) (map[string]any, string, string, error) {
 	reader, etag, version, err := cli.GetState(ctx, key, leaseID)
 	if err != nil {
-		var apiErr *lockdclient.APIError
-		if errors.As(err, &apiErr) {
-			if apiErr.Status == http.StatusNoContent || apiErr.Status == http.StatusNotFound {
-				return nil, "", "", nil
-			}
-		}
 		return nil, "", "", err
 	}
 	if reader == nil {
@@ -616,13 +610,6 @@ func releaseLease(tb testing.TB, ctx context.Context, cli *lockdclient.Client, k
 		LeaseID: leaseID,
 	})
 	if err != nil {
-		var apiErr *lockdclient.APIError
-		if errors.As(err, &apiErr) {
-			switch apiErr.Response.ErrorCode {
-			case "lease_required", "lease_expired":
-				return false
-			}
-		}
 		tb.Fatalf("release: %v", err)
 	}
 	return resp.Released

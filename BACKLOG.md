@@ -11,3 +11,4 @@
 - Acquire-for-update coverage: add integration suites for MinIO/S3, disk, Pebble, Azure verifying stream open/close, UpdateAndRelease behaviour, and lease cleanup on disconnect/timeout.
 - Streaming fuzzing: build fuzz tests exercising AcquireForUpdate + UpdateAndRelease under random payloads and CAS conflicts, plus aggressive HTTP/2 connection aborts.
 - Network fault injection: extend integration harness with simulated TCP resets and slowloris patterns to confirm server releases streaming leases promptly.
+- Client refactor: redesign Go client API so `Acquire`/`AcquireForUpdate` return lease/session objects with methods (`Update`, `GetState`, `Release`, etc.), remove `UpdateAndRelease` helpers, update CLI/inprocess helpers and integration tests to use the new object-oriented interface, and only keep free functions where absolutely necessary.

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
@@ -116,6 +117,182 @@ func TestDiskConcurrency(t *testing.T) {
 	}
 	if value, ok := finalState["counter"].(float64); !ok || value != expected {
 		t.Fatalf("expected counter %.0f, got %v", expected, finalState["counter"])
+	}
+}
+
+func TestDiskAcquireForUpdateConcurrency(t *testing.T) {
+	t.Setenv("LOCKD_DISK_ROOT", filepath.Join(t.TempDir(), "disk-root"))
+	root := prepareDiskRoot(t, "")
+	cfg := buildDiskConfig(t, root, 0)
+	cli := startDiskServer(t, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	key := "disk-for-update-concurrency-" + uuid.NewString()
+	const workers = 5
+	const iterations = 8
+
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for worker := 0; worker < workers; worker++ {
+		worker := worker
+		go func() {
+			defer wg.Done()
+			rng := rand.New(rand.NewSource(time.Now().UnixNano() + int64(worker)))
+			for iter := 0; iter < iterations; iter++ {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				lease, err := cli.AcquireForUpdate(ctx, lockdclient.AcquireRequest{
+					Key:        key,
+					Owner:      fmt.Sprintf("for-update-worker-%d", worker),
+					TTLSeconds: 30,
+					BlockSecs:  5,
+				})
+				if err != nil {
+					t.Errorf("worker %d acquire-for-update: %v", worker, err)
+					return
+				}
+				if lease.Body != nil {
+					_, _ = io.Copy(io.Discard, lease.Body)
+					_ = lease.Body.Close()
+				}
+				payload := map[string]any{
+					"worker":    worker,
+					"iteration": iter,
+					"nonce":     uuid.NewString(),
+					"random":    rng.Int63(),
+				}
+				body, err := json.Marshal(payload)
+				if err != nil {
+					t.Errorf("worker %d marshal: %v", worker, err)
+					return
+				}
+				opts := lockdclient.UpdateStateOptions{}
+				if lease.StateETag != "" {
+					opts.IfETag = lease.StateETag
+				}
+				if lease.Version > 0 {
+					opts.IfVersion = strconv.FormatInt(lease.Version, 10)
+				}
+				if lease.FencingToken != "" {
+					opts.FencingToken = lease.FencingToken
+				}
+				if _, err := cli.UpdateStateBytes(ctx, key, lease.LeaseID, body, opts); err != nil {
+					t.Errorf("worker %d update: %v", worker, err)
+					return
+				}
+				if _, err := cli.Release(ctx, lockdclient.ReleaseRequest{Key: key, LeaseID: lease.LeaseID}); err != nil {
+					t.Errorf("worker %d release: %v", worker, err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	verifier := acquireWithRetry(t, ctx, cli, key, "verify", 30, 5)
+	state, _, _, err := getStateJSON(ctx, cli, key, verifier.LeaseID)
+	if err != nil {
+		t.Fatalf("verify get state: %v", err)
+	}
+	if state == nil {
+		t.Fatalf("expected state after concurrency test")
+	}
+	_ = releaseLease(t, ctx, cli, key, verifier.LeaseID)
+}
+
+func TestDiskAcquireForUpdateConnectionDrop(t *testing.T) {
+	t.Setenv("LOCKD_DISK_ROOT", filepath.Join(t.TempDir(), "disk-root"))
+	root := prepareDiskRoot(t, "")
+	cfg := buildDiskConfig(t, root, 0)
+	cli := startDiskServer(t, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	key := "disk-for-update-drop-" + uuid.NewString()
+
+	lease, err := cli.AcquireForUpdate(ctx, lockdclient.AcquireRequest{
+		Key:        key,
+		Owner:      "dropper",
+		TTLSeconds: 15,
+		BlockSecs:  1,
+	})
+	if err != nil {
+		t.Fatalf("acquire-for-update: %v", err)
+	}
+	if lease.Body != nil {
+		_ = lease.Body.Close()
+	}
+
+	// give the server time to clean up the lease automatically
+	time.Sleep(200 * time.Millisecond)
+
+	second := acquireWithRetry(t, ctx, cli, key, "re-acquire", 15, 1)
+	if second.LeaseID == lease.LeaseID {
+		t.Fatalf("expected new lease after connection drop")
+	}
+	_ = releaseLease(t, ctx, cli, key, second.LeaseID)
+}
+
+func TestDiskAcquireForUpdateRandomPayloads(t *testing.T) {
+	t.Setenv("LOCKD_DISK_ROOT", filepath.Join(t.TempDir(), "disk-root"))
+	root := prepareDiskRoot(t, "")
+	cfg := buildDiskConfig(t, root, 0)
+	cli := startDiskServer(t, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	key := "disk-for-update-random-" + uuid.NewString()
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	for i := 0; i < 40; i++ {
+		payload := map[string]any{
+			"iteration": i,
+			"value":     rng.Int63(),
+			"text":      randomJSONSafeString(rng),
+			"time":      time.Now().UTC().Format(time.RFC3339Nano),
+		}
+		body, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+
+		lease, err := cli.AcquireForUpdate(ctx, lockdclient.AcquireRequest{
+			Key:        key,
+			Owner:      "random",
+			TTLSeconds: 20,
+			BlockSecs:  2,
+		})
+		if err != nil {
+			t.Fatalf("acquire-for-update: %v", err)
+		}
+		if lease.Body != nil {
+			_, _ = io.Copy(io.Discard, lease.Body)
+			_ = lease.Body.Close()
+		}
+
+		opts := lockdclient.UpdateStateOptions{}
+		if lease.StateETag != "" {
+			opts.IfETag = lease.StateETag
+		}
+		if lease.Version > 0 {
+			opts.IfVersion = strconv.FormatInt(lease.Version, 10)
+		}
+		if lease.FencingToken != "" {
+			opts.FencingToken = lease.FencingToken
+		}
+		if _, err := cli.UpdateStateBytes(ctx, key, lease.LeaseID, body, opts); err != nil {
+			t.Fatalf("update state: %v", err)
+		}
+		if _, err := cli.Release(ctx, lockdclient.ReleaseRequest{Key: key, LeaseID: lease.LeaseID}); err != nil {
+			t.Fatalf("release: %v", err)
+		}
 	}
 }
 
@@ -378,6 +555,16 @@ func startDiskServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client {
 		tb.Fatalf("client: %v", err)
 	}
 	return cli
+}
+
+func randomJSONSafeString(r *rand.Rand) string {
+	const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+	length := 8 + r.Intn(16)
+	b := make([]byte, length)
+	for i := range b {
+		b[i] = letters[r.Intn(len(letters))]
+	}
+	return string(b)
 }
 
 func acquireWithRetry(tb testing.TB, ctx context.Context, cli *lockdclient.Client, key, owner string, ttl, block int64) *lockdclient.AcquireResponse {

@@ -48,6 +48,27 @@ type UpdateStateOptions struct {
 	FencingToken string
 }
 
+// AcquireForUpdateResult describes the metadata and stream returned by AcquireForUpdate.
+type AcquireForUpdateResult struct {
+	Key           string
+	LeaseID       string
+	Owner         string
+	ExpiresAt     int64
+	Version       int64
+	StateETag     string
+	FencingToken  string
+	Body          io.ReadCloser
+	ContentLength int64
+}
+
+// Close releases resources associated with the AcquireForUpdate stream.
+func (r *AcquireForUpdateResult) Close() error {
+	if r == nil || r.Body == nil {
+		return nil
+	}
+	return r.Body.Close()
+}
+
 // Client is a convenience wrapper around the lockd HTTP API.
 type Client struct {
 	baseURL     string
@@ -207,6 +228,118 @@ func (c *Client) Acquire(ctx context.Context, req AcquireRequest, opts ...Acquir
 	return nil, fmt.Errorf("acquire retry exhausted")
 }
 
+// AcquireForUpdate atomically acquires a lease and streams the current state.
+func (c *Client) AcquireForUpdate(ctx context.Context, req AcquireRequest, opts ...AcquireOption) (*AcquireForUpdateResult, error) {
+	cfg := AcquireConfig{
+		MaxAttempts: 20,
+		BaseDelay:   100 * time.Millisecond,
+		MaxDelay:    3 * time.Second,
+		Multiplier:  2.0,
+	}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	delay := cfg.BaseDelay
+	for attempt := 1; attempt <= cfg.MaxAttempts; attempt++ {
+		res, err := c.tryAcquireForUpdate(ctx, req)
+		if err == nil {
+			return res, nil
+		}
+		var apiErr *APIError
+		if errors.As(err, &apiErr) {
+			if apiErr.Status == http.StatusConflict && req.BlockSecs > 0 {
+				// retry while blocking
+			} else if apiErr.Status >= 500 || apiErr.Status == http.StatusTooManyRequests {
+				// backoff and retry
+			} else {
+				return nil, err
+			}
+		} else {
+			return nil, err
+		}
+		if attempt == cfg.MaxAttempts {
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(delay):
+		}
+		next := time.Duration(float64(delay) * cfg.Multiplier)
+		if next > cfg.MaxDelay {
+			next = cfg.MaxDelay
+		}
+		delay = next
+	}
+	return nil, fmt.Errorf("acquire-for-update retry exhausted")
+}
+
+func (c *Client) tryAcquireForUpdate(ctx context.Context, req AcquireRequest) (*AcquireForUpdateResult, error) {
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/acquire-for-update", bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if req.Idempotency != "" {
+		httpReq.Header.Set("X-Idempotency-Key", req.Idempotency)
+	}
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		defer resp.Body.Close()
+		return nil, c.decodeError(resp)
+	}
+	leaseID := resp.Header.Get("X-Lease-ID")
+	if leaseID == "" {
+		resp.Body.Close()
+		return nil, fmt.Errorf("lockd: acquire-for-update missing X-Lease-ID header")
+	}
+	fencing := resp.Header.Get(headerFencingToken)
+	if fencing != "" {
+		c.RegisterLeaseToken(leaseID, fencing)
+	}
+	res := &AcquireForUpdateResult{
+		Key:           req.Key,
+		LeaseID:       leaseID,
+		Owner:         resp.Header.Get("X-Lease-Owner"),
+		StateETag:     resp.Header.Get("ETag"),
+		FencingToken:  fencing,
+		Body:          resp.Body,
+		ContentLength: resp.ContentLength,
+	}
+	if expires := resp.Header.Get("X-Lease-Expires-At"); expires != "" {
+		if v, parseErr := strconv.ParseInt(expires, 10, 64); parseErr == nil {
+			res.ExpiresAt = v
+		}
+	}
+	if version := resp.Header.Get("X-Key-Version"); version != "" {
+		if v, parseErr := strconv.ParseInt(version, 10, 64); parseErr == nil {
+			res.Version = v
+		}
+	}
+	return res, nil
+}
+
+// AcquireForUpdateBytes reads the streamed state into memory while keeping the lease active.
+func (c *Client) AcquireForUpdateBytes(ctx context.Context, req AcquireRequest, opts ...AcquireOption) ([]byte, *AcquireForUpdateResult, error) {
+	res, err := c.AcquireForUpdate(ctx, req, opts...)
+	if err != nil {
+		return nil, nil, err
+	}
+	data, err := io.ReadAll(res.Body)
+	if err != nil {
+		res.Body.Close()
+		return nil, nil, err
+	}
+	return data, res, nil
+}
+
 // KeepAlive extends a lease.
 func (c *Client) KeepAlive(ctx context.Context, req KeepAliveRequest) (*KeepAliveResponse, error) {
 	token, err := c.fencingToken(req.LeaseID, "")
@@ -349,6 +482,51 @@ func (c *Client) UpdateState(ctx context.Context, key, leaseID string, body io.R
 		c.RegisterLeaseToken(leaseID, newToken)
 	}
 	return &result, nil
+}
+
+// UpdateAndRelease uploads new JSON state and releases the lease in one operation.
+func (c *Client) UpdateAndRelease(ctx context.Context, key, leaseID string, body io.Reader, opts UpdateStateOptions) (*UpdateStateResult, error) {
+	url := fmt.Sprintf("%s/v1/update-and-release?key=%s", c.baseURL, url.QueryEscape(key))
+	var payload io.Reader = body
+	if payload == nil {
+		payload = http.NoBody
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, payload)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Lease-ID", leaseID)
+	if opts.IfETag != "" {
+		req.Header.Set("X-If-State-ETag", opts.IfETag)
+	}
+	if opts.IfVersion != "" {
+		req.Header.Set("X-If-Version", opts.IfVersion)
+	}
+	token, err := c.fencingToken(leaseID, opts.FencingToken)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set(headerFencingToken, token)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.decodeError(resp)
+	}
+	var result UpdateStateResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	c.leaseTokens.Delete(leaseID)
+	return &result, nil
+}
+
+// UpdateBytesAndRelease uploads new JSON state (from bytes) and releases the lease.
+func (c *Client) UpdateBytesAndRelease(ctx context.Context, key, leaseID string, body []byte, opts UpdateStateOptions) (*UpdateStateResult, error) {
+	return c.UpdateAndRelease(ctx, key, leaseID, bytes.NewReader(body), opts)
 }
 
 // UpdateStateBytes uploads new JSON state from the provided byte slice.

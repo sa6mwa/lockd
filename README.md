@@ -609,6 +609,10 @@ values; when `--mtls=false` it assumes HTTP. Supplying an explicit
   ```sh
   go test -tags "integration pebble" ./integration/pebble
   ```
+- **Disk** (`integration/disk`) – local tests exercising streaming (`AcquireForUpdate`) include heavy contention and connection-drop scenarios. Expect the suite to take up to ~40 s on slower machines because the workers deliberately hold leases for their full block/TTL windows before retrying:
+  ```sh
+  set -a && source .env.disk && set +a && go test -tags "integration disk" ./integration/disk
+  ```
 
 ---
 

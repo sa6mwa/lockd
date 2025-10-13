@@ -124,6 +124,9 @@ func newRootCommand(logger port.ForLogging) *cobra.Command {
 	flags.Duration("max-ttl", 5*time.Minute, "maximum lease TTL")
 	flags.Duration("acquire-block", 60*time.Second, "maximum time to wait on acquire conflicts")
 	flags.Duration("sweeper-interval", 5*time.Second, "sweeper interval for background tasks")
+	flags.Int("for-update-max", 100, "maximum concurrent acquire-for-update streams")
+	flags.Int("for-update-max-per-client", 3, "maximum acquire-for-update streams per client identity")
+	flags.Duration("for-update-max-hold", 15*time.Minute, "maximum duration to hold an acquire-for-update stream before automatic release")
 	flags.Duration("disk-retention", 0, "optional retention window for disk backend (0 keeps state indefinitely)")
 	flags.Duration("disk-janitor-interval", 0, "override janitor sweep interval for disk backend (default derived from retention)")
 	flags.Bool("mtls", true, "enable mutual TLS")
@@ -158,7 +161,8 @@ func newRootCommand(logger port.ForLogging) *cobra.Command {
 
 	names := []string{
 		"listen", "listen-proto", "store", "json-max", "json-util", "payload-spool-mem", "default-ttl", "max-ttl", "acquire-block",
-		"sweeper-interval", "disk-retention", "disk-janitor-interval", "mtls", "bundle", "denylist-path", "s3-region",
+		"sweeper-interval", "for-update-max", "for-update-max-per-client", "for-update-max-hold",
+		"disk-retention", "disk-janitor-interval", "mtls", "bundle", "denylist-path", "s3-region",
 		"s3-endpoint", "s3-sse", "s3-kms-key-id", "s3-max-part-size", "s3-path-style",
 		"s3-disable-tls", "azure-account", "azure-key", "azure-endpoint", "azure-sas-token",
 		"storage-retry-attempts", "storage-retry-base-delay",
@@ -200,6 +204,9 @@ func bindConfig(cfg *lockd.Config) error {
 	cfg.MaxTTL = viper.GetDuration("max-ttl")
 	cfg.AcquireBlock = viper.GetDuration("acquire-block")
 	cfg.SweeperInterval = viper.GetDuration("sweeper-interval")
+	cfg.ForUpdateMaxStreams = viper.GetInt("for-update-max")
+	cfg.ForUpdateMaxStreamsPerClient = viper.GetInt("for-update-max-per-client")
+	cfg.ForUpdateMaxHold = viper.GetDuration("for-update-max-hold")
 	cfg.DiskRetention = viper.GetDuration("disk-retention")
 	cfg.DiskJanitorInterval = viper.GetDuration("disk-janitor-interval")
 	cfg.MTLS = viper.GetBool("mtls")
@@ -214,15 +221,15 @@ func bindConfig(cfg *lockd.Config) error {
 		if err != nil {
 			return fmt.Errorf("parse s3-max-part-size: %w", err)
 		}
-	cfg.S3MaxPartSize = int64(size)
-}
-cfg.S3ForcePath = viper.GetBool("s3-path-style")
-cfg.S3DisableTLS = viper.GetBool("s3-disable-tls")
-cfg.AzureAccount = viper.GetString("azure-account")
-cfg.AzureAccountKey = viper.GetString("azure-key")
-cfg.AzureEndpoint = viper.GetString("azure-endpoint")
-cfg.AzureSASToken = viper.GetString("azure-sas-token")
-cfg.StorageRetryMaxAttempts = viper.GetInt("storage-retry-attempts")
+		cfg.S3MaxPartSize = int64(size)
+	}
+	cfg.S3ForcePath = viper.GetBool("s3-path-style")
+	cfg.S3DisableTLS = viper.GetBool("s3-disable-tls")
+	cfg.AzureAccount = viper.GetString("azure-account")
+	cfg.AzureAccountKey = viper.GetString("azure-key")
+	cfg.AzureEndpoint = viper.GetString("azure-endpoint")
+	cfg.AzureSASToken = viper.GetString("azure-sas-token")
+	cfg.StorageRetryMaxAttempts = viper.GetInt("storage-retry-attempts")
 	cfg.StorageRetryBaseDelay = viper.GetDuration("storage-retry-base-delay")
 	cfg.StorageRetryMaxDelay = viper.GetDuration("storage-retry-max-delay")
 	cfg.StorageRetryMultiplier = viper.GetFloat64("storage-retry-multiplier")

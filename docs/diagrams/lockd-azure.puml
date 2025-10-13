@@ -38,7 +38,7 @@ Azure --> Handler: new_meta_etag
 Handler --> Client: 200 KeepAlive
 
 == GetState ==
-Client -> Handler: POST /v1/get_state
+Client -> Handler: POST /v1/get-state
 Handler -> Azure: DownloadStream(state blob)
 alt Not found
     Azure --> Handler: ErrNotFound
@@ -49,7 +49,7 @@ else
 end
 
 == UpdateState ==
-Client -> Handler: POST /v1/update_state\nbody, CAS headers, X-Fencing-Token
+Client -> Handler: POST /v1/update-state\nbody, CAS headers, X-Fencing-Token
 Handler -> Compactor: compact JSON
 Compactor --> Handler: stream
 Handler -> Azure: UploadStream(state blob, stream)\nIf-Match expected_etag

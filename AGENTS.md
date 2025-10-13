@@ -43,8 +43,8 @@ Endpoints:
 * `POST /v1/acquire` → `{key, ttl_seconds, owner, block_seconds}` → `200 {lease_id,...,version}` or `409 waiting`.
 * `POST /v1/keepalive` → `{lease_id, ttl_seconds}` → `200 {expires_at_unix}`.
 * `POST /v1/release` → `{lease_id}` → `200 {released:true}`.
-* `POST /v1/get_state` (requires live lease) → body streamed JSON; headers `X-Key-Version`, `ETag`.
-* `POST /v1/update_state` (requires live lease) → raw JSON body (streamed/compacted), optional CAS headers; `200 {new_version,new_state_etag,bytes}` or `409`.
+* `POST /v1/get-state` (requires live lease) → body streamed JSON; headers `X-Key-Version`, `ETag`.
+* `POST /v1/update-state` (requires live lease) → raw JSON body (streamed/compacted), optional CAS headers; `200 {new_version,new_state_etag,bytes}` or `409`.
 * `GET /v1/describe?key=...` → meta only (no state).
 * `GET /healthz`, `GET /readyz`.
 
@@ -176,7 +176,7 @@ Preferred: github.com/cockroachdb/pebble (already in go.mod).
   * Parse incrementally, strip insignificant whitespace, **write directly** to uploader (multipart or file).
   * Enforce `json_max_bytes` (default ~100 MB) early.
   * Reject non-JSON bodies with `400`.
-* On `get_state`, stream directly from backend (no full buffering), with `ETag` header and `X-Key-Version`.
+* On `get-state`, stream directly from backend (no full buffering), with `ETag` header and `X-Key-Version`.
 
 ### Failure semantics
 

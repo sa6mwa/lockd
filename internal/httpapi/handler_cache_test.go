@@ -50,7 +50,7 @@ func TestHandlerLeaseCacheAvoidsExtraLoadMeta(t *testing.T) {
 	}
 
 	updateBody := bytes.NewBufferString("  { \"value\" : 42 }\n")
-	upReq := httptest.NewRequest(http.MethodPost, "/v1/update_state?key=orders", updateBody)
+	upReq := httptest.NewRequest(http.MethodPost, "/v1/update-state?key=orders", updateBody)
 	upReq.Header.Set("X-Lease-ID", acq.LeaseID)
 	upReq.Header.Set("X-Fencing-Token", fence)
 	rr = httptest.NewRecorder()

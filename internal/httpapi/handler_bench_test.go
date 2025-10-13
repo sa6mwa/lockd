@@ -44,7 +44,7 @@ func BenchmarkAcquireUpdate(b *testing.B) {
 		fence := strconv.FormatInt(acquireResp.FencingToken, 10)
 
 		rec = httptest.NewRecorder()
-		updateReq := httptest.NewRequest(http.MethodPost, "/v1/update_state?key="+key, bytes.NewBufferString(`{"seq":1}`))
+		updateReq := httptest.NewRequest(http.MethodPost, "/v1/update-state?key="+key, bytes.NewBufferString(`{"seq":1}`))
 		updateReq.Header.Set("Content-Type", "application/json")
 		updateReq.Header.Set("X-Lease-ID", acquireResp.LeaseID)
 		updateReq.Header.Set("X-Fencing-Token", fence)

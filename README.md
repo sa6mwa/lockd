@@ -23,6 +23,9 @@ worker to resume from the last committed state.
 - **Atomic JSON state** up to ~50 MB with CAS via version + ETag headers.
 - **Monotonic fencing tokens** protect against delayed clients; every lease-bound
   request must include the latest `X-Fencing-Token` issued by the server.
+- **Acquire-for-update streaming** combines acquire + get into one atomic HTTP
+  stream so workers can fetch the current state and proceed to update without a
+  race window.
 - **Simple HTTP/JSON API** (no gRPC) capable of running with or without TLS.
 - **Storage backends**
   - **S3 / S3-compatible** object stores using a conditional copy pattern.
@@ -50,13 +53,28 @@ worker to resume from the last committed state.
 ### Request flow
 
 1. **Acquire** – `POST /v1/acquire` → acquire lease (optionally blocking).
-2. **Get state** – `POST /v1/get_state` → stream JSON state with CAS headers.
+2. **Get state** – `POST /v1/get-state` → stream JSON state with CAS headers.
    Supply `X-Lease-ID` + `X-Fencing-Token` from the acquire response.
-3. **Update state** – `POST /v1/update_state` → upload new JSON with
+3. **Update state** – `POST /v1/update-state` → upload new JSON with
    `X-If-Version` and/or `X-If-State-ETag` to enforce CAS. Include the current
    `X-Fencing-Token`.
 4. **Release** – `POST /v1/release` → release lease with the same fencing token;
    the sweeper handles timeouts for crashed workers.
+
+### Atomic acquire + stream
+
+`POST /v1/acquire-for-update` combines the normal acquire + get sequence into a
+single atomic operation. The response body streams the current JSON state while
+the lease remains active. The server withholds final release until either:
+
+- the client calls `UpdateAndRelease` (or the legacy `Release`),
+- the client closes the streaming body, or
+- the connection/lease times out (server-side cap defaults to 15 minutes).
+
+Metadata is returned via headers (`X-Lease-ID`, `X-Fencing-Token`, `X-Key-Version`,
+`ETag`, `X-Lease-Expires-At`). Clients can use these values directly with the new
+`POST /v1/update-and-release` endpoint to install a new state blob and release in
+one round-trip.
 
 ### Internal layout
 
@@ -159,6 +177,14 @@ lockd --store mem:// --json-util stdlib
 
 The default listen address is `:9341`, chosen from the unassigned IANA space to
 avoid clashes with common cloud-native services.
+
+Additional knobs for the acquire-for-update workflow:
+
+| Flag / Env | Description |
+|------------|-------------|
+| `--for-update-max` / `LOCKD_FOR_UPDATE_MAX` | Global cap on concurrent acquire-for-update streams (default 100). |
+| `--for-update-max-per-client` / `LOCKD_FOR_UPDATE_MAX_PER_CLIENT` | Per client identity cap (default 3). |
+| `--for-update-max-hold` / `LOCKD_FOR_UPDATE_MAX_HOLD` | Maximum time a stream may hold a lease before the server forces release (default 15m). |
 
 ### Lease fencing tokens
 
@@ -303,6 +329,11 @@ met:
   each device claims work and reports progress exactly once.
 - **Distributed cron / windowing** – serialize recurring jobs (per key) so
   retries don’t overlap, while keeping per-run state directly in lockd.
+
+Acquire-for-update is particularly useful for these scenarios because the state
+reader holds the lease while a worker inspects the JSON payload. Once it computes
+the next cursor it can call `UpdateAndRelease`, avoiding a race window between a
+separate update and release call.
 
 ### Benchmarking with MinIO
 

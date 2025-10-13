@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	port "pkt.systems/logport"
 	"pkt.systems/logport/adapters/zerologger"
 
+	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/internal/api"
 	"pkt.systems/lockd/internal/storage/memory"
 )
@@ -73,12 +75,12 @@ func TestAcquireLifecycle(t *testing.T) {
 		"X-Fencing-Token": fencingToken,
 	}
 	updateBody := map[string]any{"cursor": 42}
-	status = doJSON(t, server, http.MethodPost, "/v1/update_state?key=orders", stateHeaders, updateBody, nil)
+	status = doJSON(t, server, http.MethodPost, "/v1/update-state?key=orders", stateHeaders, updateBody, nil)
 	if status != http.StatusOK {
 		t.Fatalf("expected update state 200, got %d", status)
 	}
 
-	getReq, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/get_state?key=orders", http.NoBody)
+	getReq, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/get-state?key=orders", http.NoBody)
 	getReq.Header.Set("X-Lease-ID", acquireResp.LeaseID)
 	getReq.Header.Set("X-Fencing-Token", fencingToken)
 	getResp, err := http.DefaultClient.Do(getReq)
@@ -108,6 +110,81 @@ func TestAcquireLifecycle(t *testing.T) {
 	}
 	if !releaseResp.Released {
 		t.Fatal("expected release to succeed")
+	}
+}
+
+func TestAcquireForUpdateAndRelease(t *testing.T) {
+	store := memory.New()
+	clk := newStubClock(time.Unix(1_700_000_000, 0))
+	handler := New(Config{
+		Store:                        store,
+		Logger:                       port.NoopLogger(),
+		Clock:                        clk,
+		JSONMaxBytes:                 1 << 20,
+		DefaultTTL:                   30 * time.Second,
+		MaxTTL:                       2 * time.Minute,
+		AcquireBlock:                 5 * time.Second,
+		ForUpdateMaxStreams:          10,
+		ForUpdateMaxHold:             time.Minute,
+		ForUpdateMaxStreamsPerClient: 5,
+	})
+	mux := http.NewServeMux()
+	handler.Register(mux)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	cli, err := lockdclient.New(server.URL)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	ctx := context.Background()
+	res, err := cli.AcquireForUpdate(ctx, lockdclient.AcquireRequest{Key: "orders", Owner: "worker", TTLSeconds: 30})
+	if err != nil {
+		t.Fatalf("acquire-for-update: %v", err)
+	}
+	if res.LeaseID == "" {
+		t.Fatal("expected lease id")
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		opts := lockdclient.UpdateStateOptions{
+			IfVersion:    strconv.FormatInt(res.Version, 10),
+			IfETag:       res.StateETag,
+			FencingToken: res.FencingToken,
+		}
+		_, updateErr := cli.UpdateBytesAndRelease(ctx, "orders", res.LeaseID, []byte(`{"cursor":1}`), opts)
+		errCh <- updateErr
+	}()
+
+	select {
+	case updateErr := <-errCh:
+		if updateErr != nil {
+			res.Close()
+			t.Fatalf("update-and-release: %v", updateErr)
+		}
+	case <-time.After(2 * time.Second):
+		res.Close()
+		t.Fatal("update-and-release timed out")
+	}
+
+	if err := res.Close(); err != nil {
+		t.Fatalf("close acquire-for-update body: %v", err)
+	}
+
+	lease, err := cli.Acquire(ctx, lockdclient.AcquireRequest{Key: "orders", Owner: "verifier", TTLSeconds: 30})
+	if err != nil {
+		t.Fatalf("reacquire after release: %v", err)
+	}
+	state, _, _, err := cli.GetStateBytes(ctx, "orders", lease.LeaseID)
+	if err != nil {
+		t.Fatalf("get state: %v", err)
+	}
+	if string(state) != `{"cursor":1}` {
+		t.Fatalf("unexpected state: %s", string(state))
+	}
+	if _, err := cli.Release(ctx, lockdclient.ReleaseRequest{Key: "orders", LeaseID: lease.LeaseID}); err != nil {
+		t.Fatalf("cleanup release: %v", err)
 	}
 }
 
@@ -181,11 +258,11 @@ func TestUpdateStateVersionMismatch(t *testing.T) {
 
 	token := strconv.FormatInt(acquire.FencingToken, 10)
 	headers := map[string]string{"X-Lease-ID": acquire.LeaseID, "X-Fencing-Token": token}
-	doJSON(t, server, http.MethodPost, "/v1/update_state?key=stream", headers, map[string]int{"pos": 1}, nil)
+	doJSON(t, server, http.MethodPost, "/v1/update-state?key=stream", headers, map[string]int{"pos": 1}, nil)
 
 	headers["X-If-Version"] = "0"
 	var errResp api.ErrorResponse
-	status := doJSON(t, server, http.MethodPost, "/v1/update_state?key=stream", headers, map[string]int{"pos": 2}, &errResp)
+	status := doJSON(t, server, http.MethodPost, "/v1/update-state?key=stream", headers, map[string]int{"pos": 2}, &errResp)
 	if status != http.StatusConflict {
 		t.Fatalf("expected 409 conflict, got %d", status)
 	}
@@ -215,9 +292,9 @@ func TestGetStateRequiresLease(t *testing.T) {
 	doJSON(t, server, http.MethodPost, "/v1/acquire", nil, acq, &acquire)
 	token := strconv.FormatInt(acquire.FencingToken, 10)
 	headers := map[string]string{"X-Lease-ID": acquire.LeaseID, "X-Fencing-Token": token}
-	doJSON(t, server, http.MethodPost, "/v1/update_state?key=alpha", headers, map[string]int{"pos": 1}, nil)
+	doJSON(t, server, http.MethodPost, "/v1/update-state?key=alpha", headers, map[string]int{"pos": 1}, nil)
 
-	getReq, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/get_state?key=alpha", http.NoBody)
+	getReq, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/get-state?key=alpha", http.NoBody)
 	resp, err := http.DefaultClient.Do(getReq)
 	if err != nil {
 		t.Fatalf("request failed: %v", err)

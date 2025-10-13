@@ -39,18 +39,21 @@ func isValidJSONUtil(name string) bool {
 
 // Config captures the tunables for a lockd.Server instance.
 type Config struct {
-	Listen               string
-	ListenProto          string
-	Store                string
-	JSONMaxBytes         int64
-	JSONUtil             string
-	SpoolMemoryThreshold int64
-	DiskRetention        time.Duration
-	DiskJanitorInterval  time.Duration
-	DefaultTTL           time.Duration
-	MaxTTL               time.Duration
-	AcquireBlock         time.Duration
-	SweeperInterval      time.Duration
+	Listen                       string
+	ListenProto                  string
+	Store                        string
+	JSONMaxBytes                 int64
+	JSONUtil                     string
+	SpoolMemoryThreshold         int64
+	DiskRetention                time.Duration
+	DiskJanitorInterval          time.Duration
+	DefaultTTL                   time.Duration
+	MaxTTL                       time.Duration
+	AcquireBlock                 time.Duration
+	SweeperInterval              time.Duration
+	ForUpdateMaxStreams          int
+	ForUpdateMaxStreamsPerClient int
+	ForUpdateMaxHold             time.Duration
 
 	// mTLS
 	MTLS         bool
@@ -116,6 +119,15 @@ func (c *Config) Validate() error {
 	}
 	if c.SweeperInterval <= 0 {
 		c.SweeperInterval = 5 * time.Second
+	}
+	if c.ForUpdateMaxStreams <= 0 {
+		c.ForUpdateMaxStreams = 100
+	}
+	if c.ForUpdateMaxStreamsPerClient <= 0 {
+		c.ForUpdateMaxStreamsPerClient = 3
+	}
+	if c.ForUpdateMaxHold <= 0 {
+		c.ForUpdateMaxHold = 15 * time.Minute
 	}
 	if c.DiskRetention < 0 {
 		return fmt.Errorf("config: disk retention must be >= 0")

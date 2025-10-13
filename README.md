@@ -176,6 +176,34 @@ lockd client update --lease "$LOCKD_CLIENT_LEASE_ID" --fencing-token "$LOCKD_CLI
 If the server detects a stale token it returns `403 fencing_mismatch`, ensuring
 delayed or replayed requests cannot clobber state after a lease changes hands.
 
+#### Why fencing tokens matter
+
+The token is a strictly monotonic counter that advances on every successful
+`acquire`. Compared with relying purely on lease IDs and CAS/version checks, it
+adds several key safeguards:
+
+- **Lease turnover without state writes** – metadata `version` only increments
+  when the JSON blob changes. If lease A expires and lease B acquires but has not
+  updated the state yet, the version remains unchanged. The fencing token has
+  already increased, so any delayed keepalive/update from lease A is rejected
+  immediately.
+- **Ordering, not just identity** – lease IDs are random, so downstream systems
+  cannot tell which one is newer. By carrying the token, workers give databases
+  and queues a simple “greater-than” check: accept writes with the highest token,
+  reject anything older.
+- **Cache resilience inside the server** – the handler caches lease metadata to
+  avoid extra storage reads. A stale request might otherwise slip through by
+  reading the cached entry; the fencing token still forces a mismatch and blocks
+  the outdated lease holder.
+- **Protection for downstream systems** – workers can forward the token to other
+  services (databases, queues) and let them reject stale writers. CAS keeps
+  lockd’s JSON state consistent, while fencing tokens extend that guarantee to
+  anything else the worker touches.
+- **Operational guardrails** – CLI/scripts that stash lease IDs in environment
+  variables gain an extra safety net. If an operator forgets to refresh after a
+  re-acquire, the stale token triggers a clear 403 instead of silently updating
+  the wrong state.
+
 ### Configuration files
 
 `lockd` can also read a YAML configuration file (loaded via Viper). Generate a
@@ -528,6 +556,15 @@ convenient way to populate environment variables for subsequent commands.
 When `--mtls` is enabled (default) the CLI assumes HTTPS for bare `host[:port]`
 values; when `--mtls=false` it assumes HTTP. Supplying an explicit
 `http://...`/`https://...` URL is always honoured.
+
+---
+
+## Sequence Diagrams
+
+- [![Lockd Lease Lifecycle (Overview)](docs/diagrams/lockd-overview.jpeg)](docs/diagrams/lockd-overview.jpeg)
+- [![Lockd Lease Lifecycle (Disk Backend)](docs/diagrams/lockd-disk.jpeg)](docs/diagrams/lockd-disk.jpeg)
+- [![Lockd Lease Lifecycle (S3 Backend)](docs/diagrams/lockd-s3.jpeg)](docs/diagrams/lockd-s3.jpeg)
+- [![Lockd Lease Lifecycle (Azure Blob)](docs/diagrams/lockd-azure.jpeg)](docs/diagrams/lockd-azure.jpeg)
 
 ---
 

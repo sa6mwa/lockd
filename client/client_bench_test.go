@@ -16,6 +16,7 @@ const (
 	benchLease   = "bench-lease"
 	benchETag    = `"etag-1"`
 	benchVersion = "1"
+	benchFence   = "1"
 )
 
 func newClientBenchmarkServer(payload []byte) *httptest.Server {
@@ -29,6 +30,10 @@ func newClientBenchmarkServer(payload []byte) *httptest.Server {
 			http.Error(w, "missing lease", http.StatusForbidden)
 			return
 		}
+		if r.Header.Get("X-Fencing-Token") != benchFence {
+			http.Error(w, "missing fencing", http.StatusForbidden)
+			return
+		}
 		if len(payload) == 0 {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -36,6 +41,7 @@ func newClientBenchmarkServer(payload []byte) *httptest.Server {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("ETag", strings.Trim(benchETag, `"`))
 		w.Header().Set("X-Key-Version", benchVersion)
+		w.Header().Set("X-Fencing-Token", benchFence)
 		if _, err := w.Write(payload); err != nil {
 			panic(err)
 		}
@@ -49,7 +55,12 @@ func newClientBenchmarkServer(payload []byte) *httptest.Server {
 			http.Error(w, "missing lease", http.StatusForbidden)
 			return
 		}
+		if r.Header.Get("X-Fencing-Token") != benchFence {
+			http.Error(w, "missing fencing", http.StatusForbidden)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Fencing-Token", benchFence)
 		n, err := io.Copy(io.Discard, r.Body)
 		_ = r.Body.Close()
 		if err != nil {
@@ -152,6 +163,7 @@ func BenchmarkClientGetStateBytes(b *testing.B) {
 	if err != nil {
 		b.Fatalf("new client: %v", err)
 	}
+	cli.RegisterLeaseToken(benchLease, benchFence)
 	ctx := context.Background()
 
 	b.ReportAllocs()
@@ -176,6 +188,7 @@ func BenchmarkClientGetStateStream(b *testing.B) {
 	if err != nil {
 		b.Fatalf("new client: %v", err)
 	}
+	cli.RegisterLeaseToken(benchLease, benchFence)
 	ctx := context.Background()
 
 	b.ReportAllocs()

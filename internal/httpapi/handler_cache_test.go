@@ -42,6 +42,7 @@ func TestHandlerLeaseCacheAvoidsExtraLoadMeta(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &acq); err != nil {
 		t.Fatalf("decode acquire: %v", err)
 	}
+	fence := strconv.FormatInt(acq.FencingToken, 10)
 
 	loadCalls := store.resetCounters()
 	if loadCalls != 1 {
@@ -51,6 +52,7 @@ func TestHandlerLeaseCacheAvoidsExtraLoadMeta(t *testing.T) {
 	updateBody := bytes.NewBufferString("  { \"value\" : 42 }\n")
 	upReq := httptest.NewRequest(http.MethodPost, "/v1/update_state?key=orders", updateBody)
 	upReq.Header.Set("X-Lease-ID", acq.LeaseID)
+	upReq.Header.Set("X-Fencing-Token", fence)
 	rr = httptest.NewRecorder()
 	if err := h.handleUpdateState(rr, upReq); err != nil {
 		t.Fatalf("update: %v", err)
@@ -67,6 +69,7 @@ func TestHandlerLeaseCacheAvoidsExtraLoadMeta(t *testing.T) {
 
 	store.resetCounters()
 	keepReq := httptest.NewRequest(http.MethodPost, "/v1/keepalive", bytes.NewBufferString(`{"key":"orders","lease_id":"`+acq.LeaseID+`","ttl_seconds":45}`))
+	keepReq.Header.Set("X-Fencing-Token", fence)
 	rr = httptest.NewRecorder()
 	if err := h.handleKeepAlive(rr, keepReq); err != nil {
 		t.Fatalf("keepalive: %v", err)
@@ -80,6 +83,7 @@ func TestHandlerLeaseCacheAvoidsExtraLoadMeta(t *testing.T) {
 
 	store.resetCounters()
 	relReq := httptest.NewRequest(http.MethodPost, "/v1/release", bytes.NewBufferString(`{"key":"orders","lease_id":"`+acq.LeaseID+`"}`))
+	relReq.Header.Set("X-Fencing-Token", fence)
 	rr = httptest.NewRecorder()
 	if err := h.handleRelease(rr, relReq); err != nil {
 		t.Fatalf("release: %v", err)

@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -25,6 +26,16 @@ func newVerifyStoreCommand(logger port.ForLogging) *cobra.Command {
 	return &cobra.Command{
 		Use:   "store",
 		Short: "Verify storage configuration",
+		Example: strings.TrimSpace(`
+# Verify disk backend
+LOCKD_STORE=disk:///var/lib/lockd lockd verify store
+
+# Verify Azure Blob using Shared Key credentials
+LOCKD_STORE=azure://myacct/lockd LOCKD_AZURE_ACCOUNT_KEY=... lockd verify store
+
+# Verify MinIO with environment credentials
+LOCKD_STORE=minio://localhost:9000/lockd?insecure=1 lockd verify store
+`),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var cfg lockd.Config
 			if err := bindConfig(&cfg); err != nil {

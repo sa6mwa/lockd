@@ -25,32 +25,35 @@ import (
 )
 
 const defaultPayloadSpoolMemoryThreshold = 4 << 20 // 4 MiB in-memory, then spill to disk
+const headerFencingToken = "X-Fencing-Token"
 
 // Handler wires HTTP endpoints to backend operations.
 type Handler struct {
-	store          storage.Backend
-	logger         port.ForLogging
-	clock          clock.Clock
-	jsonMaxBytes   int64
-	compactWriter  func(io.Writer, io.Reader, int64) error
-	defaultTTL     time.Duration
-	maxTTL         time.Duration
-	acquireBlock   time.Duration
-	spoolThreshold int64
-	leaseCache     sync.Map
+	store                 storage.Backend
+	logger                port.ForLogging
+	clock                 clock.Clock
+	jsonMaxBytes          int64
+	compactWriter         func(io.Writer, io.Reader, int64) error
+	defaultTTL            time.Duration
+	maxTTL                time.Duration
+	acquireBlock          time.Duration
+	spoolThreshold        int64
+	leaseCache            sync.Map
+	enforceClientIdentity bool
 }
 
 // Config groups the dependencies required by Handler.
 type Config struct {
-	Store                storage.Backend
-	Logger               port.ForLogging
-	Clock                clock.Clock
-	JSONMaxBytes         int64
-	CompactWriter        func(io.Writer, io.Reader, int64) error
-	DefaultTTL           time.Duration
-	MaxTTL               time.Duration
-	AcquireBlock         time.Duration
-	SpoolMemoryThreshold int64
+	Store                 storage.Backend
+	Logger                port.ForLogging
+	Clock                 clock.Clock
+	JSONMaxBytes          int64
+	CompactWriter         func(io.Writer, io.Reader, int64) error
+	DefaultTTL            time.Duration
+	MaxTTL                time.Duration
+	AcquireBlock          time.Duration
+	SpoolMemoryThreshold  int64
+	EnforceClientIdentity bool
 }
 
 // New constructs a Handler using the supplied configuration.
@@ -72,15 +75,16 @@ func New(cfg Config) *Handler {
 		threshold = defaultPayloadSpoolMemoryThreshold
 	}
 	return &Handler{
-		store:          cfg.Store,
-		logger:         logger,
-		clock:          clk,
-		jsonMaxBytes:   cfg.JSONMaxBytes,
-		compactWriter:  cw,
-		defaultTTL:     cfg.DefaultTTL,
-		maxTTL:         cfg.MaxTTL,
-		acquireBlock:   cfg.AcquireBlock,
-		spoolThreshold: threshold,
+		store:                 cfg.Store,
+		logger:                logger,
+		clock:                 clk,
+		jsonMaxBytes:          cfg.JSONMaxBytes,
+		compactWriter:         cw,
+		defaultTTL:            cfg.DefaultTTL,
+		maxTTL:                cfg.MaxTTL,
+		acquireBlock:          cfg.AcquireBlock,
+		spoolThreshold:        threshold,
+		enforceClientIdentity: cfg.EnforceClientIdentity,
 	}
 }
 
@@ -100,10 +104,29 @@ type handlerFunc func(http.ResponseWriter, *http.Request) error
 
 func (h *Handler) wrap(fn handlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if err := fn(w, r); err != nil {
+		ctx := r.Context()
+		if h.enforceClientIdentity {
+			if id := clientIdentityFromRequest(r); id != "" {
+				ctx = WithClientIdentity(ctx, id)
+				r = r.WithContext(ctx)
+			}
+		}
+		if err := fn(w, r.WithContext(ctx)); err != nil {
 			h.handleError(w, err)
 		}
 	}
+}
+
+func clientIdentityFromRequest(r *http.Request) string {
+	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+		return ""
+	}
+	cert := r.TLS.PeerCertificates[0]
+	serial := ""
+	if cert.SerialNumber != nil {
+		serial = cert.SerialNumber.Text(16)
+	}
+	return fmt.Sprintf("%s#%s", cert.Subject.String(), serial)
 }
 
 func (h *Handler) handleAcquire(w http.ResponseWriter, r *http.Request) error {
@@ -117,6 +140,9 @@ func (h *Handler) handleAcquire(w http.ResponseWriter, r *http.Request) error {
 			Code:   "invalid_body",
 			Detail: fmt.Sprintf("failed to parse request: %v", err),
 		}
+	}
+	if id := clientIdentityFromContext(ctx); id != "" {
+		payload.Owner = fmt.Sprintf("%s/%s", payload.Owner, id)
 	}
 	payload.Idempotency = strings.TrimSpace(r.Header.Get("X-Idempotency-Key"))
 	if payload.Key == "" {
@@ -133,6 +159,11 @@ func (h *Handler) handleAcquire(w http.ResponseWriter, r *http.Request) error {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_ttl", Detail: "ttl_seconds must be positive"}
 	}
 	block := h.resolveBlock(payload.BlockSecs)
+
+	clientID := clientIdentityFromContext(r.Context())
+	if clientID != "" {
+		payload.Owner = fmt.Sprintf("%s/%s", payload.Owner, clientID)
+	}
 
 	deadline := h.clock.Now().Add(block)
 	leaseID := uuid.NewString()
@@ -172,10 +203,13 @@ func (h *Handler) handleAcquire(w http.ResponseWriter, r *http.Request) error {
 			}
 		}
 		expiresAt := now.Add(ttl).Unix()
+		newFencing := meta.FencingToken + 1
+		meta.FencingToken = newFencing
 		meta.Lease = &storage.Lease{
 			ID:            leaseID,
 			Owner:         payload.Owner,
 			ExpiresAtUnix: expiresAt,
+			FencingToken:  newFencing,
 		}
 		meta.UpdatedAtUnix = now.Unix()
 
@@ -189,13 +223,15 @@ func (h *Handler) handleAcquire(w http.ResponseWriter, r *http.Request) error {
 		h.cacheLease(leaseID, payload.Key, *meta, newMetaETag)
 
 		resp := api.AcquireResponse{
-			LeaseID:   leaseID,
-			Key:       payload.Key,
-			Owner:     payload.Owner,
-			ExpiresAt: expiresAt,
-			Version:   meta.Version,
-			StateETag: meta.StateETag,
+			LeaseID:      leaseID,
+			Key:          payload.Key,
+			Owner:        payload.Owner,
+			ExpiresAt:    expiresAt,
+			Version:      meta.Version,
+			StateETag:    meta.StateETag,
+			FencingToken: newFencing,
 		}
+		w.Header().Set(headerFencingToken, strconv.FormatInt(newFencing, 10))
 		h.writeJSON(w, http.StatusOK, resp, map[string]string{
 			"X-Key-Version": strconv.FormatInt(meta.Version, 10),
 		})
@@ -205,6 +241,10 @@ func (h *Handler) handleAcquire(w http.ResponseWriter, r *http.Request) error {
 
 func (h *Handler) handleKeepAlive(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
+	token, err := parseFencingToken(r)
+	if err != nil {
+		return err
+	}
 	reqBody := http.MaxBytesReader(w, r.Body, h.jsonMaxBytes)
 	defer reqBody.Close()
 	var payload api.KeepAliveRequest
@@ -238,23 +278,8 @@ func (h *Handler) handleKeepAlive(w http.ResponseWriter, r *http.Request) error 
 			meta = *loadedMeta
 			metaETag = etag
 		}
-		if meta.Lease == nil || meta.Lease.ID != payload.LeaseID {
-			return httpError{
-				Status:  http.StatusConflict,
-				Code:    "lease_conflict",
-				Detail:  "lease not held",
-				Version: meta.Version,
-				ETag:    meta.StateETag,
-			}
-		}
-		if meta.Lease.ExpiresAtUnix < now.Unix() {
-			return httpError{
-				Status:  http.StatusConflict,
-				Code:    "lease_expired",
-				Detail:  "lease expired",
-				Version: meta.Version,
-				ETag:    meta.StateETag,
-			}
+		if err := validateLease(&meta, payload.LeaseID, token, now); err != nil {
+			return err
 		}
 		meta.Lease.ExpiresAtUnix = now.Add(ttl).Unix()
 		meta.UpdatedAtUnix = now.Unix()
@@ -269,6 +294,7 @@ func (h *Handler) handleKeepAlive(w http.ResponseWriter, r *http.Request) error 
 		}
 		h.cacheLease(payload.LeaseID, key, meta, newMetaETag)
 		resp := api.KeepAliveResponse{ExpiresAt: meta.Lease.ExpiresAtUnix}
+		w.Header().Set(headerFencingToken, strconv.FormatInt(meta.Lease.FencingToken, 10))
 		h.writeJSON(w, http.StatusOK, resp, nil)
 		return nil
 	}
@@ -276,6 +302,10 @@ func (h *Handler) handleKeepAlive(w http.ResponseWriter, r *http.Request) error 
 
 func (h *Handler) handleRelease(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
+	fencingToken, err := parseFencingToken(r)
+	if err != nil {
+		return err
+	}
 	reqBody := http.MaxBytesReader(w, r.Body, h.jsonMaxBytes)
 	defer reqBody.Close()
 	var payload api.ReleaseRequest
@@ -306,25 +336,20 @@ func (h *Handler) handleRelease(w http.ResponseWriter, r *http.Request) error {
 			meta = *loadedMeta
 			metaETag = etag
 		}
-		released := false
-		if meta.Lease != nil && meta.Lease.ID == payload.LeaseID {
-			meta.Lease = nil
-			meta.UpdatedAtUnix = h.clock.Now().Unix()
-			released = true
+		if err := validateLease(&meta, payload.LeaseID, fencingToken, h.clock.Now()); err != nil {
+			return err
 		}
-		newMetaETag, err := h.store.StoreMeta(ctx, payload.Key, &meta, metaETag)
-		if err != nil {
+		meta.Lease = nil
+		meta.UpdatedAtUnix = h.clock.Now().Unix()
+		released := true
+		if _, err := h.store.StoreMeta(ctx, payload.Key, &meta, metaETag); err != nil {
 			if errors.Is(err, storage.ErrCASMismatch) {
 				h.dropLease(payload.LeaseID)
 				continue
 			}
 			return fmt.Errorf("store meta: %w", err)
 		}
-		if released {
-			h.dropLease(payload.LeaseID)
-		} else {
-			h.cacheLease(payload.LeaseID, payload.Key, meta, newMetaETag)
-		}
+		h.dropLease(payload.LeaseID)
 		h.writeJSON(w, http.StatusOK, api.ReleaseResponse{Released: released}, nil)
 		return nil
 	}
@@ -337,11 +362,15 @@ func (h *Handler) handleGetState(w http.ResponseWriter, r *http.Request) error {
 	if key == "" || leaseID == "" {
 		return httpError{Status: http.StatusBadRequest, Code: "missing_params", Detail: "key query and X-Lease-ID required"}
 	}
+	fencingToken, err := parseFencingToken(r)
+	if err != nil {
+		return err
+	}
 	meta, _, err := h.ensureMeta(ctx, key)
 	if err != nil {
 		return err
 	}
-	if err := validateLease(meta, leaseID, h.clock.Now()); err != nil {
+	if err := validateLease(meta, leaseID, fencingToken, h.clock.Now()); err != nil {
 		return err
 	}
 	reader, info, err := h.store.ReadState(ctx, key)
@@ -361,6 +390,7 @@ func (h *Handler) handleGetState(w http.ResponseWriter, r *http.Request) error {
 			w.Header().Set("X-Key-Version", strconv.FormatInt(meta.Version, 10))
 		}
 	}
+	w.Header().Set(headerFencingToken, strconv.FormatInt(meta.Lease.FencingToken, 10))
 	w.WriteHeader(http.StatusOK)
 	_, err = io.Copy(w, reader)
 	return err
@@ -375,6 +405,10 @@ func (h *Handler) handleUpdateState(w http.ResponseWriter, r *http.Request) erro
 	leaseID := r.Header.Get("X-Lease-ID")
 	if leaseID == "" {
 		return httpError{Status: http.StatusBadRequest, Code: "missing_lease", Detail: "X-Lease-ID required"}
+	}
+	fencingToken, err := parseFencingToken(r)
+	if err != nil {
+		return err
 	}
 	ifMatch := strings.TrimSpace(r.Header.Get("X-If-State-ETag"))
 	ifVersion := strings.TrimSpace(r.Header.Get("X-If-Version"))
@@ -397,7 +431,7 @@ func (h *Handler) handleUpdateState(w http.ResponseWriter, r *http.Request) erro
 		meta = *loadedMeta
 		metaETag = etag
 	}
-	if err := validateLease(&meta, leaseID, now); err != nil {
+	if err := validateLease(&meta, leaseID, fencingToken, now); err != nil {
 		return err
 	}
 	if ifVersion != "" {
@@ -465,8 +499,9 @@ func (h *Handler) handleUpdateState(w http.ResponseWriter, r *http.Request) erro
 		"bytes":          putRes.BytesWritten,
 	}
 	headers := map[string]string{
-		"X-Key-Version": strconv.FormatInt(meta.Version, 10),
-		"ETag":          meta.StateETag,
+		"X-Key-Version":    strconv.FormatInt(meta.Version, 10),
+		"ETag":             meta.StateETag,
+		headerFencingToken: strconv.FormatInt(meta.Lease.FencingToken, 10),
 	}
 	h.writeJSON(w, http.StatusOK, resp, headers)
 	return nil
@@ -572,7 +607,7 @@ func (h *Handler) resolveBlock(requested int64) time.Duration {
 	return block
 }
 
-func validateLease(meta *storage.Meta, leaseID string, now time.Time) error {
+func validateLease(meta *storage.Meta, leaseID string, fencingToken int64, now time.Time) error {
 	if meta.Lease == nil || meta.Lease.ID != leaseID {
 		return httpError{
 			Status:  http.StatusForbidden,
@@ -591,7 +626,28 @@ func validateLease(meta *storage.Meta, leaseID string, now time.Time) error {
 			ETag:    meta.StateETag,
 		}
 	}
+	if meta.Lease.FencingToken != fencingToken {
+		return httpError{
+			Status:  http.StatusForbidden,
+			Code:    "fencing_mismatch",
+			Detail:  "fencing token mismatch",
+			Version: meta.Version,
+			ETag:    meta.StateETag,
+		}
+	}
 	return nil
+}
+
+func parseFencingToken(r *http.Request) (int64, error) {
+	value := strings.TrimSpace(r.Header.Get(headerFencingToken))
+	if value == "" {
+		return 0, httpError{Status: http.StatusBadRequest, Code: "missing_fencing_token", Detail: "X-Fencing-Token header required"}
+	}
+	token, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0, httpError{Status: http.StatusBadRequest, Code: "invalid_fencing_token", Detail: "invalid fencing token"}
+	}
+	return token, nil
 }
 
 type payloadSpool struct {

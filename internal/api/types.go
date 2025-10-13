@@ -17,6 +17,7 @@ type AcquireResponse struct {
 	ExpiresAt  int64  `json:"expires_at_unix"`
 	Version    int64  `json:"version"`
 	StateETag  string `json:"state_etag,omitempty"`
+	FencingToken int64  `json:"fencing_token,omitempty"`
 	RetryAfter int64  `json:"retry_after_seconds,omitempty"`
 }
 

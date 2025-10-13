@@ -21,6 +21,8 @@ worker to resume from the last committed state.
 - **Exclusive leases** (one holder per key) with configurable TTLs, keepalive,
   and a background sweeper to reap expired locks.
 - **Atomic JSON state** up to ~50 MB with CAS via version + ETag headers.
+- **Monotonic fencing tokens** protect against delayed clients; every lease-bound
+  request must include the latest `X-Fencing-Token` issued by the server.
 - **Simple HTTP/JSON API** (no gRPC) capable of running with or without TLS.
 - **Storage backends**
   - **S3 / S3-compatible** object stores using a conditional copy pattern.
@@ -49,9 +51,12 @@ worker to resume from the last committed state.
 
 1. **Acquire** – `POST /v1/acquire` → acquire lease (optionally blocking).
 2. **Get state** – `POST /v1/get_state` → stream JSON state with CAS headers.
+   Supply `X-Lease-ID` + `X-Fencing-Token` from the acquire response.
 3. **Update state** – `POST /v1/update_state` → upload new JSON with
-   `X-If-Version` and/or `X-If-State-ETag` to enforce CAS.
-4. **Release** – `POST /v1/release` → release lease; sweeper handles timeouts.
+   `X-If-Version` and/or `X-If-State-ETag` to enforce CAS. Include the current
+   `X-Fencing-Token`.
+4. **Release** – `POST /v1/release` → release lease with the same fencing token;
+   the sweeper handles timeouts for crashed workers.
 
 ### Internal layout
 
@@ -154,6 +159,22 @@ lockd --store mem:// --json-util stdlib
 
 The default listen address is `:9341`, chosen from the unassigned IANA space to
 avoid clashes with common cloud-native services.
+
+### Lease fencing tokens
+
+Every successful `acquire` response includes a `fencing_token` and echoing
+`X-Fencing-Token` on follow-up requests is mandatory. The Go SDK manages the
+token automatically when you reuse the same `client.Client`. For CLI workflows
+you can export the token so subsequent commands pick it up:
+
+```sh
+eval "$(lockd client acquire --server localhost:9341 --owner worker orders)"
+lockd client keepalive --lease "$LOCKD_CLIENT_LEASE_ID" orders
+lockd client update --lease "$LOCKD_CLIENT_LEASE_ID" --fencing-token "$LOCKD_CLIENT_FENCING_TOKEN" orders payload.json
+```
+
+If the server detects a stale token it returns `403 fencing_mismatch`, ensuring
+delayed or replayed requests cannot clobber state after a lease changes hands.
 
 ### Configuration files
 
@@ -365,7 +386,20 @@ Health endpoints:
 ### Storage verification
 
 `lockd verify store` validates credentials (list/get/put/delete) and prints a
-suggested IAM policy when access fails.
+suggested IAM policy when access fails. Disk backends run a multi-replica
+simulation (metadata CAS and payload writes) so locking bugs or stale CAS tokens
+fail fast.
+
+```sh
+# Verify a disk mount before starting the server
+LOCKD_STORE=disk:///var/lib/lockd lockd verify store
+
+# Verify Azure Blob credentials (relies on LOCKD_AZURE_* env vars)
+LOCKD_STORE=azure://lockdaccount/lockd-container lockd verify store
+```
+
+When `--store` uses `disk://`, the same verification runs automatically during
+server startup and the process exits if any check fails.
 
 ---
 

@@ -1,24 +1,24 @@
 package lockd
 
 import (
-	"context"
-	"crypto/tls"
-	"crypto/x509"
-	"errors"
-	"fmt"
-	"net"
-	"net/http"
-	"os"
-	"strings"
-	"sync"
-	"time"
+    "context"
+    "crypto/tls"
+    "crypto/x509"
+    "errors"
+    "fmt"
+    "net"
+    "net/http"
+    "os"
+    "strings"
+    "sync"
+    "time"
 
-	"pkt.systems/lockd/internal/clock"
-	"pkt.systems/lockd/internal/httpapi"
-	"pkt.systems/lockd/internal/storage"
-	"pkt.systems/lockd/internal/storage/retry"
-	"pkt.systems/lockd/internal/tlsutil"
-	"pkt.systems/logport"
+    "pkt.systems/lockd/internal/clock"
+    "pkt.systems/lockd/internal/httpapi"
+    "pkt.systems/lockd/internal/storage"
+    "pkt.systems/lockd/internal/storage/retry"
+    "pkt.systems/lockd/internal/tlsutil"
+    "pkt.systems/logport"
 )
 
 // Server wraps the HTTP server, storage backend, and supporting components.
@@ -130,6 +130,7 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 		MaxTTL:               cfg.MaxTTL,
 		AcquireBlock:         cfg.AcquireBlock,
 		SpoolMemoryThreshold: cfg.SpoolMemoryThreshold,
+		EnforceClientIdentity: cfg.MTLS,
 	})
 	logger.Info("json compaction configured", "impl", jsonUtil.name)
 	mux := http.NewServeMux()

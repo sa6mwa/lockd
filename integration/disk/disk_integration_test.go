@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 )
 
 func TestDiskLockLifecycle(t *testing.T) {
+	t.Setenv("LOCKD_DISK_ROOT", filepath.Join(t.TempDir(), "disk-root"))
 	root := prepareDiskRoot(t, "")
 	cfg := buildDiskConfig(t, root, 0)
 	cli := startDiskServer(t, cfg)
@@ -39,6 +41,7 @@ func TestDiskLockLifecycle(t *testing.T) {
 }
 
 func TestDiskConcurrency(t *testing.T) {
+	t.Setenv("LOCKD_DISK_ROOT", filepath.Join(t.TempDir(), "disk-root"))
 	root := prepareDiskRoot(t, "")
 	cfg := buildDiskConfig(t, root, 0)
 	cli := startDiskServer(t, cfg)
@@ -48,6 +51,8 @@ func TestDiskConcurrency(t *testing.T) {
 	workers := 4
 	iterations := 3
 	ttl := int64(45)
+
+	var updates atomic.Int64
 
 	var wg sync.WaitGroup
 	wg.Add(workers)
@@ -85,9 +90,8 @@ func TestDiskConcurrency(t *testing.T) {
 					}
 					t.Fatalf("update state: %v", err)
 				}
-				if !releaseLease(t, ctx, cli, key, lease.LeaseID) {
-					continue
-				}
+				updates.Add(1)
+				_ = releaseLease(t, ctx, cli, key, lease.LeaseID)
 				iter++
 			}
 		}(id)
@@ -104,6 +108,9 @@ func TestDiskConcurrency(t *testing.T) {
 	}
 
 	expected := float64(workers * iterations)
+	if got := float64(updates.Load()); got != expected {
+		t.Fatalf("expected %f successful updates, got %f", expected, got)
+	}
 	if finalState == nil {
 		t.Fatalf("expected final state, got nil")
 	}
@@ -113,6 +120,7 @@ func TestDiskConcurrency(t *testing.T) {
 }
 
 func TestDiskRetentionSweep(t *testing.T) {
+	t.Setenv("LOCKD_DISK_ROOT", filepath.Join(t.TempDir(), "disk-root"))
 	root := prepareDiskRoot(t, "")
 	store, err := disk.New(disk.Config{
 		Root:            root,
@@ -146,11 +154,92 @@ func TestDiskRetentionSweep(t *testing.T) {
 	}
 }
 
+func TestDiskMultiReplica(t *testing.T) {
+	t.Setenv("LOCKD_DISK_ROOT", filepath.Join(t.TempDir(), "disk-root"))
+	root := prepareDiskRoot(t, "")
+
+	cfg1 := buildDiskConfig(t, root, 0)
+	cli1 := startDiskServer(t, cfg1)
+
+	cfg2 := buildDiskConfig(t, root, 0)
+	cli2 := startDiskServer(t, cfg2)
+
+	clients := []*lockdclient.Client{cli1, cli2}
+	owners := []string{"replica-1", "replica-2"}
+	ctx := context.Background()
+	key := "disk-multi-" + uuid.NewString()
+	iterations := 5
+
+	var wg sync.WaitGroup
+	for i, cli := range clients {
+		owner := owners[i]
+		wg.Add(1)
+		go func(cli *lockdclient.Client, owner string) {
+			defer wg.Done()
+			for n := 0; n < iterations; n++ {
+				for {
+					lease := acquireWithRetry(t, ctx, cli, key, owner, 45, 10)
+					state, etag, version, err := getStateJSON(ctx, cli, key, lease.LeaseID)
+					if err != nil {
+						_ = releaseLease(t, ctx, cli, key, lease.LeaseID)
+						continue
+					}
+					if version == "" {
+						version = strconv.FormatInt(lease.Version, 10)
+					}
+					var counter float64
+					if state != nil {
+						if v, ok := state["counter"].(float64); ok {
+							counter = v
+						}
+					}
+					counter++
+					body, _ := json.Marshal(map[string]any{"counter": counter, "owner": owner})
+					_, err = cli.UpdateStateBytes(ctx, key, lease.LeaseID, body, lockdclient.UpdateStateOptions{IfETag: etag, IfVersion: version})
+					if err != nil {
+						var apiErr *lockdclient.APIError
+						if errors.As(err, &apiErr) {
+							code := apiErr.Response.ErrorCode
+							if code == "meta_conflict" || code == "etag_mismatch" || code == "version_conflict" {
+								_ = releaseLease(t, ctx, cli, key, lease.LeaseID)
+								continue
+							}
+						}
+						t.Fatalf("update state: %v", err)
+					}
+					if !releaseLease(t, ctx, cli, key, lease.LeaseID) {
+						t.Fatalf("release failed for owner %s", owner)
+					}
+					break
+				}
+			}
+		}(cli, owner)
+	}
+	wg.Wait()
+
+	verifier := acquireWithRetry(t, ctx, cli1, key, "verifier", 45, 5)
+	finalState, _, _, err := getStateJSON(ctx, cli1, key, verifier.LeaseID)
+	if err != nil {
+		t.Fatalf("get_state: %v", err)
+	}
+	if !releaseLease(t, ctx, cli1, key, verifier.LeaseID) {
+		t.Fatalf("release verifier failed")
+	}
+	expected := float64(iterations * len(clients))
+	if finalState == nil {
+		t.Fatalf("expected final state, got nil")
+	}
+	if v, ok := finalState["counter"].(float64); !ok || v != expected {
+		t.Fatalf("expected counter %.0f, got %v", expected, finalState["counter"])
+	}
+}
+
 func TestDiskOnNFS(t *testing.T) {
-	root := prepareDiskRoot(t, nfsBasePath())
-	if root == "" {
+	base := nfsBasePath()
+	if base == "" {
 		t.Skip("nfs root unavailable")
 	}
+	root := prepareDiskRoot(t, base)
 	cfg := buildDiskConfig(t, root, 0)
 	cli := startDiskServer(t, cfg)
 

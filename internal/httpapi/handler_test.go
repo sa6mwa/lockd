@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -51,6 +52,7 @@ func TestAcquireLifecycle(t *testing.T) {
 	if acquireResp.Version != 0 {
 		t.Fatalf("expected version 0, got %d", acquireResp.Version)
 	}
+	fencingToken := strconv.FormatInt(acquireResp.FencingToken, 10)
 
 	keepReq := api.KeepAliveRequest{
 		Key:        "orders",
@@ -58,7 +60,7 @@ func TestAcquireLifecycle(t *testing.T) {
 		TTLSeconds: 20,
 	}
 	var keepResp api.KeepAliveResponse
-	status = doJSON(t, server, http.MethodPost, "/v1/keepalive", nil, keepReq, &keepResp)
+	status = doJSON(t, server, http.MethodPost, "/v1/keepalive", map[string]string{"X-Fencing-Token": fencingToken}, keepReq, &keepResp)
 	if status != http.StatusOK {
 		t.Fatalf("expected keepalive 200, got %d", status)
 	}
@@ -67,7 +69,8 @@ func TestAcquireLifecycle(t *testing.T) {
 	}
 
 	stateHeaders := map[string]string{
-		"X-Lease-ID": acquireResp.LeaseID,
+		"X-Lease-ID":      acquireResp.LeaseID,
+		"X-Fencing-Token": fencingToken,
 	}
 	updateBody := map[string]any{"cursor": 42}
 	status = doJSON(t, server, http.MethodPost, "/v1/update_state?key=orders", stateHeaders, updateBody, nil)
@@ -77,6 +80,7 @@ func TestAcquireLifecycle(t *testing.T) {
 
 	getReq, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/get_state?key=orders", http.NoBody)
 	getReq.Header.Set("X-Lease-ID", acquireResp.LeaseID)
+	getReq.Header.Set("X-Fencing-Token", fencingToken)
 	getResp, err := http.DefaultClient.Do(getReq)
 	if err != nil {
 		t.Fatalf("get_state request failed: %v", err)
@@ -98,7 +102,7 @@ func TestAcquireLifecycle(t *testing.T) {
 		LeaseID: acquireResp.LeaseID,
 	}
 	var releaseResp api.ReleaseResponse
-	status = doJSON(t, server, http.MethodPost, "/v1/release", nil, releaseReq, &releaseResp)
+	status = doJSON(t, server, http.MethodPost, "/v1/release", map[string]string{"X-Fencing-Token": fencingToken}, releaseReq, &releaseResp)
 	if status != http.StatusOK {
 		t.Fatalf("expected release 200, got %d", status)
 	}
@@ -175,7 +179,8 @@ func TestUpdateStateVersionMismatch(t *testing.T) {
 	var acquire api.AcquireResponse
 	doJSON(t, server, http.MethodPost, "/v1/acquire", nil, req, &acquire)
 
-	headers := map[string]string{"X-Lease-ID": acquire.LeaseID}
+	token := strconv.FormatInt(acquire.FencingToken, 10)
+	headers := map[string]string{"X-Lease-ID": acquire.LeaseID, "X-Fencing-Token": token}
 	doJSON(t, server, http.MethodPost, "/v1/update_state?key=stream", headers, map[string]int{"pos": 1}, nil)
 
 	headers["X-If-Version"] = "0"
@@ -208,7 +213,8 @@ func TestGetStateRequiresLease(t *testing.T) {
 	acq := api.AcquireRequest{Key: "alpha", Owner: "worker", TTLSeconds: 5}
 	var acquire api.AcquireResponse
 	doJSON(t, server, http.MethodPost, "/v1/acquire", nil, acq, &acquire)
-	headers := map[string]string{"X-Lease-ID": acquire.LeaseID}
+	token := strconv.FormatInt(acquire.FencingToken, 10)
+	headers := map[string]string{"X-Lease-ID": acquire.LeaseID, "X-Fencing-Token": token}
 	doJSON(t, server, http.MethodPost, "/v1/update_state?key=alpha", headers, map[string]int{"pos": 1}, nil)
 
 	getReq, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/get_state?key=alpha", http.NoBody)

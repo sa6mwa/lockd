@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -40,11 +41,13 @@ func BenchmarkAcquireUpdate(b *testing.B) {
 		if err := json.Unmarshal(rec.Body.Bytes(), &acquireResp); err != nil {
 			b.Fatalf("decode acquire: %v", err)
 		}
+		fence := strconv.FormatInt(acquireResp.FencingToken, 10)
 
 		rec = httptest.NewRecorder()
 		updateReq := httptest.NewRequest(http.MethodPost, "/v1/update_state?key="+key, bytes.NewBufferString(`{"seq":1}`))
 		updateReq.Header.Set("Content-Type", "application/json")
 		updateReq.Header.Set("X-Lease-ID", acquireResp.LeaseID)
+		updateReq.Header.Set("X-Fencing-Token", fence)
 		if err := h.handleUpdateState(rec, updateReq); err != nil {
 			b.Fatalf("update state: %v", err)
 		}
@@ -53,6 +56,7 @@ func BenchmarkAcquireUpdate(b *testing.B) {
 		releaseBody, _ := json.Marshal(api.ReleaseRequest{Key: key, LeaseID: acquireResp.LeaseID})
 		releaseReq := httptest.NewRequest(http.MethodPost, "/v1/release", bytes.NewReader(releaseBody))
 		releaseReq.Header.Set("Content-Type", "application/json")
+		releaseReq.Header.Set("X-Fencing-Token", fence)
 		if err := h.handleRelease(rec, releaseReq); err != nil {
 			b.Fatalf("release: %v", err)
 		}

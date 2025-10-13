@@ -34,6 +34,7 @@ type Store struct {
 	metaDir         string
 	stateDir        string
 	tmpDir          string
+	lockDir         string
 	retention       time.Duration
 	janitorInterval time.Duration
 	now             func() time.Time
@@ -42,6 +43,28 @@ type Store struct {
 
 	stopJanitor chan struct{}
 	doneJanitor chan struct{}
+}
+
+var globalLocks sync.Map
+
+func globalKeyMutex(encoded string) *sync.Mutex {
+	mu, _ := globalLocks.LoadOrStore(encoded, &sync.Mutex{})
+	return mu.(*sync.Mutex)
+}
+
+type fileLock struct {
+	file *os.File
+}
+
+func (f *fileLock) Unlock() error {
+	if f.file == nil {
+		return nil
+	}
+	if err := unlockFile(f.file); err != nil {
+		f.file.Close()
+		return err
+	}
+	return f.file.Close()
 }
 
 // New initialises a disk-backed store rooted at cfg.Root.
@@ -68,12 +91,17 @@ func New(cfg Config) (*Store, error) {
 			return nil, fmt.Errorf("disk: prepare directory %q: %w", dir, err)
 		}
 	}
+	lockDir := filepath.Join(root, "locks")
+	if err := os.MkdirAll(lockDir, 0o755); err != nil {
+		return nil, fmt.Errorf("disk: prepare lock directory %q: %w", lockDir, err)
+	}
 
 	s := &Store{
 		root:            root,
 		metaDir:         metaDir,
 		stateDir:        stateDir,
 		tmpDir:          tmpDir,
+		lockDir:         lockDir,
 		retention:       cfg.Retention,
 		janitorInterval: cfg.JanitorInterval,
 		now:             cfg.Now,
@@ -94,6 +122,23 @@ func New(cfg Config) (*Store, error) {
 func (s *Store) keyLock(key string) *sync.Mutex {
 	mu, _ := s.locks.LoadOrStore(key, &sync.Mutex{})
 	return mu.(*sync.Mutex)
+}
+
+func (s *Store) acquireFileLock(key string) (*fileLock, error) {
+	encoded, err := s.encodeKey(key)
+	if err != nil {
+		return nil, err
+	}
+	lockPath := filepath.Join(s.lockDir, encoded+".lock")
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("disk: open lock: %w", err)
+	}
+	if err := lockFile(f); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("disk: lock key: %w", err)
+	}
+	return &fileLock{file: f}, nil
 }
 
 // Close shuts down the backend and waits for the janitor to finish.
@@ -158,7 +203,7 @@ func (s *Store) LoadMeta(_ context.Context, key string) (*storage.Meta, string, 
 	return &rec.Meta, rec.ETag, nil
 }
 
-func (s *Store) StoreMeta(_ context.Context, key string, meta *storage.Meta, expectedETag string) (string, error) {
+func (s *Store) StoreMeta(_ context.Context, key string, meta *storage.Meta, expectedETag string) (etag string, err error) {
 	if meta == nil {
 		return "", fmt.Errorf("disk: meta nil")
 	}
@@ -167,9 +212,23 @@ func (s *Store) StoreMeta(_ context.Context, key string, meta *storage.Meta, exp
 		return "", err
 	}
 
+	glob := globalKeyMutex(encoded)
+	glob.Lock()
+	defer glob.Unlock()
+
 	mu := s.keyLock(key)
 	mu.Lock()
 	defer mu.Unlock()
+
+	fl, err := s.acquireFileLock(key)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		if unlockErr := fl.Unlock(); unlockErr != nil && err == nil {
+			err = unlockErr
+		}
+	}()
 
 	current, err := s.readMetaRecord(encoded)
 	if err != nil && !errors.Is(err, storage.ErrNotFound) {
@@ -194,14 +253,27 @@ func (s *Store) StoreMeta(_ context.Context, key string, meta *storage.Meta, exp
 	return newRec.ETag, nil
 }
 
-func (s *Store) DeleteMeta(_ context.Context, key string, expectedETag string) error {
+func (s *Store) DeleteMeta(_ context.Context, key string, expectedETag string) (err error) {
 	encoded, err := s.encodeKey(key)
 	if err != nil {
 		return err
 	}
+	glob := globalKeyMutex(encoded)
+	glob.Lock()
+	defer glob.Unlock()
 	mu := s.keyLock(key)
 	mu.Lock()
 	defer mu.Unlock()
+
+	fl, err := s.acquireFileLock(key)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if unlockErr := fl.Unlock(); unlockErr != nil && err == nil {
+			err = unlockErr
+		}
+	}()
 
 	if expectedETag != "" {
 		rec, err := s.readMetaRecord(encoded)
@@ -268,14 +340,27 @@ func (s *Store) ReadState(_ context.Context, key string) (io.ReadCloser, *storag
 	}, nil
 }
 
-func (s *Store) WriteState(_ context.Context, key string, body io.Reader, opts storage.PutStateOptions) (*storage.PutStateResult, error) {
+func (s *Store) WriteState(_ context.Context, key string, body io.Reader, opts storage.PutStateOptions) (result *storage.PutStateResult, err error) {
 	encoded, err := s.encodeKey(key)
 	if err != nil {
 		return nil, err
 	}
+	glob := globalKeyMutex(encoded)
+	glob.Lock()
+	defer glob.Unlock()
 	mu := s.keyLock(key)
 	mu.Lock()
 	defer mu.Unlock()
+
+	fl, err := s.acquireFileLock(key)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if unlockErr := fl.Unlock(); unlockErr != nil && err == nil {
+			err = unlockErr
+		}
+	}()
 
 	if err := os.MkdirAll(s.stateDirPath(encoded), 0o755); err != nil {
 		return nil, fmt.Errorf("disk: ensure state dir: %w", err)
@@ -346,14 +431,27 @@ func (s *Store) WriteState(_ context.Context, key string, body io.Reader, opts s
 	}, nil
 }
 
-func (s *Store) RemoveState(_ context.Context, key string, expectedETag string) error {
+func (s *Store) RemoveState(_ context.Context, key string, expectedETag string) (err error) {
 	encoded, err := s.encodeKey(key)
 	if err != nil {
 		return err
 	}
+	glob := globalKeyMutex(encoded)
+	glob.Lock()
+	defer glob.Unlock()
 	mu := s.keyLock(key)
 	mu.Lock()
 	defer mu.Unlock()
+
+	fl, err := s.acquireFileLock(key)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if unlockErr := fl.Unlock(); unlockErr != nil && err == nil {
+			err = unlockErr
+		}
+	}()
 
 	if expectedETag != "" {
 		info, err := s.readStateRecord(encoded)

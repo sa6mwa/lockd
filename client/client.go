@@ -10,7 +10,9 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"pkt.systems/lockd/internal/api"
@@ -28,6 +30,10 @@ type (
 	ErrorResponse     = api.ErrorResponse
 )
 
+const headerFencingToken = "X-Fencing-Token"
+
+var ErrMissingFencingToken = errors.New("lockd: fencing token required")
+
 // UpdateStateResult captures the response from UpdateState.
 type UpdateStateResult struct {
 	NewVersion   int64  `json:"new_version"`
@@ -37,14 +43,41 @@ type UpdateStateResult struct {
 
 // UpdateStateOptions controls conditional update semantics.
 type UpdateStateOptions struct {
-	IfETag    string
-	IfVersion string
+	IfETag       string
+	IfVersion    string
+	FencingToken string
 }
 
 // Client is a convenience wrapper around the lockd HTTP API.
 type Client struct {
-	baseURL    string
-	httpClient *http.Client
+	baseURL     string
+	httpClient  *http.Client
+	leaseTokens sync.Map
+}
+
+// RegisterLeaseToken stores a lease -> fencing token mapping for subsequent
+// requests. This is useful when the token is obtained out-of-band (for example
+// via environment variables between CLI invocations).
+func (c *Client) RegisterLeaseToken(leaseID, token string) {
+	if leaseID == "" || token == "" {
+		return
+	}
+	c.leaseTokens.Store(leaseID, token)
+}
+
+func (c *Client) fencingToken(leaseID, override string) (string, error) {
+	if override != "" {
+		return override, nil
+	}
+	if leaseID == "" {
+		return "", ErrMissingFencingToken
+	}
+	if v, ok := c.leaseTokens.Load(leaseID); ok {
+		if token, ok := v.(string); ok && token != "" {
+			return token, nil
+		}
+	}
+	return "", ErrMissingFencingToken
 }
 
 // Option customises client construction.
@@ -166,6 +199,9 @@ func (c *Client) Acquire(ctx context.Context, req AcquireRequest, opts ...Acquir
 			delay = next
 			continue
 		}
+		if resp.FencingToken != 0 {
+			c.RegisterLeaseToken(resp.LeaseID, strconv.FormatInt(resp.FencingToken, 10))
+		}
 		return &resp, nil
 	}
 	return nil, fmt.Errorf("acquire retry exhausted")
@@ -173,8 +209,14 @@ func (c *Client) Acquire(ctx context.Context, req AcquireRequest, opts ...Acquir
 
 // KeepAlive extends a lease.
 func (c *Client) KeepAlive(ctx context.Context, req KeepAliveRequest) (*KeepAliveResponse, error) {
+	token, err := c.fencingToken(req.LeaseID, "")
+	if err != nil {
+		return nil, err
+	}
+	headers := http.Header{}
+	headers.Set(headerFencingToken, token)
 	var resp KeepAliveResponse
-	if err := c.postJSON(ctx, "/v1/keepalive", req, &resp, nil); err != nil {
+	if err := c.postJSON(ctx, "/v1/keepalive", req, &resp, headers); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -182,10 +224,17 @@ func (c *Client) KeepAlive(ctx context.Context, req KeepAliveRequest) (*KeepAliv
 
 // Release drops a lease.
 func (c *Client) Release(ctx context.Context, req ReleaseRequest) (*ReleaseResponse, error) {
-	var resp ReleaseResponse
-	if err := c.postJSON(ctx, "/v1/release", req, &resp, nil); err != nil {
+	token, err := c.fencingToken(req.LeaseID, "")
+	if err != nil {
 		return nil, err
 	}
+	headers := http.Header{}
+	headers.Set(headerFencingToken, token)
+	var resp ReleaseResponse
+	if err := c.postJSON(ctx, "/v1/release", req, &resp, headers); err != nil {
+		return nil, err
+	}
+	c.leaseTokens.Delete(req.LeaseID)
 	return &resp, nil
 }
 
@@ -220,6 +269,11 @@ func (c *Client) GetState(ctx context.Context, key, leaseID string) (io.ReadClos
 		return nil, "", "", err
 	}
 	req.Header.Set("X-Lease-ID", leaseID)
+	token, err := c.fencingToken(leaseID, "")
+	if err != nil {
+		return nil, "", "", err
+	}
+	req.Header.Set(headerFencingToken, token)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, "", "", err
@@ -231,6 +285,9 @@ func (c *Client) GetState(ctx context.Context, key, leaseID string) (io.ReadClos
 	if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
 		return nil, "", "", c.decodeError(resp)
+	}
+	if newToken := resp.Header.Get(headerFencingToken); newToken != "" {
+		c.RegisterLeaseToken(leaseID, newToken)
 	}
 	return resp.Body, resp.Header.Get("ETag"), resp.Header.Get("X-Key-Version"), nil
 }
@@ -271,6 +328,11 @@ func (c *Client) UpdateState(ctx context.Context, key, leaseID string, body io.R
 	if opts.IfVersion != "" {
 		req.Header.Set("X-If-Version", opts.IfVersion)
 	}
+	token, err := c.fencingToken(leaseID, opts.FencingToken)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set(headerFencingToken, token)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -282,6 +344,9 @@ func (c *Client) UpdateState(ctx context.Context, key, leaseID string, body io.R
 	var result UpdateStateResult
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
+	}
+	if newToken := resp.Header.Get(headerFencingToken); newToken != "" {
+		c.RegisterLeaseToken(leaseID, newToken)
 	}
 	return &result, nil
 }

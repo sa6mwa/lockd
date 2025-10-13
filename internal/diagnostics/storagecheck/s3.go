@@ -21,6 +21,7 @@ type Result struct {
 	Provider          string
 	Bucket            string
 	Prefix            string
+	Path              string
 	Checks            []CheckResult
 	RecommendedPolicy string
 	AdditionalMessage string
@@ -57,6 +58,9 @@ func VerifyStore(ctx context.Context, cfg lockd.Config) (Result, error) {
 			return Result{}, err
 		}
 		return verifyObjectStore(ctx, "minio", minioCfg, minioCfg.Bucket, minioCfg.Prefix, false)
+	}
+	if strings.HasPrefix(cfg.Store, "disk://") {
+		return verifyDisk(ctx, cfg)
 	}
 	return Result{}, storage.ErrNotImplemented
 }

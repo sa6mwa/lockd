@@ -19,6 +19,7 @@ type Meta struct {
 	Version       int64  `json:"version"`
 	StateETag     string `json:"state_etag,omitempty"`
 	UpdatedAtUnix int64  `json:"updated_at_unix,omitempty"`
+	FencingToken  int64  `json:"fencing_token,omitempty"`
 }
 
 // Lease captures the server-side view of an active lease.
@@ -26,6 +27,7 @@ type Lease struct {
 	ID            string `json:"lease_id"`
 	Owner         string `json:"owner"`
 	ExpiresAtUnix int64  `json:"expires_at_unix"`
+	FencingToken  int64  `json:"fencing_token,omitempty"`
 }
 
 // StateInfo provides metadata about a stored state blob.

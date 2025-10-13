@@ -67,6 +67,12 @@
 //	if err != nil { log.Fatal(err) }
 //	defer cli.Release(ctx, client.ReleaseRequest{Key: "orders", LeaseID: lease.LeaseID})
 //
+// The client tracks fencing tokens automatically; reusing the same `Client`
+// instance ensures follow-up KeepAlive/Get/Update/Release calls include the
+// freshest `X-Fencing-Token`. For multi-process flows the CLI exports the token
+// via `LOCKD_CLIENT_FENCING_TOKEN`, and your program can register it manually
+// with `Client.RegisterLeaseToken`.
+//
 // The client streams state to avoid buffering large payloads. Use
 // `GetStateBytes` / `UpdateStateBytes` for convenience if you prefer working
 // with slices.

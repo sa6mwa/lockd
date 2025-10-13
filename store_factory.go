@@ -1,6 +1,7 @@
 package lockd
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"os"
@@ -50,23 +51,17 @@ func openBackend(cfg Config) (storage.Backend, error) {
 		}
 		return pebblestore.Open(path)
 	case "disk":
-		path := strings.TrimSpace(u.Path)
-		host := strings.TrimSpace(u.Host)
-		if host != "" {
-			if path == "" || path == "/" {
-				path = "/" + host
-			} else {
-				path = "/" + host + "/" + strings.TrimPrefix(path, "/")
+		diskCfg, _, err := BuildDiskConfig(cfg)
+		if err != nil {
+			return nil, err
+		}
+		checks := disk.Verify(context.Background(), diskCfg)
+		for _, check := range checks {
+			if check.Err != nil {
+				return nil, fmt.Errorf("disk store verification failed: %s: %v", check.Name, check.Err)
 			}
 		}
-		if path == "" || path == "/" {
-			return nil, fmt.Errorf("disk store path required (e.g. disk:///var/lib/lockd-data)")
-		}
-		return disk.New(disk.Config{
-			Root:            filepath.Clean(path),
-			Retention:       cfg.DiskRetention,
-			JanitorInterval: cfg.DiskJanitorInterval,
-		})
+		return disk.New(diskCfg)
 	case "azure":
 		azureCfg, err := BuildAzureConfig(cfg)
 		if err != nil {
@@ -267,4 +262,34 @@ func firstEnv(names ...string) string {
 		}
 	}
 	return ""
+}
+
+// BuildDiskConfig parses disk:// URLs into a disk.Config.
+func BuildDiskConfig(cfg Config) (disk.Config, string, error) {
+	u, err := url.Parse(cfg.Store)
+	if err != nil {
+		return disk.Config{}, "", fmt.Errorf("parse store URL: %w", err)
+	}
+	if u.Scheme != "disk" {
+		return disk.Config{}, "", fmt.Errorf("store scheme %q not supported", u.Scheme)
+	}
+	pathPart := strings.TrimSpace(u.Path)
+	host := strings.TrimSpace(u.Host)
+	if host != "" {
+		if pathPart == "" || pathPart == "/" {
+			pathPart = "/" + host
+		} else {
+			pathPart = "/" + host + "/" + strings.TrimPrefix(pathPart, "/")
+		}
+	}
+	if pathPart == "" || pathPart == "/" {
+		return disk.Config{}, "", fmt.Errorf("disk store path required (e.g. disk:///var/lib/lockd-data)")
+	}
+	root := filepath.Clean(pathPart)
+	cfgDisk := disk.Config{
+		Root:            root,
+		Retention:       cfg.DiskRetention,
+		JanitorInterval: cfg.DiskJanitorInterval,
+	}
+	return cfgDisk, root, nil
 }

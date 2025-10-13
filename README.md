@@ -67,14 +67,14 @@ worker to resume from the last committed state.
 single atomic operation. The response body streams the current JSON state while
 the lease remains active. The server withholds final release until either:
 
-- the client calls `UpdateAndRelease` (or the legacy `Release`),
-- the client closes the streaming body, or
+- the client closes the streaming body and subsequently posts an update followed by `Release`,
+- the client explicitly calls `Release`, or
 - the connection/lease times out (server-side cap defaults to 15 minutes).
 
 Metadata is returned via headers (`X-Lease-ID`, `X-Fencing-Token`, `X-Key-Version`,
-`ETag`, `X-Lease-Expires-At`). Clients can use these values directly with the new
-`POST /v1/update-and-release` endpoint to install a new state blob and release in
-one round-trip.
+`ETag`, `X-Lease-Expires-At`). Use these values with `POST /v1/update-state`
+followed by `POST /v1/release` to install a new state blob and relinquish the
+lease without race windows.
 
 ### Internal layout
 
@@ -332,8 +332,8 @@ met:
 
 Acquire-for-update is particularly useful for these scenarios because the state
 reader holds the lease while a worker inspects the JSON payload. Once it computes
-the next cursor it can call `UpdateAndRelease`, avoiding a race window between a
-separate update and release call.
+the next cursor it can call `UpdateState` followed by `Release`, avoiding any race
+window between separate update and release calls.
 
 ### Benchmarking with MinIO
 

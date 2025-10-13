@@ -80,9 +80,9 @@
 // metadata through headers (`X-Lease-ID`, `X-Fencing-Token`, `ETag`,
 // `X-Key-Version`, `X-Lease-Expires-At`). The lease remains active until one of
 // three events occurs: the client closes the stream, the connection is severed,
-// or the new `UpdateAndRelease` endpoint successfully writes and releases in a
-// single round-trip. A configurable server-side cap (`Config.ForUpdateMaxHold`,
-// default 15 minutes) ensures stuck streams are reclaimed.
+// or the caller explicitly issues `Release` after finishing updates. A
+// configurable server-side cap (`Config.ForUpdateMaxHold`, default 15 minutes)
+// ensures stuck streams are reclaimed.
 //
 // The client streams state to avoid buffering large payloads. Use
 // `GetStateBytes` / `UpdateStateBytes` for convenience if you prefer working

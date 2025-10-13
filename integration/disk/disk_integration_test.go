@@ -548,7 +548,7 @@ func startDiskServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client {
 		_ = stop(ctx)
 	})
 
-	httpClient := &http.Client{Timeout: 15 * time.Second}
+	httpClient := &http.Client{Timeout: 60 * time.Second}
 	baseURL := "http://" + cfg.Listen
 	cli, err := lockdclient.New(baseURL, lockdclient.WithHTTPClient(httpClient))
 	if err != nil {

@@ -231,6 +231,7 @@ func (s *Store) StoreMeta(_ context.Context, key string, meta *storage.Meta, exp
 	}()
 
 	current, err := s.readMetaRecord(encoded)
+	exists := err == nil
 	if err != nil && !errors.Is(err, storage.ErrNotFound) {
 		return "", err
 	}
@@ -241,6 +242,8 @@ func (s *Store) StoreMeta(_ context.Context, key string, meta *storage.Meta, exp
 		if current.ETag != expectedETag {
 			return "", storage.ErrCASMismatch
 		}
+	} else if exists {
+		return "", storage.ErrCASMismatch
 	}
 
 	newRec := metaRecord{

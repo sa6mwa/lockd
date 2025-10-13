@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -14,7 +13,6 @@ import (
 	port "pkt.systems/logport"
 	"pkt.systems/logport/adapters/zerologger"
 
-	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/internal/api"
 	"pkt.systems/lockd/internal/storage/memory"
 )
@@ -110,53 +108,6 @@ func TestAcquireLifecycle(t *testing.T) {
 	}
 	if !releaseResp.Released {
 		t.Fatal("expected release to succeed")
-	}
-}
-
-func TestAcquireForUpdateAndRelease(t *testing.T) {
-	store := memory.New()
-	clk := newStubClock(time.Unix(1_700_000_000, 0))
-	handler := New(Config{
-		Store:                        store,
-		Logger:                       port.NoopLogger(),
-		Clock:                        clk,
-		JSONMaxBytes:                 1 << 20,
-		DefaultTTL:                   30 * time.Second,
-		MaxTTL:                       2 * time.Minute,
-		AcquireBlock:                 5 * time.Second,
-		ForUpdateMaxStreams:          10,
-		ForUpdateMaxHold:             time.Minute,
-		ForUpdateMaxStreamsPerClient: 5,
-	})
-	mux := http.NewServeMux()
-	handler.Register(mux)
-	server := httptest.NewServer(mux)
-	defer server.Close()
-
-	cli, err := lockdclient.New(server.URL)
-	if err != nil {
-		t.Fatalf("new client: %v", err)
-	}
-
-	ctx := context.Background()
-	res, err := cli.AcquireForUpdate(ctx, lockdclient.AcquireRequest{Key: "orders", Owner: "worker", TTLSeconds: 30})
-	if err != nil {
-		t.Fatalf("acquire-for-update: %v", err)
-	}
-	if res.LeaseID == "" {
-		t.Fatal("expected lease id")
-	}
-	if res.Body != nil {
-		_, _ = io.Copy(io.Discard, res.Body)
-		_ = res.Body.Close()
-	}
-
-	lease, err := cli.Acquire(ctx, lockdclient.AcquireRequest{Key: "orders", Owner: "verifier", TTLSeconds: 30})
-	if err != nil {
-		t.Fatalf("reacquire after release: %v", err)
-	}
-	if _, err := cli.Release(ctx, lockdclient.ReleaseRequest{Key: "orders", LeaseID: lease.LeaseID}); err != nil {
-		t.Fatalf("cleanup release: %v", err)
 	}
 }
 

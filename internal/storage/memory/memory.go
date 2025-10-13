@@ -58,14 +58,16 @@ func (s *Store) LoadMeta(_ context.Context, key string) (*storage.Meta, string, 
 func (s *Store) StoreMeta(_ context.Context, key string, meta *storage.Meta, expectedETag string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	entry, exists := s.metas[key]
 	if expectedETag != "" {
-		entry, ok := s.metas[key]
-		if !ok {
+		if !exists {
 			return "", storage.ErrNotFound
 		}
 		if entry.etag != expectedETag {
 			return "", storage.ErrCASMismatch
 		}
+	} else if exists {
+		return "", storage.ErrCASMismatch
 	}
 	etag := uuid.NewString()
 	clone := *meta

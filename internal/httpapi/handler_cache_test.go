@@ -151,7 +151,14 @@ func (s *stubStore) StoreMeta(ctx context.Context, key string, meta *storage.Met
 	defer s.mu.Unlock()
 	s.storeMetaCount++
 	entry, exists := s.meta[key]
-	if exists && expectedETag != "" && expectedETag != entry.etag {
+	if expectedETag != "" {
+		if !exists {
+			return "", storage.ErrNotFound
+		}
+		if expectedETag != entry.etag {
+			return "", storage.ErrCASMismatch
+		}
+	} else if exists {
 		return "", storage.ErrCASMismatch
 	}
 	newETag := s.nextMetaETag()

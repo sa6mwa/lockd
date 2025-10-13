@@ -484,51 +484,6 @@ func (c *Client) UpdateState(ctx context.Context, key, leaseID string, body io.R
 	return &result, nil
 }
 
-// UpdateAndRelease uploads new JSON state and releases the lease in one operation.
-func (c *Client) UpdateAndRelease(ctx context.Context, key, leaseID string, body io.Reader, opts UpdateStateOptions) (*UpdateStateResult, error) {
-	url := fmt.Sprintf("%s/v1/update-and-release?key=%s", c.baseURL, url.QueryEscape(key))
-	var payload io.Reader = body
-	if payload == nil {
-		payload = http.NoBody
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, payload)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Lease-ID", leaseID)
-	if opts.IfETag != "" {
-		req.Header.Set("X-If-State-ETag", opts.IfETag)
-	}
-	if opts.IfVersion != "" {
-		req.Header.Set("X-If-Version", opts.IfVersion)
-	}
-	token, err := c.fencingToken(leaseID, opts.FencingToken)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set(headerFencingToken, token)
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, c.decodeError(resp)
-	}
-	var result UpdateStateResult
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
-	}
-	c.leaseTokens.Delete(leaseID)
-	return &result, nil
-}
-
-// UpdateBytesAndRelease uploads new JSON state (from bytes) and releases the lease.
-func (c *Client) UpdateBytesAndRelease(ctx context.Context, key, leaseID string, body []byte, opts UpdateStateOptions) (*UpdateStateResult, error) {
-	return c.UpdateAndRelease(ctx, key, leaseID, bytes.NewReader(body), opts)
-}
-
 // UpdateStateBytes uploads new JSON state from the provided byte slice.
 func (c *Client) UpdateStateBytes(ctx context.Context, key, leaseID string, body []byte, opts UpdateStateOptions) (*UpdateStateResult, error) {
 	return c.UpdateState(ctx, key, leaseID, bytes.NewReader(body), opts)

@@ -922,14 +922,6 @@ retain these guards whenever tests are updated.
 
 MIT – see [`LICENSE`](LICENSE).
 
-## Third-Party Notices
-
-- All bundled dependencies and their original license texts are recorded in [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md); regenerate the file with `go run ./cmd/licensegen` as part of the release pipeline.
-- Apache-2.0 components (for example `github.com/minio/minio-go/v7`, `github.com/spf13/cobra`, `github.com/prometheus/client_golang`, AWS SDK submodules) require preserving their license text and any `NOTICE` files; both are embedded in the generated third-party bundle.
-- The MPL-2.0 dependency (`github.com/hashicorp/hcl`, pulled in by Viper) allows dynamic/static linking without additional obligations, but any direct modifications to MPL-covered source must be published under MPL-2.0.
-- BSD-2-Clause / BSD-3-Clause libraries (e.g. `golang.org/x/*`, `github.com/google/uuid`) and MIT-licensed packages are satisfied by retaining their copyright and disclaimer text inside the third-party report.
-- When distributing binaries or container images, ship the `LICENSE` file together with `THIRD_PARTY_LICENSES.md` to meet attribution requirements.
-
 ### Disk (SSD/NVMe)
 
 - Streams JSON payloads directly to files beneath the store root, hashing on the fly to produce deterministic ETags.

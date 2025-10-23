@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+package lockd.internal;
+
+option go_package = "pkt.systems/lockd/internal/proto;proto";
+
+import "google/protobuf/struct.proto";
+
+message Lease {
+  string lease_id = 1;
+  string owner = 2;
+  int64 expires_at_unix = 3;
+  int64 fencing_token = 4;
+}
+
+message LockMeta {
+  Lease lease = 1;
+  int64 version = 2;
+  string state_etag = 3;
+  int64 updated_at_unix = 4;
+  int64 fencing_token = 5;
+  bytes state_descriptor = 6;
+  int64 state_plaintext_bytes = 7;
+}
+
+message MetaRecord {
+  string etag = 1;
+  LockMeta meta = 2;
+}
+
+message QueueMessageMeta {
+  string type = 1;
+  string queue = 2;
+  string id = 3;
+  int64 enqueued_at_unix = 4;
+  int64 updated_at_unix = 5;
+  int32 attempts = 6;
+  int32 max_attempts = 7;
+  int64 not_visible_until_unix = 8;
+  int64 visibility_timeout_seconds = 9;
+  google.protobuf.Struct attributes = 10;
+  google.protobuf.Value last_error = 11;
+  int64 payload_bytes = 12;
+  string payload_content_type = 13;
+  optional int64 expires_at_unix = 14;
+  string correlation_id = 15;
+  bytes payload_descriptor = 16;
+  bytes meta_descriptor = 17;
+}

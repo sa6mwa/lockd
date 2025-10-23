@@ -1,0 +1,33 @@
+@startuml lockd-architecture
+title lockd queue/lease architecture
+skinparam componentStyle rectangle
+skinparam shadowing false
+
+component "Worker Apps\n(Go client SDK)" as Workers
+component "HTTP API\n(lockd server)" as HttpAPI
+component "Lease Manager\n+ Sweeper" as Lease
+component "Queue Service\n(meta/state & CAS)" as QueueSvc
+component "Dispatcher\n+ Ready Cache" as Dispatcher
+component "Storage Crypto\n(kryptograf)" as Crypto
+component "Storage Backends\n(S3 / Disk / Mem / ...)" as Storage
+component "Storage Change Feed\n(fsnotify / S3 events / mem watch)" as Watchers
+component "QRF\n(perimeter throttles)" as QRF
+component "LSF\n(local sampling)" as LSF
+
+Workers --> HttpAPI : HTTPS + mTLS\nAcquire / Queue ops
+HttpAPI --> Lease : leases\nkeepalive\nrelease
+HttpAPI --> QueueSvc : queue + state\noperations
+QueueSvc --> Dispatcher : candidate fetch\nready set
+Dispatcher --> Crypto : CAS meta/state\nobject moves
+Crypto --> Storage : encrypted blobs
+Storage --> Crypto : encrypted reads
+Storage --> Watchers : change events
+Watchers --> Dispatcher : notify()\nmark demand
+Dispatcher --> QueueSvc : reschedule\nmark ready
+Lease --> Crypto : update meta\n(sweeper CAS)
+HttpAPI --> QRF : usage samples
+QRF --> HttpAPI : throttle decisions
+HttpAPI --> LSF : emit metrics
+LSF --> QRF : resource signals
+
+@enduml

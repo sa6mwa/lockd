@@ -1,0 +1,79 @@
+@startuml
+' Detailed flow for S3-compatible backend (MinIO/AWS)
+
+skin rose
+
+actor Client
+participant "HTTP Handler" as Handler
+participant "JSON Compactor" as Compactor
+participant "S3 Store (minio-go)" as S3
+database "meta/<key>.pb" as MetaObj
+database "state/<key>.json" as StateObj
+
+== Acquire ==
+Client -> Handler: POST /v1/acquire
+Handler -> S3: GetObject(meta/<key>.pb)
+S3 -> MetaObj: GET
+alt Not found
+    MetaObj --> S3: 404
+    S3 --> Handler: ErrNotFound
+else Found
+    MetaObj --> S3: JSON + ETag
+    S3 --> Handler: meta + etag
+end
+Handler -> Handler: lease_id, fencing := prev+1
+Handler -> S3: PutObject(meta, updated lease)\nIf-Match old_etag or If-None-Match "*"
+alt Precondition failed
+    S3 --> Handler: ErrCASMismatch
+else Success
+    S3 -> MetaObj: store
+    MetaObj --> S3: new ETag
+    S3 --> Handler: new_meta_etag
+end
+Handler --> Client: 200 AcquireResponse\nX-Fencing-Token
+
+== KeepAlive ==
+Client -> Handler: POST /v1/keepalive\nX-Fencing-Token
+Handler -> S3: PutObject(meta, new expires)\nIf-Match meta_etag
+S3 -> MetaObj: store
+MetaObj --> S3: new ETag
+S3 --> Handler: new_meta_etag
+Handler --> Client: 200 KeepAlive
+
+== GetState ==
+Client -> Handler: POST /v1/get-state
+Handler -> S3: StatObject(state)
+alt Not found
+    S3 --> Handler: ErrNotFound
+else
+    S3 -> StateObj: HEAD
+    StateObj --> S3: size + ETag
+    S3 --> Handler: info
+    Handler -> S3: GetObject(state)
+    S3 --> Handler: stream JSON
+    Handler --> Client: 200 stream\nheaders: ETag, X-Key-Version, X-Fencing-Token
+end
+
+== UpdateState ==
+Client -> Handler: POST /v1/update-state\nbody, CAS headers, X-Fencing-Token
+Handler -> Compactor: compact JSON
+Compactor --> Handler: stream
+Handler -> S3: PutObject(state, stream)\nIf-Match expected_etag (optional)
+alt Precondition failed
+    S3 --> Handler: ErrCASMismatch
+else
+    S3 -> StateObj: store (multipart if large)
+    StateObj --> S3: new ETag + size
+    S3 --> Handler: new_state_etag, bytes
+end
+Handler -> S3: PutObject(meta, version+1, state_etag)\nIf-Match meta_etag
+S3 --> Handler: new_meta_etag
+Handler --> Client: 200 {new_version, new_state_etag, bytes}\nheaders: ETag, X-Key-Version, X-Fencing-Token
+
+== Release ==
+Client -> Handler: POST /v1/release
+Handler -> S3: PutObject(meta, lease cleared)\nIf-Match meta_etag
+S3 --> Handler: new_meta_etag
+Handler --> Client: 200 {released:true}
+
+@enduml

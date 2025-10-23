@@ -20,6 +20,7 @@ import (
 	"pkt.systems/lockd"
 	api "pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
+	"pkt.systems/lockd/integration/internal/cryptotest"
 	testlog "pkt.systems/lockd/integration/internal/testlog"
 	"pkt.systems/lockd/internal/diagnostics/storagecheck"
 	"pkt.systems/lockd/internal/storage"
@@ -989,6 +990,7 @@ func loadAWSConfig(t *testing.T) lockd.Config {
 	if cfg.AWSRegion == "" {
 		cfg.AWSRegion = os.Getenv("AWS_DEFAULT_REGION")
 	}
+	cryptotest.MaybeEnableStorageEncryption(t, &cfg)
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("config validation: %v", err)
 	}

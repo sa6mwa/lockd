@@ -21,6 +21,7 @@ import (
 	"pkt.systems/lockd"
 	api "pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
+	"pkt.systems/lockd/integration/internal/cryptotest"
 	testlog "pkt.systems/lockd/integration/internal/testlog"
 	"pkt.systems/lockd/internal/diagnostics/storagecheck"
 	"pkt.systems/lockd/internal/storage"
@@ -993,6 +994,7 @@ func loadAzureConfig(t *testing.T) lockd.Config {
 		AzureSASToken: os.Getenv("LOCKD_AZURE_SAS_TOKEN"),
 	}
 	cfg.AzureAccountKey = os.Getenv("LOCKD_AZURE_ACCOUNT_KEY")
+	cryptotest.MaybeEnableStorageEncryption(t, &cfg)
 	return cfg
 }
 

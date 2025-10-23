@@ -50,7 +50,7 @@ const (
 	// DefaultDefaultTTL is the baseline lease duration handed to new acquirers.
 	DefaultDefaultTTL = 30 * time.Second
 	// DefaultMaxTTL is the hard ceiling enforced on user-supplied TTLs.
-	DefaultMaxTTL = 5 * time.Minute
+	DefaultMaxTTL = 30 * time.Minute
 	// DefaultAcquireBlock controls how long acquire requests block before timing out.
 	DefaultAcquireBlock = 60 * time.Second
 	// DefaultSweeperInterval sets the frequency for background lease reaping.

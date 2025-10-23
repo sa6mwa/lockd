@@ -234,7 +234,7 @@ lockd \
   --store "$LOCKD_STORE" \
   --json-max 100MB \
   --default-ttl 30s \
-  --max-ttl 2m \
+  --max-ttl 30m \
   --acquire-block 60s \
   --sweeper-interval 5s \
   --bundle $HOME/.lockd/server.pem

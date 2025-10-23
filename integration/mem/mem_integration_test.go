@@ -22,6 +22,7 @@ import (
 	"pkt.systems/lockd"
 	"pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
+	"pkt.systems/lockd/integration/internal/cryptotest"
 	testlog "pkt.systems/lockd/integration/internal/testlog"
 	memorybackend "pkt.systems/lockd/internal/storage/memory"
 	"pkt.systems/lockd/internal/uuidv7"
@@ -926,6 +927,7 @@ func buildMemConfig(tb testing.TB) lockd.Config {
 	}
 	cfg.MemQueueWatch = true
 	cfg.MemQueueWatchSet = true
+	cryptotest.MaybeEnableStorageEncryption(tb, &cfg)
 	if err := cfg.Validate(); err != nil {
 		tb.Fatalf("config validation failed: %v", err)
 	}

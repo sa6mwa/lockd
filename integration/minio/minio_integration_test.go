@@ -885,6 +885,7 @@ func loadMinioConfig(tb testing.TB) lockd.Config {
 		S3MaxPartSize:   8 << 20,
 		SweeperInterval: time.Second,
 	}
+	cryptotest.MaybeEnableStorageEncryption(tb, &cfg)
 
 	if err := cfg.Validate(); err != nil {
 		tb.Fatalf("config validation: %v", err)

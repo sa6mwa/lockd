@@ -25,6 +25,7 @@ import (
 	"pkt.systems/lockd"
 	"pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
+	"pkt.systems/lockd/integration/internal/cryptotest"
 	testlog "pkt.systems/lockd/integration/internal/testlog"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/disk"
@@ -1720,6 +1721,7 @@ func buildDiskConfig(tb testing.TB, root string, retention time.Duration) lockd.
 		SweeperInterval: 2 * time.Second,
 		DiskRetention:   retention,
 	}
+	cryptotest.MaybeEnableStorageEncryption(tb, &cfg)
 	if err := cfg.Validate(); err != nil {
 		tb.Fatalf("config validation failed: %v", err)
 	}

@@ -365,7 +365,7 @@ func New(cfg Config) *Handler {
 	if baseLogger == nil {
 		baseLogger = logport.NoopLogger()
 	}
-	logger := baseLogger.With("svc", "api")
+	logger := baseLogger.With("sys", "api.http.router")
 	clk := cfg.Clock
 	if clk == nil {
 		clk = clock.Real{}
@@ -415,9 +415,9 @@ func New(cfg Config) *Handler {
 	}
 	var queueDisp *queue.Dispatcher
 	if queueSvc != nil {
-		queueLogger := baseLogger.With("svc", "queue_dispatcher")
+		queueLogger := baseLogger.With("sys", "queue.dispatcher.core")
 		opts := []queue.DispatcherOption{
-			queue.WithLogger(baseLogger),
+			queue.WithLogger(queueLogger),
 			queue.WithMaxConsumers(cfg.QueueMaxConsumers),
 			queue.WithPollInterval(cfg.QueuePollInterval),
 			queue.WithPollJitter(cfg.QueuePollJitter),
@@ -523,7 +523,22 @@ type acquireOutcome struct {
 	MetaETag string
 }
 
+func routerSys(operation string) string {
+	parts := strings.FieldsFunc(operation, func(r rune) bool {
+		switch r {
+		case '.', '/', '-', '_':
+			return true
+		}
+		return false
+	})
+	if len(parts) == 0 {
+		return "api.http.router"
+	}
+	return "api.http.router." + strings.Join(parts, ".")
+}
+
 func (h *Handler) wrap(operation string, fn handlerFunc) http.Handler {
+	sys := routerSys(operation)
 	httpSpanName := "lockd.http." + operation
 	txSpanName := "lockd.tx." + operation
 
@@ -531,7 +546,10 @@ func (h *Handler) wrap(operation string, fn handlerFunc) http.Handler {
 		start := time.Now()
 		reqID := uuidv7.NewString()
 		ctx := r.Context()
-		ctx, span := h.tracer.Start(ctx, txSpanName, trace.WithSpanKind(trace.SpanKindInternal))
+		ctx, span := h.tracer.Start(ctx, txSpanName,
+			trace.WithSpanKind(trace.SpanKindInternal),
+			trace.WithAttributes(attribute.String("lockd.sys", sys)),
+		)
 		defer span.End()
 
 		span.SetAttributes(
@@ -544,6 +562,7 @@ func (h *Handler) wrap(operation string, fn handlerFunc) http.Handler {
 		ctx = correlation.Ensure(ctx)
 
 		logger := h.logger.With(
+			"sys", sys,
 			"req_id", reqID,
 			"method", r.Method,
 			"path", r.URL.Path,

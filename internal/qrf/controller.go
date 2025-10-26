@@ -140,7 +140,7 @@ func NewController(cfg Config) *Controller {
 	}
 	return &Controller{
 		cfg:    cfg,
-		logger: logger.With("svc", "qrf"),
+		logger: logger.With("sys", "control.qrf.controller"),
 		state:  StateDisengaged,
 	}
 }

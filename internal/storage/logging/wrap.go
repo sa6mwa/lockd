@@ -19,10 +19,11 @@ type backend struct {
 	inner  storage.Backend
 	logger logport.ForLogging
 	tracer trace.Tracer
+	sys    string
 }
 
 // Wrap decorates inner with trace/debug logging.
-func Wrap(inner storage.Backend, logger logport.ForLogging) storage.Backend {
+func Wrap(inner storage.Backend, logger logport.ForLogging, sys string) storage.Backend {
 	if logger == nil {
 		logger = logport.NoopLogger()
 	}
@@ -30,13 +31,17 @@ func Wrap(inner storage.Backend, logger logport.ForLogging) storage.Backend {
 		inner:  inner,
 		logger: logger,
 		tracer: otel.Tracer("pkt.systems/lockd/storage"),
+		sys:    sys,
 	}
 }
 
 func (b *backend) start(ctx context.Context, op string) (context.Context, trace.Span, logport.ForLogging, logport.ForLogging, time.Time, func(string, error)) {
 	begin := time.Now()
 	ctx, span := b.tracer.Start(ctx, "lockd.storage."+op, trace.WithSpanKind(trace.SpanKindInternal))
-	span.SetAttributes(attribute.String("lockd.storage.operation", op))
+	span.SetAttributes(
+		attribute.String("lockd.storage.operation", op),
+		attribute.String("lockd.sys", b.sys),
+	)
 	span.AddEvent("lockd.storage.begin")
 
 	logger := b.logger

@@ -522,15 +522,15 @@ func diskBenchLoggerOptions(tb testing.TB) (lockd.TestServerOption, lockdclient.
 		tb.Cleanup(func() { _ = os.Remove(logPath) })
 	}
 
-	baseLogger := psl.NewStructured(writer).With("bench", "disk")
+	baseLogger := psl.NewStructured(writer).With("app", "lockd").With("sys", "bench.disk")
 	if level, ok := logport.ParseLevel(levelStr); ok {
 		baseLogger = baseLogger.LogLevel(level)
 	} else {
 		tb.Fatalf("invalid LOCKD_BENCH_LOG_LEVEL %q", levelStr)
 	}
 
-	serverLogger := baseLogger.With("svc", "server").WithLogLevel()
-	clientLogger := baseLogger.With("svc", "client").WithLogLevel()
+	serverLogger := baseLogger.With("sys", "bench.disk.server").WithLogLevel()
+	clientLogger := baseLogger.With("sys", "bench.disk.client").WithLogLevel()
 
 	return lockd.WithTestLogger(serverLogger), lockdclient.WithLogger(clientLogger)
 }

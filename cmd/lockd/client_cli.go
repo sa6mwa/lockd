@@ -274,7 +274,7 @@ func (c *clientCLIConfig) setupLogger() error {
 			writer = f
 		}
 	}
-	base := psl.NewStructured(writer).WithLogLevel().With("app", "lockd").With("svc", "client")
+	base := psl.NewStructured(writer).WithLogLevel().With("app", "lockd").With("sys", "client.cli")
 	logger := base.LogLevel(level)
 	subset, ok := logger.(logport.ForLoggingSubset)
 	if !ok {

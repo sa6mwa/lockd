@@ -64,7 +64,7 @@ func NewObserver(cfg Config, controller *qrf.Controller, logger logport.ForLoggi
 	return &Observer{
 		cfg:    cfg,
 		qrf:    controller,
-		logger: logger.With("svc", "lsf"),
+		logger: logger.With("sys", "control.lsf.observer"),
 	}
 }
 

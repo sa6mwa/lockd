@@ -101,7 +101,7 @@ func NewTestingLogger(t testing.TB, level logport.Level) logport.ForLogging {
 	if level != logport.NoLevel {
 		logger = logger.LogLevel(level)
 	}
-	return logger.With("app", "testserver")
+	return logger
 }
 
 // URL returns the base URL clients should use to reach the server.

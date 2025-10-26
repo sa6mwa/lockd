@@ -22,7 +22,7 @@ import (
 )
 
 func submain(ctx context.Context) int {
-	logger := psl.NewStructured(os.Stderr).WithLogLevel().With("app", "lockd")
+	logger := psl.NewStructured(os.Stderr).WithLogLevel().With("app", "lockd").With("sys", "cli.root")
 	cmd := newRootCommand(logger)
 	targetCmd := cmd
 	if len(os.Args) > 1 {

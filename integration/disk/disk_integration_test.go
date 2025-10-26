@@ -1851,7 +1851,7 @@ func diskTestLoggerOption(tb testing.TB) lockd.TestServerOption {
 	}
 	tb.Cleanup(func() { _ = file.Close() })
 
-	logger := psl.NewStructured(file).With("svc", "bench")
+	logger := psl.NewStructured(file).With("app", "lockd").With("sys", "bench.disk")
 	if level, ok := logport.ParseLevel(levelStr); ok {
 		logger = logger.LogLevel(level)
 	} else {

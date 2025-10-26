@@ -2028,6 +2028,14 @@ func WithHTTPClient(cli *http.Client) Option {
 // WithLogger supplies a logger for client diagnostics. Passing nil disables logging.
 func WithLogger(logger logport.ForLoggingSubset) Option {
 	return func(c *Client) {
+		if logger == nil {
+			c.logger = nil
+			return
+		}
+		if full, ok := logger.(logport.ForLogging); ok {
+			c.logger = full.With("app", "lockd").With("sys", "client.sdk")
+			return
+		}
 		c.logger = logger
 	}
 }

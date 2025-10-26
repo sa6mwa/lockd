@@ -178,7 +178,7 @@ func NewDispatcher(svc candidateProvider, opts ...DispatcherOption) *Dispatcher 
 	if d.resilientPollInterval <= 0 {
 		d.resilientPollInterval = 5 * time.Minute
 	}
-	d.logger = d.logger.With("svc", "queue_dispatcher")
+	d.logger = d.logger.With("sys", "queue.dispatcher.core")
 	return d
 }
 

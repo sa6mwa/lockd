@@ -130,6 +130,26 @@ The ASCII sketch mirrors the PlantUML component diagram in
 - **LSF (Local Security Force)** – samples host-level metrics and feeds them into
   **QRF (Quick Reaction Force)**, which enforces backpressure/throttling decisions.
 
+#### Subsystem ↔ `sys` mapping
+
+Every block above maps to a canonical structured-logging prefix. All logs include `app=lockd` and a `sys` key with the `system.subsystem.component[.subcomponent]` hierarchy.
+
+| Architecture block / concern        | Assigned `sys` value                    | Notes |
+|-------------------------------------|-----------------------------------------|-------|
+| Worker apps / Go SDK / CLI          | `client.sdk`, `client.cli`              | CLI commands and SDK helpers share this family. |
+| HTTP API routes + router            | `api.http.router`                       | Handlers append `.acquire`, `.queue`, `.health`, etc. |
+| Lease manager & sweeper             | `server.lease.manager`, `server.lease.sweeper` | Background reapers / TTL extension loops. |
+| Queue service (meta/state)          | `queue.service.meta`, `queue.service.state` | Covers CAS coordination for queue metadata/state. |
+| Dispatcher + ready cache            | `queue.dispatcher.core`, `queue.dispatcher.ready_cache` | Watchers/events append `.watch`, `.events`. |
+| Storage change feed                 | `storage.change_feed.fsnotify`, `storage.change_feed.s3`, etc. | Backend-specific watchers add suffixes. |
+| Storage crypto / pipeline           | `storage.crypto.envelope`, `storage.pipeline.snappy.pre_encrypt` | Mirrors kryptograf + compression stages. |
+| Storage backends                    | `storage.backend.s3`, `storage.backend.disk`, `storage.backend.mem`, … | Adapter-specific operations. |
+| LSF observer                        | `control.lsf.observer`                  | Host sampling and gauges. |
+| QRF controller                      | `control.qrf.controller`                | Retry-after and throttle state transitions. |
+| Shutdown controller                 | `server.shutdown.controller`            | Drain/watchdog subcomponents append `.drain`, `.listener`, etc. |
+| Telemetry exporters                 | `observability.telemetry.exporter`      | OTLP and future sinks. |
+| Benchmark / integration harnesses   | `bench.disk`, `bench.minio`, `bench.client`, … | Tests/benchmarks prefix with suite + role. |
+
 ### Request flow
 
 1. **Acquire** – `POST /v1/acquire` → acquire lease (optionally blocking).
@@ -704,6 +724,16 @@ LOCKD_STORE=azure://lockdaccount/lockd-container LOCKD_AZURE_ACCOUNT_KEY=... loc
 
 When `--store` uses `disk://`, the same verification runs automatically during
 server startup and the process exits if any check fails.
+
+## Structured logging convention
+
+To keep observability output, docs, and dashboards aligned, every structured log emitted by lockd adheres to the following rules:
+
+- `app` is always `lockd`, whether the line originates from the server, CLI, or in-process harness.
+- `sys` is mandatory and encodes the origin hierarchy as `system.subsystem.component[.subcomponent]`. Use as many segments as needed to pinpoint the emitting code (for example `storage.crypto.envelope`, `queue.dispatcher.ready_cache.prune`, or `server.shutdown.controller.drain`).
+- We no longer emit `svc` or `component` keys—`sys` replaces both. Any additional structured fields (latency, owner, key, cid, etc.) stay as-is.
+
+OpenTelemetry exports follow the same convention: every server-managed span records `lockd.sys=<value>` alongside `lockd.operation`, so traces and metrics can be filtered with the same identifiers as logs.
 
 ## TLS (mTLS)
 

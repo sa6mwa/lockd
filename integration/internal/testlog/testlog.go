@@ -37,7 +37,7 @@ func NewRecorder(t testing.TB, level logport.Level) (logport.ForLoggingSubset, *
 	if level != logport.NoLevel {
 		logger = logger.LogLevel(level)
 	}
-	return logger, rec
+	return logger.With("app", "lockd").With("sys", "test.recorder"), rec
 }
 
 // Events returns a copy of all recorded entries.

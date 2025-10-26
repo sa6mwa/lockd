@@ -299,16 +299,17 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 	if logger == nil {
 		logger = logport.NoopLogger()
 	}
+	logger = logger.With("app", "lockd")
 	if cfg.StorageEncryptionEnabled() {
-		logger.Info("storage.crypto.envelope enabled", "svc", "storage.crypto.envelope", "enabled", true)
+		logger.Info("storage.crypto.envelope enabled", "sys", "storage.crypto.envelope", "enabled", true)
 		if cfg.StorageEncryptionSnappy {
-			logger.Info("storage.pipeline.snappy pre-encrypt enabled", "svc", "storage.pipeline.snappy_pre_encrypt", "enabled", true)
+			logger.Info("storage.pipeline.snappy pre-encrypt enabled", "sys", "storage.pipeline.snappy.pre_encrypt", "enabled", true)
 		} else {
-			logger.Info("storage.pipeline.snappy pre-encrypt disabled", "svc", "storage.pipeline.snappy_pre_encrypt", "enabled", false)
+			logger.Info("storage.pipeline.snappy pre-encrypt disabled", "sys", "storage.pipeline.snappy.pre_encrypt", "enabled", false)
 		}
 	} else {
-		logger.Warn("storage.crypto.envelope disabled; falling back to plaintext at rest", "svc", "storage.crypto.envelope", "impact", "data at rest will be stored in plaintext", "enabled", false)
-		logger.Info("storage.pipeline.snappy pre-encrypt disabled", "svc", "storage.pipeline.snappy_pre_encrypt", "enabled", false, "reason", "requires storage.crypto.envelope")
+		logger.Warn("storage.crypto.envelope disabled; falling back to plaintext at rest", "sys", "storage.crypto.envelope", "impact", "data at rest will be stored in plaintext", "enabled", false)
+		logger.Info("storage.pipeline.snappy pre-encrypt disabled", "sys", "storage.pipeline.snappy.pre_encrypt", "enabled", false, "reason", "requires storage.crypto.envelope")
 	}
 	var telemetry *telemetryBundle
 	otlpEndpoint := cfg.OTLPEndpoint
@@ -316,7 +317,7 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 		otlpEndpoint = o.OTLPEndpoint
 	}
 	if otlpEndpoint != "" {
-		telemetry, err = setupTelemetry(context.Background(), otlpEndpoint, logger.With("svc", "telemetry"))
+		telemetry, err = setupTelemetry(context.Background(), otlpEndpoint, logger.With("sys", "observability.telemetry.exporter"))
 		if err != nil {
 			return nil, err
 		}
@@ -345,8 +346,8 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 		MaxDelay:    cfg.StorageRetryMaxDelay,
 		Multiplier:  cfg.StorageRetryMultiplier,
 	}
-	storageLogger := logger.With("svc", "storage")
-	backend = loggingbackend.Wrap(backend, storageLogger.With("layer", "backend"))
+	storageLogger := logger.With("sys", "storage.backend.core")
+	backend = loggingbackend.Wrap(backend, storageLogger.With("layer", "backend"), "storage.backend.core")
 	backend = retry.Wrap(backend, storageLogger.With("layer", "retry"), serverClock, retryCfg)
 	jsonUtil, err := selectJSONUtil(cfg.JSONUtil)
 	if err != nil {
@@ -441,7 +442,7 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 			return context.Background()
 		},
 	}
-	httpSrv.ErrorLog = logport.LogLoggerWithLevel(logger.With("svc", "http"), logport.ErrorLevel)
+	httpSrv.ErrorLog = logport.LogLoggerWithLevel(logger.With("sys", "api.http.server"), logport.ErrorLevel)
 
 	if cfg.MTLSEnabled() {
 		httpSrv.TLSConfig = buildServerTLS(bundle)
@@ -452,7 +453,7 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 
 	srv := &Server{
 		cfg:              cfg,
-		logger:           logger.With("svc", "server"),
+		logger:           logger.With("sys", "server.lifecycle.core"),
 		backend:          backend,
 		handler:          handler,
 		httpSrv:          httpSrv,
@@ -733,7 +734,7 @@ func (s *Server) snapshotActiveLeases(ctx context.Context) (leases []leaseSnapsh
 		return nil, nil
 	}
 	start := s.clock.Now()
-	logger := s.logger.With("component", "shutdown")
+	logger := s.logger.With("sys", "server.shutdown.controller")
 	var totalKeys int
 	defer func() {
 		elapsed := s.clock.Now().Sub(start)
@@ -860,7 +861,7 @@ func (s *Server) performDrain(parentCtx context.Context, policy DrainLeasesPolic
 	startActive := len(leases)
 	summary.ActiveAtStart = startActive
 	remaining := startActive
-	logger := s.logger.With("component", "shutdown")
+	logger := s.logger.With("sys", "server.shutdown.controller")
 	logger.Info("shutdown.drain.begin",
 		"active_leases", startActive,
 		"grace_period", policy.GracePeriod,

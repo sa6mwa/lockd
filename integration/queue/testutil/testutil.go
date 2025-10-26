@@ -502,7 +502,7 @@ func (c *LogCapture) Logger() logport.ForLogging {
 		level = logport.TraceLevel
 	}
 	logger := psl.NewStructured(c).WithLogLevel().LogLevel(level)
-	return logger.With("app", "testserver")
+	return logger.With("app", "lockd").With("sys", "test.capture")
 }
 
 func uniqueSuffix() string {

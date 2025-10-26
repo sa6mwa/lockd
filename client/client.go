@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"pkt.systems/lockd/api"
@@ -832,6 +833,7 @@ func (s *QueueStateHandle) CorrelationID() string {
 }
 
 const headerFencingToken = "X-Fencing-Token"
+const headerShutdownImminent = "Shutdown-Imminent"
 const headerCorrelationID = "X-Correlation-Id"
 
 // ErrMissingFencingToken is returned when an operation needs a fencing token but none was found.
@@ -845,20 +847,20 @@ var (
 const defaultEndpointPort = "9341"
 
 // ParseEndpoints splits a comma-separated server list and normalizes each
-// endpoint, applying default schemes based on mtls expectations.
-func ParseEndpoints(raw string, mtls bool) ([]string, error) {
+// endpoint, applying default schemes based on whether mTLS is disabled.
+func ParseEndpoints(raw string, disableMTLS bool) ([]string, error) {
 	parts := strings.Split(raw, ",")
-	return parseEndpointSlice(parts, mtls)
+	return parseEndpointSlice(parts, disableMTLS)
 }
 
-func parseEndpointSlice(parts []string, mtls bool) ([]string, error) {
+func parseEndpointSlice(parts []string, disableMTLS bool) ([]string, error) {
 	endpoints := make([]string, 0, len(parts))
 	for _, part := range parts {
 		ep := strings.TrimSpace(part)
 		if ep == "" {
 			continue
 		}
-		normalized, err := normalizeEndpoint(ep, mtls)
+		normalized, err := normalizeEndpoint(ep, disableMTLS)
 		if err != nil {
 			return nil, err
 		}
@@ -870,7 +872,7 @@ func parseEndpointSlice(parts []string, mtls bool) ([]string, error) {
 	return endpoints, nil
 }
 
-func normalizeEndpoint(raw string, mtls bool) (string, error) {
+func normalizeEndpoint(raw string, disableMTLS bool) (string, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return "", fmt.Errorf("lockd: empty endpoint")
@@ -886,7 +888,7 @@ func normalizeEndpoint(raw string, mtls bool) (string, error) {
 		return ensurePort(u, defaultEndpointPort), nil
 	}
 	scheme := "https://"
-	if !mtls {
+	if disableMTLS {
 		scheme = "http://"
 	}
 	u, err := url.Parse(scheme + trimmed)
@@ -1131,13 +1133,15 @@ func secondsFromDuration(d time.Duration) int64 {
 type LeaseSession struct {
 	client *Client
 	api.AcquireResponse
-	fencingToken  string
-	mu            sync.Mutex
-	closed        bool
-	closeErr      error
-	lastSnapshot  *StateSnapshot
-	correlationID string
-	endpoint      string
+	fencingToken   string
+	mu             sync.Mutex
+	closed         bool
+	closeErr       error
+	lastSnapshot   *StateSnapshot
+	correlationID  string
+	endpoint       string
+	drainOnce      sync.Once
+	drainTriggered atomic.Bool
 }
 
 // AcquireForUpdateHandler is invoked while a lease is held. The provided context
@@ -1263,13 +1267,15 @@ func (s *StateSnapshot) Decode(v any) error {
 }
 
 func newLeaseSession(c *Client, resp api.AcquireResponse, token string, endpoint string) *LeaseSession {
-	return &LeaseSession{
+	session := &LeaseSession{
 		client:          c,
 		AcquireResponse: resp,
 		fencingToken:    token,
 		correlationID:   resp.CorrelationID,
 		endpoint:        endpoint,
 	}
+	c.registerSession(session)
+	return session
 }
 
 func (s *LeaseSession) fencing() string {
@@ -1562,7 +1568,34 @@ func (s *LeaseSession) Release(ctx context.Context) error {
 	s.closed = true
 	s.closeErr = nil
 	s.mu.Unlock()
+	s.client.unregisterSession(s.LeaseID)
 	return nil
+}
+
+func (s *LeaseSession) triggerDrainRelease(reason string) {
+	if s == nil || s.client == nil {
+		return
+	}
+	if !s.client.drainAwareShutdown {
+		return
+	}
+	if !s.drainTriggered.CompareAndSwap(false, true) {
+		return
+	}
+	key := s.Key
+	leaseID := s.LeaseID
+	endpoint := s.endpoint
+	fields := []any{"key", key, "lease_id", leaseID, "endpoint", endpoint, "reason", reason}
+	s.client.logInfoCtx(context.Background(), "client.shutdown.auto_release.start", fields...)
+	go func() {
+		ctx, cancel := s.closeContext()
+		defer cancel()
+		if err := s.Release(ctx); err != nil {
+			s.client.logWarnCtx(ctx, "client.shutdown.auto_release.error", append(fields, "error", err)...)
+			return
+		}
+		s.client.logInfoCtx(ctx, "client.shutdown.auto_release.complete", fields...)
+	}()
 }
 
 // Close is equivalent to Release using a background context.
@@ -1666,19 +1699,22 @@ func CorrelationIDFromResponse(resp *http.Response) string {
 
 // Client is a convenience wrapper around the lockd HTTP API.
 type Client struct {
-	endpoints        []string
-	lastEndpoint     string
-	shuffleEndpoints bool
-	httpClient       *http.Client
-	httpTraceEnabled bool
-	leaseTokens      sync.Map
-	httpTimeout      time.Duration
-	closeTimeout     time.Duration
-	keepAliveTimeout time.Duration
-	forUpdateTimeout time.Duration
-	mtls             bool
-	logger           logport.ForLoggingSubset
-	failureRetries   int
+	endpoints          []string
+	lastEndpoint       string
+	shuffleEndpoints   bool
+	httpClient         *http.Client
+	httpTraceEnabled   bool
+	leaseTokens        sync.Map
+	sessions           sync.Map
+	httpTimeout        time.Duration
+	closeTimeout       time.Duration
+	keepAliveTimeout   time.Duration
+	forUpdateTimeout   time.Duration
+	disableMTLS        bool
+	logger             logport.ForLoggingSubset
+	failureRetries     int
+	drainAwareShutdown bool
+	shutdownNotified   atomic.Bool
 
 	closeOnce sync.Once
 }
@@ -1691,6 +1727,20 @@ func (c *Client) RegisterLeaseToken(leaseID, token string) {
 		return
 	}
 	c.leaseTokens.Store(leaseID, token)
+}
+
+func (c *Client) registerSession(sess *LeaseSession) {
+	if c == nil || sess == nil || sess.LeaseID == "" {
+		return
+	}
+	c.sessions.Store(sess.LeaseID, sess)
+}
+
+func (c *Client) unregisterSession(leaseID string) {
+	if leaseID == "" {
+		return
+	}
+	c.sessions.Delete(leaseID)
 }
 
 func (c *Client) fencingToken(leaseID, override string) (string, error) {
@@ -1990,12 +2040,13 @@ func WithEndpointShuffle(enabled bool) Option {
 	}
 }
 
-// WithMTLS toggles mutual TLS expectations for scheme inference.
-// When enabled (default), base URLs without a scheme assume HTTPS.
-// When disabled, base URLs without a scheme assume HTTP.
-func WithMTLS(enabled bool) Option {
+// WithDisableMTLS toggles mutual TLS expectations for scheme inference.
+// When disabled (false, default), base URLs without a scheme assume HTTPS.
+// When enabled (true), bare endpoints default to HTTP and TLS client
+// certificates are not loaded automatically.
+func WithDisableMTLS(disable bool) Option {
 	return func(c *Client) {
-		c.mtls = enabled
+		c.disableMTLS = disable
 	}
 }
 
@@ -2034,6 +2085,13 @@ func WithKeepAliveTimeout(d time.Duration) Option {
 	}
 }
 
+// WithDrainAwareShutdown toggles automatic lease releases when the server signals shutdown.
+func WithDrainAwareShutdown(enabled bool) Option {
+	return func(c *Client) {
+		c.drainAwareShutdown = enabled
+	}
+}
+
 // WithForUpdateTimeout overrides the timeout used for acquire-for-update requests.
 func WithForUpdateTimeout(d time.Duration) Option {
 	return func(c *Client) {
@@ -2060,18 +2118,19 @@ func New(baseURL string, opts ...Option) (*Client, error) {
 		return nil, fmt.Errorf("baseURL required")
 	}
 	c := &Client{
-		shuffleEndpoints: true,
-		httpTimeout:      defaultHTTPTimeout,
-		closeTimeout:     defaultCloseTimeout,
-		keepAliveTimeout: defaultKeepAliveTimeout,
-		forUpdateTimeout: defaultForUpdateTimeout,
-		mtls:             true,
-		failureRetries:   DefaultFailureRetries,
+		shuffleEndpoints:   true,
+		httpTimeout:        defaultHTTPTimeout,
+		closeTimeout:       defaultCloseTimeout,
+		keepAliveTimeout:   defaultKeepAliveTimeout,
+		forUpdateTimeout:   defaultForUpdateTimeout,
+		disableMTLS:        false,
+		failureRetries:     DefaultFailureRetries,
+		drainAwareShutdown: true,
 	}
 	for _, opt := range opts {
 		opt(c)
 	}
-	endpoints, err := ParseEndpoints(trimmed, c.mtls)
+	endpoints, err := ParseEndpoints(trimmed, c.disableMTLS)
 	if err != nil {
 		return nil, err
 	}
@@ -2084,18 +2143,19 @@ func New(baseURL string, opts ...Option) (*Client, error) {
 // NewWithEndpoints constructs a client from a slice of server endpoints.
 func NewWithEndpoints(endpoints []string, opts ...Option) (*Client, error) {
 	c := &Client{
-		shuffleEndpoints: true,
-		httpTimeout:      defaultHTTPTimeout,
-		closeTimeout:     defaultCloseTimeout,
-		keepAliveTimeout: defaultKeepAliveTimeout,
-		forUpdateTimeout: defaultForUpdateTimeout,
-		mtls:             true,
-		failureRetries:   DefaultFailureRetries,
+		shuffleEndpoints:   true,
+		httpTimeout:        defaultHTTPTimeout,
+		closeTimeout:       defaultCloseTimeout,
+		keepAliveTimeout:   defaultKeepAliveTimeout,
+		forUpdateTimeout:   defaultForUpdateTimeout,
+		disableMTLS:        false,
+		failureRetries:     DefaultFailureRetries,
+		drainAwareShutdown: true,
 	}
 	for _, opt := range opts {
 		opt(c)
 	}
-	normalized, err := parseEndpointSlice(endpoints, c.mtls)
+	normalized, err := parseEndpointSlice(endpoints, c.disableMTLS)
 	if err != nil {
 		return nil, err
 	}
@@ -2789,7 +2849,10 @@ func (c *Client) GetState(ctx context.Context, key, leaseID string) (io.ReadClos
 	}
 	c.logTraceCtx(ctx, "client.get_state.start", "key", key, "lease_id", leaseID, "endpoint", c.lastEndpoint, "fencing_token", token)
 	builder := func(base string) (*http.Request, context.CancelFunc, error) {
-		reqCtx, cancel := c.requestContext(ctx)
+		// Use the caller's context without the per-request HTTP timeout so that
+		// AcquireForUpdate handlers can continue reading the snapshot while the
+		// server is draining. Callers are expected to bound ctx themselves.
+		reqCtx, cancel := c.requestContextNoTimeout(ctx)
 		full := fmt.Sprintf("%s/v1/get-state?key=%s", base, url.QueryEscape(key))
 		req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, full, http.NoBody)
 		if err != nil {
@@ -3067,6 +3130,7 @@ func (c *Client) postJSON(ctx context.Context, path string, payload any, out any
 	}
 	defer cancel()
 	defer resp.Body.Close()
+	c.observeShutdown(endpoint, resp)
 	if resp.StatusCode >= 300 {
 		c.logWarnCtx(ctx, "client.http.post.error", "path", path, "endpoint", endpoint, "status", resp.StatusCode)
 		return endpoint, c.decodeError(resp)
@@ -3138,6 +3202,55 @@ func parseRetryAfterHeader(raw string) time.Duration {
 	return 0
 }
 
+func shutdownSignalFromHeader(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false
+	}
+	switch strings.ToLower(raw) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *Client) observeShutdown(endpoint string, resp *http.Response) {
+	if c == nil || resp == nil || !c.drainAwareShutdown {
+		return
+	}
+	if !shutdownSignalFromHeader(resp.Header.Get(headerShutdownImminent)) {
+		return
+	}
+	ctx := context.Background()
+	if resp.Request != nil {
+		ctx = resp.Request.Context()
+	}
+	fields := []any{"endpoint", endpoint}
+	if c.shutdownNotified.CompareAndSwap(false, true) {
+		c.logInfoCtx(ctx, "client.shutdown.notice", fields...)
+	} else {
+		c.logDebugCtx(ctx, "client.shutdown.notice.repeat", fields...)
+	}
+	matchEndpoint := func(sessEndpoint string) bool {
+		if endpoint == "" || sessEndpoint == "" {
+			return true
+		}
+		return sessEndpoint == endpoint
+	}
+	c.sessions.Range(func(_, value any) bool {
+		sess, ok := value.(*LeaseSession)
+		if !ok || sess == nil {
+			return true
+		}
+		if !matchEndpoint(sess.endpoint) {
+			return true
+		}
+		sess.triggerDrainRelease("server_shutdown")
+		return true
+	})
+}
+
 func retryAfterFromError(err error) time.Duration {
 	var apiErr *APIError
 	if errors.As(err, &apiErr) {
@@ -3154,6 +3267,7 @@ func qrfStateFromError(err error) string {
 	return ""
 }
 
+// QueueAck acknowledges a queue message via the /v1/queue/ack API.
 func (c *Client) QueueAck(ctx context.Context, req api.AckRequest) (*api.AckResponse, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -3182,6 +3296,7 @@ func (c *Client) QueueAck(ctx context.Context, req api.AckRequest) (*api.AckResp
 	}
 	defer cancel()
 	defer resp.Body.Close()
+	c.observeShutdown(endpoint, resp)
 	if resp.StatusCode != http.StatusOK {
 		warnFields := []any{"queue", req.Queue, "mid", req.MessageID, "endpoint", endpoint, "status", resp.StatusCode}
 		if cidCtx != "" {
@@ -3209,6 +3324,7 @@ func (c *Client) QueueAck(ctx context.Context, req api.AckRequest) (*api.AckResp
 	return &res, nil
 }
 
+// QueueNack requeues a message with an optional visibility delay via /v1/queue/nack.
 func (c *Client) QueueNack(ctx context.Context, req api.NackRequest) (*api.NackResponse, error) {
 	if req.DelaySeconds < 0 {
 		req.DelaySeconds = 0
@@ -3240,6 +3356,7 @@ func (c *Client) QueueNack(ctx context.Context, req api.NackRequest) (*api.NackR
 	}
 	defer cancel()
 	defer resp.Body.Close()
+	c.observeShutdown(endpoint, resp)
 	if resp.StatusCode != http.StatusOK {
 		warnFields := []any{"queue", req.Queue, "mid", req.MessageID, "endpoint", endpoint, "status", resp.StatusCode}
 		if cidCtx != "" {
@@ -3267,6 +3384,7 @@ func (c *Client) QueueNack(ctx context.Context, req api.NackRequest) (*api.NackR
 	return &res, nil
 }
 
+// QueueExtend extends a queue message's visibility window using /v1/queue/extend.
 func (c *Client) QueueExtend(ctx context.Context, req api.ExtendRequest) (*api.ExtendResponse, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -3295,6 +3413,7 @@ func (c *Client) QueueExtend(ctx context.Context, req api.ExtendRequest) (*api.E
 	}
 	defer cancel()
 	defer resp.Body.Close()
+	c.observeShutdown(endpoint, resp)
 	if resp.StatusCode != http.StatusOK {
 		warnFields := []any{"queue", req.Queue, "mid", req.MessageID, "endpoint", endpoint, "status", resp.StatusCode}
 		if cidCtx != "" {
@@ -3384,6 +3503,7 @@ func (c *Client) dequeueInternal(ctx context.Context, queue string, opts Dequeue
 		return nil, err
 	}
 	cancel()
+	c.observeShutdown(endpoint, resp)
 	if resp.StatusCode != http.StatusOK {
 		errorFields := []any{"queue", queue, "owner", owner, "endpoint", endpoint, "status", resp.StatusCode}
 		if cidCtx != "" {
@@ -3523,6 +3643,7 @@ func (c *Client) dequeueInternal(ctx context.Context, queue string, opts Dequeue
 	return result, nil
 }
 
+// Enqueue pushes a payload into the specified queue using /v1/queue/enqueue.
 func (c *Client) Enqueue(ctx context.Context, queue string, payload io.Reader, opts EnqueueOptions) (*api.EnqueueResponse, error) {
 	queue = strings.TrimSpace(queue)
 	if queue == "" {
@@ -3647,6 +3768,7 @@ func (c *Client) EnqueueBytes(ctx context.Context, queue string, payload []byte,
 	return c.Enqueue(ctx, queue, bytes.NewReader(payload), opts)
 }
 
+// Dequeue pops a single message from the queue using /v1/queue/dequeue.
 func (c *Client) Dequeue(ctx context.Context, queue string, opts DequeueOptions) (*QueueMessage, error) {
 	res, err := c.dequeueInternal(ctx, queue, opts, false)
 	if err != nil {
@@ -3686,6 +3808,7 @@ func (c *Client) DequeueBatch(ctx context.Context, queue string, opts DequeueOpt
 	return batch, nil
 }
 
+// DequeueWithState pops a queue message and returns its state payload in one call.
 func (c *Client) DequeueWithState(ctx context.Context, queue string, opts DequeueOptions) (*QueueMessage, error) {
 	res, err := c.dequeueInternal(ctx, queue, opts, true)
 	if err != nil {
@@ -3782,6 +3905,7 @@ func (c *Client) subscribe(ctx context.Context, queue string, opts SubscribeOpti
 	}
 	defer cancel()
 	defer resp.Body.Close()
+	c.observeShutdown(endpoint, resp)
 
 	if resp.StatusCode != http.StatusOK {
 		err := c.decodeError(resp)
@@ -3790,6 +3914,9 @@ func (c *Client) subscribe(ctx context.Context, queue string, opts SubscribeOpti
 
 	mediaType, params, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	if err != nil || !strings.HasPrefix(strings.ToLower(mediaType), "multipart/") {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		return fmt.Errorf("lockd: unexpected subscribe content-type %q", resp.Header.Get("Content-Type"))
 	}
 	boundary := params["boundary"]

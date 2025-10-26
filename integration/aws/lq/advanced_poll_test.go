@@ -339,7 +339,7 @@ func runAWSQueueMultiServerFailoverClient(t *testing.T) {
 	endpoints := []string{serverA.URL(), serverB.URL()}
 	capture := queuetestutil.NewLogCapture(t)
 	failoverClient, err := lockdclient.NewWithEndpoints(endpoints,
-		lockdclient.WithMTLS(false),
+		lockdclient.WithDisableMTLS(true),
 		lockdclient.WithEndpointShuffle(false),
 		lockdclient.WithLogger(capture.Logger()),
 	)

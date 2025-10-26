@@ -60,7 +60,7 @@ func prepareMinioQueueConfig(t testing.TB, opts minioQueueOptions) lockd.Config 
 	cfg.QRFLoadSoftLimitMultiplier = lockd.DefaultQRFLoadSoftLimitMultiplier
 	cfg.QRFLoadHardLimitMultiplier = lockd.DefaultQRFLoadHardLimitMultiplier
 
-	cfg.MTLS = false
+	cfg.DisableMTLS = true
 	cfg.ListenProto = "tcp"
 	cfg.Listen = "127.0.0.1:0"
 

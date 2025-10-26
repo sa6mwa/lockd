@@ -29,8 +29,8 @@ func TestNewRunsServerAndCloseIsIdempotent(t *testing.T) {
 
 	ctx := context.Background()
 	cfg := lockd.Config{
-		Store: "mem://",
-		MTLS:  true, // should be disabled automatically.
+		Store:       "mem://",
+		DisableMTLS: false, // should be disabled automatically.
 	}
 	inproc, err := inprocess.New(ctx, cfg)
 	if err != nil {

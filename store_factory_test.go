@@ -7,7 +7,10 @@ import (
 )
 
 func TestOpenBackendMemory(t *testing.T) {
-	cfg := Config{Store: "mem://"}
+	cfg := Config{
+		Store:                    "mem://",
+		DisableStorageEncryption: true, // memory backend has no bundle, so opt out of crypto
+	}
 	backend, err := openBackend(cfg, nil)
 	if err != nil {
 		t.Fatalf("open backend: %v", err)

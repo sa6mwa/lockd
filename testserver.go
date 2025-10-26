@@ -28,7 +28,7 @@ type TestServer struct {
 	Client   *client.Client
 	Config   Config
 
-	stop    func(context.Context) error
+	stop    func(context.Context, ...CloseOption) error
 	backend storage.Backend
 	proxy   *chaosProxy
 }
@@ -79,7 +79,7 @@ func (w *testingWriter) close() {
 }
 
 // Stop shuts down the server using the provided context.
-func (ts *TestServer) Stop(ctx context.Context) error {
+func (ts *TestServer) Stop(ctx context.Context, opts ...CloseOption) error {
 	if ts == nil || ts.stop == nil {
 		return nil
 	}
@@ -90,7 +90,7 @@ func (ts *TestServer) Stop(ctx context.Context) error {
 		_ = ts.proxy.Close()
 		ts.proxy = nil
 	}
-	return ts.stop(ctx)
+	return ts.stop(ctx, opts...)
 }
 
 // NewTestingLogger creates a logport logger that writes through testing.TB.
@@ -140,25 +140,27 @@ func (ts *TestServer) NewClient(opts ...client.Option) (*client.Client, error) {
 		return nil, fmt.Errorf("nil test server")
 	}
 	options := make([]client.Option, 0, len(opts)+1)
-	if !ts.Config.MTLS {
-		options = append(options, client.WithMTLS(false))
+	if !ts.Config.MTLSEnabled() {
+		options = append(options, client.WithDisableMTLS(true))
 	}
 	options = append(options, opts...)
 	return client.New(ts.BaseURL, options...)
 }
 
 type testServerOptions struct {
-	cfg           Config
-	cfgSet        bool
-	mutators      []func(*Config)
-	backend       storage.Backend
-	logger        logport.ForLogging
-	clientOpts    []client.Option
-	disableClient bool
-	startTimeout  time.Duration
-	chaosConfig   *ChaosConfig
-	testTB        testing.TB
-	testLogLevel  logport.Level
+	cfg              Config
+	cfgSet           bool
+	mutators         []func(*Config)
+	backend          storage.Backend
+	logger           logport.ForLogging
+	clientOpts       []client.Option
+	disableClient    bool
+	startTimeout     time.Duration
+	chaosConfig      *ChaosConfig
+	testTB           testing.TB
+	testLogLevel     logport.Level
+	closeDefaults    []CloseOption
+	closeDefaultsSet bool
 }
 
 // TestServerOption customises NewTestServer/StartTestServer behaviour.
@@ -268,6 +270,22 @@ func WithTestLoggerTB(t testing.TB) TestServerOption {
 	return WithTestLoggerFromTB(t, logport.DebugLevel)
 }
 
+// WithTestCloseDefaults overrides the shutdown CloseOptions applied to StartTestServer instances.
+// Passing no options restores the production defaults (currently 8s drain / 10s overall).
+func WithTestCloseDefaults(opts ...CloseOption) TestServerOption {
+	return func(o *testServerOptions) {
+		o.closeDefaults = append([]CloseOption(nil), opts...)
+		o.closeDefaultsSet = true
+	}
+}
+
+func defaultTestCloseDefaults() []CloseOption {
+	return []CloseOption{
+		WithDrainLeases(4 * time.Second),
+		WithShutdownTimeout(5 * time.Second),
+	}
+}
+
 // NewTestServer starts a lockd server suitable for tests. Call Stop to clean up resources.
 func NewTestServer(ctx context.Context, opts ...TestServerOption) (*TestServer, error) {
 	options := testServerOptions{
@@ -275,7 +293,7 @@ func NewTestServer(ctx context.Context, opts ...TestServerOption) (*TestServer, 
 			Store:       "mem://",
 			ListenProto: "tcp",
 			Listen:      "127.0.0.1:0",
-			MTLS:        false,
+			DisableMTLS: true,
 		},
 		logger:       nil,
 		startTimeout: 5 * time.Second,
@@ -283,6 +301,9 @@ func NewTestServer(ctx context.Context, opts ...TestServerOption) (*TestServer, 
 	}
 	for _, opt := range opts {
 		opt(&options)
+	}
+	if !options.closeDefaultsSet {
+		options.closeDefaults = defaultTestCloseDefaults()
 	}
 
 	cfg := options.cfg
@@ -323,13 +344,16 @@ func NewTestServer(ctx context.Context, opts ...TestServerOption) (*TestServer, 
 	ctxServer, cancel := context.WithCancel(context.Background())
 	type startResult struct {
 		srv  *Server
-		stop func(context.Context) error
+		stop func(context.Context, ...CloseOption) error
 		err  error
 	}
 	resultCh := make(chan startResult, 1)
 	backend := options.backend
 	go func() {
 		startOpts := []Option{WithLogger(logger)}
+		if len(options.closeDefaults) > 0 {
+			startOpts = append(startOpts, WithDefaultCloseOptions(options.closeDefaults...))
+		}
 		if backend != nil {
 			startOpts = append(startOpts, WithBackend(backend))
 		}
@@ -369,9 +393,9 @@ func NewTestServer(ctx context.Context, opts ...TestServerOption) (*TestServer, 
 	}
 	srv := res.srv
 	originalStop := res.stop
-	stop := func(stopCtx context.Context) error {
+	stop := func(stopCtx context.Context, closeOpts ...CloseOption) error {
 		cancel()
-		return originalStop(stopCtx)
+		return originalStop(stopCtx, closeOpts...)
 	}
 
 	addr := srv.ListenerAddr()
@@ -390,8 +414,8 @@ func NewTestServer(ctx context.Context, opts ...TestServerOption) (*TestServer, 
 	var baseClientOpts []client.Option
 	if !options.disableClient {
 		baseClientOpts = make([]client.Option, 0, len(options.clientOpts)+1)
-		if !cfg.MTLS {
-			baseClientOpts = append(baseClientOpts, client.WithMTLS(false))
+		if !cfg.MTLSEnabled() {
+			baseClientOpts = append(baseClientOpts, client.WithDisableMTLS(true))
 		}
 		baseClientOpts = append(baseClientOpts, options.clientOpts...)
 		cli, err = client.New(baseURL, baseClientOpts...)
@@ -470,7 +494,7 @@ func computeBaseURL(cfg Config, addr net.Addr) (string, error) {
 	default:
 		host := addr.String()
 		scheme := "http"
-		if cfg.MTLS {
+		if cfg.MTLSEnabled() {
 			scheme = "https"
 		}
 		return fmt.Sprintf("%s://%s", scheme, host), nil

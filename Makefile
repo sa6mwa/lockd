@@ -1,18 +1,13 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-integration-aws test-integration-minio test-integration-disk test-integration-azure test-integration-otlp test-integration-otlp-external bench-disk diagrams
+.PHONY: help test test-integration bench diagrams
 
 help:
 	@echo "Available targets:"
 	@echo "  make test                    # run unit tests"
-	@echo "  make test-integration-aws    # run AWS S3 integration suite"
-	@echo "  make test-integration-minio  # run MinIO integration suite"
-	@echo "  make test-integration-disk   # run disk backend integration suite"
-	@echo "  make test-integration-azure  # run Azure Blob integration suite"
-	@echo "  make test-integration-otlp   # run OTLP observability integration suite"
-	@echo "  make test-integration-otlp-external # run OTLP tests against external collector"
-	@echo "  make bench-disk              # run disk backend benchmarks"
+	@echo "  make test-integration        # run integration suites (pass SUITES=...)"
+	@echo "  make bench                    # run benchmark suites (pass SUITES=...)"
 	@echo "  make diagrams                # render PlantUML sequence diagrams to JPEG"
 
 # Example environment file contents shown when missing
@@ -38,40 +33,23 @@ test:
 	@echo "Running unit tests"
 	@go test ./...
 
-test-integration-aws:
-	$(call ENSURE_ENV,.env.aws,AWS_ENV_EXAMPLE)
-	@echo "Running AWS integration tests"
-	@$(call RUN_WITH_ENV,.env.aws,go test -timeout 2m -count 1 -v -tags "integration aws" ./integration/aws)
+test-integration:
+	@if [[ -z "$(SUITES)" ]]; then \
+		echo "Running all integration suites"; \
+		./run-integration-suites.sh all; \
+	else \
+		echo "Running suites: $(SUITES)"; \
+		./run-integration-suites.sh $(SUITES); \
+	fi
 
-test-integration-minio:
-	$(call ENSURE_ENV,.env.minio,MINIO_ENV_EXAMPLE)
-	@echo "Running MinIO integration tests"
-	@$(call RUN_WITH_ENV,.env.minio,go test -timeout 1m -count 1 -v -tags "integration minio" ./integration/minio)
-
-test-integration-disk:
-	$(call ENSURE_ENV,.env.disk,DISK_ENV_EXAMPLE)
-	@echo "Running disk integration tests"
-	@$(call RUN_WITH_ENV,.env.disk,go test -timeout 1m -count 1 -v -tags "integration disk" ./integration/disk)
-
-test-integration-azure:
-	$(call ENSURE_ENV,.env.azure,AZURE_ENV_EXAMPLE)
-	@echo "Running Azure integration tests"
-	@$(call RUN_WITH_ENV,.env.azure,go test -timeout 2m -count 1 -v -tags "integration azure" ./integration/azure)
-
-test-integration-otlp:
-	$(call ENSURE_ENV,.env.otlp,OTLP_ENV_EXAMPLE)
-	@echo "Running OTLP observability integration tests"
-	@$(call RUN_WITH_ENV,.env.otlp,go test -timeout 90s -count 1 -v -tags "integration disk minio otlp" ./integration/disk ./integration/minio)
-
-test-integration-otlp-external:
-	$(call ENSURE_ENV,.env.otlp,OTLP_ENV_EXAMPLE)
-	@echo "Running OTLP external collector integration tests"
-	@$(call RUN_WITH_ENV,.env.otlp,go test -timeout 90s -count 1 -v -tags "integration disk minio otlp external" ./integration/disk ./integration/minio)
-
-bench-disk:
-	$(call ENSURE_ENV,.env.disk,DISK_ENV_EXAMPLE)
-	@echo "Running disk backend benchmarks (5 iterations each)"
-	@$(call RUN_WITH_ENV,.env.disk,go test -run=^$$ -bench=LockdDisk -benchtime=5x -count 1 -tags "integration disk bench" ./integration/disk)
+bench:
+	@if [[ -z "$(SUITES)" ]]; then \
+		echo "Running all benchmark suites"; \
+		./run-benchmark-suites.sh all; \
+	else \
+		echo "Running benchmark suites: $(SUITES)"; \
+		./run-benchmark-suites.sh $(SUITES); \
+	fi
 
 PLANTUML_SOURCES := $(wildcard docs/diagrams/*.puml)
 PLANTUML_OUT_SVG := $(PLANTUML_SOURCES:.puml=.svg)

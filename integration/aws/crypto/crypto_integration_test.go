@@ -1,4 +1,4 @@
-//go:build integration && aws
+//go:build integration && aws && crypto
 
 package awscrypto
 
@@ -245,7 +245,7 @@ func startServer(t testing.TB, cfg lockd.Config) *lockdclient.Client {
 		lockd.WithTestListener("tcp", "127.0.0.1:0"),
 		lockd.WithTestLoggerFromTB(t, logport.TraceLevel),
 		lockd.WithTestClientOptions(
-			lockdclient.WithMTLS(false),
+			lockdclient.WithDisableMTLS(true),
 			lockdclient.WithHTTPTimeout(90*time.Second),
 			lockdclient.WithKeepAliveTimeout(90*time.Second),
 			lockdclient.WithCloseTimeout(90*time.Second),

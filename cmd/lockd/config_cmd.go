@@ -82,29 +82,33 @@ func newConfigGenCommand() *cobra.Command {
 }
 
 type configDefaults struct {
-	Listen                  string  `yaml:"listen"`
-	ListenProto             string  `yaml:"listen-proto"`
-	Store                   string  `yaml:"store"`
-	JSONMax                 string  `yaml:"json-max"`
-	JSONUtil                string  `yaml:"json-util"`
-	PayloadSpoolMem         string  `yaml:"payload-spool-mem"`
-	DefaultTTL              string  `yaml:"default-ttl"`
-	MaxTTL                  string  `yaml:"max-ttl"`
-	AcquireBlock            string  `yaml:"acquire-block"`
-	SweeperInterval         string  `yaml:"sweeper-interval"`
-	MTLS                    bool    `yaml:"mtls"`
-	Bundle                  string  `yaml:"bundle"`
-	DenylistPath            string  `yaml:"denylist-path"`
-	StoreSSE                string  `yaml:"s3-sse"`
-	StoreKMSKeyID           string  `yaml:"s3-kms-key-id"`
-	StoreMaxPartSize        string  `yaml:"s3-max-part-size"`
-	AWSRegion               string  `yaml:"aws-region"`
-	AWSKMSKeyID             string  `yaml:"aws-kms-key-id"`
-	StorageRetryMaxAttempts int     `yaml:"storage-retry-attempts"`
-	StorageRetryBaseDelay   string  `yaml:"storage-retry-base-delay"`
-	StorageRetryMaxDelay    string  `yaml:"storage-retry-max-delay"`
-	StorageRetryMultiplier  float64 `yaml:"storage-retry-multiplier"`
-	LogLevel                string  `yaml:"log-level"`
+	Listen                    string  `yaml:"listen"`
+	ListenProto               string  `yaml:"listen-proto"`
+	Store                     string  `yaml:"store"`
+	JSONMax                   string  `yaml:"json-max"`
+	JSONUtil                  string  `yaml:"json-util"`
+	PayloadSpoolMem           string  `yaml:"payload-spool-mem"`
+	DefaultTTL                string  `yaml:"default-ttl"`
+	MaxTTL                    string  `yaml:"max-ttl"`
+	AcquireBlock              string  `yaml:"acquire-block"`
+	SweeperInterval           string  `yaml:"sweeper-interval"`
+	DrainGrace                string  `yaml:"drain-grace"`
+	ShutdownTimeout           string  `yaml:"shutdown-timeout"`
+	DisableMTLS               bool    `yaml:"disable-mtls"`
+	DisableStorageEncryption  bool    `yaml:"disable-storage-encryption"`
+	StorageEncryptionSnappy   bool    `yaml:"storage-encryption-snappy"`
+	Bundle                    string  `yaml:"bundle"`
+	DenylistPath              string  `yaml:"denylist-path"`
+	StoreSSE                  string  `yaml:"s3-sse"`
+	StoreKMSKeyID             string  `yaml:"s3-kms-key-id"`
+	StoreMaxPartSize          string  `yaml:"s3-max-part-size"`
+	AWSRegion                 string  `yaml:"aws-region"`
+	AWSKMSKeyID               string  `yaml:"aws-kms-key-id"`
+	StorageRetryMaxAttempts   int     `yaml:"storage-retry-attempts"`
+	StorageRetryBaseDelay     string  `yaml:"storage-retry-base-delay"`
+	StorageRetryMaxDelay      string  `yaml:"storage-retry-max-delay"`
+	StorageRetryMultiplier    float64 `yaml:"storage-retry-multiplier"`
+	LogLevel                  string  `yaml:"log-level"`
 }
 
 func configHumanizeBytes(n int64) string {
@@ -123,7 +127,11 @@ func defaultConfigYAML() ([]byte, error) {
 		MaxTTL:                  lockd.DefaultMaxTTL.String(),
 		AcquireBlock:            lockd.DefaultAcquireBlock.String(),
 		SweeperInterval:         lockd.DefaultSweeperInterval.String(),
-		MTLS:                    true,
+		DrainGrace:              lockd.DefaultDrainGrace.String(),
+		ShutdownTimeout:         lockd.DefaultShutdownTimeout.String(),
+		DisableMTLS:             false,
+		DisableStorageEncryption: false,
+		StorageEncryptionSnappy:  false,
 		Bundle:                  "",
 		DenylistPath:            "",
 		StoreSSE:                "",

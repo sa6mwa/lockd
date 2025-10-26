@@ -21,6 +21,7 @@ import (
 	api "pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/integration/internal/cryptotest"
+	shutdowntest "pkt.systems/lockd/integration/internal/shutdowntest"
 	testlog "pkt.systems/lockd/integration/internal/testlog"
 	"pkt.systems/lockd/internal/diagnostics/storagecheck"
 	"pkt.systems/lockd/internal/storage"
@@ -29,9 +30,50 @@ import (
 	"pkt.systems/logport"
 )
 
+var (
+	awsStoreVerifyOnce sync.Once
+	awsStoreVerifyErr  error
+)
+
 func TestAWSStoreVerification(t *testing.T) {
 	cfg := loadAWSConfig(t)
 	ensureStoreReady(t, context.Background(), cfg)
+}
+
+func TestAWSShutdownDrainingBlocksAcquire(t *testing.T) {
+	cfg := loadAWSConfig(t)
+	ensureStoreReady(t, context.Background(), cfg)
+	ts := startAWSTestServer(t, cfg)
+	t.Cleanup(func() { _ = ts.Stop(context.Background()) })
+	cli := ts.Client
+	if cli == nil {
+		t.Fatalf("nil test server client")
+	}
+	ctx := context.Background()
+	key := "aws-drain-" + uuidv7.NewString()
+	lease := acquireWithRetry(t, ctx, cli, key, "holder", 45, lockdclient.BlockWaitForever)
+	stopCh := make(chan error, 1)
+	go func() {
+		stopCh <- ts.Stop(context.Background(), lockd.WithDrainLeases(3*time.Second), lockd.WithShutdownTimeout(4*time.Second))
+	}()
+	payload, _ := json.Marshal(api.AcquireRequest{Key: "aws-drain-wait", Owner: "drain-tester", TTLSeconds: 5})
+	url := ts.URL() + "/v1/acquire"
+	result := shutdowntest.WaitForShutdownDrainingAcquire(t, url, payload)
+	if result.Response.ErrorCode != "shutdown_draining" {
+		t.Fatalf("expected shutdown_draining error, got %+v", result.Response)
+	}
+	if result.Header.Get("Shutdown-Imminent") == "" {
+		t.Fatalf("expected Shutdown-Imminent header, got %v", result.Header)
+	}
+	select {
+	case err := <-stopCh:
+		if err != nil {
+			t.Fatalf("server stop failed: %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatalf("server stop timed out")
+	}
+	_ = lease.Release(ctx)
 }
 
 func TestAWSLockLifecycle(t *testing.T) {
@@ -593,7 +635,7 @@ func TestAWSAcquireForUpdateCallbackFailover(t *testing.T) {
 	clientLogger, clientLogs := testlog.NewRecorder(t, logport.TraceLevel)
 	failoverClient, err := lockdclient.NewWithEndpoints(
 		[]string{primary.URL(), backup.URL()},
-		lockdclient.WithMTLS(false),
+		lockdclient.WithDisableMTLS(true),
 		lockdclient.WithHTTPTimeout(90*time.Second),
 		lockdclient.WithCloseTimeout(90*time.Second),
 		lockdclient.WithKeepAliveTimeout(90*time.Second),
@@ -808,7 +850,7 @@ func TestAWSRemoveStateFailover(t *testing.T) {
 	clientLogger, clientLogs := testlog.NewRecorder(t, logport.TraceLevel)
 	failoverClient, err := lockdclient.NewWithEndpoints(
 		[]string{primary.URL(), backup.URL()},
-		lockdclient.WithMTLS(false),
+		lockdclient.WithDisableMTLS(true),
 		lockdclient.WithHTTPTimeout(90*time.Second),
 		lockdclient.WithCloseTimeout(90*time.Second),
 		lockdclient.WithKeepAliveTimeout(90*time.Second),
@@ -998,12 +1040,19 @@ func loadAWSConfig(t *testing.T) lockd.Config {
 }
 
 func ensureStoreReady(t *testing.T, ctx context.Context, cfg lockd.Config) {
-	res, err := storagecheck.VerifyStore(ctx, cfg)
-	if err != nil {
-		t.Fatalf("verify store: %v", err)
-	}
-	if !res.Passed() {
-		t.Fatalf("store verification failed: %+v", res)
+	resetAWSBucketForCrypto(t, cfg)
+	awsStoreVerifyOnce.Do(func() {
+		res, err := storagecheck.VerifyStore(ctx, cfg)
+		if err != nil {
+			awsStoreVerifyErr = err
+			return
+		}
+		if !res.Passed() {
+			awsStoreVerifyErr = fmt.Errorf("store verification failed: %+v", res)
+		}
+	})
+	if awsStoreVerifyErr != nil {
+		t.Fatalf("store verification failed: %v", awsStoreVerifyErr)
 	}
 }
 
@@ -1023,7 +1072,7 @@ func startLockdServer(t *testing.T, cfg lockd.Config) *lockdclient.Client {
 func startAWSTestServer(t testing.TB, cfg lockd.Config, opts ...lockd.TestServerOption) *lockd.TestServer {
 	t.Helper()
 	cfgCopy := cfg
-	cfgCopy.MTLS = false
+	cfgCopy.DisableMTLS = true
 	if cfgCopy.JSONMaxBytes == 0 {
 		cfgCopy.JSONMaxBytes = 100 << 20
 	}

@@ -346,7 +346,7 @@ func startMinioBenchServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client 
 
 	cfg.Listen = "127.0.0.1:0"
 	cfg.ListenProto = "tcp"
-	cfg.MTLS = false
+	cfg.DisableMTLS = true
 	cfg.JSONMaxBytes = 100 << 20
 	cfg.DefaultTTL = 30 * time.Second
 	cfg.MaxTTL = 2 * time.Minute

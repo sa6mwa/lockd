@@ -2,12 +2,16 @@ package lockd
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"sync"
 	"testing"
 	"time"
 
 	"pkt.systems/logport"
 
+	"pkt.systems/lockd/api"
+	"pkt.systems/lockd/client"
 	"pkt.systems/lockd/internal/clock"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/memory"
@@ -42,6 +46,101 @@ func (c *sweeperClock) Sleep(d time.Duration) {
 	c.mu.Lock()
 	c.now = c.now.Add(d)
 	c.mu.Unlock()
+}
+
+func waitFor(t *testing.T, timeout, interval time.Duration, fn func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if fn() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("condition not met within %s", timeout)
+		}
+		time.Sleep(interval)
+	}
+}
+
+type drainCapture struct {
+	mu     sync.Mutex
+	policy DrainLeasesPolicy
+	calls  int
+}
+
+func (d *drainCapture) run(_ context.Context, policy DrainLeasesPolicy) drainSummary {
+	d.mu.Lock()
+	d.policy = policy
+	d.calls++
+	d.mu.Unlock()
+	elapsed := policy.GracePeriod
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	return drainSummary{ActiveAtStart: 1, Remaining: 0, Elapsed: elapsed}
+}
+
+func (d *drainCapture) Policy() DrainLeasesPolicy {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.policy
+}
+
+type httpShutdownCapture struct {
+	mu  sync.Mutex
+	ctx context.Context
+}
+
+func (h *httpShutdownCapture) fn(ctx context.Context) error {
+	h.mu.Lock()
+	h.ctx = ctx
+	h.mu.Unlock()
+	if ctx == nil {
+		return http.ErrServerClosed
+	}
+	if err := ctx.Err(); err != nil && err != context.Canceled && err != context.DeadlineExceeded {
+		return err
+	}
+	return http.ErrServerClosed
+}
+
+func (h *httpShutdownCapture) Deadline() (time.Time, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.ctx == nil {
+		return time.Time{}, false
+	}
+	return h.ctx.Deadline()
+}
+
+func newShutdownHarness(t *testing.T) (*Server, *drainCapture, *httpShutdownCapture) {
+	t.Helper()
+	srv := &Server{
+		cfg:              Config{},
+		logger:           logport.NoopLogger(),
+		backend:          memory.New(),
+		httpSrv:          &http.Server{},
+		clock:            clock.Real{},
+		readyCh:          make(chan struct{}),
+		defaultCloseOpts: defaultCloseOptions(),
+	}
+	close(srv.readyCh)
+	drainCap := &drainCapture{}
+	srv.drainFn = drainCap.run
+	httpCap := &httpShutdownCapture{}
+	srv.httpShutdown = httpCap.fn
+	return srv, drainCap, httpCap
+}
+
+func durationAlmostEqual(t *testing.T, got, want, tolerance time.Duration) {
+	t.Helper()
+	delta := got - want
+	if delta < 0 {
+		delta = -delta
+	}
+	if delta > tolerance {
+		t.Fatalf("duration mismatch: got %v want %v (±%v)", got, want, tolerance)
+	}
 }
 
 func TestSweeperClearsExpiredLeases(t *testing.T) {
@@ -85,5 +184,190 @@ func TestSweeperClearsExpiredLeases(t *testing.T) {
 	}
 	if updated.Lease != nil {
 		t.Fatalf("expected sweeper to clear lease, still present: %+v", updated.Lease)
+	}
+}
+
+func TestShutdownBlocksAcquireDuringDrain(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{Store: "mem://", Listen: "127.0.0.1:0", DisableMTLS: true}
+	srv, stop, err := StartServer(ctx, cfg)
+	if err != nil {
+		t.Fatalf("start server: %v", err)
+	}
+	addr := srv.ListenerAddr()
+	if addr == nil {
+		t.Fatal("listener address not available")
+	}
+	cli, err := client.New("http://"+addr.String(), client.WithDisableMTLS(true))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer cli.Close()
+
+	lease, err := cli.Acquire(ctx, api.AcquireRequest{Key: "alpha", Owner: "worker", TTLSeconds: 30})
+	if err != nil {
+		t.Fatalf("acquire lease: %v", err)
+	}
+	defer lease.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- stop(context.Background(), WithDrainLeases(2*time.Second))
+	}()
+
+	waitFor(t, time.Second, 10*time.Millisecond, func() bool {
+		draining, _, _ := srv.shutdownState()
+		return draining
+	})
+
+	acqCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	_, err = cli.Acquire(acqCtx, api.AcquireRequest{Key: "beta", Owner: "worker", TTLSeconds: 5, BlockSecs: api.BlockNoWait})
+	if err == nil {
+		t.Fatalf("expected acquire to fail during drain")
+	}
+	var apiErr *client.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected APIError, got %T", err)
+	}
+	if apiErr.Status != http.StatusServiceUnavailable {
+		t.Fatalf("expected status 503, got %d", apiErr.Status)
+	}
+	if apiErr.Response.ErrorCode != "shutdown_draining" {
+		t.Fatalf("expected error code shutdown_draining, got %q", apiErr.Response.ErrorCode)
+	}
+
+	_ = lease.Close()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("shutdown error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("shutdown did not complete in time")
+	}
+}
+
+func TestShutdownAutoReleasesLeases(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{Store: "mem://", Listen: "127.0.0.1:0", DisableMTLS: true}
+	srv, stop, err := StartServer(ctx, cfg)
+	if err != nil {
+		t.Fatalf("start server: %v", err)
+	}
+	addr := srv.ListenerAddr()
+	if addr == nil {
+		t.Fatal("listener address not available")
+	}
+	cli, err := client.New("http://"+addr.String(), client.WithDisableMTLS(true))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer cli.Close()
+
+	lease, err := cli.Acquire(ctx, api.AcquireRequest{Key: "gamma", Owner: "worker", TTLSeconds: 60})
+	if err != nil {
+		t.Fatalf("acquire lease: %v", err)
+	}
+	defer func() { _ = lease.Close() }()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- stop(context.Background(), WithDrainLeases(time.Second))
+	}()
+
+	waitFor(t, time.Second, 10*time.Millisecond, func() bool {
+		draining, _, _ := srv.shutdownState()
+		return draining
+	})
+
+	if _, err := lease.KeepAlive(ctx, 30*time.Second); err != nil {
+		t.Fatalf("keepalive during shutdown: %v", err)
+	}
+
+	waitFor(t, 2*time.Second, 20*time.Millisecond, func() bool {
+		meta, _, err := srv.backend.LoadMeta(ctx, "gamma")
+		if err != nil {
+			return false
+		}
+		return meta.Lease == nil
+	})
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("shutdown error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("shutdown did not complete in time")
+	}
+
+}
+
+func TestShutdownDefaultSplit(t *testing.T) {
+	srv, drainCap, httpCap := newShutdownHarness(t)
+	if err := srv.ShutdownWithOptions(context.Background()); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+	policy := drainCap.Policy()
+	if policy.GracePeriod != 8*time.Second {
+		t.Fatalf("expected default grace 8s, got %v", policy.GracePeriod)
+	}
+	deadline, ok := httpCap.Deadline()
+	if !ok {
+		t.Fatalf("expected http shutdown context to have deadline")
+	}
+	remaining := time.Until(deadline)
+	durationAlmostEqual(t, remaining, 2*time.Second, 150*time.Millisecond)
+}
+
+func TestShutdownRespectsDrainOverride(t *testing.T) {
+	srv, drainCap, httpCap := newShutdownHarness(t)
+	if err := srv.ShutdownWithOptions(context.Background(), WithDrainLeases(5*time.Second)); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+	policy := drainCap.Policy()
+	if policy.GracePeriod != 5*time.Second {
+		t.Fatalf("expected grace 5s, got %v", policy.GracePeriod)
+	}
+	deadline, ok := httpCap.Deadline()
+	if !ok {
+		t.Fatalf("expected deadline for http shutdown")
+	}
+	remaining := time.Until(deadline)
+	durationAlmostEqual(t, remaining, 5*time.Second, 150*time.Millisecond)
+}
+
+func TestShutdownTimeoutOverride(t *testing.T) {
+	srv, drainCap, httpCap := newShutdownHarness(t)
+	if err := srv.ShutdownWithOptions(context.Background(), WithShutdownTimeout(4*time.Second)); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+	policy := drainCap.Policy()
+	expectedGrace := time.Duration(float64(4*time.Second) * drainShutdownSplit)
+	if policy.GracePeriod != expectedGrace {
+		t.Fatalf("expected grace %v, got %v", expectedGrace, policy.GracePeriod)
+	}
+	deadline, ok := httpCap.Deadline()
+	if !ok {
+		t.Fatalf("expected deadline for http shutdown")
+	}
+	remaining := time.Until(deadline)
+	expectedHTTP := 4*time.Second - expectedGrace
+	durationAlmostEqual(t, remaining, expectedHTTP, 150*time.Millisecond)
+}
+
+func TestShutdownTimeoutDisabled(t *testing.T) {
+	srv, drainCap, httpCap := newShutdownHarness(t)
+	if err := srv.ShutdownWithOptions(context.Background(), WithShutdownTimeout(0)); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+	policy := drainCap.Policy()
+	if policy.GracePeriod != 10*time.Second {
+		t.Fatalf("expected grace 10s when timeout disabled, got %v", policy.GracePeriod)
+	}
+	if _, ok := httpCap.Deadline(); ok {
+		t.Fatalf("did not expect http shutdown deadline when timeout disabled")
 	}
 }

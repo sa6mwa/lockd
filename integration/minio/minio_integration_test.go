@@ -24,6 +24,7 @@ import (
 	api "pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
 	cryptotest "pkt.systems/lockd/integration/internal/cryptotest"
+	shutdowntest "pkt.systems/lockd/integration/internal/shutdowntest"
 	testlog "pkt.systems/lockd/integration/internal/testlog"
 	"pkt.systems/lockd/internal/diagnostics/storagecheck"
 	"pkt.systems/lockd/internal/storage"
@@ -37,6 +38,43 @@ func TestMinioStoreVerification(t *testing.T) {
 	cfg := loadMinioConfig(t)
 	ensureMinioBucket(t, cfg)
 	ensureStoreReady(t, context.Background(), cfg)
+}
+
+func TestMinioShutdownDrainingBlocksAcquire(t *testing.T) {
+	cfg := loadMinioConfig(t)
+	ensureMinioBucket(t, cfg)
+	ensureStoreReady(t, context.Background(), cfg)
+	ts := startMinioTestServer(t, cfg)
+	t.Cleanup(func() { _ = ts.Stop(context.Background()) })
+	cli := ts.Client
+	if cli == nil {
+		t.Fatalf("nil test server client")
+	}
+	ctx := context.Background()
+	key := "minio-drain-" + uuidv7.NewString()
+	lease := acquireWithRetry(t, ctx, cli, key, "holder", 30, lockdclient.BlockWaitForever)
+	stopCh := make(chan error, 1)
+	go func() {
+		stopCh <- ts.Stop(context.Background(), lockd.WithDrainLeases(3*time.Second), lockd.WithShutdownTimeout(4*time.Second))
+	}()
+	payload, _ := json.Marshal(api.AcquireRequest{Key: "minio-drain-wait", Owner: "drain-tester", TTLSeconds: 5})
+	url := ts.URL() + "/v1/acquire"
+	result := shutdowntest.WaitForShutdownDrainingAcquire(t, url, payload)
+	if result.Response.ErrorCode != "shutdown_draining" {
+		t.Fatalf("expected shutdown_draining error, got %+v", result.Response)
+	}
+	if result.Header.Get("Shutdown-Imminent") == "" {
+		t.Fatalf("expected Shutdown-Imminent header, got %v", result.Header)
+	}
+	select {
+	case err := <-stopCh:
+		if err != nil {
+			t.Fatalf("server stop failed: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("server stop timed out")
+	}
+	_ = lease.Release(ctx)
 }
 
 func TestMinioLockLifecycle(t *testing.T) {
@@ -497,8 +535,12 @@ func TestMinioAcquireForUpdateCallbackFailover(t *testing.T) {
 	ensureMinioBucket(t, cfg)
 	ensureStoreReady(t, context.Background(), cfg)
 
-	primary := startMinioTestServer(t, cfg)
-	backup := startMinioTestServer(t, cfg)
+	productionClose := lockd.WithTestCloseDefaults(
+		lockd.WithDrainLeases(8*time.Second),
+		lockd.WithShutdownTimeout(10*time.Second),
+	)
+	primary := startMinioTestServer(t, cfg, productionClose)
+	backup := startMinioTestServer(t, cfg, productionClose)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -546,7 +588,7 @@ func TestMinioAcquireForUpdateCallbackFailover(t *testing.T) {
 	clientLogger, clientLogs := testlog.NewRecorder(t, logport.TraceLevel)
 	failoverClient, err := lockdclient.NewWithEndpoints(
 		[]string{primary.URL(), backup.URL()},
-		lockdclient.WithMTLS(false),
+		lockdclient.WithDisableMTLS(true),
 		lockdclient.WithHTTPTimeout(90*time.Second),
 		lockdclient.WithCloseTimeout(90*time.Second),
 		lockdclient.WithKeepAliveTimeout(90*time.Second),
@@ -683,8 +725,12 @@ func TestMinioRemoveStateFailover(t *testing.T) {
 	ensureMinioBucket(t, cfg)
 	ensureStoreReady(t, context.Background(), cfg)
 
-	primary := startMinioTestServer(t, cfg)
-	backup := startMinioTestServer(t, cfg)
+	productionClose := lockd.WithTestCloseDefaults(
+		lockd.WithDrainLeases(8*time.Second),
+		lockd.WithShutdownTimeout(10*time.Second),
+	)
+	primary := startMinioTestServer(t, cfg, productionClose)
+	backup := startMinioTestServer(t, cfg, productionClose)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -719,7 +765,7 @@ func TestMinioRemoveStateFailover(t *testing.T) {
 	clientLogger, clientLogs := testlog.NewRecorder(t, logport.TraceLevel)
 	failoverClient, err := lockdclient.NewWithEndpoints(
 		[]string{primary.URL(), backup.URL()},
-		lockdclient.WithMTLS(false),
+		lockdclient.WithDisableMTLS(true),
 		lockdclient.WithHTTPTimeout(90*time.Second),
 		lockdclient.WithCloseTimeout(90*time.Second),
 		lockdclient.WithKeepAliveTimeout(90*time.Second),
@@ -941,7 +987,7 @@ func startLockdServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client {
 
 	cfg.Listen = "127.0.0.1:0"
 	cfg.ListenProto = "tcp"
-	cfg.MTLS = false
+	cfg.DisableMTLS = true
 	cfg.JSONMaxBytes = 100 << 20
 	cfg.DefaultTTL = 30 * time.Second
 	cfg.MaxTTL = 2 * time.Minute
@@ -979,7 +1025,7 @@ func startLockdServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client {
 func startMinioTestServer(tb testing.TB, cfg lockd.Config, opts ...lockd.TestServerOption) *lockd.TestServer {
 	tb.Helper()
 	cfgCopy := cfg
-	cfgCopy.MTLS = false
+	cfgCopy.DisableMTLS = true
 	if cfgCopy.JSONMaxBytes == 0 {
 		cfgCopy.JSONMaxBytes = 100 << 20
 	}
@@ -1031,7 +1077,7 @@ func directClient(tb testing.TB, ts *lockd.TestServer) *lockdclient.Client {
 	}
 	baseURL := "http://" + addr.String()
 	cli, err := lockdclient.New(baseURL,
-		lockdclient.WithMTLS(false),
+		lockdclient.WithDisableMTLS(true),
 		lockdclient.WithLogger(lockd.NewTestingLogger(tb, logport.TraceLevel)),
 		lockdclient.WithHTTPTimeout(30*time.Second),
 	)

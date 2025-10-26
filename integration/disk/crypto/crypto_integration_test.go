@@ -26,7 +26,7 @@ func TestCryptoDiskLocks(t *testing.T) {
 		lockd.WithTestConfig(cfg),
 		lockd.WithTestLogger(logport.NoopLogger()),
 		lockd.WithTestClientOptions(
-			lockdclient.WithMTLS(false),
+			lockdclient.WithDisableMTLS(true),
 			lockdclient.WithHTTPTimeout(30*time.Second),
 			lockdclient.WithKeepAliveTimeout(30*time.Second),
 			lockdclient.WithCloseTimeout(30*time.Second),
@@ -75,7 +75,7 @@ func TestCryptoDiskQueues(t *testing.T) {
 		lockd.WithTestConfig(cfg),
 		lockd.WithTestLogger(logport.NoopLogger()),
 		lockd.WithTestClientOptions(
-			lockdclient.WithMTLS(false),
+			lockdclient.WithDisableMTLS(true),
 			lockdclient.WithHTTPTimeout(30*time.Second),
 			lockdclient.WithKeepAliveTimeout(30*time.Second),
 			lockdclient.WithCloseTimeout(30*time.Second),
@@ -155,7 +155,7 @@ func buildDiskConfig(t testing.TB) lockd.Config {
 		Store:       diskStoreURL(root),
 		ListenProto: "tcp",
 		Listen:      "127.0.0.1:0",
-		MTLS:        false,
+		DisableMTLS: true,
 	}
 	cfg.QueuePollInterval = 150 * time.Millisecond
 	cfg.QueuePollJitter = 0

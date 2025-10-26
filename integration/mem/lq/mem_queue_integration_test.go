@@ -5,6 +5,7 @@ package memlq
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -17,11 +18,14 @@ import (
 	"runtime/pprof"
 
 	"pkt.systems/lockd"
+	api "pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/integration/internal/cryptotest"
+	shutdowntest "pkt.systems/lockd/integration/internal/shutdowntest"
 	queuetestutil "pkt.systems/lockd/integration/queue/testutil"
 	"pkt.systems/lockd/internal/qrf"
 	memorybackend "pkt.systems/lockd/internal/storage/memory"
+	"pkt.systems/lockd/internal/uuidv7"
 	"pkt.systems/logport"
 )
 
@@ -46,6 +50,7 @@ func RunMemLQScenarios(t *testing.T, mode memQueueMode) {
 	t.Run("StatefulCorrelationPersistence", func(t *testing.T) { runMemQueueStatefulCorrelationPersistence(t, mode) })
 	t.Run("SubscribeBasics", func(t *testing.T) { runMemQueueSubscribeBasics(t, mode) })
 	t.Run("SubscribeStateful", func(t *testing.T) { runMemQueueSubscribeStateful(t, mode) })
+	t.Run("ShutdownDrainingSubscribeWithState", func(t *testing.T) { runMemQueueShutdownDrainingSubscribeWithState(t, mode) })
 
 	if extended {
 		t.Run("PrefetchBatch", func(t *testing.T) { runMemQueuePrefetch(t, mode) })
@@ -419,7 +424,7 @@ func buildMemQueueConfig(t testing.TB, queueWatch bool) lockd.Config {
 	t.Helper()
 	cfg := lockd.Config{
 		Store:                      "mem://",
-		MTLS:                       false,
+		DisableMTLS:                true,
 		ListenProto:                "tcp",
 		Listen:                     "127.0.0.1:0",
 		DefaultTTL:                 30 * time.Second,
@@ -760,7 +765,7 @@ func runMemQueueMultiServerFailoverClient(t *testing.T, mode memQueueMode) {
 	endpoints := []string{serverA.URL(), serverB.URL()}
 	clientCapture := queuetestutil.NewLogCapture(t)
 	failoverClient, err := lockdclient.NewWithEndpoints(endpoints,
-		lockdclient.WithMTLS(false),
+		lockdclient.WithDisableMTLS(true),
 		lockdclient.WithEndpointShuffle(false),
 		lockdclient.WithLogger(clientCapture.Logger()),
 	)
@@ -989,6 +994,48 @@ func runMemQueueHighFanInFanOutSingleServer(t *testing.T, mode memQueueMode) {
 	}
 }
 
+func runMemQueueShutdownDrainingSubscribeWithState(t *testing.T, mode memQueueMode) {
+	cfg := buildMemQueueConfig(t, mode.queueWatch)
+	ts := startMemQueueServer(t, cfg)
+	t.Cleanup(func() { _ = ts.Stop(context.Background()) })
+	cli := ts.Client
+	if cli == nil {
+		t.Fatalf("nil client")
+	}
+	leaseCtx, leaseCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer leaseCancel()
+	lease, err := cli.Acquire(leaseCtx, api.AcquireRequest{
+		Key:        "mem-lq-drain-" + uuidv7.NewString(),
+		Owner:      "mem-lq-holder",
+		TTLSeconds: 30,
+	})
+	if err != nil {
+		t.Fatalf("acquire drain holder: %v", err)
+	}
+	stopCh := make(chan error, 1)
+	go func() {
+		stopCh <- ts.Stop(context.Background(), lockd.WithDrainLeases(2*time.Second), lockd.WithShutdownTimeout(3*time.Second))
+	}()
+	payload, _ := json.Marshal(api.DequeueRequest{Queue: "drain-queue", Owner: "worker-1", PageSize: 1})
+	url := ts.URL() + "/v1/queue/subscribe-with-state"
+	result := shutdowntest.WaitForShutdownDrainingAcquire(t, url, payload)
+	if result.Response.ErrorCode != "shutdown_draining" {
+		t.Fatalf("expected shutdown_draining error, got %+v", result.Response)
+	}
+	if result.Header.Get("Shutdown-Imminent") == "" {
+		t.Fatalf("expected Shutdown-Imminent header, got %v", result.Header)
+	}
+	_ = lease.Release(context.Background())
+	select {
+	case err := <-stopCh:
+		if err != nil {
+			t.Fatalf("server stop failed: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("server stop timed out")
+	}
+}
+
 func startMemQueueServerWithCapture(t testing.TB, cfg lockd.Config) (*lockd.TestServer, *queuetestutil.LogCapture) {
 	t.Helper()
 	capture := queuetestutil.NewLogCapture(t)
@@ -1006,7 +1053,7 @@ func startMemQueueServer(t testing.TB, cfg lockd.Config) *lockd.TestServer {
 			lockdclient.WithHTTPTimeout(30*time.Second),
 			lockdclient.WithKeepAliveTimeout(30*time.Second),
 			lockdclient.WithCloseTimeout(30*time.Second),
-			lockdclient.WithMTLS(false),
+			lockdclient.WithDisableMTLS(true),
 		),
 	)
 }
@@ -1022,7 +1069,7 @@ func startMemQueueServerWithBackend(t testing.TB, cfg lockd.Config, backend *mem
 			lockdclient.WithHTTPTimeout(30*time.Second),
 			lockdclient.WithKeepAliveTimeout(30*time.Second),
 			lockdclient.WithCloseTimeout(30*time.Second),
-			lockdclient.WithMTLS(false),
+			lockdclient.WithDisableMTLS(true),
 		),
 	)
 }

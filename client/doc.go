@@ -48,7 +48,12 @@
 //
 // The lease session tracks fencing tokens automatically; the same `Client`
 // instance should be reused for subsequent operations so KeepAlive, Get, Update,
-// Release, and RemoveState calls carry the correct `X-Fencing-Token`.
+// Release, and RemoveState calls carry the correct `X-Fencing-Token`. When the
+// server enters its drain window it sets a `Shutdown-Imminent` header; the Go
+// SDK notices this and, by default, releases leases after in-flight work
+// completes. You can disable the behaviour via `client.WithDrainAwareShutdown`
+// or the CLI flag `--drain-aware-shutdown=false` if your workflow prefers to
+// hold leases until the next session.
 //
 // # Acquire-for-update
 //
@@ -164,7 +169,7 @@
 //	cli, err := client.NewWithEndpoints([]string{
 //	    "https://lockd-primary.example.com",
 //	    "https://lockd-backup.example.com",
-//	}, client.WithMTLS(true))
+//	}, client.WithDisableMTLS(false))
 //
 // The SDK rotates through endpoints when transport errors occur and keeps the
 // same bounded retry budget as the CLI so tests remain deterministic. When
@@ -202,7 +207,7 @@
 //
 // By default the client expects mTLS and uses the CA found in the bundle passed
 // to `client.New`. To connect over plaintext HTTP, construct the client with
-// `client.WithMTLS(false)` or by using an `http://` endpoint. Clients connecting
+// `client.WithDisableMTLS(true)` or by using an `http://` endpoint. Clients connecting
 // over mTLS must present certificates with the `ClientAuth` extended key usage
 // signed by the same CA as the server certificate.
 package client

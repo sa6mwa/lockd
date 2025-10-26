@@ -27,7 +27,7 @@ type CredentialSummary struct {
 }
 
 func openBackend(cfg Config, crypto *storage.Crypto) (storage.Backend, error) {
-	if cfg.StorageEncryptionEnabled && (crypto == nil || !crypto.Enabled()) {
+	if cfg.StorageEncryptionEnabled() && (crypto == nil || !crypto.Enabled()) {
 		return nil, fmt.Errorf("config: storage encryption enabled but crypto material missing")
 	}
 	u, err := url.Parse(cfg.Store)

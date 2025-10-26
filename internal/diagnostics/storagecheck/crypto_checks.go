@@ -22,7 +22,7 @@ import (
 // prepareCryptoForVerify ensures kryptograf material is available and constructs
 // a storage.Crypto helper when encryption is enabled.
 func prepareCryptoForVerify(cfg lockd.Config) (*storage.Crypto, lockd.Config, error) {
-	if !cfg.StorageEncryptionEnabled {
+	if !cfg.StorageEncryptionEnabled() {
 		return nil, cfg, nil
 	}
 
@@ -168,6 +168,10 @@ func syntheticStateRoundTrip(ctx context.Context, backend storage.Backend, crypt
 	if err != nil {
 		return fmt.Errorf("store diagnostics meta %q: %w", key, err)
 	}
+	defer func() {
+		_ = backend.RemoveState(ctx, key, "")
+		_ = backend.DeleteMeta(ctx, key, "")
+	}()
 	stateRes, err := backend.WriteState(ctx, key, strings.NewReader("{}"), storage.PutStateOptions{})
 	if err != nil {
 		return fmt.Errorf("write diagnostics state %q: %w", key, err)
@@ -182,12 +186,6 @@ func syntheticStateRoundTrip(ctx context.Context, backend storage.Backend, crypt
 	meta.UpdatedAtUnix = time.Now().Unix()
 	if _, err := backend.StoreMeta(ctx, key, meta, etag); err != nil {
 		return fmt.Errorf("update diagnostics meta %q: %w", key, err)
-	}
-	if crypto == nil || !crypto.Enabled() {
-		defer func() {
-			_ = backend.RemoveState(ctx, key, "")
-			_ = backend.DeleteMeta(ctx, key, "")
-		}()
 	}
 	metaLoaded, _, err := backend.LoadMeta(ctx, key)
 	if err != nil {
@@ -287,13 +285,19 @@ func decryptQueueObject(ctx context.Context, backend storage.Backend, crypto *st
 	return reader.Close()
 }
 
+const diagnosticsCleanupGuard = 30 * time.Second
+
 func cleanupSyntheticDiagnostics(ctx context.Context, backend storage.Backend) error {
 	keys, err := backend.ListMetaKeys(ctx)
 	if err != nil {
 		return fmt.Errorf("list meta keys: %w", err)
 	}
+	now := time.Now()
 	for _, key := range keys {
 		if !strings.HasPrefix(key, "lockd-diagnostics/") {
+			continue
+		}
+		if shouldDeferDiagnosticsCleanup(key, now) {
 			continue
 		}
 		if err := backend.RemoveState(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
@@ -304,4 +308,16 @@ func cleanupSyntheticDiagnostics(ctx context.Context, backend storage.Backend) e
 		}
 	}
 	return nil
+}
+
+func shouldDeferDiagnosticsCleanup(key string, now time.Time) bool {
+	idx := strings.LastIndexByte(key, '/')
+	if idx >= 0 && idx+1 < len(key) {
+		key = key[idx+1:]
+	}
+	ts, ok := uuidv7.ParseTime(key)
+	if !ok {
+		return false
+	}
+	return now.Sub(ts) < diagnosticsCleanupGuard
 }

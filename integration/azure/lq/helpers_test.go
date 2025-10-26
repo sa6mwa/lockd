@@ -4,13 +4,16 @@ package azureintegration
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"pkt.systems/lockd"
 	lockdclient "pkt.systems/lockd/client"
+	azuretest "pkt.systems/lockd/integration/azuretest"
 	"pkt.systems/lockd/integration/internal/cryptotest"
 	queuetestutil "pkt.systems/lockd/integration/queue/testutil"
 	"pkt.systems/lockd/internal/diagnostics/storagecheck"
@@ -22,6 +25,11 @@ type azureQueueOptions struct {
 	PollJitter        time.Duration
 	ResilientInterval time.Duration
 }
+
+var (
+	azureQueueStoreVerifyOnce sync.Once
+	azureQueueStoreVerifyErr  error
+)
 
 func prepareAzureQueueConfig(t testing.TB, opts azureQueueOptions) lockd.Config {
 	cfg := loadAzureQueueConfig(t)
@@ -44,7 +52,7 @@ func prepareAzureQueueConfig(t testing.TB, opts azureQueueOptions) lockd.Config 
 
 	cfg.QRFEnabled = false
 
-	cfg.MTLS = false
+	cfg.DisableMTLS = true
 	cfg.ListenProto = "tcp"
 	cfg.Listen = "127.0.0.1:0"
 
@@ -77,12 +85,19 @@ func loadAzureQueueConfig(t testing.TB) lockd.Config {
 }
 
 func ensureAzureStoreReady(t testing.TB, ctx context.Context, cfg lockd.Config) {
-	res, err := storagecheck.VerifyStore(ctx, cfg)
-	if err != nil {
-		t.Fatalf("verify store: %v", err)
-	}
-	if !res.Passed() {
-		t.Fatalf("store verification failed: %+v", res)
+	azuretest.ResetContainerForCrypto(t, cfg)
+	azureQueueStoreVerifyOnce.Do(func() {
+		res, err := storagecheck.VerifyStore(ctx, cfg)
+		if err != nil {
+			azureQueueStoreVerifyErr = err
+			return
+		}
+		if !res.Passed() {
+			azureQueueStoreVerifyErr = fmt.Errorf("store verification failed: %+v", res)
+		}
+	})
+	if azureQueueStoreVerifyErr != nil {
+		t.Fatalf("store verification failed: %v", azureQueueStoreVerifyErr)
 	}
 }
 
@@ -96,7 +111,7 @@ func startAzureQueueServerWithCapture(t testing.TB, cfg lockd.Config) (*lockd.Te
 	return ts, capture
 }
 
-func startAzureQueueServerWithLogger(t testing.TB, cfg lockd.Config, logger logport.ForLogging) *lockd.TestServer {
+func startAzureQueueServerWithLogger(t testing.TB, cfg lockd.Config, logger logport.ForLogging, extra ...lockd.TestServerOption) *lockd.TestServer {
 	clientLogger := lockd.NewTestingLogger(t, logport.TraceLevel)
 	clientOpts := []lockdclient.Option{
 		lockdclient.WithHTTPTimeout(120 * time.Second),
@@ -104,10 +119,17 @@ func startAzureQueueServerWithLogger(t testing.TB, cfg lockd.Config, logger logp
 		lockdclient.WithCloseTimeout(120 * time.Second),
 		lockdclient.WithLogger(clientLogger),
 	}
-	return lockd.StartTestServer(t,
+	closeDefaults := lockd.WithTestCloseDefaults(
+		lockd.WithDrainLeases(0),
+		lockd.WithShutdownTimeout(2*time.Second),
+	)
+	options := []lockd.TestServerOption{
 		lockd.WithTestConfig(cfg),
 		lockd.WithTestLogger(logger),
 		lockd.WithTestClientOptions(clientOpts...),
-		lockd.WithTestStartTimeout(30*time.Second),
-	)
+		lockd.WithTestStartTimeout(30 * time.Second),
+		closeDefaults,
+	}
+	options = append(options, extra...)
+	return lockd.StartTestServer(t, options...)
 }

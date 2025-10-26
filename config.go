@@ -55,6 +55,10 @@ const (
 	DefaultAcquireBlock = 60 * time.Second
 	// DefaultSweeperInterval sets the frequency for background lease reaping.
 	DefaultSweeperInterval = 5 * time.Second
+	// DefaultDrainGrace is the grace period granted before HTTP shutdown begins.
+	DefaultDrainGrace = 10 * time.Second
+	// DefaultShutdownTimeout caps the total shutdown time (drain + HTTP server).
+	DefaultShutdownTimeout = 10 * time.Second
 	// DefaultS3MaxPartSize tunes multipart uploads when writing state to S3-compatible stores.
 	DefaultS3MaxPartSize = 16 * 1024 * 1024
 	// DefaultStorageRetryMaxAttempts describes how many transient storage errors are retried.
@@ -165,14 +169,18 @@ type Config struct {
 	MaxTTL               time.Duration
 	AcquireBlock         time.Duration
 	SweeperInterval      time.Duration
+	DrainGrace           time.Duration
+	DrainGraceSet        bool
+	ShutdownTimeout      time.Duration
+	ShutdownTimeoutSet   bool
 	OTLPEndpoint         string
 
 	// mTLS
-	MTLS         bool
+	DisableMTLS  bool
 	BundlePath   string
 	DenylistPath string
 	// Storage encryption
-	StorageEncryptionEnabled bool
+	DisableStorageEncryption bool
 	StorageEncryptionSnappy  bool
 	MetadataRootKey          keymgmt.RootKey
 	MetadataDescriptor       keymgmt.Descriptor
@@ -238,8 +246,21 @@ type Config struct {
 	LSFLogIntervalSet bool
 }
 
+// MTLSEnabled reports whether mutual TLS is active.
+func (c Config) MTLSEnabled() bool {
+	return !c.DisableMTLS
+}
+
+// StorageEncryptionEnabled reports whether kryptograf envelope encryption is active.
+func (c Config) StorageEncryptionEnabled() bool {
+	return !c.DisableStorageEncryption
+}
+
 // Validate applies defaults and sanity-checks the configuration.
 func (c *Config) Validate() error {
+	if c.DisableStorageEncryption {
+		c.StorageEncryptionSnappy = false
+	}
 	if c.Listen == "" {
 		c.Listen = DefaultListen
 	}
@@ -278,6 +299,18 @@ func (c *Config) Validate() error {
 	}
 	if c.SweeperInterval <= 0 {
 		c.SweeperInterval = DefaultSweeperInterval
+	}
+	if c.DrainGrace < 0 {
+		return fmt.Errorf("config: drain grace must be >= 0")
+	}
+	if c.ShutdownTimeout < 0 {
+		return fmt.Errorf("config: shutdown timeout must be >= 0")
+	}
+	if !c.DrainGraceSet && c.DrainGrace > 0 {
+		c.DrainGraceSet = true
+	}
+	if !c.ShutdownTimeoutSet && c.ShutdownTimeout > 0 {
+		c.ShutdownTimeoutSet = true
 	}
 	if c.DiskRetention < 0 {
 		return fmt.Errorf("config: disk retention must be >= 0")
@@ -426,7 +459,7 @@ func (c *Config) Validate() error {
 	if c.QRFRecoveryRetryAfter <= 0 {
 		c.QRFRecoveryRetryAfter = DefaultQRFRecoveryRetryAfter
 	}
-	requireBundle := c.MTLS || c.StorageEncryptionEnabled
+	requireBundle := c.MTLSEnabled() || c.StorageEncryptionEnabled()
 	if requireBundle {
 		if c.BundlePath == "" {
 			path, err := DefaultBundlePath()

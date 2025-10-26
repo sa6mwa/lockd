@@ -30,10 +30,11 @@ import (
 const (
 	clientServerKey           = "client.server"
 	clientBundleKey           = "client.bundle"
-	clientMTLSKey             = "client.mtls"
+	clientDisableMTLSKey      = "client.disable_mtls"
 	clientTimeoutKey          = "client.timeout"
 	clientCloseTimeoutKey     = "client.close_timeout"
 	clientKeepAliveTimeoutKey = "client.keepalive_timeout"
+	clientDrainAwareKey       = "client.drain_aware_shutdown"
 	clientLogLevelKey         = "client.log_level"
 	clientLogOutputKey        = "client.log_output"
 
@@ -74,20 +75,22 @@ func newClientCommand() *cobra.Command {
 	flags := cmd.PersistentFlags()
 	flags.String("server", "https://127.0.0.1:9341", "lockd server base URL")
 	flags.String("bundle", "", "path to client bundle PEM (default auto-discover under $HOME/.lockd)")
-	flags.Bool("mtls", true, "enable mutual TLS")
+	flags.Bool("disable-mtls", false, "disable mutual TLS (plain HTTP by default for bare endpoints)")
 	flags.Duration("timeout", lockdclient.DefaultHTTPTimeout, "HTTP client timeout")
 	flags.Duration("close-timeout", lockdclient.DefaultCloseTimeout, "timeout to wait for lease release during Close()")
 	flags.Duration("keepalive-timeout", lockdclient.DefaultKeepAliveTimeout, "timeout to wait for keepalive responses")
+	flags.Bool("drain-aware-shutdown", true, "automatically release leases when the server is draining")
 	flags.String("log-level", "none", "client log level (trace|debug|info|warn|error|none)")
 	flags.String("log-output", "", "client log output path (default stderr)")
 	flags.BoolVarP(&verbose, "verbose", "v", false, "enable verbose (trace) client logging")
 
 	mustBindFlag(clientServerKey, "LOCKD_CLIENT_SERVER", flags.Lookup("server"))
 	mustBindFlag(clientBundleKey, "LOCKD_CLIENT_BUNDLE", flags.Lookup("bundle"))
-	mustBindFlag(clientMTLSKey, "LOCKD_CLIENT_MTLS", flags.Lookup("mtls"))
+	mustBindFlag(clientDisableMTLSKey, "LOCKD_CLIENT_DISABLE_MTLS", flags.Lookup("disable-mtls"))
 	mustBindFlag(clientTimeoutKey, "LOCKD_CLIENT_TIMEOUT", flags.Lookup("timeout"))
 	mustBindFlag(clientCloseTimeoutKey, "LOCKD_CLIENT_CLOSE_TIMEOUT", flags.Lookup("close-timeout"))
 	mustBindFlag(clientKeepAliveTimeoutKey, "LOCKD_CLIENT_KEEPALIVE_TIMEOUT", flags.Lookup("keepalive-timeout"))
+	mustBindFlag(clientDrainAwareKey, "LOCKD_CLIENT_DRAIN_AWARE", flags.Lookup("drain-aware-shutdown"))
 	mustBindFlag(clientLogLevelKey, "LOCKD_CLIENT_LOG_LEVEL", flags.Lookup("log-level"))
 	mustBindFlag(clientLogOutputKey, "LOCKD_CLIENT_LOG_OUTPUT", flags.Lookup("log-output"))
 
@@ -127,10 +130,11 @@ type clientCLIConfig struct {
 	server           string
 	servers          []string
 	bundle           string
-	mtls             bool
+	disableMTLS      bool
 	timeout          time.Duration
 	closeTimeout     time.Duration
 	keepAliveTimeout time.Duration
+	drainAware       bool
 	cachedHTTPClient *http.Client
 	logLevel         string
 	logOutput        string
@@ -170,13 +174,8 @@ func (c *clientCLIConfig) load() error {
 	if server == "" {
 		server = "https://127.0.0.1:9341"
 	}
-	mtls := viper.GetBool(clientMTLSKey)
-	// Ensure default true if flag/env not set.
-	if !viper.IsSet(clientMTLSKey) {
-		mtls = true
-	}
-	c.mtls = mtls
-	endpoints, err := lockdclient.ParseEndpoints(server, c.mtls)
+	c.disableMTLS = viper.GetBool(clientDisableMTLSKey)
+	endpoints, err := lockdclient.ParseEndpoints(server, c.disableMTLS)
 	if err != nil {
 		return err
 	}
@@ -201,6 +200,10 @@ func (c *clientCLIConfig) load() error {
 		ka = lockdclient.DefaultKeepAliveTimeout
 	}
 	c.keepAliveTimeout = ka
+	c.drainAware = viper.GetBool(clientDrainAwareKey)
+	if !viper.IsSet(clientDrainAwareKey) {
+		c.drainAware = true
+	}
 	c.logOutput = viper.GetString(clientLogOutputKey)
 	c.logLevel = strings.TrimSpace(viper.GetString(clientLogLevelKey))
 	if c.verboseFlag != nil && *c.verboseFlag {
@@ -305,7 +308,7 @@ func (c *clientCLIConfig) buildHTTPClient() (*http.Client, error) {
 		return nil, errors.New("http default transport unexpected type")
 	}
 	tr := transport.Clone()
-	if c.mtls {
+	if !c.disableMTLS {
 		bundlePath, err := c.ensureBundlePath()
 		if err != nil {
 			return nil, err
@@ -337,11 +340,12 @@ func (c *clientCLIConfig) client() (*lockdclient.Client, error) {
 		return nil, err
 	}
 	opts := []lockdclient.Option{
-		lockdclient.WithMTLS(c.mtls),
+		lockdclient.WithDisableMTLS(c.disableMTLS),
 		lockdclient.WithHTTPClient(httpClient),
 		lockdclient.WithHTTPTimeout(c.timeout),
 		lockdclient.WithCloseTimeout(c.closeTimeout),
 		lockdclient.WithKeepAliveTimeout(c.keepAliveTimeout),
+		lockdclient.WithDrainAwareShutdown(c.drainAware),
 	}
 	if c.logger != nil {
 		opts = append(opts, lockdclient.WithLogger(c.logger))

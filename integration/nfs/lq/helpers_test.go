@@ -44,7 +44,7 @@ func buildNFSQueueConfig(t testing.TB, root string, opts nfsQueueOptions) lockd.
 	t.Helper()
 	cfg := lockd.Config{
 		Store:                      nfsStoreURL(root),
-		MTLS:                       false,
+		DisableMTLS:                true,
 		ListenProto:                "tcp",
 		Listen:                     "127.0.0.1:0",
 		DefaultTTL:                 30 * time.Second,

@@ -28,6 +28,7 @@ func queueWatchSupported(root string) bool {
 	return true
 }
 
+// SubscribeQueueChanges registers a filesystem watcher for queue message changes.
 func (s *Store) SubscribeQueueChanges(queue string) (storage.QueueChangeSubscription, error) {
 	if !s.queueWatchEnabled {
 		return nil, storage.ErrNotImplemented

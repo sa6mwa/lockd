@@ -9,25 +9,25 @@ import (
 
 func TestParseServerEndpoints(t *testing.T) {
 	tests := []struct {
-		name   string
-		raw    string
-		mtls   bool
-		expect []string
+		name        string
+		raw         string
+		disableMTLS bool
+		expect      []string
 	}{
-		{name: "mtls default host", raw: "lockd.local", mtls: true, expect: []string{"https://lockd.local:9341"}},
-		{name: "mtls host port", raw: "lockd.local:9443", mtls: true, expect: []string{"https://lockd.local:9443"}},
-		{name: "explicit http honored", raw: "http://lockd.local:8080", mtls: true, expect: []string{"http://lockd.local:8080"}},
-		{name: "insecure default host", raw: "lockd.local", mtls: false, expect: []string{"http://lockd.local:9341"}},
-		{name: "multi endpoints", raw: "localhost,localhost:9342,http://localhost:9343", mtls: true, expect: []string{"https://localhost:9341", "https://localhost:9342", "http://localhost:9343"}},
+		{name: "mtls default host", raw: "lockd.local", disableMTLS: false, expect: []string{"https://lockd.local:9341"}},
+		{name: "mtls host port", raw: "lockd.local:9443", disableMTLS: false, expect: []string{"https://lockd.local:9443"}},
+		{name: "explicit http honored", raw: "http://lockd.local:8080", disableMTLS: false, expect: []string{"http://lockd.local:8080"}},
+		{name: "insecure default host", raw: "lockd.local", disableMTLS: true, expect: []string{"http://lockd.local:9341"}},
+		{name: "multi endpoints", raw: "localhost,localhost:9342,http://localhost:9343", disableMTLS: false, expect: []string{"https://localhost:9341", "https://localhost:9342", "http://localhost:9343"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := lockdclient.ParseEndpoints(tt.raw, tt.mtls)
+			got, err := lockdclient.ParseEndpoints(tt.raw, tt.disableMTLS)
 			if err != nil {
 				t.Fatalf("ParseEndpoints returned error: %v", err)
 			}
 			if !reflect.DeepEqual(got, tt.expect) {
-				t.Fatalf("ParseEndpoints(%q, %v) = %v, want %v", tt.raw, tt.mtls, got, tt.expect)
+				t.Fatalf("ParseEndpoints(%q, disable=%v) = %v, want %v", tt.raw, tt.disableMTLS, got, tt.expect)
 			}
 		})
 	}

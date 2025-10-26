@@ -25,7 +25,7 @@ func TestCryptoMemLocks(t *testing.T) {
 		lockd.WithTestConfig(cfg),
 		lockd.WithTestLogger(logport.NoopLogger()),
 		lockd.WithTestClientOptions(
-			lockdclient.WithMTLS(false),
+			lockdclient.WithDisableMTLS(true),
 			lockdclient.WithHTTPTimeout(20*time.Second),
 			lockdclient.WithKeepAliveTimeout(20*time.Second),
 			lockdclient.WithCloseTimeout(20*time.Second),
@@ -80,7 +80,7 @@ func TestCryptoMemQueues(t *testing.T) {
 		lockd.WithTestConfig(cfg),
 		lockd.WithTestLogger(logport.NoopLogger()),
 		lockd.WithTestClientOptions(
-			lockdclient.WithMTLS(false),
+			lockdclient.WithDisableMTLS(true),
 			lockdclient.WithHTTPTimeout(20*time.Second),
 			lockdclient.WithKeepAliveTimeout(20*time.Second),
 			lockdclient.WithCloseTimeout(20*time.Second),
@@ -164,7 +164,7 @@ func buildMemConfig(t testing.TB) lockd.Config {
 		Store:       "mem://",
 		ListenProto: "tcp",
 		Listen:      "127.0.0.1:0",
-		MTLS:        false,
+		DisableMTLS: true,
 	}
 	cfg.MemQueueWatch = true
 	cfg.MemQueueWatchSet = true

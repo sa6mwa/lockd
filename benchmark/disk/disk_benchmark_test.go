@@ -100,7 +100,7 @@ func buildDiskConfig(tb testing.TB, root string, retention time.Duration) lockd.
 	storeURL := diskStoreURL(root)
 	cfg := lockd.Config{
 		Store:           storeURL,
-		MTLS:            false,
+		DisableMTLS:     true,
 		Listen:          "127.0.0.1:0",
 		ListenProto:     "tcp",
 		DefaultTTL:      30 * time.Second,
@@ -470,7 +470,7 @@ func startDiskBenchServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client {
 
 	cfg.Listen = "127.0.0.1:0"
 	cfg.ListenProto = "tcp"
-	cfg.MTLS = false
+	cfg.DisableMTLS = true
 
 	serverLoggerOpt, clientLoggerOpt := diskBenchLoggerOptions(tb)
 

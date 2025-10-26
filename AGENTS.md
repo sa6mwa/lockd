@@ -111,9 +111,9 @@ lockd client release --key orders
 * `lockd auth verify` validates that bundles contain the expected CA/server material and that revoked client serials are surfaced from the denylist.
 * `lockd auth revoke client` rewrites every `server*.pem` alongside the selected bundle so denylist updates reach all replicas automatically; use `--propagate=false` to update only the referenced bundle.
 * `lockd client` subcommands wrap the Go SDK and honour the same mTLS defaults; the `set` helper mutates JSON using an existing lease (supports `path=value`, arithmetic `++/--/=+N`, `rm:/delete:` removals, and `time:` assignments). `lockd client acquire` prints `export LOCKD_CLIENT_*=` assignments so `eval "$(...)"` seeds the environment for follow-up commands, and every subcommand falls back to `LOCKD_CLIENT_KEY` when you omit the key flag.
-* Bare `host[:port]` values default to HTTPS when mTLS is enabled (HTTP when `--mtls=false`); explicit `http://` / `https://` URLs are always honoured.
+* Bare `host[:port]` values default to HTTPS when mTLS is enabled (HTTP when `--disable-mtls` is set); explicit `http://` / `https://` URLs are always honoured.
 * Default listen port is `9341`, selected from unassigned IANA space to avoid clashes with common cloud-native services.
-* Bare `host[:port]` values default to HTTPS when mTLS is enabled (HTTP when `--mtls=false`); explicit `http://` / `https://` URLs are always honoured.
+* Bare `host[:port]` values default to HTTPS when mTLS is enabled (HTTP when `--disable-mtls` is set); explicit `http://` / `https://` URLs are always honoured.
 
 ## Storage model
 
@@ -256,9 +256,11 @@ type Config struct {
   AcquireBlock     time.Duration
   SweeperInterval  time.Duration
   // mTLS
-  MTLS             bool
+  DisableMTLS      bool
   BundlePath       string // server.pem
   DenylistPath     string
+  DisableStorageEncryption bool
+  StorageEncryptionSnappy  bool
   // Object store options (may also come from env)
   S3SSE            string
   S3KMSKeyID       string
@@ -283,7 +285,7 @@ The storage backend is chosen by parsing `cfg.Store`. The S3 impl uses the condi
 
 ## Configuration (viper/env)
 
-Key flags/env (mirror to `LOCKD_*`): `LISTEN`, `MTLS`, `BUNDLE`, `STORE`, `DEFAULT_TTL`, `MAX_TTL`, `JSON_MAX`, `ACQUIRE_BLOCK`, `SWEEPER_INTERVAL`, `DENYLIST_PATH`, plus the object-store options above (`AWS_REGION`, `S3_KMS_KEY_ID`, etc.).
+Key flags/env (mirror to `LOCKD_*`): `LISTEN`, `DISABLE_MTLS`, `DISABLE_STORAGE_ENCRYPTION`, `BUNDLE`, `STORE`, `DEFAULT_TTL`, `MAX_TTL`, `JSON_MAX`, `ACQUIRE_BLOCK`, `SWEEPER_INTERVAL`, `DENYLIST_PATH`, plus the object-store options above (`AWS_REGION`, `S3_KMS_KEY_ID`, etc.).
 
 ## Non-goals (v0)
 

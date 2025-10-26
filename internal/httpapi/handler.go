@@ -41,6 +41,7 @@ import (
 const defaultPayloadSpoolMemoryThreshold = 4 << 20 // 4 MiB in-memory, then spill to disk
 const headerFencingToken = "X-Fencing-Token"
 const headerCorrelationID = "X-Correlation-Id"
+const headerShutdownImminent = "Shutdown-Imminent"
 const maxQueueDequeueBatch = 64
 
 const (
@@ -108,6 +109,14 @@ type Handler struct {
 	stateWarmupInitial    time.Duration
 	stateWarmupMax        time.Duration
 	pendingDeliveries     sync.Map // map[string]*pendingQueueDeliveries
+	shutdownState         func() ShutdownState
+}
+
+// ShutdownState exposes the server's current shutdown posture.
+type ShutdownState struct {
+	Draining  bool
+	Remaining time.Duration
+	Notify    bool
 }
 
 type correlationAppliedKey struct{}
@@ -209,6 +218,17 @@ func (h *Handler) logQueueSubscribeError(queue logport.ForLogging, queueName, ow
 	if os.Getenv("MEM_LQ_BENCH_DEBUG") == "1" {
 		fmt.Fprintf(os.Stderr, "[subscribe error] queue=%s owner=%s err=%v\n", queueName, owner, err)
 	}
+}
+
+func (h *Handler) currentShutdownState() ShutdownState {
+	if h == nil || h.shutdownState == nil {
+		return ShutdownState{}
+	}
+	state := h.shutdownState()
+	if state.Remaining < 0 {
+		state.Remaining = 0
+	}
+	return state
 }
 
 func (h *Handler) releasePendingDeliveries(queue, owner string) {
@@ -336,6 +356,7 @@ type Config struct {
 	QueueResilientPollInterval time.Duration
 	LSFObserver                *lsf.Observer
 	QRFController              *qrf.Controller
+	ShutdownState              func() ShutdownState
 }
 
 // New constructs a Handler using the supplied configuration.
@@ -458,6 +479,7 @@ func New(cfg Config) *Handler {
 		stateWarmupAttempts:   stateWarmupAttempts,
 		stateWarmupInitial:    stateWarmupInitial,
 		stateWarmupMax:        stateWarmupMax,
+		shutdownState:         cfg.ShutdownState,
 	}
 }
 
@@ -554,6 +576,11 @@ func (h *Handler) wrap(operation string, fn handlerFunc) http.Handler {
 
 		verboseLogger.Trace("http.request.start", "remote_addr", r.RemoteAddr)
 
+		state := h.currentShutdownState()
+		if state.Draining && state.Notify {
+			w.Header().Set(headerShutdownImminent, "true")
+		}
+
 		result := "ok"
 		status := codes.Ok
 		statusMsg := ""
@@ -568,6 +595,14 @@ func (h *Handler) wrap(operation string, fn handlerFunc) http.Handler {
 
 		r = r.WithContext(ctx)
 		if err := fn(w, r); err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				result = "context"
+				status = codes.Error
+				statusMsg = "context_canceled"
+				span.SetAttributes(attribute.String("lockd.error_code", "context"))
+				verboseLogger.Trace("http.request.canceled", "elapsed", time.Since(start))
+				return
+			}
 			result = "error"
 			status = codes.Error
 			statusMsg = "handler_error"
@@ -682,6 +717,27 @@ func (h *Handler) handleAcquire(w http.ResponseWriter, r *http.Request) error {
 		"owner", payload.Owner,
 		"remote_addr", remoteAddr,
 	)
+	state := h.currentShutdownState()
+	if state.Draining {
+		retry := durationToSeconds(state.Remaining)
+		infoLogger.Info("lease.acquire.reject_shutdown",
+			"ttl_seconds", ttl.Seconds(),
+			"block_seconds", payload.BlockSecs,
+			"remaining_seconds", retry,
+		)
+		verbose := logger.WithTrace(ctx)
+		verbose.Debug("acquire.reject.shutdown",
+			"key", payload.Key,
+			"owner", payload.Owner,
+			"remaining_seconds", retry,
+		)
+		return httpError{
+			Status:     http.StatusServiceUnavailable,
+			Code:       "shutdown_draining",
+			Detail:     "server is draining existing leases",
+			RetryAfter: retry,
+		}
+	}
 	infoLogger.Info("lease.acquire.begin",
 		"ttl_seconds", ttl.Seconds(),
 		"block_seconds", payload.BlockSecs,
@@ -1657,6 +1713,19 @@ func (h *Handler) handleQueueDequeue(w http.ResponseWriter, r *http.Request) err
 
 	remoteAddr := h.clientKeyFromRequest(r)
 	queueLogger := logger.With("queue", queueName, "owner", owner, "stateful", false)
+	if state := h.currentShutdownState(); state.Draining {
+		retry := durationToSeconds(state.Remaining)
+		queueLogger.Info("queue.dequeue.reject_shutdown",
+			"block_seconds", blockSeconds,
+			"remaining_seconds", retry,
+		)
+		return httpError{
+			Status:     http.StatusServiceUnavailable,
+			Code:       "shutdown_draining",
+			Detail:     "server is draining existing leases",
+			RetryAfter: retry,
+		}
+	}
 	queueLogger.Info("queue.consumer.connect",
 		"block_seconds", blockSeconds,
 		"block_mode", queueBlockModeLabel(blockSeconds),
@@ -1826,6 +1895,19 @@ func (h *Handler) handleQueueDequeueWithState(w http.ResponseWriter, r *http.Req
 
 	remoteAddr := h.clientKeyFromRequest(r)
 	queueLogger := logger.With("queue", queueName, "owner", owner, "stateful", true)
+	if state := h.currentShutdownState(); state.Draining {
+		retry := durationToSeconds(state.Remaining)
+		queueLogger.Info("queue.dequeue_state.reject_shutdown",
+			"block_seconds", blockSeconds,
+			"remaining_seconds", retry,
+		)
+		return httpError{
+			Status:     http.StatusServiceUnavailable,
+			Code:       "shutdown_draining",
+			Detail:     "server is draining existing leases",
+			RetryAfter: retry,
+		}
+	}
 	queueLogger.Info("queue.consumer.connect",
 		"block_seconds", blockSeconds,
 		"block_mode", queueBlockModeLabel(blockSeconds),
@@ -1960,6 +2042,20 @@ func (h *Handler) handleQueueSubscribeInternal(w http.ResponseWriter, r *http.Re
 	visibility := h.resolveTTL(req.VisibilityTimeoutSeconds)
 	remoteAddr := h.clientKeyFromRequest(r)
 	queueLogger := logger.With("queue", queueName, "owner", owner, "stateful", stateful)
+	if state := h.currentShutdownState(); state.Draining {
+		retry := durationToSeconds(state.Remaining)
+		queueLogger.Info("queue.subscribe.reject_shutdown",
+			"block_seconds", blockSeconds,
+			"remaining_seconds", retry,
+			"prefetch", pageSize,
+		)
+		return httpError{
+			Status:     http.StatusServiceUnavailable,
+			Code:       "shutdown_draining",
+			Detail:     "server is draining existing leases",
+			RetryAfter: retry,
+		}
+	}
 	queueLogger.Info("queue.subscribe.connect",
 		"block_seconds", blockSeconds,
 		"block_mode", queueBlockModeLabel(blockSeconds),
@@ -2055,10 +2151,10 @@ func (h *Handler) handleQueueSubscribeInternal(w http.ResponseWriter, r *http.Re
 		}
 
 		deliveries, nextCursor, err := h.consumeQueueBatch(iterCtx, queueLogger, qsvc, queueName, owner, visibility, stateful, loopBlock, pageSize)
-		if cancel != nil {
-			cancel()
-		}
 		if err != nil {
+			if cancel != nil {
+				cancel()
+			}
 			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, errQueueEmpty) {
 				hotUntil = time.Time{}
 				if deliveredCount == 0 && !headersWritten {
@@ -2106,6 +2202,14 @@ func (h *Handler) handleQueueSubscribeInternal(w http.ResponseWriter, r *http.Re
 			}
 			candidateID := delivery.descriptor.Document.ID
 			if err := delivery.ensure(iterCtx); err != nil {
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					delivery.abort()
+					disconnectStatus = "context"
+					if ctxErr := ctx.Err(); ctxErr != nil {
+						return ctxErr
+					}
+					return err
+				}
 				if queueLogger != nil {
 					fields := []any{
 						"queue", queueName,
@@ -2178,6 +2282,9 @@ func (h *Handler) handleQueueSubscribeInternal(w http.ResponseWriter, r *http.Re
 			delivery.complete()
 			deliveredCount++
 			queueLogger.Trace("queue.subscribe.delivered", "mid", delivery.message.MessageID, "cursor", delivery.nextCursor, "delivered", deliveredCount)
+		}
+		if cancel != nil {
+			cancel()
 		}
 	}
 

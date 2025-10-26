@@ -26,6 +26,7 @@ import (
 	"pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/integration/internal/cryptotest"
+	shutdowntest "pkt.systems/lockd/integration/internal/shutdowntest"
 	testlog "pkt.systems/lockd/integration/internal/testlog"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/disk"
@@ -42,6 +43,8 @@ type failoverLogResult struct {
 	ErrorEndpoint     string
 	HadTransportError bool
 }
+
+var diskEncryptionBundles sync.Map
 
 const (
 	failoverDuringHandlerStart failoverPhase = iota
@@ -160,6 +163,42 @@ func TestDiskConcurrency(t *testing.T) {
 func TestDiskAutoKeyAcquire(t *testing.T) {
 	ensureDiskRootEnv(t)
 	runDiskAutoKeyAcquireScenario(t, "", "disk-auto")
+}
+
+func TestDiskShutdownDrainingBlocksAcquire(t *testing.T) {
+	ctx := context.Background()
+	root := prepareDiskRoot(t, "")
+	cfg := buildDiskConfig(t, root, 0)
+	ts := startDiskTestServer(t, cfg)
+	t.Cleanup(func() { _ = ts.Stop(context.Background()) })
+	cli := ts.Client
+	if cli == nil {
+		t.Fatalf("nil test server client")
+	}
+	key := "disk-drain-" + uuidv7.NewString()
+	lease := acquireWithRetry(t, ctx, cli, key, "holder", 30, lockdclient.BlockWaitForever)
+	stopCh := make(chan error, 1)
+	go func() {
+		stopCh <- ts.Stop(context.Background(), lockd.WithDrainLeases(3*time.Second), lockd.WithShutdownTimeout(4*time.Second))
+	}()
+	payload, _ := json.Marshal(api.AcquireRequest{Key: "disk-drain-wait", Owner: "drain-tester", TTLSeconds: 5})
+	url := ts.URL() + "/v1/acquire"
+	result := shutdowntest.WaitForShutdownDrainingAcquire(t, url, payload)
+	if result.Response.ErrorCode != "shutdown_draining" {
+		t.Fatalf("expected shutdown_draining error, got %+v", result.Response)
+	}
+	if result.Header.Get("Shutdown-Imminent") == "" {
+		t.Fatalf("expected Shutdown-Imminent header, got %v", result.Header)
+	}
+	select {
+	case err := <-stopCh:
+		if err != nil {
+			t.Fatalf("server stop failed: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("server stop timed out")
+	}
+	_ = lease.Release(ctx)
 }
 
 func runDiskAutoKeyAcquireScenario(t *testing.T, base string, owner string) {
@@ -742,7 +781,7 @@ func TestDiskRemoveStateFailoverMultiServer(t *testing.T) {
 	clientLogger, clientLogs := testlog.NewRecorder(t, logport.TraceLevel)
 	failoverClient, err := lockdclient.NewWithEndpoints(
 		[]string{primary.URL(), backup.URL()},
-		lockdclient.WithMTLS(false),
+		lockdclient.WithDisableMTLS(true),
 		lockdclient.WithHTTPTimeout(2*time.Second),
 		lockdclient.WithFailureRetries(5),
 		lockdclient.WithEndpointShuffle(false),
@@ -1111,13 +1150,13 @@ func TestDiskAcquireForUpdateCallbackFailoverMultiServer(t *testing.T) {
 }
 
 func runDiskAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase failoverPhase, base string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	watchdog := time.AfterFunc(10*time.Second, func() {
+	watchdog := time.AfterFunc(30*time.Second, func() {
 		buf := make([]byte, 1<<18)
 		n := runtime.Stack(buf, true)
-		panic("runDiskAcquireForUpdateCallbackFailoverMultiServer timeout after 10s:\n" + string(buf[:n]))
+		panic("runDiskAcquireForUpdateCallbackFailoverMultiServer timeout after 30s:\n" + string(buf[:n]))
 	})
 	defer watchdog.Stop()
 
@@ -1183,7 +1222,7 @@ func runDiskAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase fail
 	clientLogger, clientLogs := testlog.NewRecorder(t, logport.TraceLevel)
 	failoverClient, err := lockdclient.NewWithEndpoints(
 		[]string{primary.URL(), backup.URL()},
-		lockdclient.WithMTLS(false),
+		lockdclient.WithDisableMTLS(true),
 		lockdclient.WithHTTPTimeout(2*time.Second),
 		lockdclient.WithFailureRetries(5),
 		lockdclient.WithEndpointShuffle(false),
@@ -1609,7 +1648,7 @@ func directDiskClient(t testing.TB, ts *lockd.TestServer) *lockdclient.Client {
 	}
 	baseURL := "http://" + addr.String()
 	cli, err := lockdclient.New(baseURL,
-		lockdclient.WithMTLS(false),
+		lockdclient.WithDisableMTLS(true),
 		lockdclient.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)),
 		lockdclient.WithHTTPTimeout(time.Second),
 	)
@@ -1712,7 +1751,7 @@ func buildDiskConfig(tb testing.TB, root string, retention time.Duration) lockd.
 	storeURL := diskStoreURL(root)
 	cfg := lockd.Config{
 		Store:           storeURL,
-		MTLS:            false,
+		DisableMTLS:     true,
 		Listen:          "127.0.0.1:0",
 		ListenProto:     "tcp",
 		DefaultTTL:      30 * time.Second,
@@ -1721,7 +1760,12 @@ func buildDiskConfig(tb testing.TB, root string, retention time.Duration) lockd.
 		SweeperInterval: 2 * time.Second,
 		DiskRetention:   retention,
 	}
-	cryptotest.MaybeEnableStorageEncryption(tb, &cfg)
+	if bundle, ok := diskEncryptionBundles.Load(root); ok {
+		cfg.DisableStorageEncryption = false
+		cfg.BundlePath = bundle.(string)
+	} else if cryptotest.MaybeEnableStorageEncryption(tb, &cfg) && cfg.BundlePath != "" {
+		diskEncryptionBundles.Store(root, cfg.BundlePath)
+	}
 	if err := cfg.Validate(); err != nil {
 		tb.Fatalf("config validation failed: %v", err)
 	}
@@ -1741,7 +1785,7 @@ func diskStoreURL(root string) string {
 func startDiskServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client {
 	tb.Helper()
 
-	cfg.MTLS = false
+	cfg.DisableMTLS = true
 
 	loggerOption := diskTestLoggerOption(tb)
 
@@ -1761,6 +1805,30 @@ func startDiskServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client {
 
 	ts := lockd.StartTestServer(tb, options...)
 	return ts.Client
+}
+
+func startDiskTestServer(tb testing.TB, cfg lockd.Config) *lockd.TestServer {
+	tb.Helper()
+
+	cfg.DisableMTLS = true
+
+	loggerOption := diskTestLoggerOption(tb)
+
+	clientOpts := []lockdclient.Option{
+		lockdclient.WithHTTPTimeout(60 * time.Second),
+		lockdclient.WithCloseTimeout(60 * time.Second),
+		lockdclient.WithKeepAliveTimeout(60 * time.Second),
+		lockdclient.WithLogger(lockd.NewTestingLogger(tb, logport.TraceLevel)),
+	}
+
+	options := []lockd.TestServerOption{
+		lockd.WithTestConfig(cfg),
+		lockd.WithTestListener("tcp", "127.0.0.1:0"),
+		loggerOption,
+		lockd.WithTestClientOptions(clientOpts...),
+	}
+
+	return lockd.StartTestServer(tb, options...)
 }
 
 func diskTestLoggerOption(tb testing.TB) lockd.TestServerOption {

@@ -21,7 +21,9 @@ import (
 	"pkt.systems/lockd"
 	api "pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
+	azuretest "pkt.systems/lockd/integration/azuretest"
 	"pkt.systems/lockd/integration/internal/cryptotest"
+	shutdowntest "pkt.systems/lockd/integration/internal/shutdowntest"
 	testlog "pkt.systems/lockd/integration/internal/testlog"
 	"pkt.systems/lockd/internal/diagnostics/storagecheck"
 	"pkt.systems/lockd/internal/storage"
@@ -30,9 +32,50 @@ import (
 	"pkt.systems/logport"
 )
 
+var (
+	azureStoreVerifyOnce sync.Once
+	azureStoreVerifyErr  error
+)
+
 func TestAzureStoreVerification(t *testing.T) {
 	cfg := loadAzureConfig(t)
 	ensureAzureStoreReady(t, context.Background(), cfg)
+}
+
+func TestAzureShutdownDrainingBlocksAcquire(t *testing.T) {
+	cfg := loadAzureConfig(t)
+	ensureAzureStoreReady(t, context.Background(), cfg)
+	ts := startAzureTestServer(t, cfg)
+	t.Cleanup(func() { _ = ts.Stop(context.Background()) })
+	cli := ts.Client
+	if cli == nil {
+		t.Fatalf("nil test server client")
+	}
+	ctx := context.Background()
+	key := "azure-drain-" + uuidv7.NewString()
+	lease := acquireWithRetry(t, ctx, cli, key, "holder", 45, lockdclient.BlockWaitForever)
+	stopCh := make(chan error, 1)
+	go func() {
+		stopCh <- ts.Stop(context.Background(), lockd.WithDrainLeases(3*time.Second), lockd.WithShutdownTimeout(4*time.Second))
+	}()
+	payload, _ := json.Marshal(api.AcquireRequest{Key: "azure-drain-wait", Owner: "drain-tester", TTLSeconds: 5})
+	url := ts.URL() + "/v1/acquire"
+	result := shutdowntest.WaitForShutdownDrainingAcquire(t, url, payload)
+	if result.Response.ErrorCode != "shutdown_draining" {
+		t.Fatalf("expected shutdown_draining error, got %+v", result.Response)
+	}
+	if result.Header.Get("Shutdown-Imminent") == "" {
+		t.Fatalf("expected Shutdown-Imminent header, got %v", result.Header)
+	}
+	select {
+	case err := <-stopCh:
+		if err != nil {
+			t.Fatalf("server stop failed: %v", err)
+		}
+	case <-time.After(60 * time.Second):
+		t.Fatalf("server stop timed out")
+	}
+	_ = lease.Release(ctx)
 }
 
 func TestAzureLockLifecycle(t *testing.T) {
@@ -590,7 +633,7 @@ func TestAzureAcquireForUpdateCallbackFailover(t *testing.T) {
 	clientLogger, clientLogs := testlog.NewRecorder(t, logport.TraceLevel)
 	failoverClient, err := lockdclient.NewWithEndpoints(
 		[]string{primary.URL(), backup.URL()},
-		lockdclient.WithMTLS(false),
+		lockdclient.WithDisableMTLS(true),
 		lockdclient.WithHTTPTimeout(90*time.Second),
 		lockdclient.WithCloseTimeout(90*time.Second),
 		lockdclient.WithKeepAliveTimeout(90*time.Second),
@@ -757,7 +800,7 @@ func TestAzureRemoveStateFailover(t *testing.T) {
 	clientLogger, clientLogs := testlog.NewRecorder(t, logport.TraceLevel)
 	failoverClient, err := lockdclient.NewWithEndpoints(
 		[]string{primary.URL(), backup.URL()},
-		lockdclient.WithMTLS(false),
+		lockdclient.WithDisableMTLS(true),
 		lockdclient.WithHTTPTimeout(90*time.Second),
 		lockdclient.WithCloseTimeout(90*time.Second),
 		lockdclient.WithKeepAliveTimeout(90*time.Second),
@@ -999,19 +1042,26 @@ func loadAzureConfig(t *testing.T) lockd.Config {
 }
 
 func ensureAzureStoreReady(t *testing.T, ctx context.Context, cfg lockd.Config) {
-	res, err := storagecheck.VerifyStore(ctx, cfg)
-	if err != nil {
-		t.Fatalf("verify store: %v", err)
-	}
-	if !res.Passed() {
-		t.Fatalf("store verification failed: %+v", res)
+	azuretest.ResetContainerForCrypto(t, cfg)
+	azureStoreVerifyOnce.Do(func() {
+		res, err := storagecheck.VerifyStore(ctx, cfg)
+		if err != nil {
+			azureStoreVerifyErr = err
+			return
+		}
+		if !res.Passed() {
+			azureStoreVerifyErr = fmt.Errorf("store verification failed: %+v", res)
+		}
+	})
+	if azureStoreVerifyErr != nil {
+		t.Fatalf("store verification failed: %v", azureStoreVerifyErr)
 	}
 }
 
 func startAzureTestServer(t testing.TB, cfg lockd.Config, opts ...lockd.TestServerOption) *lockd.TestServer {
 	t.Helper()
 	cfgCopy := cfg
-	cfgCopy.MTLS = false
+	cfgCopy.DisableMTLS = true
 	if cfgCopy.JSONMaxBytes == 0 {
 		cfgCopy.JSONMaxBytes = 100 << 20
 	}
@@ -1049,6 +1099,11 @@ func startAzureTestServer(t testing.TB, cfg lockd.Config, opts ...lockd.TestServ
 			lockdclient.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)),
 		),
 	}
+	closeDefaults := lockd.WithTestCloseDefaults(
+		lockd.WithDrainLeases(0),
+		lockd.WithShutdownTimeout(2*time.Second),
+	)
+	options = append(options, closeDefaults)
 	options = append(options, opts...)
 	return lockd.StartTestServer(t, options...)
 }
@@ -1061,7 +1116,7 @@ func directClient(t testing.TB, ts *lockd.TestServer) *lockdclient.Client {
 	}
 	base := "http://" + addr.String()
 	cli, err := lockdclient.New(base,
-		lockdclient.WithMTLS(false),
+		lockdclient.WithDisableMTLS(true),
 		lockdclient.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)),
 		lockdclient.WithHTTPTimeout(2*time.Minute),
 	)

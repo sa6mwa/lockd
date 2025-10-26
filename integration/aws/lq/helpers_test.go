@@ -5,8 +5,10 @@ package awsintegration
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,6 +30,11 @@ type awsQueueOptions struct {
 	ResilientInterval time.Duration
 	SweeperInterval   time.Duration
 }
+
+var (
+	awsQueueStoreVerifyOnce sync.Once
+	awsQueueStoreVerifyErr  error
+)
 
 func prepareAWSQueueConfig(t testing.TB, opts awsQueueOptions) lockd.Config {
 	cfg := loadAWSQueueConfig(t)
@@ -72,7 +79,7 @@ func startAWSQueueServerWithCapture(t testing.TB, cfg lockd.Config) (*lockd.Test
 	return ts, capture
 }
 
-func newAWSQueueTestServer(t testing.TB, cfg lockd.Config, serverLogger logport.ForLogging) *lockd.TestServer {
+func newAWSQueueTestServer(t testing.TB, cfg lockd.Config, serverLogger logport.ForLogging, opts ...lockd.TestServerOption) *lockd.TestServer {
 	t.Helper()
 
 	if serverLogger == nil {
@@ -86,12 +93,14 @@ func newAWSQueueTestServer(t testing.TB, cfg lockd.Config, serverLogger logport.
 		lockdclient.WithLogger(clientLogger),
 	}
 
-	return lockd.StartTestServer(t,
+	options := []lockd.TestServerOption{
 		lockd.WithTestConfig(cfg),
 		lockd.WithTestLogger(serverLogger),
 		lockd.WithTestClientOptions(baseClientOpts...),
-		lockd.WithTestStartTimeout(30*time.Second),
-	)
+		lockd.WithTestStartTimeout(30 * time.Second),
+	}
+	options = append(options, opts...)
+	return lockd.StartTestServer(t, options...)
 }
 
 func loadAWSQueueConfig(t testing.TB) lockd.Config {
@@ -125,12 +134,19 @@ func loadAWSQueueConfig(t testing.TB) lockd.Config {
 }
 
 func ensureAWSQueueReady(t testing.TB, ctx context.Context, cfg lockd.Config) {
-	res, err := storagecheck.VerifyStore(ctx, cfg)
-	if err != nil {
-		t.Fatalf("verify store: %v", err)
-	}
-	if !res.Passed() {
-		t.Fatalf("store verification failed: %+v", res)
+	resetAWSBucketForCrypto(t, cfg)
+	awsQueueStoreVerifyOnce.Do(func() {
+		res, err := storagecheck.VerifyStore(ctx, cfg)
+		if err != nil {
+			awsQueueStoreVerifyErr = err
+			return
+		}
+		if !res.Passed() {
+			awsQueueStoreVerifyErr = fmt.Errorf("store verification failed: %+v", res)
+		}
+	})
+	if awsQueueStoreVerifyErr != nil {
+		t.Fatalf("store verification failed: %v", awsQueueStoreVerifyErr)
 	}
 	ensureAWSQueuePrefixWritable(t, cfg)
 }

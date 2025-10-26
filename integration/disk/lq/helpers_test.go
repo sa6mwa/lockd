@@ -46,7 +46,7 @@ func buildDiskQueueConfig(t testing.TB, root string, opts diskQueueOptions) lock
 	t.Helper()
 	cfg := lockd.Config{
 		Store:           diskStoreURL(root),
-		MTLS:            false,
+		DisableMTLS:     true,
 		ListenProto:     "tcp",
 		Listen:          "127.0.0.1:0",
 		DefaultTTL:      30 * time.Second,

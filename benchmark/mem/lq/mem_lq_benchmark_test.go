@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"runtime/pprof"
 	"strconv"
 	"strings"
@@ -19,8 +20,9 @@ import (
 
 	"pkt.systems/lockd"
 	lockdclient "pkt.systems/lockd/client"
-	"pkt.systems/lockd/integration/internal/cryptotest"
+	"pkt.systems/lockd/internal/cryptoutil"
 	memorybackend "pkt.systems/lockd/internal/storage/memory"
+	"pkt.systems/lockd/internal/tlsutil"
 	"pkt.systems/logport"
 )
 
@@ -30,6 +32,8 @@ const (
 	memBenchTotalCap              = 2000
 	memBenchMinMessages           = 200
 )
+
+const memBenchEncryptionEnv = "LOCKD_TEST_STORAGE_ENCRYPTION"
 
 var errBenchmarkComplete = errors.New("mem queue benchmark complete")
 
@@ -208,7 +212,7 @@ func runMemQueueBenchmark(b *testing.B, scenario queueBenchmarkScenario, payload
 			lockd.WithTestConfig(cfg),
 			lockd.WithTestLogger(logger),
 			lockd.WithTestClientOptions(
-				lockdclient.WithMTLS(false),
+				lockdclient.WithDisableMTLS(true),
 				lockdclient.WithHTTPTimeout(5*time.Minute),
 				lockdclient.WithKeepAliveTimeout(5*time.Minute),
 				lockdclient.WithLogger(logger),
@@ -647,7 +651,7 @@ func buildMemQueueConfig(tb testing.TB) lockd.Config {
 	tb.Helper()
 	cfg := lockd.Config{
 		Store:                      "mem://",
-		MTLS:                       false,
+		DisableMTLS:                true,
 		ListenProto:                "tcp",
 		Listen:                     "127.0.0.1:0",
 		DefaultTTL:                 30 * time.Second,
@@ -661,11 +665,55 @@ func buildMemQueueConfig(tb testing.TB) lockd.Config {
 	cfg.MemQueueWatch = true
 	cfg.MemQueueWatchSet = true
 	cfg.QRFEnabled = false
-	cryptotest.MaybeEnableStorageEncryption(tb, &cfg)
+	maybeEnableStorageEncryption(tb, &cfg)
 	if err := cfg.Validate(); err != nil {
 		tb.Fatalf("config validation failed: %v", err)
 	}
 	return cfg
+}
+
+func maybeEnableStorageEncryption(tb testing.TB, cfg *lockd.Config) bool {
+	tb.Helper()
+	if cfg == nil {
+		tb.Fatalf("membench: nil config")
+	}
+	if os.Getenv(memBenchEncryptionEnv) != "1" {
+		cfg.DisableStorageEncryption = true
+		cfg.StorageEncryptionSnappy = false
+		return false
+	}
+	dir := tb.TempDir()
+	ca, err := tlsutil.GenerateCA("lockd-bench-ca", 365*24*time.Hour)
+	if err != nil {
+		tb.Fatalf("generate ca: %v", err)
+	}
+	caBundle, err := tlsutil.EncodeCABundle(ca.CertPEM, ca.KeyPEM)
+	if err != nil {
+		tb.Fatalf("encode ca bundle: %v", err)
+	}
+	material, err := cryptoutil.MetadataMaterialFromBytes(caBundle)
+	if err != nil {
+		tb.Fatalf("extract metadata material: %v", err)
+	}
+	serverCert, serverKey, err := ca.IssueServer([]string{"127.0.0.1"}, "lockd-bench", 365*24*time.Hour)
+	if err != nil {
+		tb.Fatalf("issue server cert: %v", err)
+	}
+	serverBundle, err := tlsutil.EncodeServerBundle(ca.CertPEM, nil, serverCert, serverKey, nil)
+	if err != nil {
+		tb.Fatalf("encode server bundle: %v", err)
+	}
+	augmented, err := cryptoutil.ApplyMetadataMaterial(serverBundle, material)
+	if err != nil {
+		tb.Fatalf("apply metadata material: %v", err)
+	}
+	bundlePath := filepath.Join(dir, "server.pem")
+	if err := os.WriteFile(bundlePath, augmented, 0o600); err != nil {
+		tb.Fatalf("write bundle: %v", err)
+	}
+	cfg.DisableStorageEncryption = false
+	cfg.BundlePath = bundlePath
+	return true
 }
 
 func prefillQueue(ctx context.Context, cli *lockdclient.Client, queue string, count int, payload []byte) (int, error) {

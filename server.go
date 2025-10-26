@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"pkt.systems/kryptograf/keymgmt"
@@ -25,6 +26,9 @@ import (
 	"pkt.systems/lockd/internal/storage/retry"
 	"pkt.systems/lockd/internal/tlsutil"
 	"pkt.systems/logport"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric"
 )
 
 // Server wraps the HTTP server, storage backend, and supporting components.
@@ -34,6 +38,7 @@ type Server struct {
 	backend      storage.Backend
 	handler      *httpapi.Handler
 	httpSrv      *http.Server
+	httpShutdown func(context.Context) error
 	listener     net.Listener
 	socketPath   string
 	clock        clock.Clock
@@ -50,17 +55,44 @@ type Server struct {
 	qrfController *qrf.Controller
 	lsfObserver   *lsf.Observer
 	lsfCancel     context.CancelFunc
+
+	draining      atomic.Bool
+	drainDeadline atomic.Int64
+	drainMetrics  struct {
+		once      sync.Once
+		active    metric.Int64Histogram
+		remaining metric.Int64Histogram
+		duration  metric.Float64Histogram
+		err       error
+	}
+	drainNotifyClients atomic.Bool
+	defaultCloseOpts   closeOptions
+	drainFn            func(context.Context, DrainLeasesPolicy) drainSummary
+}
+
+type leaseSnapshot struct {
+	Key       string
+	Owner     string
+	LeaseID   string
+	ExpiresAt int64
+}
+
+type drainSummary struct {
+	ActiveAtStart int
+	Remaining     int
+	Elapsed       time.Duration
 }
 
 // Option configures server instances.
 type Option func(*options)
 
 type options struct {
-	Logger       logport.ForLogging
-	Backend      storage.Backend
-	Clock        clock.Clock
-	OTLPEndpoint string
-	configHooks  []func(*Config)
+	Logger        logport.ForLogging
+	Backend       storage.Backend
+	Clock         clock.Clock
+	OTLPEndpoint  string
+	configHooks   []func(*Config)
+	closeDefaults []CloseOption
 }
 
 // WithLogger supplies a custom logger.
@@ -101,6 +133,110 @@ func WithLSFLogInterval(interval time.Duration) Option {
 	}
 }
 
+// WithDefaultCloseOptions sets the server-wide defaults applied to Close/Shutdown calls.
+func WithDefaultCloseOptions(opts ...CloseOption) Option {
+	return func(o *options) {
+		o.closeDefaults = append(o.closeDefaults, opts...)
+	}
+}
+
+// CloseOption customises server shutdown semantics.
+type CloseOption func(*closeOptions)
+
+type closeOptions struct {
+	drain              DrainLeasesPolicy
+	drainSet           bool
+	shutdownTimeout    time.Duration
+	shutdownTimeoutSet bool
+}
+
+const drainShutdownSplit = 0.8
+
+// DrainLeasesPolicy describes how the server should attempt to let existing lease
+// holders finish work before the HTTP server stops accepting new connections.
+type DrainLeasesPolicy struct {
+	// GracePeriod defines how long the server should keep serving requests
+	// (while denying new leases) before beginning the HTTP shutdown. Zero skips
+	// the grace window.
+	GracePeriod time.Duration
+
+	// ForceRelease toggles metadata rewrites that explicitly clear outstanding
+	// leases when the grace period elapses. This is experimental and disabled by
+	// default.
+	ForceRelease bool
+
+	// NotifyClients controls whether the server surfaces Shutdown-Imminent
+	// headers while draining so clients can release proactively.
+	NotifyClients bool
+}
+
+// WithDrainLeases configures the shutdown grace period used to let existing
+// lease holders flush state. Passing a negative duration disables draining.
+func WithDrainLeases(grace time.Duration) CloseOption {
+	return WithDrainLeasesPolicy(DrainLeasesPolicy{
+		GracePeriod:   grace,
+		NotifyClients: true,
+	})
+}
+
+// WithDrainLeasesPolicy applies a full drain policy to shutdown calls.
+func WithDrainLeasesPolicy(policy DrainLeasesPolicy) CloseOption {
+	return func(opts *closeOptions) {
+		opts.drain = policy.normalized()
+		opts.drainSet = true
+	}
+}
+
+// WithShutdownTimeout caps the total time allowed for drain plus HTTP shutdown.
+// Zero disables the explicit cap and relies solely on the provided context.
+func WithShutdownTimeout(d time.Duration) CloseOption {
+	return func(opts *closeOptions) {
+		if d <= 0 {
+			opts.shutdownTimeout = 0
+			opts.shutdownTimeoutSet = true
+			return
+		}
+		opts.shutdownTimeout = d
+		opts.shutdownTimeoutSet = true
+	}
+}
+
+func defaultCloseOptions() closeOptions {
+	return closeOptions{
+		drain: DrainLeasesPolicy{
+			GracePeriod:   10 * time.Second,
+			NotifyClients: true,
+		},
+		drainSet:           true,
+		shutdownTimeout:    10 * time.Second,
+		shutdownTimeoutSet: true,
+	}
+}
+
+func resolveCloseOptions(base closeOptions, input []CloseOption) closeOptions {
+	opts := base
+	for _, apply := range input {
+		if apply == nil {
+			continue
+		}
+		apply(&opts)
+	}
+	if !opts.drainSet {
+		def := defaultCloseOptions().drain
+		opts.drain = def
+		opts.drainSet = true
+	}
+	opts.drain = opts.drain.normalized()
+	return opts
+}
+
+func (p DrainLeasesPolicy) normalized() DrainLeasesPolicy {
+	if p.GracePeriod < 0 {
+		p.GracePeriod = 0
+	}
+	return p
+}
+
 // NewServer constructs a lockd server according to cfg.
 // Example:
 //
@@ -125,12 +261,12 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 	cfg = cfgCopy
 	var err error
 	var bundle *tlsutil.Bundle
-	if cfg.MTLS || cfg.StorageEncryptionEnabled {
+	if cfg.MTLSEnabled() || cfg.StorageEncryptionEnabled() {
 		bundle, err = tlsutil.LoadBundle(cfg.BundlePath, cfg.DenylistPath)
 		if err != nil {
 			return nil, err
 		}
-		if cfg.StorageEncryptionEnabled {
+		if cfg.StorageEncryptionEnabled() {
 			if bundle.MetadataRootKey == (keymgmt.RootKey{}) {
 				return nil, fmt.Errorf("config: server bundle %q missing kryptograf root key (reissue with 'lockd auth new server')", cfg.BundlePath)
 			}
@@ -147,7 +283,7 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 		}
 	}
 	var crypto *storage.Crypto
-	if cfg.StorageEncryptionEnabled {
+	if cfg.StorageEncryptionEnabled() {
 		crypto, err = storage.NewCrypto(storage.CryptoConfig{
 			Enabled:            true,
 			RootKey:            cfg.MetadataRootKey,
@@ -163,12 +299,17 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 	if logger == nil {
 		logger = logport.NoopLogger()
 	}
-	if cfg.StorageEncryptionEnabled {
-		logger.Info("storage encryption enabled")
+	if cfg.StorageEncryptionEnabled() {
+		logger.Info("storage.crypto.envelope enabled", "svc", "storage.crypto.envelope", "enabled", true)
+		if cfg.StorageEncryptionSnappy {
+			logger.Info("storage.pipeline.snappy pre-encrypt enabled", "svc", "storage.pipeline.snappy_pre_encrypt", "enabled", true)
+		} else {
+			logger.Info("storage.pipeline.snappy pre-encrypt disabled", "svc", "storage.pipeline.snappy_pre_encrypt", "enabled", false)
+		}
 	} else {
-		logger.Warn("storage encryption disabled", "impact", "data at rest will be stored in plaintext")
+		logger.Warn("storage.crypto.envelope disabled; falling back to plaintext at rest", "svc", "storage.crypto.envelope", "impact", "data at rest will be stored in plaintext", "enabled", false)
+		logger.Info("storage.pipeline.snappy pre-encrypt disabled", "svc", "storage.pipeline.snappy_pre_encrypt", "enabled", false, "reason", "requires storage.crypto.envelope")
 	}
-	logger.Info("storage encryption snappy", "enabled", cfg.StorageEncryptionSnappy)
 	var telemetry *telemetryBundle
 	otlpEndpoint := cfg.OTLPEndpoint
 	if o.OTLPEndpoint != "" {
@@ -254,6 +395,7 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 			LogInterval:    cfg.LSFLogInterval,
 		}, qrfCtrl, logger)
 	}
+	var srvRef *Server
 	handler := httpapi.New(httpapi.Config{
 		Store:                      backend,
 		Crypto:                     crypto,
@@ -265,7 +407,7 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 		MaxTTL:                     cfg.MaxTTL,
 		AcquireBlock:               cfg.AcquireBlock,
 		SpoolMemoryThreshold:       cfg.SpoolMemoryThreshold,
-		EnforceClientIdentity:      cfg.MTLS,
+		EnforceClientIdentity:      cfg.MTLSEnabled(),
 		MetaWarmupAttempts:         -1,
 		StateWarmupAttempts:        -1,
 		QueueMaxConsumers:          cfg.QueueMaxConsumers,
@@ -274,6 +416,13 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 		QueueResilientPollInterval: cfg.QueueResilientPollInterval,
 		LSFObserver:                lsfObserver,
 		QRFController:              qrfCtrl,
+		ShutdownState: func() httpapi.ShutdownState {
+			if srvRef == nil {
+				return httpapi.ShutdownState{}
+			}
+			draining, remaining, notify := srvRef.shutdownState()
+			return httpapi.ShutdownState{Draining: draining, Remaining: remaining, Notify: notify}
+		},
 	})
 	logger.Info("json compaction configured", "impl", jsonUtil.name)
 	mux := http.NewServeMux()
@@ -294,26 +443,44 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 	}
 	httpSrv.ErrorLog = logport.LogLoggerWithLevel(logger.With("svc", "http"), logport.ErrorLevel)
 
-	if cfg.MTLS {
+	if cfg.MTLSEnabled() {
 		httpSrv.TLSConfig = buildServerTLS(bundle)
 	}
-	if cfg.MTLS {
+	if cfg.MTLSEnabled() {
 		httpSrv.TLSConfig = buildServerTLS(bundle)
 	}
 
-	return &Server{
-		cfg:           cfg,
-		logger:        logger.With("svc", "server"),
-		backend:       backend,
-		handler:       handler,
-		httpSrv:       httpSrv,
-		clock:         serverClock,
-		telemetry:     telemetry,
-		readyCh:       make(chan struct{}),
-		qrfController: qrfCtrl,
-		lsfObserver:   lsfObserver,
-		lsfCancel:     lsfCancel,
-	}, nil
+	srv := &Server{
+		cfg:              cfg,
+		logger:           logger.With("svc", "server"),
+		backend:          backend,
+		handler:          handler,
+		httpSrv:          httpSrv,
+		httpShutdown:     httpSrv.Shutdown,
+		clock:            serverClock,
+		telemetry:        telemetry,
+		readyCh:          make(chan struct{}),
+		qrfController:    qrfCtrl,
+		lsfObserver:      lsfObserver,
+		lsfCancel:        lsfCancel,
+		defaultCloseOpts: defaultCloseOptions(),
+	}
+	configClose := make([]CloseOption, 0, 2)
+	if cfg.DrainGraceSet || cfg.DrainGrace > 0 {
+		configClose = append(configClose, WithDrainLeases(cfg.DrainGrace))
+	}
+	if cfg.ShutdownTimeoutSet || cfg.ShutdownTimeout > 0 {
+		configClose = append(configClose, WithShutdownTimeout(cfg.ShutdownTimeout))
+	}
+	if len(configClose) > 0 {
+		srv.defaultCloseOpts = resolveCloseOptions(srv.defaultCloseOpts, configClose)
+	}
+	srv.drainFn = srv.performDrain
+	if len(o.closeDefaults) > 0 {
+		srv.defaultCloseOpts = resolveCloseOptions(srv.defaultCloseOpts, o.closeDefaults)
+	}
+	srvRef = srv
+	return srv, nil
 }
 
 // Handler returns the underlying HTTP handler so lockd can be mounted inside an
@@ -338,7 +505,7 @@ func (s *Server) Start() error {
 		s.socketPath = s.cfg.Listen
 	}
 	s.signalReady()
-	s.logger.Info("listening", "network", s.cfg.ListenProto, "address", ln.Addr().String(), "mtls", s.cfg.MTLS)
+	s.logger.Info("listening", "network", s.cfg.ListenProto, "address", ln.Addr().String(), "mtls", s.cfg.MTLSEnabled())
 	s.startSweeper()
 	defer s.stopSweeper()
 	var serveErr error
@@ -360,6 +527,17 @@ func (s *Server) Start() error {
 // Shutdown gracefully stops the server and returns any fatal serve/shutdown
 // error. The returned error will be nil for clean shutdowns.
 func (s *Server) Shutdown(ctx context.Context) error {
+	return s.ShutdownWithOptions(ctx)
+}
+
+// ShutdownWithOptions gracefully stops the server while applying custom close
+// behaviour.
+func (s *Server) ShutdownWithOptions(ctx context.Context, opts ...CloseOption) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	resolved := resolveCloseOptions(s.defaultCloseOpts, opts)
+
 	s.mu.Lock()
 	if s.shutdown {
 		s.mu.Unlock()
@@ -368,7 +546,59 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.shutdown = true
 	s.mu.Unlock()
 
-	if err := s.httpSrv.Shutdown(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	overallTimeout := time.Duration(0)
+	if resolved.shutdownTimeoutSet && resolved.shutdownTimeout > 0 {
+		overallTimeout = resolved.shutdownTimeout
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining < 0 {
+			remaining = 0
+		}
+		if overallTimeout == 0 || (remaining > 0 && remaining < overallTimeout) {
+			overallTimeout = remaining
+		}
+	}
+
+	effectivePolicy := resolved.drain
+	if effectivePolicy.GracePeriod > 0 && overallTimeout > 0 {
+		cap := time.Duration(float64(overallTimeout) * drainShutdownSplit)
+		if cap <= 0 {
+			cap = overallTimeout
+		}
+		if cap > 0 && cap < effectivePolicy.GracePeriod {
+			effectivePolicy.GracePeriod = cap
+		}
+	}
+
+	summary := s.drainFn(ctx, effectivePolicy)
+	if summary.ActiveAtStart > 0 {
+		s.logger.Debug("shutdown.drain.summary", "started", summary.ActiveAtStart, "remaining", summary.Remaining, "elapsed", summary.Elapsed)
+	}
+
+	httpCtx := ctx
+	if overallTimeout > 0 {
+		remaining := overallTimeout - summary.Elapsed
+		if remaining < 0 {
+			remaining = 0
+		}
+		if remaining == 0 {
+			remaining = 10 * time.Millisecond
+		}
+		var cancel context.CancelFunc
+		httpCtx, cancel = context.WithTimeout(ctx, remaining)
+		defer cancel()
+	}
+
+	shutdownFn := s.httpShutdown
+	if shutdownFn == nil && s.httpSrv != nil {
+		shutdownFn = s.httpSrv.Shutdown
+	}
+	if shutdownFn == nil {
+		shutdownFn = func(context.Context) error { return nil }
+	}
+	if err := shutdownFn(httpCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		s.logger.Error("shutdown.http.error", "error", err)
 		return fmt.Errorf("http shutdown: %w", err)
 	}
 	if s.lsfCancel != nil {
@@ -379,11 +609,14 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.lsfObserver.Wait()
 	}
 	if l := s.listener; l != nil {
-		_ = l.Close()
+		if err := l.Close(); err != nil {
+			s.logger.Warn("shutdown.listener.close_error", "error", err)
+		}
 		s.listener = nil
 	}
 	s.stopSweeper()
 	if err := s.backend.Close(); err != nil {
+		s.logger.Error("shutdown.backend.close_error", "error", err)
 		return err
 	}
 	if s.telemetry != nil {
@@ -394,24 +627,27 @@ func (s *Server) Shutdown(ctx context.Context) error {
 			defer cancel()
 		}
 		if err := s.telemetry.Shutdown(telemetryCtx); err != nil {
+			s.logger.Error("shutdown.telemetry.close_error", "error", err)
 			return err
 		}
 		s.telemetry = nil
 	}
 	if s.cfg.ListenProto == "unix" && s.socketPath != "" {
 		if err := os.Remove(s.socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			s.logger.Warn("shutdown.socket.remove_error", "error", err)
 			return err
 		}
 	}
 	if err := s.LastServeError(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		s.logger.Error("shutdown.serve_error", "error", err)
 		return err
 	}
 	return nil
 }
 
 // Close gracefully shuts the server down using a background context.
-func (s *Server) Close() error {
-	return s.Shutdown(context.Background())
+func (s *Server) Close(opts ...CloseOption) error {
+	return s.ShutdownWithOptions(context.Background(), opts...)
 }
 
 func (s *Server) signalReady() {
@@ -436,6 +672,271 @@ func (s *Server) ListenerAddr() net.Addr {
 		return l.Addr()
 	}
 	return nil
+}
+
+func (s *Server) shutdownState() (bool, time.Duration, bool) {
+	if s == nil {
+		return false, 0, false
+	}
+	if !s.draining.Load() {
+		return false, 0, false
+	}
+	remaining := time.Duration(0)
+	if deadlineNano := s.drainDeadline.Load(); deadlineNano > 0 {
+		deadline := time.Unix(0, deadlineNano)
+		now := s.clock.Now()
+		remaining = deadline.Sub(now)
+		if remaining < 0 {
+			remaining = 0
+		}
+	}
+	return true, remaining, s.drainNotifyClients.Load()
+}
+
+func (s *Server) ensureDrainMetrics() {
+	s.drainMetrics.once.Do(func() {
+		meter := otel.Meter("pkt.systems/lockd/server")
+		if hist, err := meter.Int64Histogram("lockd.shutdown.drain.active_leases"); err == nil {
+			s.drainMetrics.active = hist
+		} else {
+			s.logger.Warn("shutdown.telemetry.instrument_error", "metric", "lockd.shutdown.drain.active_leases", "error", err)
+		}
+		if hist, err := meter.Int64Histogram("lockd.shutdown.drain.remaining_leases"); err == nil {
+			s.drainMetrics.remaining = hist
+		} else {
+			s.logger.Warn("shutdown.telemetry.instrument_error", "metric", "lockd.shutdown.drain.remaining_leases", "error", err)
+		}
+		if hist, err := meter.Float64Histogram("lockd.shutdown.drain.elapsed_seconds"); err == nil {
+			s.drainMetrics.duration = hist
+		} else {
+			s.logger.Warn("shutdown.telemetry.instrument_error", "metric", "lockd.shutdown.drain.elapsed_seconds", "error", err)
+		}
+	})
+}
+
+func (s *Server) recordDrainMetrics(summary drainSummary) {
+	s.ensureDrainMetrics()
+	ctx := context.Background()
+	if s.drainMetrics.active != nil && summary.ActiveAtStart >= 0 {
+		s.drainMetrics.active.Record(ctx, int64(summary.ActiveAtStart))
+	}
+	if s.drainMetrics.remaining != nil && summary.Remaining >= 0 {
+		s.drainMetrics.remaining.Record(ctx, int64(summary.Remaining))
+	}
+	if s.drainMetrics.duration != nil && summary.Elapsed >= 0 {
+		s.drainMetrics.duration.Record(ctx, summary.Elapsed.Seconds())
+	}
+}
+
+func (s *Server) snapshotActiveLeases(ctx context.Context) (leases []leaseSnapshot, err error) {
+	if s.backend == nil {
+		return nil, nil
+	}
+	start := s.clock.Now()
+	logger := s.logger.With("component", "shutdown")
+	var totalKeys int
+	defer func() {
+		elapsed := s.clock.Now().Sub(start)
+		fields := []any{
+			"keys", totalKeys,
+			"active", len(leases),
+			"elapsed", elapsed,
+		}
+		if err != nil {
+			fields = append(fields, "error", err)
+			logger.Debug("shutdown.drain.snapshot.scan_error", fields...)
+		} else {
+			logger.Debug("shutdown.drain.snapshot.scan", fields...)
+		}
+	}()
+
+	var keys []string
+	keys, err = s.backend.ListMetaKeys(ctx)
+	if err != nil {
+		return nil, err
+	}
+	totalKeys = len(keys)
+	now := s.clock.Now().Unix()
+	leases = make([]leaseSnapshot, 0, len(keys))
+	for _, key := range keys {
+		var meta *storage.Meta
+		meta, _, err = s.backend.LoadMeta(ctx, key)
+		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				continue
+			}
+			logger.Warn("shutdown.drain.load_meta_failed", "key", key, "error", err)
+			continue
+		}
+		if meta.Lease == nil {
+			continue
+		}
+		if meta.Lease.ExpiresAtUnix <= now {
+			continue
+		}
+		leases = append(leases, leaseSnapshot{
+			Key:       key,
+			Owner:     meta.Lease.Owner,
+			LeaseID:   meta.Lease.ID,
+			ExpiresAt: meta.Lease.ExpiresAtUnix,
+		})
+	}
+	return leases, nil
+}
+
+func (s *Server) forceReleaseLeases(ctx context.Context, leases []leaseSnapshot) int {
+	released := 0
+	if len(leases) == 0 || s.backend == nil {
+		return 0
+	}
+	for _, lease := range leases {
+		meta, etag, err := s.backend.LoadMeta(ctx, lease.Key)
+		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				continue
+			}
+			s.logger.Warn("shutdown.drain.force_release.load_failed", "key", lease.Key, "error", err)
+			continue
+		}
+		if meta.Lease == nil || meta.Lease.ID != lease.LeaseID {
+			continue
+		}
+		meta.Lease = nil
+		meta.UpdatedAtUnix = s.clock.Now().Unix()
+		if _, err := s.backend.StoreMeta(ctx, lease.Key, meta, etag); err != nil {
+			if errors.Is(err, storage.ErrCASMismatch) {
+				continue
+			}
+			s.logger.Warn("shutdown.drain.force_release.store_failed", "key", lease.Key, "error", err)
+			continue
+		}
+		released++
+	}
+	return released
+}
+
+func (s *Server) performDrain(parentCtx context.Context, policy DrainLeasesPolicy) drainSummary {
+	summary := drainSummary{ActiveAtStart: 0, Remaining: 0}
+	if !s.draining.Load() {
+		s.draining.Store(true)
+	}
+	s.drainNotifyClients.Store(policy.NotifyClients)
+	if policy.GracePeriod <= 0 {
+		s.drainDeadline.Store(0)
+		s.logger.Info("shutdown.drain.skip", "reason", "grace_disabled", "force_release", policy.ForceRelease, "notify_clients", policy.NotifyClients)
+		s.recordDrainMetrics(summary)
+		return summary
+	}
+
+	startTime := s.clock.Now()
+	deadline := startTime.Add(policy.GracePeriod)
+	s.drainDeadline.Store(deadline.UnixNano())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	go func() {
+		select {
+		case <-parentCtx.Done():
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
+	leases, err := s.snapshotActiveLeases(ctx)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotImplemented) {
+			s.logger.Warn("shutdown.drain.unsupported", "error", err)
+		} else {
+			s.logger.Warn("shutdown.drain.snapshot_failed", "error", err)
+		}
+		summary.Elapsed = s.clock.Now().Sub(startTime)
+		s.recordDrainMetrics(summary)
+		return summary
+	}
+
+	startActive := len(leases)
+	summary.ActiveAtStart = startActive
+	remaining := startActive
+	logger := s.logger.With("component", "shutdown")
+	logger.Info("shutdown.drain.begin",
+		"active_leases", startActive,
+		"grace_period", policy.GracePeriod,
+		"force_release", policy.ForceRelease,
+		"notify_clients", policy.NotifyClients,
+	)
+	if startActive > 0 {
+		sample := make([]string, 0, len(leases))
+		for i, lease := range leases {
+			if i >= 5 {
+				break
+			}
+			sample = append(sample, lease.Key)
+		}
+		if len(sample) > 0 {
+			logger.Debug("shutdown.drain.sample", "keys", sample)
+		}
+	}
+
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if len(leases) == 0 {
+			remaining = 0
+			break
+		}
+		if !deadline.IsZero() && s.clock.Now().After(deadline) {
+			remaining = len(leases)
+			break
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			logger.Warn("shutdown.drain.context_cancelled", "error", ctx.Err())
+			remaining = len(leases)
+			goto FORCE
+		}
+		if !deadline.IsZero() && s.clock.Now().After(deadline) {
+			remaining = len(leases)
+			break
+		}
+		leases, err = s.snapshotActiveLeases(ctx)
+		if err != nil {
+			logger.Warn("shutdown.drain.snapshot_failed", "error", err)
+			remaining = len(leases)
+			break
+		}
+		remaining = len(leases)
+		if remaining > 0 {
+			logger.Debug("shutdown.drain.wait", "remaining", remaining, "deadline", deadline)
+		}
+	}
+
+FORCE:
+	forced := 0
+	if remaining > 0 && policy.ForceRelease {
+		forced = s.forceReleaseLeases(ctx, leases)
+		remaining -= forced
+		if remaining < 0 {
+			remaining = 0
+		}
+		logger.Warn("shutdown.drain.force_release", "attempted", len(leases), "released", forced, "remaining", remaining)
+	}
+
+	summary.Remaining = remaining
+	summary.Elapsed = s.clock.Now().Sub(startTime)
+	logger.Info("shutdown.drain.complete",
+		"active_leases", startActive,
+		"released", startActive-remaining,
+		"force_release", policy.ForceRelease,
+		"forced_releases", forced,
+		"remaining", remaining,
+		"elapsed", summary.Elapsed,
+	)
+	s.recordDrainMetrics(summary)
+	return summary
 }
 
 func (s *Server) startSweeper() {
@@ -580,13 +1081,13 @@ func buildServerTLS(bundle *tlsutil.Bundle) *tls.Config {
 // stop function that gracefully shuts it down.
 // Example:
 //
-//	cfg := lockd.Config{Store: "mem://", ListenProto: "unix", Listen: "/tmp/lockd.sock", MTLS: false}
+//	cfg := lockd.Config{Store: "mem://", ListenProto: "unix", Listen: "/tmp/lockd.sock", DisableMTLS: true}
 //	srv, stop, err := lockd.StartServer(ctx, cfg)
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
 //	defer stop(context.Background())
-func StartServer(ctx context.Context, cfg Config, opts ...Option) (*Server, func(context.Context) error, error) {
+func StartServer(ctx context.Context, cfg Config, opts ...Option) (*Server, func(context.Context, ...CloseOption) error, error) {
 	srv, err := NewServer(cfg, opts...)
 	if err != nil {
 		return nil, nil, err
@@ -602,7 +1103,7 @@ func StartServer(ctx context.Context, cfg Config, opts ...Option) (*Server, func
 	if err := srv.WaitUntilReady(waitCtx); err != nil {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
+		_ = srv.ShutdownWithOptions(shutdownCtx)
 		<-errCh
 		return nil, nil, err
 	}
@@ -610,12 +1111,12 @@ func StartServer(ctx context.Context, cfg Config, opts ...Option) (*Server, func
 		stopOnce sync.Once
 		stopErr  error
 	)
-	stop := func(shutdownCtx context.Context) error {
+	stop := func(shutdownCtx context.Context, closeOpts ...CloseOption) error {
 		stopOnce.Do(func() {
 			if shutdownCtx == nil {
 				shutdownCtx = context.Background()
 			}
-			if err := srv.Shutdown(shutdownCtx); err != nil {
+			if err := srv.ShutdownWithOptions(shutdownCtx, closeOpts...); err != nil {
 				stopErr = err
 				return
 			}

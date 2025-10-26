@@ -26,6 +26,21 @@ production but makes log-order assertions brittle, so the client now exposes
 `client.WithEndpointShuffle(false)`.  When disabled the endpoints are tried in
 the order provided, while default behaviour (shuffle enabled) remains the same.
 
+## Test Shutdown Defaults
+
+- `lockd.StartTestServer` now applies a fast close profile by default: ~4 s of
+  drain time followed by ~1 s reserved for `http.Server.Shutdown`. This keeps
+  most suites under the container runtimes’ 10 s SIGTERM window without changing
+  the production defaults (still 8 s / 2 s).
+- Use `lockd.WithTestCloseDefaults(...)` to override the profile per server.
+  Pass explicit options (e.g. `WithDrainLeases(8*time.Second)`,
+  `WithShutdownTimeout(10*time.Second)`) for slower failover scenarios, or call
+  `WithTestCloseDefaults()` with no arguments to fall back to the production
+  defaults when a test needs to observe that exact split.
+- Tests that require extremely short shutdowns can pass their own `CloseOption`
+  stack directly to `ts.Stop(...)` or `Server.ShutdownWithOptions(...)`; the
+  helper defaults simply cover the common case.
+
 ## Backend / tag layout
 
 Integration suites compile only when both the `integration` tag and a backend

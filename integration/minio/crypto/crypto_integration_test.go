@@ -273,7 +273,7 @@ func startMinioServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client {
 		lockd.WithTestListener("tcp", "127.0.0.1:0"),
 		lockd.WithTestLoggerFromTB(tb, logport.TraceLevel),
 		lockd.WithTestClientOptions(
-			lockdclient.WithMTLS(false),
+			lockdclient.WithDisableMTLS(true),
 			lockdclient.WithHTTPTimeout(45*time.Second),
 			lockdclient.WithKeepAliveTimeout(45*time.Second),
 			lockdclient.WithCloseTimeout(45*time.Second),

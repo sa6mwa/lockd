@@ -124,7 +124,7 @@ func startMTLSServer(t *testing.T, bundlePath string) *runningServer {
 	cfg := Config{
 		Listen:          "127.0.0.1:0",
 		Store:           "memory://",
-		MTLS:            true,
+		DisableMTLS:     false,
 		BundlePath:      bundlePath,
 		SweeperInterval: time.Second,
 	}

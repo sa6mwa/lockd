@@ -154,7 +154,7 @@ func newRootCommand(logger logport.ForLogging) *cobra.Command {
 			if ok {
 				logger = logger.LogLevel(level)
 			}
-			logger.Info("starting lockd", "store", cfg.Store, "listen", cfg.Listen, "mtls", cfg.MTLS)
+			logger.Info("starting lockd", "store", cfg.Store, "listen", cfg.Listen, "mtls", !cfg.DisableMTLS)
 
 			server, err := lockd.NewServer(cfg, lockd.WithLogger(logger))
 			if err != nil {
@@ -199,13 +199,15 @@ func newRootCommand(logger logport.ForLogging) *cobra.Command {
 	flags.Duration("max-ttl", lockd.DefaultMaxTTL, "maximum lease TTL")
 	flags.Duration("acquire-block", lockd.DefaultAcquireBlock, "maximum time to wait on acquire conflicts")
 	flags.Duration("sweeper-interval", lockd.DefaultSweeperInterval, "sweeper interval for background tasks")
+	flags.Duration("drain-grace", lockd.DefaultDrainGrace, "grace period to drain leases before HTTP shutdown (set 0 to disable)")
+	flags.Duration("shutdown-timeout", lockd.DefaultShutdownTimeout, "overall shutdown timeout (set 0 to rely on signal deadlines)")
 	flags.Duration("disk-retention", 0, "optional retention window for disk backend (0 keeps state indefinitely)")
 	flags.Duration("disk-janitor-interval", 0, "override janitor sweep interval for disk backend (default derived from retention)")
 	flags.Bool("disk-queue-watch", true, "enable inotify-based queue events for disk backend (Linux only; falls back to polling on unsupported filesystems)")
 	flags.Bool("mem-queue-watch", true, "enable in-memory queue change notifications")
-	flags.Bool("storage-encryption", true, "encrypt metadata and state objects using kryptograf (disable for plaintext storage)")
+	flags.Bool("disable-storage-encryption", false, "disable kryptograf envelope encryption (plaintext at rest)")
 	flags.Bool("storage-encryption-snappy", false, "enable Snappy compression before encrypting objects")
-	flags.Bool("mtls", true, "enable mutual TLS")
+	flags.Bool("disable-mtls", false, "disable mutual TLS")
 	flags.String("bundle", "", "path to combined server bundle PEM")
 	flags.String("denylist-path", "", "path to certificate denylist (optional)")
 	flags.String("s3-sse", "", "server-side encryption mode for S3 objects")
@@ -266,11 +268,11 @@ func newRootCommand(logger logport.ForLogging) *cobra.Command {
 	names := []string{
 		"config",
 		"listen", "listen-proto", "store", "json-max", "json-util", "payload-spool-mem", "default-ttl", "max-ttl", "acquire-block",
-		"sweeper-interval", "disk-retention", "disk-janitor-interval", "mtls", "bundle", "denylist-path", "s3-sse",
+		"sweeper-interval", "drain-grace", "shutdown-timeout", "disk-retention", "disk-janitor-interval", "disable-mtls", "bundle", "denylist-path", "s3-sse",
 		"s3-kms-key-id", "s3-max-part-size", "aws-region", "aws-kms-key-id", "azure-key", "azure-endpoint", "azure-sas-token",
 		"storage-retry-attempts", "storage-retry-base-delay", "storage-retry-max-delay", "storage-retry-multiplier",
 		"queue-max-consumers", "queue-poll-interval", "queue-poll-jitter", "queue-resilient-poll-interval",
-		"disk-queue-watch", "mem-queue-watch", "storage-encryption", "storage-encryption-snappy",
+		"disk-queue-watch", "mem-queue-watch", "disable-storage-encryption", "storage-encryption-snappy",
 		"lsf-sample-interval", "lsf-log-interval",
 		"qrf-enabled", "qrf-queue-soft-limit", "qrf-queue-hard-limit", "qrf-queue-consumer-soft-limit", "qrf-queue-consumer-hard-limit", "qrf-lock-soft-limit", "qrf-lock-hard-limit",
 		"qrf-memory-soft-limit", "qrf-memory-hard-limit", "qrf-memory-soft-limit-percent", "qrf-memory-hard-limit-percent",
@@ -316,17 +318,30 @@ func bindConfig(cfg *lockd.Config) error {
 	cfg.MaxTTL = viper.GetDuration("max-ttl")
 	cfg.AcquireBlock = viper.GetDuration("acquire-block")
 	cfg.SweeperInterval = viper.GetDuration("sweeper-interval")
+	cfg.DrainGrace = viper.GetDuration("drain-grace")
+	cfg.DrainGraceSet = true
+	cfg.ShutdownTimeout = viper.GetDuration("shutdown-timeout")
+	cfg.ShutdownTimeoutSet = true
 	cfg.DiskRetention = viper.GetDuration("disk-retention")
 	cfg.DiskJanitorInterval = viper.GetDuration("disk-janitor-interval")
-	cfg.MTLS = viper.GetBool("mtls")
+	cfg.DisableMTLS = viper.GetBool("disable-mtls")
+	if viper.IsSet("mtls") {
+		cfg.DisableMTLS = !viper.GetBool("mtls")
+	}
 	cfg.BundlePath = viper.GetString("bundle")
 	cfg.DenylistPath = viper.GetString("denylist-path")
 	cfg.S3SSE = viper.GetString("s3-sse")
 	cfg.S3KMSKeyID = viper.GetString("s3-kms-key-id")
 	cfg.MemQueueWatch = viper.GetBool("mem-queue-watch")
 	cfg.MemQueueWatchSet = true
-	cfg.StorageEncryptionEnabled = viper.GetBool("storage-encryption")
+	cfg.DisableStorageEncryption = viper.GetBool("disable-storage-encryption")
+	if viper.IsSet("storage-encryption") {
+		cfg.DisableStorageEncryption = !viper.GetBool("storage-encryption")
+	}
 	cfg.StorageEncryptionSnappy = viper.GetBool("storage-encryption-snappy")
+	if cfg.DisableStorageEncryption {
+		cfg.StorageEncryptionSnappy = false
+	}
 	if partSize := viper.GetString("s3-max-part-size"); partSize != "" {
 		size, err := humanize.ParseBytes(partSize)
 		if err != nil {

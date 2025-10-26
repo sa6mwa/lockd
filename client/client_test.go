@@ -215,7 +215,7 @@ func TestClientDefaultSchemeInsecure(t *testing.T) {
 	defer ts.Close()
 
 	base := strings.TrimPrefix(ts.URL, "http://")
-	cli, err := client.New(base, client.WithHTTPClient(ts.Client()), client.WithMTLS(false))
+	cli, err := client.New(base, client.WithHTTPClient(ts.Client()), client.WithDisableMTLS(true))
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -253,7 +253,7 @@ func TestAcquireWaitForeverIgnoresHTTPTimeout(t *testing.T) {
 	defer ts.Close()
 
 	cli, err := client.New(strings.TrimPrefix(ts.URL, "http://"),
-		client.WithMTLS(false),
+		client.WithDisableMTLS(true),
 		client.WithHTTPClient(ts.Client()),
 		client.WithHTTPTimeout(50*time.Millisecond),
 	)
@@ -359,7 +359,7 @@ func TestLeaseSessionRemoveState(t *testing.T) {
 	defer ts.Close()
 
 	cli, err := client.New(strings.TrimPrefix(ts.URL, "http://"),
-		client.WithMTLS(false),
+		client.WithDisableMTLS(true),
 		client.WithHTTPClient(ts.Client()),
 	)
 	if err != nil {
@@ -576,7 +576,7 @@ func TestClientAcquireFailoverAcrossEndpoints(t *testing.T) {
 	httpClient := &http.Client{Transport: transport}
 	endpoints := []string{"http://host1:9341", "http://host2:9341"}
 	cli, err := client.NewWithEndpoints(endpoints,
-		client.WithMTLS(false),
+		client.WithDisableMTLS(true),
 		client.WithHTTPClient(httpClient),
 		client.WithHTTPTimeout(200*time.Millisecond),
 	)
@@ -639,7 +639,7 @@ func TestClientAcquireAllEndpointsDown(t *testing.T) {
 	httpClient := &http.Client{Transport: transport}
 	endpoints := []string{"http://hosta:9341", "http://hostb:9341"}
 	cli, err := client.NewWithEndpoints(endpoints,
-		client.WithMTLS(false),
+		client.WithDisableMTLS(true),
 		client.WithHTTPClient(httpClient),
 	)
 	if err != nil {
@@ -718,7 +718,7 @@ func TestAcquireForUpdateRetriesOnLeaseRequired(t *testing.T) {
 	httpClient := &http.Client{Transport: transport}
 
 	cli, err := client.NewWithEndpoints([]string{"http://retry:9341"},
-		client.WithMTLS(false),
+		client.WithDisableMTLS(true),
 		client.WithHTTPClient(httpClient),
 		client.WithHTTPTimeout(200*time.Millisecond),
 	)
@@ -941,7 +941,7 @@ func TestClientEnqueue(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	cli, err := client.New(srv.URL, client.WithMTLS(false), client.WithEndpointShuffle(false))
+	cli, err := client.New(srv.URL, client.WithDisableMTLS(true), client.WithEndpointShuffle(false))
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -1065,7 +1065,7 @@ func TestClientDequeueHandlesLifecycle(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	cli, err := client.New(srv.URL, client.WithMTLS(false), client.WithEndpointShuffle(false))
+	cli, err := client.New(srv.URL, client.WithDisableMTLS(true), client.WithEndpointShuffle(false))
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -1194,7 +1194,7 @@ func TestClientDequeueWithState(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	cli, err := client.New(srv.URL, client.WithMTLS(false), client.WithEndpointShuffle(false))
+	cli, err := client.New(srv.URL, client.WithDisableMTLS(true), client.WithEndpointShuffle(false))
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -1319,7 +1319,7 @@ func TestClientSubscribe(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	cli, err := client.New(srv.URL, client.WithMTLS(false), client.WithEndpointShuffle(false))
+	cli, err := client.New(srv.URL, client.WithDisableMTLS(true), client.WithEndpointShuffle(false))
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -1414,7 +1414,7 @@ func TestClientSubscribeWithState(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	cli, err := client.New(srv.URL, client.WithMTLS(false), client.WithEndpointShuffle(false))
+	cli, err := client.New(srv.URL, client.WithDisableMTLS(true), client.WithEndpointShuffle(false))
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}

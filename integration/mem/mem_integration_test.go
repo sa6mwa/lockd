@@ -23,6 +23,7 @@ import (
 	"pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/integration/internal/cryptotest"
+	shutdowntest "pkt.systems/lockd/integration/internal/shutdowntest"
 	testlog "pkt.systems/lockd/integration/internal/testlog"
 	memorybackend "pkt.systems/lockd/internal/storage/memory"
 	"pkt.systems/lockd/internal/uuidv7"
@@ -144,6 +145,41 @@ func TestMemConcurrency(t *testing.T) {
 
 func TestMemAutoKeyAcquire(t *testing.T) {
 	runMemAutoKeyAcquireScenario(t, "mem-auto")
+}
+
+func TestMemShutdownDrainingBlocksAcquire(t *testing.T) {
+	ctx := context.Background()
+	cfg := buildMemConfig(t)
+	ts := startMemTestServer(t, cfg)
+	t.Cleanup(func() { _ = ts.Stop(context.Background()) })
+	cli := ts.Client
+	if cli == nil {
+		t.Fatalf("nil test server client")
+	}
+	key := "mem-drain-" + uuidv7.NewString()
+	lease := acquireWithRetry(t, ctx, cli, key, "holder", 30, lockdclient.BlockWaitForever)
+	stopCh := make(chan error, 1)
+	go func() {
+		stopCh <- ts.Stop(context.Background(), lockd.WithDrainLeases(1500*time.Millisecond), lockd.WithShutdownTimeout(2*time.Second))
+	}()
+	acquirePayload, _ := json.Marshal(api.AcquireRequest{Key: "mem-drain-wait", Owner: "drain-tester", TTLSeconds: 5})
+	url := ts.URL() + "/v1/acquire"
+	result := shutdowntest.WaitForShutdownDrainingAcquire(t, url, acquirePayload)
+	if result.Response.ErrorCode != "shutdown_draining" {
+		t.Fatalf("expected shutdown_draining error, got %+v", result.Response)
+	}
+	if result.Header.Get("Shutdown-Imminent") == "" {
+		t.Fatalf("expected Shutdown-Imminent header, got %v", result.Header)
+	}
+	select {
+	case err := <-stopCh:
+		if err != nil {
+			t.Fatalf("server stop failed: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("server stop timed out")
+	}
+	_ = lease.Release(ctx)
 }
 
 func runMemAutoKeyAcquireScenario(t *testing.T, owner string) {
@@ -482,8 +518,12 @@ func TestMemRemoveStateFailoverMultiServer(t *testing.T) {
 	backend := memorybackend.New()
 	cfg := buildMemConfig(t)
 
-	primary := startMemTestServerWithBackend(t, cfg, backend)
-	secondary := startMemTestServerWithBackend(t, cfg, backend)
+	closeDefaults := lockd.WithTestCloseDefaults(
+		lockd.WithDrainLeases(8*time.Second),
+		lockd.WithShutdownTimeout(10*time.Second),
+	)
+	primary := startMemTestServerWithBackendOpts(t, cfg, backend, closeDefaults)
+	secondary := startMemTestServerWithBackendOpts(t, cfg, backend, closeDefaults)
 
 	key := "mem-remove-failover-" + uuidv7.NewString()
 
@@ -508,7 +548,7 @@ func TestMemRemoveStateFailoverMultiServer(t *testing.T) {
 
 	clientLogger, recorder := testlog.NewRecorder(t, logport.TraceLevel)
 	failoverCli, err := lockdclient.NewWithEndpoints([]string{primary.URL(), secondary.URL()},
-		lockdclient.WithMTLS(false),
+		lockdclient.WithDisableMTLS(true),
 		lockdclient.WithHTTPTimeout(2*time.Second),
 		lockdclient.WithFailureRetries(5),
 		lockdclient.WithEndpointShuffle(false),
@@ -754,13 +794,13 @@ func TestMemMultiReplica(t *testing.T) {
 	releaseLease(t, ctx, verifier)
 }
 func runMemAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase failoverPhase) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	watchdog := time.AfterFunc(10*time.Second, func() {
+	watchdog := time.AfterFunc(30*time.Second, func() {
 		buf := make([]byte, 1<<18)
 		n := runtime.Stack(buf, true)
-		panic("runMemAcquireForUpdateCallbackFailoverMultiServer timeout after 10s:\n" + string(buf[:n]))
+		panic("runMemAcquireForUpdateCallbackFailoverMultiServer timeout after 30s:\n" + string(buf[:n]))
 	})
 	defer watchdog.Stop()
 
@@ -785,6 +825,10 @@ func runMemAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase failo
 			lockdclient.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)),
 			lockdclient.WithHTTPTimeout(time.Second),
 		),
+		lockd.WithTestCloseDefaults(
+			lockd.WithDrainLeases(8*time.Second),
+			lockd.WithShutdownTimeout(10*time.Second),
+		),
 	)
 	backup := lockd.StartTestServer(t,
 		lockd.WithTestConfig(cfg),
@@ -793,6 +837,10 @@ func runMemAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase failo
 		lockd.WithTestClientOptions(
 			lockdclient.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)),
 			lockdclient.WithHTTPTimeout(time.Second),
+		),
+		lockd.WithTestCloseDefaults(
+			lockd.WithDrainLeases(8*time.Second),
+			lockd.WithShutdownTimeout(10*time.Second),
 		),
 	)
 
@@ -825,7 +873,7 @@ func runMemAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase failo
 	clientLogger, clientLogs := testlog.NewRecorder(t, logport.TraceLevel)
 	failoverClient, err := lockdclient.NewWithEndpoints(
 		[]string{primary.URL(), backup.URL()},
-		lockdclient.WithMTLS(false),
+		lockdclient.WithDisableMTLS(true),
 		lockdclient.WithHTTPTimeout(2*time.Second),
 		lockdclient.WithFailureRetries(5),
 		lockdclient.WithEndpointShuffle(false),
@@ -917,7 +965,7 @@ func buildMemConfig(tb testing.TB) lockd.Config {
 	tb.Helper()
 	cfg := lockd.Config{
 		Store:           "mem://",
-		MTLS:            false,
+		DisableMTLS:     true,
 		Listen:          "127.0.0.1:0",
 		ListenProto:     "tcp",
 		DefaultTTL:      30 * time.Second,
@@ -967,7 +1015,12 @@ func startMemTestServer(tb testing.TB, cfg lockd.Config) *lockd.TestServer {
 
 func startMemTestServerWithBackend(tb testing.TB, cfg lockd.Config, backend *memorybackend.Store) *lockd.TestServer {
 	tb.Helper()
-	return lockd.StartTestServer(tb,
+	return startMemTestServerWithBackendOpts(tb, cfg, backend)
+}
+
+func startMemTestServerWithBackendOpts(tb testing.TB, cfg lockd.Config, backend *memorybackend.Store, extra ...lockd.TestServerOption) *lockd.TestServer {
+	tb.Helper()
+	opts := []lockd.TestServerOption{
 		lockd.WithTestConfig(cfg),
 		lockd.WithTestBackend(backend),
 		lockd.WithTestListener("tcp", "127.0.0.1:0"),
@@ -978,7 +1031,9 @@ func startMemTestServerWithBackend(tb testing.TB, cfg lockd.Config, backend *mem
 			lockdclient.WithKeepAliveTimeout(60*time.Second),
 			lockdclient.WithLogger(lockd.NewTestingLogger(tb, logport.TraceLevel)),
 		),
-	)
+	}
+	opts = append(opts, extra...)
+	return lockd.StartTestServer(tb, opts...)
 }
 
 func directMemClient(t testing.TB, ts *lockd.TestServer) *lockdclient.Client {
@@ -992,7 +1047,7 @@ func directMemClient(t testing.TB, ts *lockd.TestServer) *lockdclient.Client {
 	}
 	baseURL := "http://" + addr.String()
 	cli, err := lockdclient.New(baseURL,
-		lockdclient.WithMTLS(false),
+		lockdclient.WithDisableMTLS(true),
 		lockdclient.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)),
 		lockdclient.WithHTTPTimeout(time.Second),
 	)

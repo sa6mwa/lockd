@@ -88,7 +88,7 @@ func (o *Observer) Wait() {
 	o.wg.Wait()
 }
 
-// BeginQueueOp records the start of a queue operation and returns a closure that must be invoked on completion.
+// BeginQueueProducer records the start of a queue operation and returns a closure that must be invoked on completion.
 func (o *Observer) BeginQueueProducer() func() {
 	if !o.cfg.Enabled {
 		return func() {}
@@ -99,6 +99,7 @@ func (o *Observer) BeginQueueProducer() func() {
 	}
 }
 
+// BeginQueueConsumer records the start of a queue consume operation and returns a completion callback.
 func (o *Observer) BeginQueueConsumer() func() {
 	if !o.cfg.Enabled {
 		return func() {}
@@ -109,6 +110,7 @@ func (o *Observer) BeginQueueConsumer() func() {
 	}
 }
 
+// BeginQueueAck records the start of an ack operation and returns a completion callback.
 func (o *Observer) BeginQueueAck() func() {
 	if !o.cfg.Enabled {
 		return func() {}

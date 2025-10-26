@@ -20,13 +20,13 @@ worker to resume from the last committed state.
 
 > **Note from the author**
 >
-> *lockd started as an experiment to see how far you could really go with AI today. I’ve spent over two decades working across IT operations and software development, with a strong focus on distributed systems - enough experience to lead a project like lockd, but not the time, cognitive bandwidth, or budget to build something like this on my own.
+> _lockd started as an experiment to see how far you could really go with AI today. I’ve spent over two decades working across IT operations and software development, with a strong focus on distributed systems - enough experience to lead a project like lockd, but not the time, cognitive bandwidth, or budget to build something like this on my own._
 >
-> What’s been achieved here genuinely amazes me. It shows what augmentation really means — how far human expertise can be amplified when combined with capable AI systems. It’s not fair to say lockd was "vibe coded"; you still need solid foundations in distributed computing. But nearly all of the code was written by an AI coding agent, while I’ve acted as the solution architect - steering design decisions, ensuring technical feasibility, and keeping the vision cohesive.
+> _What’s been achieved here genuinely amazes me. It shows what augmentation really means — how far human expertise can be amplified when combined with capable AI systems. It’s not fair to say lockd was "vibe coded"; you still need solid foundations in distributed computing. But nearly all of the code was written by an AI coding agent, while I’ve acted as the solution architect - steering design decisions, ensuring technical feasibility, and keeping the vision cohesive._
 >
-> The result is far beyond what I first imagined. Just a few years ago, if someone told you I built lockd in less than two weeks of spare time, you’d probably laugh. Today, you might just believe it.
+> _The result is far beyond what I first imagined. Just a few years ago, if someone told you I built lockd in less than two weeks of spare time, you’d probably laugh. Today, you might just believe it._
 >
-> We’re living in an incredible moment - where building at the speed of twelve parsecs or less is no longer science fiction.*
+> _We’re living in an incredible moment - where building at the speed of twelve parsecs or less is no longer science fiction._
 
 ## Features
 
@@ -68,15 +68,15 @@ worker to resume from the last committed state.
                                   |  (S3 / Disk / Memory …)   |
                                   +-------------+-------------+
                                                 ^
-                                      encrypted I/O |
+                                  encrypted I/O |
                                                 |
-                                  +-------------+-------------+
-                                  | Storage Crypto           |
-                                  | (kryptograf DEKs +       |
-                                  |  optional Snappy)        |
-                                  +-------------+-------------+
+                                 +--------------+-------------+
+                                 |       Storage Crypto       |
+                                 |     (kryptograf DEKs +     |
+                                 |optional Snappy compression)|
+                                 +--------------+-------------+
                                                 ^
-                                      CAS meta/state |
+                                 CAS meta/state |
                                                 |
 +------------------+    HTTPS + mTLS    +-------+--------+
 |  Worker Apps     |<------------------>|   HTTP API     |
@@ -85,24 +85,24 @@ worker to resume from the last committed state.
           |                                     |
           | leases / queue ops                  | request dispatch
           v                                     v
-+---------+---------+         queue ops   +-----+-------+
-| Lease Manager &   |-------------------->| Queue Service|
-| Sweeper           |                     |  (meta/state)|
-+-------------------+                     +------+-------+
++---------+---------+         queue ops   +-----+---------+
+| Lease Manager &   |-------------------->| Queue Service |
+| Sweeper           |                     |  (meta/state) |
++-------------------+                     +-------+-------+
                                                   |
-                     reschedule / ready set       |
+                           reschedule / ready set |
                                                   v
                                     +-------------+-------------+
-                                    | Queue Dispatcher          |
-                                    | + Ready Cache             |
+                                    |      Queue Dispatcher     |
+                                    |       + Ready Cache       |
                                     +------+------+-------------+
                                            |    ^
-                           notify/watch    |    | mark demand
+                              notify/watch |    | mark demand
                       +--------------------+----+------------------+
-                      | Storage Change Feed (fsnotify/S3/mem)      |
+                      |   Storage Change Feed (fsnotify/S3/mem)    |
                       +--------------------+----+------------------+
                                            |    |
-                 throttle decisions        |    | usage & metrics
+                        throttle decisions |    | usage & metrics
 +------------------+                +------+----+------+
 | QRF (perimeter)  |<---------------|  HTTP API routes |
 +------------------+                +------------------+
@@ -161,7 +161,6 @@ decide whether to re-run the helper.
 The legacy `/v1/acquire-for-update` streaming endpoint has been removed;
 all clients must use the callback helper described above.
 
-
 ### Internal layout
 
 - `server.go` – server wiring, storage retry wrapper, sweeper.
@@ -172,11 +171,7 @@ all clients must use the callback helper described above.
 - `internal/tlsutil` – bundle loading/generation helpers.
 - `integration/` – end-to-end tests (mem, disk, NFS, AWS, MinIO, Azure, OTLP, queues).
 
----
-
 ## Storage Backends
-
-### Selecting a backend
 
 `lockd` picks the storage implementation from the `--store` flag (or `LOCKD_STORE`
 environment variable) by inspecting the URL scheme:
@@ -213,11 +208,44 @@ Configuration (flags or env via `LOCKD_` prefix):
 | `--aws-kms-key-id`        | KMS key for `aws://` stores                    |
 | `--s3-max-part-size`      | Multipart upload part size                     |
 
+Shutdown tuning:
+
+| Flag / Env | Description |
+|------------|-------------|
+| `--drain-grace` / `LOCKD_DRAIN_GRACE` | How long to keep serving existing lease holders before HTTP shutdown begins (default `10s`; set `0s` to disable draining). |
+| `--shutdown-timeout` / `LOCKD_SHUTDOWN_TIMEOUT` | Overall shutdown budget, split 80/20 between drain and HTTP server teardown (default `10s`; set `0s` to rely on the orchestrator’s deadline). |
+
+### Disk (SSD/NVMe)
+
+- Streams JSON payloads directly to files beneath the store root, hashing on the fly to produce deterministic ETags.
+- Keeps metadata in per-key protobuf documents; state lives under `state/<encoded-key>/data`.
+- Optional retention (`--disk-retention`, `LOCKD_DISK_RETENTION`) prunes keys whose metadata `updated_at_unix` is older than the configured duration. Set to `0` (default) to keep data indefinitely.
+- The janitor sweep interval defaults to half the retention window (clamped between 1 minute and 1 hour). Override via `--disk-janitor-interval`.
+- Configure with `--store disk:///var/lib/lockd-data`. All files live beneath the specified root; lockd creates `meta/`, `state/`, and `tmp/` directories automatically.
+
+### Azure Blob Storage
+
+- URL format: `azure://<account>/<container>/<optional-prefix>` (the account comes from the host component).
+- Supply credentials via `--azure-key` / `LOCKD_AZURE_ACCOUNT_KEY` (Shared Key) or `--azure-sas-token` / `LOCKD_AZURE_SAS_TOKEN` (SAS). Standard Azure environment variables such as `AZURE_STORAGE_ACCOUNT` are also honoured if the account is omitted from the URL.
+- Default endpoint is `https://<account>.blob.core.windows.net`; override with `--azure-endpoint` or `?endpoint=` on the store URL when using custom domains/emulators.
+- Authentication supports either account keys (Shared Key) or SAS tokens. Provide exactly one of the above secrets; the CLI no longer requires `--azure-account` because the account name is embedded in the store URL.
+- Example:
+
+```sh
+set -a && source .env.azure && set +a
+lockd --store "azure://lockdintegration/container/pipelines" --listen :9341 --disable-mtls
+```
+
 ### Memory
 
-- In-process backend used for unit tests.
+In-process backend utilized for unit tests (`mem://`); it can also serve for
+experimentation or support a no-footprint ephemeral instance.
 
----
+### Drain-aware shutdown
+
+When the server receives a shutdown signal it immediately advertises a `Shutdown-Imminent` header, rejects new acquires with a `shutdown_draining` API error, and keeps existing lease holders alive until the drain grace expires. By default the 10 s `--shutdown-timeout` budget is split 80/20: approximately 8 s are dedicated to draining active leases and the remaining 2 s are reserved for `http.Server.Shutdown` to close idle connections cleanly. Setting `--drain-grace 0s` (or `LOCKD_DRAIN_GRACE=0s`) skips the drain window entirely when an orchestrator already enforces a strict deadline.
+
+Clients are drain-aware too. The Go SDK and CLI listen for the `Shutdown-Imminent` header and, after in-flight work completes, automatically release the lease so another worker can be scheduled. Opt out via `client.WithDrainAwareShutdown(false)`, `--drain-aware-shutdown=false`, or `LOCKD_CLIENT_DRAIN_AWARE=false` if your workflow prefers to hold the lease until the next session. KeepAlive and Release continue to succeed during the drain window, so operators can monitor progress (metrics/logs) while state is flushed to storage.
 
 ## Configuration & CLI
 
@@ -241,14 +269,14 @@ lockd \
 
 # MinIO running locally over HTTP
 export LOCKD_STORE="s3://localhost:9000/lockd-data?insecure=1"
-export LOCKD_S3_ACCESS_KEY_ID="minioadmin"
-export LOCKD_S3_SECRET_ACCESS_KEY="minioadmin"
+export LOCKD_S3_ACCESS_KEY_ID="lockddev"
+export LOCKD_S3_SECRET_ACCESS_KEY="lockddevpass"
 lockd --store "$LOCKD_STORE" --listen :9341 --bundle $HOME/.lockd/server.pem
 
 # Azure Blob Storage (account key)
 set -a && source .env.azure && set +a
 # .env.azure should export LOCKD_STORE=azure://account/container/prefix and LOCKD_AZURE_ACCOUNT_KEY=...
-lockd --store "$LOCKD_STORE" --listen :9341 --mtls=false
+lockd --store "$LOCKD_STORE" --listen :9341 --disable-mtls
 
 # IPv4-only binding
 lockd --listen-proto tcp4 --listen 0.0.0.0:9341 --store "$LOCKD_STORE"
@@ -274,13 +302,30 @@ its behaviour:
 | `--disk-queue-watch` (`LOCKD_DISK_QUEUE_WATCH`) | Enables Linux/inotify queue watchers on the disk backend (default `true`; automatically ignored on unsupported filesystems such as NFS). |
 | `--mem-queue-watch` (`LOCKD_MEM_QUEUE_WATCH`) | Enables in-process queue notifications for the in-memory backend (default `true`; disable to force pure polling). |
 
-### Observability (OTLP)
+### Development Environment (Docker Compose + OTLP)
+
+`devenv/docker-compose.yaml` brings up a complete local stack—Jaeger, the OTLP
+collector, and a MinIO instance whose data lives under
+`devenv/volumes/miniostore/`. Start the environment with:
+
+```sh
+cd devenv
+docker compose up -d
+```
+
+The MinIO container listens on `localhost:9000` (S3 API) / `9001` (console),
+with credentials `lockddev` / `lockddevpass`. Point lockd at the local bucket via:
+
+```sh
+export LOCKD_STORE="s3://localhost:9000/lockd-data?insecure=1"
+export LOCKD_S3_ACCESS_KEY_ID="lockddev"
+export LOCKD_S3_SECRET_ACCESS_KEY="lockddevpass"
+```
 
 Set `--otlp-endpoint` (or `LOCKD_OTLP_ENDPOINT`) to export traces and metrics to
-an OTLP collector. Omit the scheme to default to OTLP/gRPC on port `4317`; use
-`grpc://`/`grpcs://` to force gRPC, or `http://`/`https://` (default port `4318`)
-for the HTTP transport. For the provided `observability/docker-compose.yaml`
-collector:
+the same compose collector. Omit the scheme to default to OTLP/gRPC on
+port `4317`; use `grpc://`/`grpcs://` to force gRPC, or `http://`/`https://`
+(default port `4318`) for the HTTP transport. With the compose stack running:
 
 ```sh
 LOCKD_STORE=mem:// \
@@ -290,6 +335,16 @@ lockd
 
 All HTTP endpoints are wrapped with `otelhttp`, storage backends emit child
 spans, and structured logs attach `trace_id`/`span_id` when a span is active.
+
+### Dev Environment Assurance
+
+Run `go run ./devenv/assure` to execute an end-to-end probe that verifies the
+compose stack. The tool assumes the default compose settings (MinIO on
+`localhost:9000`, OTLP collector on `localhost:4317`, Jaeger UI/API on
+`localhost:16686`), connects to MinIO, starts an in-process lockd server against
+the dev bucket, performs lease/state mutations, confirms the underlying objects
+exist, and queries Jaeger’s HTTP API to ensure OTLP traces arrived via the
+bundled collector. It’s a zero-config “go run” sanity check once `docker compose up` is running.
 
 ### Correlation IDs
 
@@ -496,6 +551,12 @@ window between separate update and release calls.
 
 ### Benchmarking with MinIO
 
+`./run-benchmark-suites.sh` provides a single entry point for benchmark runs.
+Invoke `./run-benchmark-suites.sh list` to see the available suites (`disk`,
+`minio`, `mem/lq`) and run `./run-benchmark-suites.sh minio` (or `all`) to
+execute them with the correct build tags and per-suite logs in
+`benchmark-logs/`.
+
 With MinIO running locally (for example on `localhost:9000`) you can compare raw
 object-store performance against `lockd` by running the benchmark suite:
 
@@ -583,7 +644,7 @@ regular client facade:
 
 ```go
 ctx := context.Background()
-cfg := lockd.Config{Store: "mem://", MTLS: false}
+cfg := lockd.Config{Store: "mem://", DisableMTLS: true}
 inproc, err := inprocess.New(ctx, cfg)
 if err != nil { log.Fatal(err) }
 defer inproc.Close(ctx)
@@ -600,7 +661,7 @@ a goroutine and returns a shutdown function. You can use the helper directly
 when wiring tests around Unix-domain sockets:
 
 ```go
-cfg := lockd.Config{Store: "mem://", ListenProto: "unix", Listen: "/tmp/lockd.sock", MTLS: false}
+cfg := lockd.Config{Store: "mem://", ListenProto: "unix", Listen: "/tmp/lockd.sock", DisableMTLS: true}
 srv, stop, err := lockd.StartServer(ctx, cfg)
 if err != nil { log.Fatal(err) }
 defer stop(context.Background())
@@ -648,7 +709,7 @@ server startup and the process exits if any check fails.
 
 mTLS is **enabled by default**. `lockd` looks for a bundle at
 `$HOME/.lockd/server.pem` unless `--bundle` points elsewhere. Disable with
-`--mtls=false` (testing only).
+`--disable-mtls` / `LOCKD_DISABLE_MTLS=1` (testing only).
 
 Bundle format (PEM concatenated):
 
@@ -727,9 +788,9 @@ use deterministic content-types:
 - JSON state: `application/vnd.lockd+json-encrypted`
 - Queue payloads / DLQ binaries: `application/vnd.lockd.octet-stream+encrypted`
 
-Disable encryption (testing only) with `--storage-encryption=false` (or
-`LOCKD_STORAGE_ENCRYPTION=false`). Optional Snappy compression is available via
-`--storage-encryption-snappy`; when encryption is disabled, the original
+Disable encryption (testing only) with `--disable-storage-encryption` (or
+`LOCKD_DISABLE_STORAGE_ENCRYPTION=1`). Optional Snappy compression is available via
+`--storage-encryption-snappy` (only honoured when encryption remains enabled); when encryption is disabled, the original
 content-types (`application/x-protobuf`, `application/json`,
 `application/octet-stream`) are restored automatically.
 
@@ -777,7 +838,7 @@ host), point the client at `unix:///path/to/lockd.sock`:
 ```go
 cli, err := client.New("unix:///var/run/lockd.sock")
 if err != nil { log.Fatal(err) }
-// run the server with --mtls=false (or supply a client bundle)
+// run the server with --disable-mtls (or supply a client bundle)
 sess, err := cli.Acquire(ctx, api.AcquireRequest{Key: "orders", Owner: "worker-uds", TTLSeconds: 30})
 if err != nil { log.Fatal(err) }
 defer sess.Close()
@@ -856,7 +917,10 @@ remove keys, and `time:` prefixes for RFC3339 timestamps.
 Timeout knobs mirror the Go client: `--timeout` (HTTP dial+request),
 `--close-timeout` (release window), and `--keepalive-timeout`
 (`LOCKD_CLIENT_TIMEOUT`, `LOCKD_CLIENT_CLOSE_TIMEOUT`, and
-`LOCKD_CLIENT_KEEPALIVE_TIMEOUT` respectively).
+`LOCKD_CLIENT_KEEPALIVE_TIMEOUT` respectively). Use
+`--drain-aware-shutdown`/`LOCKD_CLIENT_DRAIN_AWARE` (enabled by default) to
+control whether the CLI auto-releases leases when the server signals a
+drain phase via the `Shutdown-Imminent` header.
 
 Use `-` with `--output` to stream results to standard output or with file inputs
 to read from standard input (e.g. `-o -`, `lockd client update ... -`). When the
@@ -864,8 +928,8 @@ acquire command runs in text mode it prints shell-compatible `export
 LOCKD_CLIENT_*=` assignments, making `eval "$(lockd client acquire ...)"` a
 convenient way to populate environment variables for subsequent commands.
 
-When `--mtls` is enabled (default) the CLI assumes HTTPS for bare `host[:port]`
-values; when `--mtls=false` it assumes HTTP. Supplying an explicit
+When mTLS is enabled (default) the CLI assumes HTTPS for bare `host[:port]`
+values; when you pass `--disable-mtls` it assumes HTTP. Supplying an explicit
 `http://...`/`https://...` URL is always honoured.
 
 ## Sequence Diagrams
@@ -884,6 +948,15 @@ the scope further. The general pattern is:
 ```sh
 go test -tags "integration <backend> [feature ...]" ./integration/...
 ```
+
+For everyday development, `./run-integration-suites.sh` wraps these invocations,
+sources the required `.env.<backend>` files, and stores logs under
+`integration-logs/`. Use `list` to see available suites (mem, disk, nfs, aws,
+azure, minio, plus `/lq` and `/crypto` variants), pass specific suites such as
+`disk disk/lq` or `nfs nfs/lq`, or run the full matrix with `all`. The helper
+honors `LOCKD_GO_TEST_TIMEOUT`, exports `LOCKD_TEST_STORAGE_ENCRYPTION=1` so
+disk/nfs/etc. suites run with envelope crypto by default, and exposes
+`--disable-crypto` to flip the env var when targeting legacy buckets.
 
 Current backends:
 
@@ -913,32 +986,12 @@ retain these guards whenever tests are updated.
 
 ## Roadmap
 
-- Azure Blob backend & integration tests.
+- Javascript/Typescript client (bun/deno-compatible).
+- Python client.
+- C# client.
 - Client helpers (auto keepalive, JSON patch utilities).
 - Metrics/observability and additional diagnostics.
-- Revocation tooling (`lockd auth revoke`, denylist management).
 
 ## License
 
 MIT – see [`LICENSE`](LICENSE).
-
-### Disk (SSD/NVMe)
-
-- Streams JSON payloads directly to files beneath the store root, hashing on the fly to produce deterministic ETags.
-- Keeps metadata in per-key protobuf documents; state lives under `state/<encoded-key>/data`.
-- Optional retention (`--disk-retention`, `LOCKD_DISK_RETENTION`) prunes keys whose metadata `updated_at_unix` is older than the configured duration. Set to `0` (default) to keep data indefinitely.
-- The janitor sweep interval defaults to half the retention window (clamped between 1 minute and 1 hour). Override via `--disk-janitor-interval`.
-- Configure with `--store disk:///var/lib/lockd-data`. All files live beneath the specified root; lockd creates `meta/`, `state/`, and `tmp/` directories automatically.
-
-### Azure Blob Storage
-
-- URL format: `azure://<account>/<container>/<optional-prefix>` (the account comes from the host component).
-- Supply credentials via `--azure-key` / `LOCKD_AZURE_ACCOUNT_KEY` (Shared Key) or `--azure-sas-token` / `LOCKD_AZURE_SAS_TOKEN` (SAS). Standard Azure environment variables such as `AZURE_STORAGE_ACCOUNT` are also honoured if the account is omitted from the URL.
-- Default endpoint is `https://<account>.blob.core.windows.net`; override with `--azure-endpoint` or `?endpoint=` on the store URL when using custom domains/emulators.
-- Authentication supports either account keys (Shared Key) or SAS tokens. Provide exactly one of the above secrets; the CLI no longer requires `--azure-account` because the account name is embedded in the store URL.
-- Example:
-
-```sh
-set -a && source .env.azure && set +a
-lockd --store "azure://lockdintegration/container/pipelines" --listen :9341 --mtls=false
-```

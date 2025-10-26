@@ -57,7 +57,7 @@ func TestAcquireForUpdateCallbackSingleServer(t *testing.T) {
 	}
 	directURL := "http://" + directAddr.String()
 	seedClient, err := client.New(directURL,
-		client.WithMTLS(false),
+		client.WithDisableMTLS(true),
 		client.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)),
 	)
 	if err != nil {
@@ -211,7 +211,7 @@ func TestAcquireForUpdateCallbackFailoverMultiServer(t *testing.T) {
 
 	endpoints := []string{primary.URL(), backup.URL()}
 	failoverClient, err := client.NewWithEndpoints(endpoints,
-		client.WithMTLS(false),
+		client.WithDisableMTLS(true),
 		client.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)),
 		client.WithAcquireFailureRetries(5),
 		client.WithHTTPTimeout(300*time.Millisecond),

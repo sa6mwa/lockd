@@ -25,7 +25,7 @@ func ExampleClient_AcquireForUpdate() {
 		Store:       "mem://",
 		ListenProto: "unix",
 		Listen:      socketPath,
-		MTLS:        false,
+		DisableMTLS: true,
 	}
 	_, stop, err := lockd.StartServer(ctx, cfg)
 	if err != nil {

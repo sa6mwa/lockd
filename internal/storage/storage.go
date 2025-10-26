@@ -7,6 +7,7 @@ import (
 	"time"
 )
 
+// Content type constants used for metadata and payload blobs across backends.
 const (
 	ContentTypeJSON                 = "application/json"
 	ContentTypeJSONEncrypted        = "application/vnd.lockd+json-encrypted"

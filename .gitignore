@@ -8,6 +8,8 @@
 /THIRD_PARTY_LICENSES.md
 /logs
 /.gocache
+/integration-logs
+/devenv/volumes
 bin/
 \#*\#
 .vscode/

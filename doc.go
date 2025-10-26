@@ -37,10 +37,10 @@
 // the connection never leaves the machine.
 //
 //	cfg := lockd.Config{
-//	    Store:       "mem://",
-//	    ListenProto: "unix",
-//	    Listen:      "/var/run/lockd.sock",
-//	    MTLS:        false,
+//	    Store:        "mem://",
+//	    ListenProto:  "unix",
+//	    Listen:       "/var/run/lockd.sock",
+//	    DisableMTLS:  true,
 //	}
 //	srv, stop, err := lockd.StartServer(ctx, cfg)
 //	if err != nil { log.Fatal(err) }
@@ -53,7 +53,7 @@
 //
 //   - `https://host:9341` – production mTLS connection (default)
 //   - `http://host:9341` – plain HTTP for trusted networks or local testing
-//   - `unix:///path/to/lockd.sock` – Unix-domain sockets (requires `MTLS=false`
+//   - `unix:///path/to/lockd.sock` – Unix-domain sockets (requires `DisableMTLS`
 //     or supplying a client bundle)
 //
 // Example:
@@ -82,6 +82,19 @@
 // freshest `X-Fencing-Token`. For multi-process flows the CLI exports the token
 // via `LOCKD_CLIENT_FENCING_TOKEN`, and your program can register it manually
 // with `Client.RegisterLeaseToken`.
+//
+// Shutdown sequencing is controlled via `Config.DrainGrace` and
+// `Config.ShutdownTimeout`. Draining gives existing lease holders time to wrap
+// up (default 10 s) before the HTTP server begins closing connections; the
+// timeout caps the combined drain + HTTP shutdown interval (default 10 s). The
+// defaults mirror the CLI flags (`--drain-grace`, `--shutdown-timeout`) and can
+// be disabled by setting them to `0`. Each server splits the budget 80/20 so a
+// 10 s timeout reserves ~8 s for draining and ~2 s for `http.Server.Shutdown`.
+//
+// The Go client and CLI are drain-aware by default: when the server emits the
+// `Shutdown-Imminent` header, the SDK auto-releases leases once in-flight work
+// is done. Opt out by using `client.WithDrainAwareShutdown(false)` or passing
+// `--drain-aware-shutdown=false` / `LOCKD_CLIENT_DRAIN_AWARE=false` to the CLI.
 //
 // Multi-host deployments can construct the client with multiple base URLs via
 // `client.NewWithEndpoints([]string{...})`. The SDK rotates through the
@@ -135,7 +148,7 @@
 // starting an embedded server (MTLS disabled) and returning a ready-to-use
 // client facade:
 //
-//	cfg := lockd.Config{Store: "mem://", MTLS: false}
+//	cfg := lockd.Config{Store: "mem://", DisableMTLS: true}
 //	inproc, err := inprocess.New(ctx, cfg)
 //	if err != nil { log.Fatal(err) }
 //	defer inproc.Close(ctx)
@@ -157,15 +170,6 @@
 // JSON uploads are compacted using the selected compactor
 // (see `Config.JSONUtil`), and large payloads spill to disk after
 // `Config.SpoolMemoryThreshold`.
-//
-// # Benchmark suites
-//
-// Optional benchmark packages compare raw backend throughput against the lockd
-// API (both buffered and streaming paths). They are handy when tuning payload
-// sizes or spool thresholds:
-//
-//	set -a && source .env.local && set +a && go test -run=^$ -bench='BenchmarkLockd(LargeJSON|SmallJSON)' -benchmem ./integration/minio -tags "integration minio bench"
-//	set -a && source .env.local && set +a && go test -run=^$ -bench='Benchmark(Disk|LockdDisk)' -benchmem ./integration/disk -tags "integration disk bench"
 //
 // Consult README.md for detailed guidance, additional examples, and operational
 // considerations (TLS, auth bundles, environment variables).

@@ -131,7 +131,8 @@ type MessageDescriptor struct {
 	Document     messageDocument
 }
 
-type stateDocument struct {
+// StateDocument captures metadata about queue state blobs.
+type StateDocument struct {
 	Type          string    `json:"type"`
 	Queue         string    `json:"queue"`
 	MessageID     string    `json:"message_id"`
@@ -140,7 +141,8 @@ type stateDocument struct {
 	CorrelationID string    `json:"correlation_id,omitempty"`
 }
 
-type messageDocument struct {
+// MessageDocument captures per-message metadata stored alongside payloads.
+type MessageDocument struct {
 	Type               string         `json:"type"`
 	Queue              string         `json:"queue"`
 	ID                 string         `json:"id"`
@@ -159,6 +161,10 @@ type messageDocument struct {
 	PayloadDescriptor  []byte         `json:"payload_descriptor,omitempty"`
 	MetaDescriptor     []byte         `json:"meta_descriptor,omitempty"`
 }
+
+type messageDocument = MessageDocument
+
+type stateDocument = StateDocument
 
 // Enqueue inserts a new message into queue and returns its metadata.
 func (s *Service) Enqueue(ctx context.Context, queue string, payload io.Reader, opts EnqueueOptions) (*Message, error) {
@@ -556,6 +562,7 @@ func (s *Service) NextCandidate(ctx context.Context, queue string, startAfter st
 	return desc, "", nil
 }
 
+// RefreshReadyCache syncs the ready cache for the provided queue immediately.
 func (s *Service) RefreshReadyCache(ctx context.Context, queue string) error {
 	name, err := sanitizeQueueName(queue)
 	if err != nil {
@@ -651,8 +658,8 @@ func (s *Service) loadMessageDocument(ctx context.Context, metadataKey string) (
 	return doc, etag, nil
 }
 
-// GetMessage loads the message document for queue/id.
-func (s *Service) GetMessage(ctx context.Context, queue, id string) (*messageDocument, string, error) {
+// GetMessage loads the metadata document for the provided queue/id pair.
+func (s *Service) GetMessage(ctx context.Context, queue, id string) (*MessageDocument, string, error) {
 	name, err := sanitizeQueueName(queue)
 	if err != nil {
 		return nil, "", err
@@ -1021,8 +1028,8 @@ func (s *Service) DeleteState(ctx context.Context, queue, id string, expectedETa
 	return err
 }
 
-// LoadState retrieves the workflow state document.
-func (s *Service) LoadState(ctx context.Context, queue, id string) (*stateDocument, string, error) {
+// LoadState retrieves the JSON state document associated with the queue message.
+func (s *Service) LoadState(ctx context.Context, queue, id string) (*StateDocument, string, error) {
 	name, err := sanitizeQueueName(queue)
 	if err != nil {
 		return nil, "", err

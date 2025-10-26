@@ -16,7 +16,7 @@ import (
 // Client provides the lockd client API backed by an in-process server instance.
 type Client struct {
 	inner     *lockdclient.Client
-	stop      func(context.Context) error
+	stop      func(context.Context, ...lockd.CloseOption) error
 	cleanup   func()
 	closeOnce sync.Once
 	closeErr  error
@@ -41,8 +41,8 @@ func New(ctx context.Context, cfg lockd.Config, opts ...lockd.Option) (*Client, 
 	if cfg.ListenProto != "unix" {
 		return nil, fmt.Errorf("inprocess: only unix sockets are supported; set ListenProto to 'unix'")
 	}
-	if cfg.MTLS {
-		cfg.MTLS = false
+	if !cfg.DisableMTLS {
+		cfg.DisableMTLS = true
 	}
 	if ctx == nil {
 		ctx = context.Background()

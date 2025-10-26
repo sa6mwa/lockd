@@ -13,7 +13,7 @@ import (
 )
 
 func TestAzureQueuePollingBasics(t *testing.T) {
-	queuetestutil.InstallWatchdog(t, "azure-poll-basics", 30*time.Second)
+	queuetestutil.InstallWatchdog(t, "azure-poll-basics", 2*time.Minute)
 
 	cfg := prepareAzureQueueConfig(t, azureQueueOptions{
 		PollInterval:      25 * time.Millisecond,
@@ -26,18 +26,18 @@ func TestAzureQueuePollingBasics(t *testing.T) {
 	ensureAzureQueueWritableOrSkip(t, cli)
 
 	t.Run("AckRemovesMessage", func(t *testing.T) {
-		queuetestutil.InstallWatchdog(t, "azure-poll-ack", 15*time.Second)
+		queuetestutil.InstallWatchdog(t, "azure-poll-ack", 60*time.Second)
 		queuetestutil.RunQueueAckScenario(t, cli, queuetestutil.QueueName("azure-poll-ack"), []byte("azure poll ack"))
 	})
 
 	t.Run("NackRedelivery", func(t *testing.T) {
-		queuetestutil.InstallWatchdog(t, "azure-poll-nack", 15*time.Second)
+		queuetestutil.InstallWatchdog(t, "azure-poll-nack", 60*time.Second)
 		queuetestutil.RunQueueNackScenario(t, cli, queuetestutil.QueueName("azure-poll-nack"), []byte("azure poll nack"))
 	})
 }
 
 func TestAzureQueuePollingIdleEnqueueDoesNotPoll(t *testing.T) {
-	queuetestutil.InstallWatchdog(t, "azure-poll-idle", 30*time.Second)
+	queuetestutil.InstallWatchdog(t, "azure-poll-idle", 2*time.Minute)
 
 	cfg := prepareAzureQueueConfig(t, azureQueueOptions{
 		PollInterval:      25 * time.Millisecond,

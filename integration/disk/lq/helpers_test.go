@@ -14,7 +14,7 @@ import (
 	"pkt.systems/lockd/integration/internal/cryptotest"
 	queuetestutil "pkt.systems/lockd/integration/queue/testutil"
 	"pkt.systems/lockd/internal/uuidv7"
-	"pkt.systems/logport"
+	"pkt.systems/pslog"
 )
 
 type diskQueueOptions struct {
@@ -96,7 +96,7 @@ func startDiskQueueServer(t testing.TB, cfg lockd.Config) *lockd.TestServer {
 	return queuetestutil.StartQueueTestServer(t, cfg)
 }
 
-func startDiskQueueServerWithLogger(t testing.TB, cfg lockd.Config, logger logport.ForLogging) *lockd.TestServer {
+func startDiskQueueServerWithLogger(t testing.TB, cfg lockd.Config, logger pslog.Logger) *lockd.TestServer {
 	t.Helper()
 	return queuetestutil.StartQueueTestServerWithLogger(t, cfg, logger)
 }

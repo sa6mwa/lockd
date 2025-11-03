@@ -13,7 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"pkt.systems/logport"
+	"pkt.systems/lockd/internal/loggingutil"
+	"pkt.systems/pslog"
 
 	"golang.org/x/sys/unix"
 	"pkt.systems/lockd/internal/qrf"
@@ -30,7 +31,7 @@ type Config struct {
 type Observer struct {
 	cfg     Config
 	qrf     *qrf.Controller
-	logger  logport.ForLogging
+	logger  pslog.Logger
 	running atomic.Bool
 
 	queueProducerInflight atomic.Int64
@@ -51,16 +52,14 @@ type Observer struct {
 }
 
 // NewObserver constructs an LSF observer.
-func NewObserver(cfg Config, controller *qrf.Controller, logger logport.ForLogging) *Observer {
+func NewObserver(cfg Config, controller *qrf.Controller, logger pslog.Logger) *Observer {
 	if cfg.SampleInterval <= 0 {
 		cfg.SampleInterval = 200 * time.Millisecond
 	}
 	if cfg.LogInterval < 0 {
 		cfg.LogInterval = 0
 	}
-	if logger == nil {
-		logger = logport.NoopLogger()
-	}
+	logger = loggingutil.EnsureLogger(logger)
 	return &Observer{
 		cfg:    cfg,
 		qrf:    controller,
@@ -362,10 +361,7 @@ func parseMeminfo(r io.Reader) (meminfo, error) {
 	}
 	totalBytes := totalKB * 1024
 	if availKB, ok := fields["MemAvailable"]; ok && availKB > 0 {
-		availableBytes := availKB * 1024
-		if availableBytes > totalBytes {
-			availableBytes = totalBytes
-		}
+		availableBytes := min(availKB * 1024, totalBytes)
 		return meminfo{
 			totalBytes:              totalBytes,
 			availableBytes:          availableBytes,
@@ -387,10 +383,7 @@ func parseMeminfo(r io.Reader) (meminfo, error) {
 	if availableKB < 0 {
 		availableKB = 0
 	}
-	availableBytes := uint64(availableKB) * 1024
-	if availableBytes > totalBytes {
-		availableBytes = totalBytes
-	}
+	availableBytes := min(uint64(availableKB) * 1024, totalBytes)
 
 	includesReclaimable := buffersKB > 0 || cachedKB > 0 || sreclaimableKB > 0
 
@@ -417,16 +410,10 @@ func gatherSystemUsage() (systemUsage, error) {
 	}
 	freeRAM := uint64(si.Freeram) * unit
 	bufferRAM := uint64(si.Bufferram) * unit
-	available := freeRAM + bufferRAM
-	if available > totalRAM {
-		available = totalRAM
-	}
+	available := min(freeRAM + bufferRAM, totalRAM)
 	if mi, err := readMeminfo(); err == nil && mi.totalBytes > 0 && mi.availableBytes > 0 {
 		totalRAM = mi.totalBytes
-		available = mi.availableBytes
-		if available > totalRAM {
-			available = totalRAM
-		}
+		available = min(mi.availableBytes, totalRAM)
 		memoryIncludesReclaimable = mi.includesReclaimableData
 	}
 	memoryUsed := 1 - float64(available)/float64(totalRAM)

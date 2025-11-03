@@ -17,7 +17,7 @@ import (
 	"pkt.systems/lockd/integration/internal/cryptotest"
 	queuetestutil "pkt.systems/lockd/integration/queue/testutil"
 	"pkt.systems/lockd/internal/diagnostics/storagecheck"
-	"pkt.systems/logport"
+	"pkt.systems/pslog"
 )
 
 type azureQueueOptions struct {
@@ -102,7 +102,7 @@ func ensureAzureStoreReady(t testing.TB, ctx context.Context, cfg lockd.Config) 
 }
 
 func startAzureQueueServer(t testing.TB, cfg lockd.Config) *lockd.TestServer {
-	return startAzureQueueServerWithLogger(t, cfg, lockd.NewTestingLogger(t, logport.TraceLevel))
+	return startAzureQueueServerWithLogger(t, cfg, lockd.NewTestingLogger(t, pslog.TraceLevel))
 }
 
 func startAzureQueueServerWithCapture(t testing.TB, cfg lockd.Config) (*lockd.TestServer, *queuetestutil.LogCapture) {
@@ -111,8 +111,8 @@ func startAzureQueueServerWithCapture(t testing.TB, cfg lockd.Config) (*lockd.Te
 	return ts, capture
 }
 
-func startAzureQueueServerWithLogger(t testing.TB, cfg lockd.Config, logger logport.ForLogging, extra ...lockd.TestServerOption) *lockd.TestServer {
-	clientLogger := lockd.NewTestingLogger(t, logport.TraceLevel)
+func startAzureQueueServerWithLogger(t testing.TB, cfg lockd.Config, logger pslog.Logger, extra ...lockd.TestServerOption) *lockd.TestServer {
+	clientLogger := lockd.NewTestingLogger(t, pslog.TraceLevel)
 	clientOpts := []lockdclient.Option{
 		lockdclient.WithHTTPTimeout(120 * time.Second),
 		lockdclient.WithKeepAliveTimeout(120 * time.Second),

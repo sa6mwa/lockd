@@ -16,7 +16,7 @@ import (
 	lockdclient "pkt.systems/lockd/client"
 	queuetestutil "pkt.systems/lockd/integration/queue/testutil"
 	"pkt.systems/lockd/internal/qrf"
-	"pkt.systems/logport"
+	"pkt.systems/pslog"
 )
 
 func TestAzureQueueAdvancedScenarios(t *testing.T) {
@@ -334,7 +334,7 @@ func runAzureQueuePollingIntervalRespected(t *testing.T) {
 	logToTesting := false
 	capture := queuetestutil.NewLogCaptureWithOptions(t, queuetestutil.LogCaptureOptions{
 		Prefixes:     []string{"queue.dispatcher.poll", "storage.list_objects.begin"},
-		LogLevel:     logport.TraceLevel,
+		LogLevel:     pslog.TraceLevel,
 		LogToTesting: &logToTesting,
 	})
 	ts := startAzureQueueServerWithLogger(t, cfg, capture.Logger())

@@ -10,23 +10,22 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"pkt.systems/lockd/internal/correlation"
-	"pkt.systems/logport"
+	"pkt.systems/lockd/internal/loggingutil"
+	"pkt.systems/pslog"
 
 	"pkt.systems/lockd/internal/storage"
 )
 
 type backend struct {
 	inner  storage.Backend
-	logger logport.ForLogging
+	logger pslog.Logger
 	tracer trace.Tracer
 	sys    string
 }
 
 // Wrap decorates inner with trace/debug logging.
-func Wrap(inner storage.Backend, logger logport.ForLogging, sys string) storage.Backend {
-	if logger == nil {
-		logger = logport.NoopLogger()
-	}
+func Wrap(inner storage.Backend, logger pslog.Logger, sys string) storage.Backend {
+	logger = loggingutil.EnsureLogger(logger)
 	return &backend{
 		inner:  inner,
 		logger: logger,
@@ -35,7 +34,7 @@ func Wrap(inner storage.Backend, logger logport.ForLogging, sys string) storage.
 	}
 }
 
-func (b *backend) start(ctx context.Context, op string) (context.Context, trace.Span, logport.ForLogging, logport.ForLogging, time.Time, func(string, error)) {
+func (b *backend) start(ctx context.Context, op string) (context.Context, trace.Span, pslog.Logger, pslog.Logger, time.Time, func(string, error)) {
 	begin := time.Now()
 	ctx, span := b.tracer.Start(ctx, "lockd.storage."+op, trace.WithSpanKind(trace.SpanKindInternal))
 	span.SetAttributes(
@@ -45,18 +44,18 @@ func (b *backend) start(ctx context.Context, op string) (context.Context, trace.
 	span.AddEvent("lockd.storage.begin")
 
 	logger := b.logger
-	if ctxLogger := logport.LoggerFromContext(ctx); ctxLogger != nil {
+	if ctxLogger := pslog.LoggerFromContext(ctx); ctxLogger != nil {
 		logger = ctxLogger
 	} else if corr := correlation.ID(ctx); corr != "" {
 		logger = logger.With("cid", corr)
 	}
 	logger = logger.With("storage_op", op)
-	verbose := logger.WithTrace(ctx)
+	verbose := logger
 	if corr := correlation.ID(ctx); corr != "" {
 		span.SetAttributes(attribute.String("lockd.correlation_id", corr))
 	}
 
-	ctx = logport.ContextWithLogger(ctx, logger)
+	ctx = pslog.ContextWithLogger(ctx, logger)
 	return ctx, span, logger, verbose, begin, func(result string, err error) {
 		duration := time.Since(begin).Milliseconds()
 		if err != nil {

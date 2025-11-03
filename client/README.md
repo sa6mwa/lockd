@@ -191,7 +191,7 @@ Use `client.WithCorrelationID` or `client.GenerateCorrelationID` to tag a
 context. The client automatically propagates the correlation identifier on
 subsequent requests (and logs) so server- and client-side traces can be tied
 together. Alternatively, register a logger that implements
-`logport.ForLoggingSubset` when constructing the client to capture structured
+`pslog.Base` when constructing the client to capture structured
 traces emitted by the SDK.
 Queue workflows surface the identifier via `QueueMessage.CorrelationID`, and
 the helpers (`Ack`, `Nack`, `Extend`) forward it automatically so DLQ moves

@@ -10,9 +10,10 @@ import (
 	"time"
 
 	"pkt.systems/lockd"
+	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/client"
 	"pkt.systems/lockd/internal/storage/memory"
-	"pkt.systems/logport"
+	"pkt.systems/pslog"
 )
 
 func TestAcquireForUpdateCallbackSingleServer(t *testing.T) {
@@ -36,9 +37,9 @@ func TestAcquireForUpdateCallbackSingleServer(t *testing.T) {
 
 	ts := lockd.StartTestServer(t,
 		lockd.WithTestChaos(chaos),
-		lockd.WithTestLoggerFromTB(t, logport.TraceLevel),
+		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
-			client.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)),
+			client.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 			client.WithAcquireFailureRetries(5),
 			client.WithHTTPTimeout(300*time.Millisecond),
 		),
@@ -58,7 +59,7 @@ func TestAcquireForUpdateCallbackSingleServer(t *testing.T) {
 	directURL := "http://" + directAddr.String()
 	seedClient, err := client.New(directURL,
 		client.WithDisableMTLS(true),
-		client.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)),
+		client.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 	)
 	if err != nil {
 		t.Fatalf("seed client: %v", err)
@@ -160,18 +161,18 @@ func TestAcquireForUpdateCallbackFailoverMultiServer(t *testing.T) {
 	primary := lockd.StartTestServer(t,
 		lockd.WithTestBackend(store),
 		lockd.WithTestChaos(primaryChaos),
-		lockd.WithTestLoggerFromTB(t, logport.TraceLevel),
+		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
-			client.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)),
+			client.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 			client.WithAcquireFailureRetries(5),
 			client.WithHTTPTimeout(300*time.Millisecond),
 		),
 	)
 	backup := lockd.StartTestServer(t,
 		lockd.WithTestBackend(store),
-		lockd.WithTestLoggerFromTB(t, logport.TraceLevel),
+		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
-			client.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)),
+			client.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 			client.WithAcquireFailureRetries(5),
 			client.WithHTTPTimeout(300*time.Millisecond),
 		),
@@ -212,7 +213,7 @@ func TestAcquireForUpdateCallbackFailoverMultiServer(t *testing.T) {
 	endpoints := []string{primary.URL(), backup.URL()}
 	failoverClient, err := client.NewWithEndpoints(endpoints,
 		client.WithDisableMTLS(true),
-		client.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)),
+		client.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 		client.WithAcquireFailureRetries(5),
 		client.WithHTTPTimeout(300*time.Millisecond),
 	)

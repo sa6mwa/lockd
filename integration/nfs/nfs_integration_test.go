@@ -29,7 +29,7 @@ import (
 	testlog "pkt.systems/lockd/integration/internal/testlog"
 	"pkt.systems/lockd/internal/storage/disk"
 	"pkt.systems/lockd/internal/uuidv7"
-	"pkt.systems/logport"
+	"pkt.systems/pslog"
 )
 
 type failoverPhase int
@@ -116,12 +116,12 @@ func startNFSServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client {
 		lockdclient.WithHTTPTimeout(60 * time.Second),
 		lockdclient.WithCloseTimeout(60 * time.Second),
 		lockdclient.WithKeepAliveTimeout(60 * time.Second),
-		lockdclient.WithLogger(lockd.NewTestingLogger(tb, logport.TraceLevel)),
+		lockdclient.WithLogger(lockd.NewTestingLogger(tb, pslog.TraceLevel)),
 	}
 	ts := lockd.StartTestServer(tb,
 		lockd.WithTestConfig(cfg),
 		lockd.WithTestListener("tcp", "127.0.0.1:0"),
-		lockd.WithTestLoggerFromTB(tb, logport.TraceLevel),
+		lockd.WithTestLoggerFromTB(tb, pslog.TraceLevel),
 		lockd.WithTestClientOptions(clientOpts...),
 	)
 	return ts.Client
@@ -134,12 +134,12 @@ func startNFSTestServer(tb testing.TB, cfg lockd.Config) *lockd.TestServer {
 		lockdclient.WithHTTPTimeout(60 * time.Second),
 		lockdclient.WithCloseTimeout(60 * time.Second),
 		lockdclient.WithKeepAliveTimeout(60 * time.Second),
-		lockdclient.WithLogger(lockd.NewTestingLogger(tb, logport.TraceLevel)),
+		lockdclient.WithLogger(lockd.NewTestingLogger(tb, pslog.TraceLevel)),
 	}
 	return lockd.StartTestServer(tb,
 		lockd.WithTestConfig(cfg),
 		lockd.WithTestListener("tcp", "127.0.0.1:0"),
-		lockd.WithTestLoggerFromTB(tb, logport.TraceLevel),
+		lockd.WithTestLoggerFromTB(tb, pslog.TraceLevel),
 		lockd.WithTestClientOptions(clientOpts...),
 	)
 }
@@ -393,9 +393,9 @@ func TestNFSAcquireForUpdateCallbackSingleServer(t *testing.T) {
 	ts := lockd.StartTestServer(t,
 		lockd.WithTestBackend(store),
 		lockd.WithTestChaos(chaos),
-		lockd.WithTestLoggerFromTB(t, logport.TraceLevel),
+		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
-			lockdclient.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)),
+			lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 			lockdclient.WithHTTPTimeout(750*time.Millisecond),
 		),
 	)
@@ -603,9 +603,9 @@ func runAcquireForUpdateCallbackFailover(t *testing.T, phase failoverPhase, base
 	primary := lockd.StartTestServer(t,
 		lockd.WithTestBackend(store),
 		lockd.WithTestChaos(chaos),
-		lockd.WithTestLoggerFromTB(t, logport.TraceLevel),
+		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
-			lockdclient.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)),
+			lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 			lockdclient.WithHTTPTimeout(time.Second),
 		),
 		lockd.WithTestCloseDefaults(
@@ -615,9 +615,9 @@ func runAcquireForUpdateCallbackFailover(t *testing.T, phase failoverPhase, base
 	)
 	backup := lockd.StartTestServer(t,
 		lockd.WithTestBackend(store),
-		lockd.WithTestLoggerFromTB(t, logport.TraceLevel),
+		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
-			lockdclient.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)),
+			lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 			lockdclient.WithHTTPTimeout(time.Second),
 		),
 		lockd.WithTestCloseDefaults(
@@ -648,7 +648,7 @@ func runAcquireForUpdateCallbackFailover(t *testing.T, phase failoverPhase, base
 	}
 	releaseLease(t, ctxSeed, lease)
 
-	clientLogger, clientLogs := testlog.NewRecorder(t, logport.TraceLevel)
+	clientLogger, clientLogs := testlog.NewRecorder(t, pslog.TraceLevel)
 	failoverClient, err := lockdclient.NewWithEndpoints([]string{primary.URL(), backup.URL()},
 		lockdclient.WithDisableMTLS(true),
 		lockdclient.WithHTTPTimeout(2*time.Second),
@@ -885,7 +885,7 @@ func directClient(t testing.TB, ts *lockd.TestServer) *lockdclient.Client {
 	baseURL := "http://" + addr.String()
 	cli, err := lockdclient.New(baseURL,
 		lockdclient.WithDisableMTLS(true),
-		lockdclient.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)),
+		lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 		lockdclient.WithHTTPTimeout(time.Second),
 	)
 	if err != nil {

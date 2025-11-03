@@ -30,8 +30,7 @@ import (
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/s3"
 	"pkt.systems/lockd/internal/uuidv7"
-	"pkt.systems/logport"
-	"pkt.systems/logport/adapters/psl"
+	"pkt.systems/pslog"
 )
 
 func TestMinioStoreVerification(t *testing.T) {
@@ -224,7 +223,7 @@ func TestMinioAcquireForUpdateCallbackSingleServer(t *testing.T) {
 	if proxiedClient == nil {
 		var err error
 		proxiedClient, err = ts.NewClient(
-			lockdclient.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)),
+			lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 		)
 		if err != nil {
 			t.Fatalf("new client: %v", err)
@@ -319,7 +318,7 @@ func TestMinioRemoveStateAcquireForUpdate(t *testing.T) {
 	cli := ts.Client
 	if cli == nil {
 		var err error
-		cli, err = ts.NewClient(lockdclient.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)))
+		cli, err = ts.NewClient(lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)))
 		if err != nil {
 			t.Fatalf("new client: %v", err)
 		}
@@ -558,7 +557,7 @@ func TestMinioAcquireForUpdateCallbackFailover(t *testing.T) {
 	seedClient := backup.Client
 	if seedClient == nil {
 		var err error
-		seedClient, err = backup.NewClient(lockdclient.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)))
+		seedClient, err = backup.NewClient(lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)))
 		if err != nil {
 			t.Fatalf("seed client: %v", err)
 		}
@@ -585,7 +584,7 @@ func TestMinioAcquireForUpdateCallbackFailover(t *testing.T) {
 		t.Fatalf("stop primary: %v", err)
 	}
 
-	clientLogger, clientLogs := testlog.NewRecorder(t, logport.TraceLevel)
+	clientLogger, clientLogs := testlog.NewRecorder(t, pslog.TraceLevel)
 	failoverClient, err := lockdclient.NewWithEndpoints(
 		[]string{primary.URL(), backup.URL()},
 		lockdclient.WithDisableMTLS(true),
@@ -741,7 +740,7 @@ func TestMinioRemoveStateFailover(t *testing.T) {
 	seedClient := backup.Client
 	if seedClient == nil {
 		var err error
-		seedClient, err = backup.NewClient(lockdclient.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)))
+		seedClient, err = backup.NewClient(lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)))
 		if err != nil {
 			t.Fatalf("seed client: %v", err)
 		}
@@ -762,7 +761,7 @@ func TestMinioRemoveStateFailover(t *testing.T) {
 	}
 	releaseLease(t, ctx, seedClient, key, seedLease.LeaseID)
 
-	clientLogger, clientLogs := testlog.NewRecorder(t, logport.TraceLevel)
+	clientLogger, clientLogs := testlog.NewRecorder(t, pslog.TraceLevel)
 	failoverClient, err := lockdclient.NewWithEndpoints(
 		[]string{primary.URL(), backup.URL()},
 		lockdclient.WithDisableMTLS(true),
@@ -1008,7 +1007,7 @@ func startLockdServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client {
 		lockdclient.WithHTTPTimeout(15 * time.Second),
 		lockdclient.WithCloseTimeout(30 * time.Second),
 		lockdclient.WithKeepAliveTimeout(30 * time.Second),
-		lockdclient.WithLogger(lockd.NewTestingLogger(tb, logport.TraceLevel)),
+		lockdclient.WithLogger(lockd.NewTestingLogger(tb, pslog.TraceLevel)),
 	}
 
 	options := []lockd.TestServerOption{
@@ -1059,7 +1058,7 @@ func startMinioTestServer(tb testing.TB, cfg lockd.Config, opts ...lockd.TestSer
 			lockdclient.WithHTTPTimeout(2*time.Minute),
 			lockdclient.WithCloseTimeout(2*time.Minute),
 			lockdclient.WithKeepAliveTimeout(2*time.Minute),
-			lockdclient.WithLogger(lockd.NewTestingLogger(tb, logport.TraceLevel)),
+			lockdclient.WithLogger(lockd.NewTestingLogger(tb, pslog.TraceLevel)),
 		),
 	}
 	options = append(options, opts...)
@@ -1078,7 +1077,7 @@ func directClient(tb testing.TB, ts *lockd.TestServer) *lockdclient.Client {
 	baseURL := "http://" + addr.String()
 	cli, err := lockdclient.New(baseURL,
 		lockdclient.WithDisableMTLS(true),
-		lockdclient.WithLogger(lockd.NewTestingLogger(tb, logport.TraceLevel)),
+		lockdclient.WithLogger(lockd.NewTestingLogger(tb, pslog.TraceLevel)),
 		lockdclient.WithHTTPTimeout(30*time.Second),
 	)
 	if err != nil {
@@ -1091,7 +1090,7 @@ func minioTestLoggerOption(tb testing.TB) lockd.TestServerOption {
 	tb.Helper()
 	levelStr := os.Getenv("LOCKD_BENCH_LOG_LEVEL")
 	if levelStr == "" {
-		return lockd.WithTestLoggerFromTB(tb, logport.TraceLevel)
+		return lockd.WithTestLoggerFromTB(tb, pslog.TraceLevel)
 	}
 
 	logPath := os.Getenv("LOCKD_BENCH_LOG_PATH")
@@ -1117,8 +1116,8 @@ func minioTestLoggerOption(tb testing.TB) lockd.TestServerOption {
 	}
 	tb.Cleanup(func() { _ = file.Close() })
 
-	logger := psl.NewStructured(file).With("app", "lockd").With("sys", "bench.minio.harness")
-	if level, ok := logport.ParseLevel(levelStr); ok {
+	logger := pslog.NewStructured(file).With("app", "lockd").With("sys", "bench.minio.harness")
+	if level, ok := pslog.ParseLevel(levelStr); ok {
 		logger = logger.LogLevel(level)
 	} else {
 		tb.Fatalf("invalid LOCKD_BENCH_LOG_LEVEL %q", levelStr)

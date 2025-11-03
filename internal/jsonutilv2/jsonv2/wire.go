@@ -298,7 +298,7 @@ func parseHexUint16(b []byte) (uint16, bool) {
 		return 0, false
 	}
 	var v uint16
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		c := b[i]
 		switch {
 		case '0' <= c && c <= '9':
@@ -316,7 +316,7 @@ func parseHexUint16(b []byte) (uint16, bool) {
 }
 
 func hasEscapedUTF16Prefix(b []byte, lowerSurrogate bool) bool {
-	for i := 0; i < len(b); i++ {
+	for i := range b {
 		switch c := b[i]; {
 		case i == 0 && c != '\\':
 			return false

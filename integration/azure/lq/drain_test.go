@@ -13,7 +13,7 @@ import (
 	api "pkt.systems/lockd/api"
 	shutdowntest "pkt.systems/lockd/integration/internal/shutdowntest"
 	queuetestutil "pkt.systems/lockd/integration/queue/testutil"
-	"pkt.systems/logport"
+	"pkt.systems/pslog"
 )
 
 func TestAzureQueueDrainUsesProductionDefaults(t *testing.T) {
@@ -24,7 +24,7 @@ func TestAzureQueueDrainUsesProductionDefaults(t *testing.T) {
 		lockd.WithDrainLeases(8*time.Second),
 		lockd.WithShutdownTimeout(2*time.Second),
 	)
-	logger := lockd.NewTestingLogger(t, logport.TraceLevel)
+	logger := lockd.NewTestingLogger(t, pslog.TraceLevel)
 	ts := startAzureQueueServerWithLogger(t, cfg, logger, productionClose)
 	cli := ts.Client
 	ensureAzureQueueWritableOrSkip(t, cli)

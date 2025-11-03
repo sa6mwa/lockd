@@ -17,20 +17,20 @@ import (
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/integration/internal/cryptotest"
 	queuetestutil "pkt.systems/lockd/integration/queue/testutil"
-	"pkt.systems/logport"
+	"pkt.systems/lockd/internal/loggingutil"
 )
 
 func TestCryptoDiskLocks(t *testing.T) {
 	cfg := buildDiskConfig(t)
 	ts := lockd.StartTestServer(t,
 		lockd.WithTestConfig(cfg),
-		lockd.WithTestLogger(logport.NoopLogger()),
+		lockd.WithTestLogger(loggingutil.NoopLogger()),
 		lockd.WithTestClientOptions(
 			lockdclient.WithDisableMTLS(true),
 			lockdclient.WithHTTPTimeout(30*time.Second),
 			lockdclient.WithKeepAliveTimeout(30*time.Second),
 			lockdclient.WithCloseTimeout(30*time.Second),
-			lockdclient.WithLogger(logport.NoopLogger()),
+			lockdclient.WithLogger(loggingutil.NoopLogger()),
 		),
 	)
 	cli := ts.Client
@@ -73,13 +73,13 @@ func TestCryptoDiskQueues(t *testing.T) {
 	cfg := buildDiskConfig(t)
 	ts := lockd.StartTestServer(t,
 		lockd.WithTestConfig(cfg),
-		lockd.WithTestLogger(logport.NoopLogger()),
+		lockd.WithTestLogger(loggingutil.NoopLogger()),
 		lockd.WithTestClientOptions(
 			lockdclient.WithDisableMTLS(true),
 			lockdclient.WithHTTPTimeout(30*time.Second),
 			lockdclient.WithKeepAliveTimeout(30*time.Second),
 			lockdclient.WithCloseTimeout(30*time.Second),
-			lockdclient.WithLogger(logport.NoopLogger()),
+			lockdclient.WithLogger(loggingutil.NoopLogger()),
 		),
 	)
 	cli := ts.Client

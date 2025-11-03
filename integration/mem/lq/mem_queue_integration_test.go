@@ -23,10 +23,11 @@ import (
 	"pkt.systems/lockd/integration/internal/cryptotest"
 	shutdowntest "pkt.systems/lockd/integration/internal/shutdowntest"
 	queuetestutil "pkt.systems/lockd/integration/queue/testutil"
+	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/qrf"
 	memorybackend "pkt.systems/lockd/internal/storage/memory"
 	"pkt.systems/lockd/internal/uuidv7"
-	"pkt.systems/logport"
+	"pkt.systems/pslog"
 )
 
 type memQueueMode struct {
@@ -218,9 +219,6 @@ func runMemQueueStatefulCorrelationPersistence(t *testing.T, mode memQueueMode) 
 }
 
 func runMemQueueSubscribeBasics(t *testing.T, mode memQueueMode) {
-	if os.Getenv(cryptotest.EnvVar) == "1" {
-		t.Skip("mem subscribe coverage pending storage encryption support")
-	}
 	queuetestutil.InstallWatchdog(t, "mem-subscribe-basics", 8*time.Second)
 
 	cfg := buildMemQueueConfig(t, mode.queueWatch)
@@ -290,9 +288,6 @@ func runMemQueueSubscribeBasics(t *testing.T, mode memQueueMode) {
 }
 
 func runMemQueueSubscribeStateful(t *testing.T, mode memQueueMode) {
-	if os.Getenv(cryptotest.EnvVar) == "1" {
-		t.Skip("mem subscribe coverage pending storage encryption support")
-	}
 	queuetestutil.InstallWatchdog(t, "mem-subscribe-stateful", 8*time.Second)
 
 	cfg := buildMemQueueConfig(t, mode.queueWatch)
@@ -343,9 +338,6 @@ func runMemQueueSubscribeStateful(t *testing.T, mode memQueueMode) {
 }
 
 func runMemQueueSubscribeHighFanInFanOutSingleServer(t *testing.T, mode memQueueMode) {
-	if os.Getenv(cryptotest.EnvVar) == "1" {
-		t.Skip("mem subscribe coverage pending storage encryption support")
-	}
 	queuetestutil.InstallWatchdog(t, "mem-subscribe-highfan", 10*time.Second)
 
 	cfg := buildMemQueueConfig(t, mode.queueWatch)
@@ -821,10 +813,10 @@ func runMemQueueHighFanInFanOutSingleServer(t *testing.T, mode memQueueMode) {
 	capture := queuetestutil.NewLogCaptureWithOptions(t, queuetestutil.LogCaptureOptions{
 		MaxEntries:   2000,
 		Prefixes:     []string{"lockd.qrf", "lockd.lsf"},
-		LogLevel:     logport.InfoLevel,
+		LogLevel:     pslog.InfoLevel,
 		LogToTesting: &logToTesting,
 	})
-	clientLogger := lockd.NewTestingLogger(t, logport.InfoLevel)
+	clientLogger := lockd.NewTestingLogger(t, pslog.InfoLevel)
 	baseClientOpts := []lockdclient.Option{
 		lockdclient.WithHTTPTimeout(60 * time.Second),
 		lockdclient.WithKeepAliveTimeout(60 * time.Second),
@@ -1047,9 +1039,9 @@ func startMemQueueServer(t testing.TB, cfg lockd.Config) *lockd.TestServer {
 	t.Helper()
 	return lockd.StartTestServer(t,
 		lockd.WithTestConfig(cfg),
-		lockd.WithTestLogger(logport.NoopLogger()),
+		lockd.WithTestLogger(loggingutil.NoopLogger()),
 		lockd.WithTestClientOptions(
-			lockdclient.WithLogger(logport.NoopLogger()),
+			lockdclient.WithLogger(loggingutil.NoopLogger()),
 			lockdclient.WithHTTPTimeout(30*time.Second),
 			lockdclient.WithKeepAliveTimeout(30*time.Second),
 			lockdclient.WithCloseTimeout(30*time.Second),
@@ -1063,9 +1055,9 @@ func startMemQueueServerWithBackend(t testing.TB, cfg lockd.Config, backend *mem
 	return lockd.StartTestServer(t,
 		lockd.WithTestConfig(cfg),
 		lockd.WithTestBackend(backend),
-		lockd.WithTestLogger(logport.NoopLogger()),
+		lockd.WithTestLogger(loggingutil.NoopLogger()),
 		lockd.WithTestClientOptions(
-			lockdclient.WithLogger(logport.NoopLogger()),
+			lockdclient.WithLogger(loggingutil.NoopLogger()),
 			lockdclient.WithHTTPTimeout(30*time.Second),
 			lockdclient.WithKeepAliveTimeout(30*time.Second),
 			lockdclient.WithCloseTimeout(30*time.Second),

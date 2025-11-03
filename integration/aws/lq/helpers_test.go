@@ -21,7 +21,7 @@ import (
 	"pkt.systems/lockd/internal/diagnostics/storagecheck"
 	"pkt.systems/lockd/internal/storage/s3"
 	"pkt.systems/lockd/internal/uuidv7"
-	"pkt.systems/logport"
+	"pkt.systems/pslog"
 )
 
 type awsQueueOptions struct {
@@ -70,7 +70,7 @@ func prepareAWSQueueConfig(t testing.TB, opts awsQueueOptions) lockd.Config {
 }
 
 func startAWSQueueServer(t testing.TB, cfg lockd.Config) *lockd.TestServer {
-	return newAWSQueueTestServer(t, cfg, lockd.NewTestingLogger(t, logport.TraceLevel))
+	return newAWSQueueTestServer(t, cfg, lockd.NewTestingLogger(t, pslog.TraceLevel))
 }
 
 func startAWSQueueServerWithCapture(t testing.TB, cfg lockd.Config) (*lockd.TestServer, *queuetestutil.LogCapture) {
@@ -79,13 +79,13 @@ func startAWSQueueServerWithCapture(t testing.TB, cfg lockd.Config) (*lockd.Test
 	return ts, capture
 }
 
-func newAWSQueueTestServer(t testing.TB, cfg lockd.Config, serverLogger logport.ForLogging, opts ...lockd.TestServerOption) *lockd.TestServer {
+func newAWSQueueTestServer(t testing.TB, cfg lockd.Config, serverLogger pslog.Logger, opts ...lockd.TestServerOption) *lockd.TestServer {
 	t.Helper()
 
 	if serverLogger == nil {
-		serverLogger = lockd.NewTestingLogger(t, logport.TraceLevel)
+		serverLogger = lockd.NewTestingLogger(t, pslog.TraceLevel)
 	}
-	clientLogger := lockd.NewTestingLogger(t, logport.TraceLevel)
+	clientLogger := lockd.NewTestingLogger(t, pslog.TraceLevel)
 	baseClientOpts := []lockdclient.Option{
 		lockdclient.WithHTTPTimeout(60 * time.Second),
 		lockdclient.WithKeepAliveTimeout(60 * time.Second),

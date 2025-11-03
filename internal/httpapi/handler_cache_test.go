@@ -12,9 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"pkt.systems/logport"
-
 	"pkt.systems/lockd/api"
+	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/storage"
 )
 
@@ -22,7 +21,7 @@ func TestHandlerLeaseCacheAvoidsExtraLoadMeta(t *testing.T) {
 	store := newStubStore()
 	h := New(Config{
 		Store:                   store,
-		Logger:                  logport.NoopLogger(),
+		Logger:                  loggingutil.NoopLogger(),
 		JSONMaxBytes:            1 << 20,
 		DefaultTTL:              30 * time.Second,
 		MaxTTL:                  time.Minute,
@@ -107,7 +106,7 @@ func TestHandlerRemoveStateClearsMeta(t *testing.T) {
 	store := newStubStore()
 	h := New(Config{
 		Store:                   store,
-		Logger:                  logport.NoopLogger(),
+		Logger:                  loggingutil.NoopLogger(),
 		JSONMaxBytes:            1 << 20,
 		DefaultTTL:              30 * time.Second,
 		MaxTTL:                  time.Minute,

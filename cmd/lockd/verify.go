@@ -10,10 +10,10 @@ import (
 	"pkt.systems/lockd"
 	"pkt.systems/lockd/internal/diagnostics/storagecheck"
 	"pkt.systems/lockd/internal/storage"
-	"pkt.systems/logport"
+	"pkt.systems/pslog"
 )
 
-func newVerifyCommand(logger logport.ForLogging) *cobra.Command {
+func newVerifyCommand(logger pslog.Logger) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "verify",
 		Short: "Run diagnostic checks",
@@ -22,7 +22,7 @@ func newVerifyCommand(logger logport.ForLogging) *cobra.Command {
 	return cmd
 }
 
-func newVerifyStoreCommand(logger logport.ForLogging) *cobra.Command {
+func newVerifyStoreCommand(logger pslog.Logger) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "store",
 		Short:        "Verify storage configuration",

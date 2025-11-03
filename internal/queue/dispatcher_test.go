@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/storage"
-	"pkt.systems/logport"
 )
 
 type nextResponse struct {
@@ -90,7 +90,7 @@ func TestDispatcherTryWatcherDiscrepancy(t *testing.T) {
 		},
 	}
 	disp := NewDispatcher(svc,
-		WithLogger(logport.NoopLogger()),
+		WithLogger(loggingutil.NoopLogger()),
 		WithResilientPollInterval(5*time.Minute),
 	)
 

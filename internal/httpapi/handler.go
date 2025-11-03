@@ -25,17 +25,18 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
-	"pkt.systems/logport"
 
 	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/internal/clock"
 	"pkt.systems/lockd/internal/correlation"
 	"pkt.systems/lockd/internal/jsonutil"
+	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/lsf"
 	"pkt.systems/lockd/internal/qrf"
 	"pkt.systems/lockd/internal/queue"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/uuidv7"
+	"pkt.systems/pslog"
 )
 
 const defaultPayloadSpoolMemoryThreshold = 4 << 20 // 4 MiB in-memory, then spill to disk
@@ -43,6 +44,7 @@ const headerFencingToken = "X-Fencing-Token"
 const headerCorrelationID = "X-Correlation-Id"
 const headerShutdownImminent = "Shutdown-Imminent"
 const maxQueueDequeueBatch = 64
+const queueEnsureTimeoutGrace = 2 * time.Second
 
 const (
 	acquireBackoffStart      = 500 * time.Millisecond
@@ -87,7 +89,7 @@ type Handler struct {
 	crypto                *storage.Crypto
 	queueSvc              *queue.Service
 	queueDisp             *queue.Dispatcher
-	logger                logport.ForLogging
+	logger                pslog.Logger
 	clock                 clock.Clock
 	lsfObserver           *lsf.Observer
 	qrf                   *qrf.Controller
@@ -126,7 +128,7 @@ type pendingQueueDeliveries struct {
 	owners map[string]map[string]*queueDelivery
 }
 
-func logQueueDeliveryInfo(logger logport.ForLogging, delivery *queueDelivery) {
+func logQueueDeliveryInfo(logger pslog.Logger, delivery *queueDelivery) {
 	if logger == nil || delivery == nil {
 		return
 	}
@@ -208,7 +210,7 @@ func (h *Handler) clearPendingDelivery(queue, owner, messageID string) {
 	}
 }
 
-func (h *Handler) logQueueSubscribeError(queue logport.ForLogging, queueName, owner string, err error) {
+func (h *Handler) logQueueSubscribeError(queue pslog.Logger, queueName, owner string, err error) {
 	if err == nil {
 		return
 	}
@@ -335,7 +337,7 @@ type Config struct {
 	Store                      storage.Backend
 	Crypto                     *storage.Crypto
 	QueueService               *queue.Service
-	Logger                     logport.ForLogging
+	Logger                     pslog.Logger
 	Clock                      clock.Clock
 	JSONMaxBytes               int64
 	CompactWriter              func(io.Writer, io.Reader, int64) error
@@ -361,11 +363,8 @@ type Config struct {
 
 // New constructs a Handler using the supplied configuration.
 func New(cfg Config) *Handler {
-	baseLogger := cfg.Logger
-	if baseLogger == nil {
-		baseLogger = logport.NoopLogger()
-	}
-	logger := baseLogger.With("sys", "api.http.router")
+	baseLogger := loggingutil.EnsureLogger(cfg.Logger)
+	logger := baseLogger
 	clk := cfg.Clock
 	if clk == nil {
 		clk = clock.Real{}
@@ -567,13 +566,13 @@ func (h *Handler) wrap(operation string, fn handlerFunc) http.Handler {
 			"method", r.Method,
 			"path", r.URL.Path,
 		)
-		ctx = logport.ContextWithLogger(ctx, logger)
+		ctx = pslog.ContextWithLogger(ctx, logger)
 
 		if h.enforceClientIdentity {
 			if id := clientIdentityFromRequest(r); id != "" {
 				ctx = WithClientIdentity(ctx, id)
 				logger = logger.With("client_identity", id)
-				ctx = logport.ContextWithLogger(ctx, logger)
+				ctx = pslog.ContextWithLogger(ctx, logger)
 				span.SetAttributes(attribute.Bool("lockd.has_client_identity", true))
 			} else {
 				span.SetAttributes(attribute.Bool("lockd.has_client_identity", false))
@@ -589,7 +588,7 @@ func (h *Handler) wrap(operation string, fn handlerFunc) http.Handler {
 			ctx = correlation.Set(ctx, correlation.Generate())
 		}
 		ctx, logger = applyCorrelation(ctx, logger, span)
-		verboseLogger := logger.WithTrace(ctx)
+		verboseLogger := logger
 
 		r = r.WithContext(ctx)
 
@@ -654,15 +653,15 @@ func (h *Handler) wrap(operation string, fn handlerFunc) http.Handler {
 		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents))
 }
 
-func applyCorrelation(ctx context.Context, logger logport.ForLogging, span trace.Span) (context.Context, logport.ForLogging) {
+func applyCorrelation(ctx context.Context, logger pslog.Logger, span trace.Span) (context.Context, pslog.Logger) {
 	if id := correlation.ID(ctx); id != "" {
 		if ctx.Value(correlationAppliedKey{}) == nil {
 			logger = logger.With("cid", id)
 			ctx = context.WithValue(ctx, correlationAppliedKey{}, struct{}{})
-		} else if existing := logport.LoggerFromContext(ctx); existing != nil {
+		} else if existing := pslog.LoggerFromContext(ctx); existing != nil {
 			logger = existing
 		}
-		ctx = logport.ContextWithLogger(ctx, logger)
+		ctx = pslog.ContextWithLogger(ctx, logger)
 		if span != nil {
 			span.SetAttributes(attribute.String("lockd.correlation_id", id))
 		}
@@ -727,7 +726,7 @@ func (h *Handler) handleAcquire(w http.ResponseWriter, r *http.Request) error {
 		ctx = correlation.Set(ctx, correlation.Generate())
 	}
 	span := trace.SpanFromContext(ctx)
-	ctx, corrLogger := applyCorrelation(ctx, logport.LoggerFromContext(ctx), span)
+	ctx, corrLogger := applyCorrelation(ctx, pslog.LoggerFromContext(ctx), span)
 	r = r.WithContext(ctx)
 	logger := corrLogger
 	remoteAddr := h.clientKeyFromRequest(r)
@@ -744,7 +743,7 @@ func (h *Handler) handleAcquire(w http.ResponseWriter, r *http.Request) error {
 			"block_seconds", payload.BlockSecs,
 			"remaining_seconds", retry,
 		)
-		verbose := logger.WithTrace(ctx)
+		verbose := logger
 		verbose.Debug("acquire.reject.shutdown",
 			"key", payload.Key,
 			"owner", payload.Owner,
@@ -763,7 +762,7 @@ func (h *Handler) handleAcquire(w http.ResponseWriter, r *http.Request) error {
 		"idempotent", payload.Idempotency != "",
 		"generated_key", autoKey,
 	)
-	verbose := logger.WithTrace(ctx)
+	verbose := logger
 	correlationID := correlation.ID(ctx)
 	verbose.Debug("acquire.begin",
 		"key", payload.Key,
@@ -836,14 +835,8 @@ func (h *Handler) handleAcquire(w http.ResponseWriter, r *http.Request) error {
 				h.clock.Sleep(sleep)
 				continue
 			}
-			retryDur := time.Until(time.Unix(meta.Lease.ExpiresAtUnix, 0))
-			if retryDur < 0 {
-				retryDur = 0
-			}
-			retry := int64(math.Ceil(retryDur.Seconds()))
-			if retry < 1 {
-				retry = 1
-			}
+			retryDur := max(time.Until(time.Unix(meta.Lease.ExpiresAtUnix, 0)), 0)
+			retry := max(int64(math.Ceil(retryDur.Seconds())), 1)
 			return httpError{
 				Status:     http.StatusConflict,
 				Code:       "waiting",
@@ -950,11 +943,11 @@ func (h *Handler) handleKeepAlive(w http.ResponseWriter, r *http.Request) error 
 	if queue.IsQueueStateKey(key) {
 		return httpError{Status: http.StatusForbidden, Code: "queue_state_keepalive_unsupported", Detail: "queue state leases must be extended via queue extend"}
 	}
-	logger := logport.LoggerFromContext(ctx)
+	logger := pslog.LoggerFromContext(ctx)
 	if logger == nil {
 		logger = h.logger
 	}
-	verbose := logger.WithTrace(ctx)
+	verbose := logger
 	verbose.Debug("keepalive.begin",
 		"key", key,
 		"lease_id", payload.LeaseID,
@@ -1032,11 +1025,11 @@ func (h *Handler) handleRelease(w http.ResponseWriter, r *http.Request) error {
 	if payload.LeaseID == "" {
 		return httpError{Status: http.StatusBadRequest, Code: "missing_lease", Detail: "lease_id required"}
 	}
-	logger := logport.LoggerFromContext(ctx)
+	logger := pslog.LoggerFromContext(ctx)
 	if logger == nil {
 		logger = h.logger
 	}
-	verbose := logger.WithTrace(ctx)
+	verbose := logger
 	verbose.Debug("release.begin", "key", payload.Key, "lease_id", payload.LeaseID)
 	for {
 		cachedMeta, cachedETag, cachedKey, cached := h.leaseSnapshot(payload.LeaseID)
@@ -1106,11 +1099,11 @@ func (h *Handler) handleGetState(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	logger := logport.LoggerFromContext(ctx)
+	logger := pslog.LoggerFromContext(ctx)
 	if logger == nil {
 		logger = h.logger
 	}
-	verbose := logger.WithTrace(ctx)
+	verbose := logger
 	remoteAddr := h.clientKeyFromRequest(r)
 	infoLogger := logger.With("key", key, "lease_id", leaseID, "remote_addr", remoteAddr)
 	infoLogger.Debug("lease.acquire_for_update.load.begin", "fencing_token", fencingToken)
@@ -1194,11 +1187,11 @@ func (h *Handler) handleUpdateState(w http.ResponseWriter, r *http.Request) erro
 	}
 	ifMatch := strings.TrimSpace(r.Header.Get("X-If-State-ETag"))
 	ifVersion := strings.TrimSpace(r.Header.Get("X-If-Version"))
-	logger := logport.LoggerFromContext(ctx)
+	logger := pslog.LoggerFromContext(ctx)
 	if logger == nil {
 		logger = h.logger
 	}
-	verbose := logger.WithTrace(ctx)
+	verbose := logger
 	remoteAddr := h.clientKeyFromRequest(r)
 	infoLogger := logger.With("key", key, "lease_id", leaseID, "remote_addr", remoteAddr)
 	infoLogger.Debug("lease.acquire_for_update.update.begin",
@@ -1359,11 +1352,11 @@ func (h *Handler) handleRemoveState(w http.ResponseWriter, r *http.Request) erro
 	}
 	ifMatch := strings.TrimSpace(r.Header.Get("X-If-State-ETag"))
 	ifVersion := strings.TrimSpace(r.Header.Get("X-If-Version"))
-	logger := logport.LoggerFromContext(ctx)
+	logger := pslog.LoggerFromContext(ctx)
 	if logger == nil {
 		logger = h.logger
 	}
-	verbose := logger.WithTrace(ctx)
+	verbose := logger
 	verbose.Debug("remove_state.begin",
 		"key", key,
 		"lease_id", leaseID,
@@ -1482,11 +1475,11 @@ func (h *Handler) handleDescribe(w http.ResponseWriter, r *http.Request) error {
 	if key == "" {
 		return httpError{Status: http.StatusBadRequest, Code: "missing_key", Detail: "key query required"}
 	}
-	logger := logport.LoggerFromContext(ctx)
+	logger := pslog.LoggerFromContext(ctx)
 	if logger == nil {
 		logger = h.logger
 	}
-	verbose := logger.WithTrace(ctx)
+	verbose := logger
 	verbose.Debug("describe.begin", "key", key)
 	meta, _, err := h.ensureMeta(ctx, key)
 	if err != nil {
@@ -1519,7 +1512,7 @@ func (h *Handler) handleQueueEnqueue(w http.ResponseWriter, r *http.Request) err
 	if err != nil {
 		return err
 	}
-	logger := logport.LoggerFromContext(ctx)
+	logger := pslog.LoggerFromContext(ctx)
 	if logger == nil {
 		logger = h.logger
 	}
@@ -1715,7 +1708,8 @@ func (h *Handler) handleQueueDequeue(w http.ResponseWriter, r *http.Request) err
 	ctx := baseCtx
 	var cancel context.CancelFunc
 	if blockSeconds > 0 {
-		ctx, cancel = context.WithTimeout(baseCtx, waitDuration)
+		timeout := waitDuration + queueEnsureTimeoutGrace
+		ctx, cancel = context.WithTimeout(baseCtx, timeout)
 		defer cancel()
 	}
 
@@ -1723,7 +1717,7 @@ func (h *Handler) handleQueueDequeue(w http.ResponseWriter, r *http.Request) err
 		ctx = correlation.Set(ctx, correlation.Generate())
 	}
 	span := trace.SpanFromContext(ctx)
-	ctx, logger := applyCorrelation(ctx, logport.LoggerFromContext(ctx), span)
+	ctx, logger := applyCorrelation(ctx, pslog.LoggerFromContext(ctx), span)
 	r = r.WithContext(ctx)
 	owner = h.appendQueueOwner(ctx, owner)
 	if owner == "" {
@@ -1782,10 +1776,7 @@ func (h *Handler) handleQueueDequeue(w http.ResponseWriter, r *http.Request) err
 				case blockSeconds == api.BlockNoWait:
 					retryAfter = 0
 				case blockSeconds > 0:
-					retryAfter = int64(math.Ceil(waitDuration.Seconds()))
-					if retryAfter < 1 {
-						retryAfter = 1
-					}
+					retryAfter = max(int64(math.Ceil(waitDuration.Seconds())), 1)
 				}
 				return httpError{
 					Status:     http.StatusConflict,
@@ -1897,7 +1888,8 @@ func (h *Handler) handleQueueDequeueWithState(w http.ResponseWriter, r *http.Req
 	ctx := baseCtx
 	var cancel context.CancelFunc
 	if blockSeconds > 0 {
-		ctx, cancel = context.WithTimeout(baseCtx, waitDuration)
+		timeout := waitDuration + queueEnsureTimeoutGrace
+		ctx, cancel = context.WithTimeout(baseCtx, timeout)
 		defer cancel()
 	}
 
@@ -1905,7 +1897,7 @@ func (h *Handler) handleQueueDequeueWithState(w http.ResponseWriter, r *http.Req
 		ctx = correlation.Set(ctx, correlation.Generate())
 	}
 	span := trace.SpanFromContext(ctx)
-	ctx, logger := applyCorrelation(ctx, logport.LoggerFromContext(ctx), span)
+	ctx, logger := applyCorrelation(ctx, pslog.LoggerFromContext(ctx), span)
 	r = r.WithContext(ctx)
 	owner = h.appendQueueOwner(ctx, owner)
 	if owner == "" {
@@ -1957,10 +1949,7 @@ func (h *Handler) handleQueueDequeueWithState(w http.ResponseWriter, r *http.Req
 			case blockSeconds == api.BlockNoWait:
 				retryAfter = 0
 			case blockSeconds > 0:
-				retryAfter = int64(math.Ceil(waitDuration.Seconds()))
-				if retryAfter < 1 {
-					retryAfter = 1
-				}
+				retryAfter = max(int64(math.Ceil(waitDuration.Seconds())), 1)
 			}
 			return httpError{
 				Status:     http.StatusConflict,
@@ -2046,7 +2035,7 @@ func (h *Handler) handleQueueSubscribeInternal(w http.ResponseWriter, r *http.Re
 		ctx = correlation.Set(ctx, correlation.Generate())
 	}
 	span := trace.SpanFromContext(ctx)
-	ctx, logger := applyCorrelation(ctx, logport.LoggerFromContext(ctx), span)
+	ctx, logger := applyCorrelation(ctx, pslog.LoggerFromContext(ctx), span)
 	r = r.WithContext(ctx)
 	owner = h.appendQueueOwner(ctx, owner)
 	if owner == "" {
@@ -2184,10 +2173,7 @@ func (h *Handler) handleQueueSubscribeInternal(w http.ResponseWriter, r *http.Re
 						retryAfter = 0
 					case blockSeconds > 0:
 						waitDuration := time.Duration(blockSeconds) * time.Second
-						retryAfter = int64(math.Ceil(waitDuration.Seconds()))
-						if retryAfter < 1 {
-							retryAfter = 1
-						}
+						retryAfter = max(int64(math.Ceil(waitDuration.Seconds())), 1)
 					}
 					return httpError{
 						Status:     http.StatusConflict,
@@ -2334,7 +2320,7 @@ func (h *Handler) handleQueueAck(w http.ResponseWriter, r *http.Request) error {
 	if req.Queue == "" || req.MessageID == "" || req.LeaseID == "" {
 		return httpError{Status: http.StatusBadRequest, Code: "missing_fields", Detail: "queue, message_id, lease_id are required"}
 	}
-	logger := logport.LoggerFromContext(ctx)
+	logger := pslog.LoggerFromContext(ctx)
 	if logger == nil {
 		logger = h.logger
 	}
@@ -2478,7 +2464,7 @@ func (h *Handler) handleQueueNack(w http.ResponseWriter, r *http.Request) error 
 	if req.Queue == "" || req.MessageID == "" || req.LeaseID == "" || req.MetaETag == "" {
 		return httpError{Status: http.StatusBadRequest, Code: "missing_fields", Detail: "queue, message_id, lease_id, meta_etag are required"}
 	}
-	logger := logport.LoggerFromContext(ctx)
+	logger := pslog.LoggerFromContext(ctx)
 	if logger == nil {
 		logger = h.logger
 	}
@@ -2598,7 +2584,7 @@ func (h *Handler) handleQueueExtend(w http.ResponseWriter, r *http.Request) erro
 		return httpError{Status: http.StatusBadRequest, Code: "missing_fields", Detail: "queue, message_id, lease_id, meta_etag are required"}
 	}
 
-	logger := logport.LoggerFromContext(ctx)
+	logger := pslog.LoggerFromContext(ctx)
 	if logger == nil {
 		logger = h.logger
 	}
@@ -2742,11 +2728,11 @@ func (h *Handler) handleReady(w http.ResponseWriter, _ *http.Request) error {
 }
 
 func (h *Handler) handleError(ctx context.Context, w http.ResponseWriter, err error) {
-	logger := logport.LoggerFromContext(ctx)
+	logger := pslog.LoggerFromContext(ctx)
 	if logger == nil {
 		logger = h.logger
 	}
-	verbose := logger.WithTrace(ctx)
+	verbose := logger
 	var httpErr httpError
 	if errors.As(err, &httpErr) {
 		verbose.Debug("http.request.failure",
@@ -2796,11 +2782,11 @@ func (h *Handler) writeJSON(w http.ResponseWriter, status int, payload any, head
 }
 
 func (h *Handler) ensureMeta(ctx context.Context, key string) (*storage.Meta, string, error) {
-	logger := logport.LoggerFromContext(ctx)
+	logger := pslog.LoggerFromContext(ctx)
 	if logger == nil {
 		logger = h.logger
 	}
-	verbose := logger.WithTrace(ctx)
+	verbose := logger
 
 	attemptLimit := h.metaWarmupAttempts
 	delay := h.metaWarmupInitial
@@ -2839,7 +2825,7 @@ func (h *Handler) ensureMeta(ctx context.Context, key string) (*storage.Meta, st
 	}
 }
 
-func (h *Handler) readStateWithWarmup(ctx context.Context, key string, expectState bool, verbose logport.ForLogging) (io.ReadCloser, *storage.StateInfo, error) {
+func (h *Handler) readStateWithWarmup(ctx context.Context, key string, expectState bool, verbose pslog.Logger) (io.ReadCloser, *storage.StateInfo, error) {
 	reader, info, err := h.store.ReadState(ctx, key)
 	if err == nil || !expectState || !errors.Is(err, storage.ErrNotFound) {
 		return reader, info, err
@@ -2898,7 +2884,7 @@ func nextWarmupDelay(current, max time.Duration) time.Duration {
 	return next
 }
 
-func (h *Handler) acquireLeaseForKey(ctx context.Context, logger logport.ForLogging, params acquireParams) (*acquireOutcome, error) {
+func (h *Handler) acquireLeaseForKey(ctx context.Context, logger pslog.Logger, params acquireParams) (*acquireOutcome, error) {
 	if params.Key == "" {
 		return nil, httpError{Status: http.StatusBadRequest, Code: "missing_key", Detail: "key required"}
 	}
@@ -2908,7 +2894,7 @@ func (h *Handler) acquireLeaseForKey(ctx context.Context, logger logport.ForLogg
 	if params.TTL <= 0 {
 		params.TTL = h.defaultTTL
 	}
-	verbose := logger.WithTrace(ctx)
+	verbose := logger
 	beginFields := []any{
 		"key", params.Key,
 		"owner", params.Owner,
@@ -2959,14 +2945,8 @@ func (h *Handler) acquireLeaseForKey(ctx context.Context, logger logport.ForLogg
 				h.clock.Sleep(sleep)
 				continue
 			}
-			retryDur := time.Until(time.Unix(meta.Lease.ExpiresAtUnix, 0))
-			if retryDur < 0 {
-				retryDur = 0
-			}
-			retry := int64(math.Ceil(retryDur.Seconds()))
-			if retry < 1 {
-				retry = 1
-			}
+			retryDur := max(time.Until(time.Unix(meta.Lease.ExpiresAtUnix, 0)), 0)
+			retry := max(int64(math.Ceil(retryDur.Seconds())), 1)
 			if params.CorrelationID != "" {
 				verbose.Trace("acquire.wait_conflict", "key", params.Key, "cid", params.CorrelationID, "retry_after", retry)
 			}
@@ -3092,7 +3072,7 @@ type queueDelivery struct {
 	owner      string
 	visibility time.Duration
 	stateful   bool
-	logger     logport.ForLogging
+	logger     pslog.Logger
 	candidate  *queue.Candidate
 	descriptor queue.MessageDescriptor
 
@@ -3109,7 +3089,7 @@ type queueDelivery struct {
 	finalize   func(success bool)
 }
 
-func (h *Handler) consumeQueue(ctx context.Context, logger logport.ForLogging, qsvc *queue.Service, queueName, owner string, visibility time.Duration, stateful bool, blockSeconds int64) (delivery *queueDelivery, nextCursor string, err error) {
+func (h *Handler) consumeQueue(ctx context.Context, logger pslog.Logger, qsvc *queue.Service, queueName, owner string, visibility time.Duration, stateful bool, blockSeconds int64) (delivery *queueDelivery, nextCursor string, err error) {
 	if h.queueDisp == nil {
 		err = httpError{Status: http.StatusNotImplemented, Code: "queue_disabled", Detail: "queue dispatcher not configured"}
 		return
@@ -3172,7 +3152,7 @@ func (h *Handler) consumeQueue(ctx context.Context, logger logport.ForLogging, q
 	}
 	if blockSeconds == api.BlockNoWait {
 		const maxImmediateAttempts = 5
-		for attempt := 0; attempt < maxImmediateAttempts; attempt++ {
+		for range maxImmediateAttempts {
 			attempts++
 			tryStart := time.Now()
 			cand, tryErr := h.queueDisp.Try(ctx, queueName)
@@ -3284,16 +3264,10 @@ func (h *Handler) queueBatchFillConfig(queue string, hasWatcher bool, blockSecon
 	var budget, step time.Duration
 	if hasWatcher {
 		step = watcherStep
-		budget = watcherStep * time.Duration(minInt(pageSize, 8))
-		if budget > watcherCap {
-			budget = watcherCap
-		}
+		budget = min(watcherStep*time.Duration(minInt(pageSize, 8)), watcherCap)
 	} else {
 		step = pollStep
-		budget = pollStep * time.Duration(pageSize)
-		if budget > pollCap {
-			budget = pollCap
-		}
+		budget = min(pollStep*time.Duration(pageSize), pollCap)
 	}
 	if blockSeconds > 0 {
 		requested := time.Duration(blockSeconds) * time.Second
@@ -3317,7 +3291,7 @@ func (h *Handler) queueBatchFillConfig(queue string, hasWatcher bool, blockSecon
 	return budget, step
 }
 
-func (h *Handler) rescheduleAfterPrepareRetry(queueLogger logport.ForLogging, qsvc *queue.Service, queueName string, doc *queue.MessageDescriptor, metaETag string) {
+func (h *Handler) rescheduleAfterPrepareRetry(queueLogger pslog.Logger, qsvc *queue.Service, queueName string, doc *queue.MessageDescriptor, metaETag string) {
 	if doc == nil || metaETag == "" {
 		return
 	}
@@ -3345,7 +3319,7 @@ func (h *Handler) rescheduleAfterPrepareRetry(queueLogger logport.ForLogging, qs
 	}
 }
 
-func (h *Handler) consumeQueueBatch(ctx context.Context, logger logport.ForLogging, qsvc *queue.Service, queueName, owner string, visibility time.Duration, stateful bool, blockSeconds int64, pageSize int) ([]*queueDelivery, string, error) {
+func (h *Handler) consumeQueueBatch(ctx context.Context, logger pslog.Logger, qsvc *queue.Service, queueName, owner string, visibility time.Duration, stateful bool, blockSeconds int64, pageSize int) ([]*queueDelivery, string, error) {
 	if pageSize <= 1 {
 		delivery, nextCursor, err := h.consumeQueue(ctx, logger, qsvc, queueName, owner, visibility, stateful, blockSeconds)
 		if err != nil {
@@ -3444,7 +3418,7 @@ func (h *Handler) consumeQueueBatch(ctx context.Context, logger logport.ForLoggi
 	return deliveries, nextCursor, nil
 }
 
-func (h *Handler) prepareQueueDelivery(ctx context.Context, logger logport.ForLogging, qsvc *queue.Service, queueName, owner string, visibility time.Duration, stateful bool, cand *queue.Candidate) (*queueDelivery, bool, error) {
+func (h *Handler) prepareQueueDelivery(ctx context.Context, logger pslog.Logger, qsvc *queue.Service, queueName, owner string, visibility time.Duration, stateful bool, cand *queue.Candidate) (*queueDelivery, bool, error) {
 	delivery := &queueDelivery{
 		handler:    h,
 		qsvc:       qsvc,
@@ -3996,10 +3970,7 @@ func (h *Handler) resolveBlock(requested int64) (time.Duration, bool) {
 		}
 		return h.acquireBlock, true
 	}
-	block := time.Duration(requested) * time.Second
-	if block > h.acquireBlock {
-		block = h.acquireBlock
-	}
+	block := min(time.Duration(requested)*time.Second, h.acquireBlock)
 	return block, false
 }
 
@@ -4214,7 +4185,7 @@ func (h *Handler) creationMutex(key string) *sync.Mutex {
 
 func (h *Handler) generateUniqueKey(ctx context.Context) (string, error) {
 	const maxAttempts = 5
-	for attempt := 0; attempt < maxAttempts; attempt++ {
+	for range maxAttempts {
 		candidate := uuidv7.NewString()
 		_, _, err := h.store.LoadMeta(ctx, candidate)
 		if errors.Is(err, storage.ErrNotFound) {

@@ -22,7 +22,7 @@ import (
 	"pkt.systems/lockd/internal/diagnostics/storagecheck"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/s3"
-	"pkt.systems/logport"
+	"pkt.systems/pslog"
 )
 
 func TestCryptoAWSLocks(t *testing.T) {
@@ -97,10 +97,6 @@ func TestCryptoAWSQueues(t *testing.T) {
 		t.Fatalf("ack message: %v", err)
 	}
 
-	if os.Getenv(cryptotest.EnvVar) == "1" {
-		t.Skip("queue subscribe with storage encryption pending follow-up fix")
-	}
-
 	subPayload := []byte("aws-crypto-subscribe")
 	res := queuetestutil.MustEnqueueBytes(t, cli, queue, subPayload)
 
@@ -167,6 +163,11 @@ func buildAWSConfig(t testing.TB) lockd.Config {
 		QueuePollJitter:            0,
 		QueueResilientPollInterval: time.Second,
 	}
+	cfg.DisableMTLS = true
+	cfg.ListenProto = "tcp"
+	if cfg.Listen == "" {
+		cfg.Listen = "127.0.0.1:0"
+	}
 	if cfg.AWSRegion == "" {
 		cfg.AWSRegion = strings.TrimSpace(os.Getenv("AWS_REGION"))
 	}
@@ -187,7 +188,7 @@ func ensureStoreReady(t *testing.T, ctx context.Context, cfg lockd.Config) {
 		t.Fatalf("verify store: %v", err)
 	}
 	if !res.Passed() {
-		t.Skipf("store verification failed: %+v", res)
+		t.Fatalf("store verification failed: %+v", res)
 	}
 }
 
@@ -243,13 +244,13 @@ func startServer(t testing.TB, cfg lockd.Config) *lockdclient.Client {
 	options := []lockd.TestServerOption{
 		lockd.WithTestConfig(cfg),
 		lockd.WithTestListener("tcp", "127.0.0.1:0"),
-		lockd.WithTestLoggerFromTB(t, logport.TraceLevel),
+		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
 			lockdclient.WithDisableMTLS(true),
 			lockdclient.WithHTTPTimeout(90*time.Second),
 			lockdclient.WithKeepAliveTimeout(90*time.Second),
 			lockdclient.WithCloseTimeout(90*time.Second),
-			lockdclient.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)),
+			lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 		),
 	}
 	ts := lockd.StartTestServer(t, options...)

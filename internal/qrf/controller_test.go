@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"pkt.systems/logport"
+	"pkt.systems/lockd/internal/loggingutil"
 )
 
 func TestControllerEngageAndRecover(t *testing.T) {
@@ -20,7 +20,7 @@ func TestControllerEngageAndRecover(t *testing.T) {
 		SoftRetryAfter:       50 * time.Millisecond,
 		EngagedRetryAfter:    200 * time.Millisecond,
 		RecoveryRetryAfter:   100 * time.Millisecond,
-		Logger:               logport.NoopLogger(),
+		Logger:               loggingutil.NoopLogger(),
 	})
 
 	ctrl.Observe(Snapshot{
@@ -93,7 +93,7 @@ func TestConsumerLimitThrottlingBehaviour(t *testing.T) {
 		SoftRetryAfter:         25 * time.Millisecond,
 		EngagedRetryAfter:      150 * time.Millisecond,
 		RecoveryRetryAfter:     75 * time.Millisecond,
-		Logger:                 logport.NoopLogger(),
+		Logger:                 loggingutil.NoopLogger(),
 	})
 
 	now := time.Now()
@@ -147,7 +147,7 @@ func TestControllerDisengageStopsQueueThrottling(t *testing.T) {
 		SoftRetryAfter:          50 * time.Millisecond,
 		EngagedRetryAfter:       200 * time.Millisecond,
 		RecoveryRetryAfter:      100 * time.Millisecond,
-		Logger:                  logport.NoopLogger(),
+		Logger:                  loggingutil.NoopLogger(),
 		LoadSoftLimitMultiplier: 0,
 		LoadHardLimitMultiplier: 0,
 	}
@@ -221,7 +221,7 @@ func TestControllerSoftArm(t *testing.T) {
 		MemorySoftLimitBytes: 1 << 62,
 		MemoryHardLimitBytes: 1 << 63,
 		RecoverySamples:      1,
-		Logger:               logport.NoopLogger(),
+		Logger:               loggingutil.NoopLogger(),
 	})
 
 	ctrl.Observe(Snapshot{
@@ -258,7 +258,7 @@ func TestConsumerBiasDuringEngaged(t *testing.T) {
 		SoftRetryAfter:     50 * time.Millisecond,
 		EngagedRetryAfter:  200 * time.Millisecond,
 		RecoveryRetryAfter: 100 * time.Millisecond,
-		Logger:             logport.NoopLogger(),
+		Logger:             loggingutil.NoopLogger(),
 	})
 
 	ctrl.Observe(Snapshot{
@@ -289,7 +289,7 @@ func TestControllerThresholdTriggers(t *testing.T) {
 	baseCfg := Config{
 		Enabled:                 true,
 		RecoverySamples:         1,
-		Logger:                  logport.NoopLogger(),
+		Logger:                  loggingutil.NoopLogger(),
 		QueueSoftLimit:          0,
 		QueueHardLimit:          0,
 		LockSoftLimit:           0,
@@ -580,7 +580,7 @@ func TestControllerMemoryStrictHeadroom(t *testing.T) {
 		MemoryHardLimitPercent:      90,
 		MemoryStrictHeadroomPercent: 15,
 		RecoverySamples:             1,
-		Logger:                      logport.NoopLogger(),
+		Logger:                      loggingutil.NoopLogger(),
 	})
 
 	now := time.Now()

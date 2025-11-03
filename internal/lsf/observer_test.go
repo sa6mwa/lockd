@@ -5,8 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"pkt.systems/logport"
-
+	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/qrf"
 )
 
@@ -21,9 +20,9 @@ func newTestObserver() (*Observer, *qrf.Controller) {
 		EngagedRetryAfter:  200 * time.Millisecond,
 		RecoveryRetryAfter: 100 * time.Millisecond,
 		RecoverySamples:    1,
-		Logger:             logport.NoopLogger(),
+		Logger:             loggingutil.NoopLogger(),
 	})
-	obs := NewObserver(Config{Enabled: true, SampleInterval: 10 * time.Millisecond}, ctrl, logport.NoopLogger())
+	obs := NewObserver(Config{Enabled: true, SampleInterval: 10 * time.Millisecond}, ctrl, loggingutil.NoopLogger())
 	return obs, ctrl
 }
 
@@ -86,7 +85,7 @@ func TestObserverStartStop(t *testing.T) {
 }
 
 func TestObserverDisabledCounters(t *testing.T) {
-	obs := NewObserver(Config{Enabled: false}, nil, logport.NoopLogger())
+	obs := NewObserver(Config{Enabled: false}, nil, loggingutil.NoopLogger())
 
 	prod := obs.BeginQueueProducer()
 	cons := obs.BeginQueueConsumer()

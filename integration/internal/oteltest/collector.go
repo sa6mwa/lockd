@@ -26,7 +26,7 @@ type Collector struct {
 	listener   net.Listener
 }
 
-// Start spins up a new Collector listening on 127.0.0.1 with an ephemeral logport.
+// Start spins up a new Collector listening on 127.0.0.1 with an ephemeral pslog backend.
 func Start() (*Collector, string, error) {
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

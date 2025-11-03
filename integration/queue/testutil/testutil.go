@@ -21,8 +21,7 @@ import (
 	"pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/internal/uuidv7"
-	"pkt.systems/logport"
-	"pkt.systems/logport/adapters/psl"
+	"pkt.systems/pslog"
 )
 
 // InstallWatchdog fails the test if the timeout elapses, dumping all goroutines.
@@ -129,15 +128,15 @@ func QueueOwner(prefix string) string {
 // StartQueueTestServer launches a lockd test server with helpful defaults.
 func StartQueueTestServer(t testing.TB, cfg lockd.Config, extraClientOpts ...lockdclient.Option) *lockd.TestServer {
 	t.Helper()
-	serverLogger := lockd.NewTestingLogger(t, logport.TraceLevel)
+	serverLogger := lockd.NewTestingLogger(t, pslog.TraceLevel)
 	return StartQueueTestServerWithLogger(t, cfg, serverLogger, extraClientOpts...)
 }
 
 // StartQueueTestServerWithLogger launches a test server with a custom logger.
-func StartQueueTestServerWithLogger(t testing.TB, cfg lockd.Config, logger logport.ForLogging, extraClientOpts ...lockdclient.Option) *lockd.TestServer {
+func StartQueueTestServerWithLogger(t testing.TB, cfg lockd.Config, logger pslog.Logger, extraClientOpts ...lockdclient.Option) *lockd.TestServer {
 	t.Helper()
 
-	clientLogger := lockd.NewTestingLogger(t, logport.TraceLevel)
+	clientLogger := lockd.NewTestingLogger(t, pslog.TraceLevel)
 	baseClientOpts := []lockdclient.Option{
 		lockdclient.WithHTTPTimeout(60 * time.Second),
 		lockdclient.WithKeepAliveTimeout(60 * time.Second),
@@ -365,7 +364,7 @@ type LogCapture struct {
 	lines    []string
 	max      int
 	prefixes []string
-	level    logport.Level
+	level    pslog.Level
 	toTest   bool
 	dropped  bool
 }
@@ -379,7 +378,7 @@ func NewLogCapture(t testing.TB) *LogCapture {
 type LogCaptureOptions struct {
 	MaxEntries   int
 	Prefixes     []string
-	LogLevel     logport.Level
+	LogLevel     pslog.Level
 	LogToTesting *bool
 }
 
@@ -397,7 +396,7 @@ func NewLogCaptureWithOptions(t testing.TB, opts LogCaptureOptions) *LogCapture 
 		cap.toTest = *opts.LogToTesting
 	}
 	if cap.level == 0 {
-		cap.level = logport.TraceLevel
+		cap.level = pslog.TraceLevel
 	}
 	t.Cleanup(cap.close)
 	return cap
@@ -495,14 +494,14 @@ func (c *LogCapture) LinesSince(idx int) []string {
 	return out
 }
 
-// Logger returns a logport logger that emits through the capture.
-func (c *LogCapture) Logger() logport.ForLogging {
+// Logger returns a pslog logger that emits through the capture.
+func (c *LogCapture) Logger() pslog.Logger {
 	level := c.level
 	if level == 0 {
-		level = logport.TraceLevel
+		level = pslog.TraceLevel
 	}
-	logger := psl.NewStructured(c).WithLogLevel().LogLevel(level)
-	return logger.With("app", "lockd").With("sys", "test.capture")
+    logger := pslog.NewStructured(c).With("sys", "test.capture")
+	return logger.LogLevel(level)
 }
 
 func uniqueSuffix() string {

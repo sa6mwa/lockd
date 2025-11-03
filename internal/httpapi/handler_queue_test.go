@@ -13,10 +13,10 @@ import (
 
 	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/internal/clock"
+	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/queue"
 	"pkt.systems/lockd/internal/storage"
 	memorystore "pkt.systems/lockd/internal/storage/memory"
-	"pkt.systems/logport"
 )
 
 type flakyPutStore struct {
@@ -44,7 +44,7 @@ func TestHandleQueueDequeueRetriesOnMissingMetaDuringIncrement(t *testing.T) {
 	handler := New(Config{
 		Store:             store,
 		QueueService:      qSvc,
-		Logger:            logport.NoopLogger(),
+		Logger:            loggingutil.NoopLogger(),
 		JSONMaxBytes:      1 << 20,
 		QueueMaxConsumers: 32,
 	})

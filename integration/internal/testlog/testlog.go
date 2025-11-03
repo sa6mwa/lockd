@@ -9,8 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"pkt.systems/logport"
-	"pkt.systems/logport/adapters/psl"
+	"pkt.systems/pslog"
 )
 
 // Entry represents a structured log entry captured from the test logger.
@@ -30,14 +29,14 @@ type Recorder struct {
 
 // NewRecorder returns a logger that records every structured log line and mirrors
 // it to testing.TB (when non-nil). The recorder is safe for concurrent use.
-func NewRecorder(t testing.TB, level logport.Level) (logport.ForLoggingSubset, *Recorder) {
+func NewRecorder(t testing.TB, level pslog.Level) (pslog.Logger, *Recorder) {
 	rec := &Recorder{}
 	writer := &recordingWriter{t: t, recorder: rec}
-	logger := psl.NewStructured(writer).WithLogLevel()
-	if level != logport.NoLevel {
+	logger := pslog.NewStructured(writer).With("sys", "test.recorder")
+	if level != pslog.NoLevel {
 		logger = logger.LogLevel(level)
 	}
-	return logger.With("app", "lockd").With("sys", "test.recorder"), rec
+	return logger, rec
 }
 
 // Events returns a copy of all recorded entries.
@@ -103,8 +102,8 @@ type recordingWriter struct {
 }
 
 func (w *recordingWriter) Write(p []byte) (int, error) {
-	lines := bytes.Split(p, []byte{'\n'})
-	for _, line := range lines {
+	lines := bytes.SplitSeq(p, []byte{'\n'})
+	for line := range lines {
 		if len(line) == 0 {
 			continue
 		}

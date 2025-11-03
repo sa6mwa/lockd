@@ -11,10 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"pkt.systems/logport"
-
 	"pkt.systems/lockd/internal/cryptoutil"
 	"pkt.systems/lockd/internal/tlsutil"
+	"pkt.systems/pslog"
 )
 
 func TestServerMTLSRevocationFlow(t *testing.T) {
@@ -131,7 +130,7 @@ func startMTLSServer(t *testing.T, bundlePath string) *runningServer {
 	ts, err := NewTestServer(context.Background(),
 		WithTestConfig(cfg),
 		WithTestListener("tcp", "127.0.0.1:0"),
-		WithTestLoggerFromTB(t, logport.TraceLevel),
+		WithTestLoggerFromTB(t, pslog.TraceLevel),
 		WithoutTestClient(),
 	)
 	if err != nil {

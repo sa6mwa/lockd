@@ -13,18 +13,18 @@ import (
 	"testing"
 	"time"
 
-	"pkt.systems/logport"
-	"pkt.systems/logport/adapters/zerologger"
+	"pkt.systems/pslog"
 
 	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/internal/correlation"
+	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/storage/memory"
 )
 
 func TestAcquireLifecycle(t *testing.T) {
 	store := memory.New()
 	clk := newStubClock(time.Unix(1_700_000_000, 0))
-	logger := zerologger.NewStructured(io.Discard)
+	logger := pslog.NewStructured(io.Discard)
 
 	handler := New(Config{
 		Store:        store,
@@ -118,7 +118,7 @@ func TestAcquireLifecycle(t *testing.T) {
 func TestAcquireAutoGeneratesKey(t *testing.T) {
 	store := memory.New()
 	clk := newStubClock(time.Unix(1_700_000_000, 0))
-	logger := zerologger.NewStructured(io.Discard)
+	logger := pslog.NewStructured(io.Discard)
 
 	handler := New(Config{
 		Store:        store,
@@ -190,7 +190,7 @@ func TestAcquireAutoGeneratesKey(t *testing.T) {
 func newTestHTTPServer(t *testing.T) *httptest.Server {
 	store := memory.New()
 	clk := newStubClock(time.Unix(1_700_000_000, 0))
-	logger := logport.NoopLogger()
+	logger := loggingutil.NoopLogger()
 	handler := New(Config{
 		Store:        store,
 		Logger:       logger,
@@ -275,7 +275,7 @@ func TestAcquireCorrelationInvalid(t *testing.T) {
 func TestAcquireConflictAndWaiting(t *testing.T) {
 	store := memory.New()
 	clk := newStubClock(time.Unix(1_700_000_000, 0))
-	logger := logport.NoopLogger()
+	logger := loggingutil.NoopLogger()
 	handler := New(Config{
 		Store:        store,
 		Logger:       logger,
@@ -324,7 +324,7 @@ func TestUpdateStateVersionMismatch(t *testing.T) {
 	clk := newStubClock(time.Unix(1_700_000_000, 0))
 	handler := New(Config{
 		Store:        store,
-		Logger:       logport.NoopLogger(),
+		Logger:       loggingutil.NoopLogger(),
 		Clock:        clk,
 		JSONMaxBytes: 1 << 20,
 		DefaultTTL:   10 * time.Second,
@@ -359,7 +359,7 @@ func TestGetStateRequiresLease(t *testing.T) {
 	store := memory.New()
 	handler := New(Config{
 		Store:        store,
-		Logger:       logport.NoopLogger(),
+		Logger:       loggingutil.NoopLogger(),
 		JSONMaxBytes: 1 << 20,
 		DefaultTTL:   5 * time.Second,
 		MaxTTL:       30 * time.Second,
@@ -471,7 +471,7 @@ func TestWaitBackoffGrowth(t *testing.T) {
 	b := newAcquireBackoff()
 	b.rand = func(n int64) int64 { return n / 2 }
 	var got []time.Duration
-	for i := 0; i < 6; i++ {
+	for range 6 {
 		got = append(got, b.Next(0))
 	}
 	cur := acquireBackoffStart

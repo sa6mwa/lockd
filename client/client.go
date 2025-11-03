@@ -24,7 +24,7 @@ import (
 	"time"
 
 	"pkt.systems/lockd/api"
-	"pkt.systems/logport"
+	"pkt.systems/pslog"
 )
 
 const (
@@ -1711,7 +1711,7 @@ type Client struct {
 	keepAliveTimeout   time.Duration
 	forUpdateTimeout   time.Duration
 	disableMTLS        bool
-	logger             logport.ForLoggingSubset
+	logger             pslog.Base
 	failureRetries     int
 	drainAwareShutdown bool
 	shutdownNotified   atomic.Bool
@@ -2026,14 +2026,14 @@ func WithHTTPClient(cli *http.Client) Option {
 }
 
 // WithLogger supplies a logger for client diagnostics. Passing nil disables logging.
-func WithLogger(logger logport.ForLoggingSubset) Option {
+func WithLogger(logger pslog.Base) Option {
 	return func(c *Client) {
 		if logger == nil {
 			c.logger = nil
 			return
 		}
-		if full, ok := logger.(logport.ForLogging); ok {
-			c.logger = full.With("app", "lockd").With("sys", "client.sdk")
+		if full, ok := logger.(pslog.Logger); ok {
+			c.logger = full.With("sys", "client.sdk")
 			return
 		}
 		c.logger = logger
@@ -2303,10 +2303,7 @@ func (c *Client) Acquire(ctx context.Context, req api.AcquireRequest, opts ...Ac
 				c.logWarnCtx(ctx, "client.acquire.deadline", "key", req.Key, "attempt", attempt, "error", err)
 				return nil, err
 			}
-			secs := int64(math.Ceil(remaining.Seconds()))
-			if secs < 1 {
-				secs = 1
-			}
+			secs := max(int64(math.Ceil(remaining.Seconds())), 1)
 			currentReq.BlockSecs = secs
 		}
 
@@ -2383,10 +2380,7 @@ func (c *Client) Acquire(ctx context.Context, req api.AcquireRequest, opts ...Ac
 			c.logDebugCtx(ctx, "client.acquire.conflict", "key", req.Key, "error", err, "attempt", attempt)
 		}
 
-		sleep := acquireRetryDelay(delay, cfg)
-		if retryAfterHint > sleep {
-			sleep = retryAfterHint
-		}
+		sleep := max(retryAfterHint, acquireRetryDelay(delay, cfg))
 		if !deadline.IsZero() {
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
@@ -2606,10 +2600,7 @@ func (c *Client) AcquireForUpdate(ctx context.Context, req api.AcquireRequest, h
 		handlerCtx, handlerCancel := context.WithCancel(ctx)
 		var keepErrCh <-chan error
 		if req.TTLSeconds > 0 {
-			ttl := time.Duration(req.TTLSeconds) * time.Second
-			if ttl < time.Second {
-				ttl = time.Second
-			}
+			ttl := max(time.Duration(req.TTLSeconds)*time.Second, time.Second)
 			keepErrCh = c.startForUpdateKeepAlive(handlerCtx, handlerCancel, sess, ttl)
 		}
 
@@ -2650,10 +2641,7 @@ func (c *Client) AcquireForUpdate(ctx context.Context, req api.AcquireRequest, h
 
 func (c *Client) startForUpdateKeepAlive(ctx context.Context, cancel context.CancelFunc, sess *LeaseSession, ttl time.Duration) <-chan error {
 	ch := make(chan error, 1)
-	interval := ttl / 2
-	if interval < time.Second {
-		interval = time.Second
-	}
+	interval := max(ttl/2, time.Second)
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()

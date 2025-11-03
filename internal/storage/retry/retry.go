@@ -5,10 +5,10 @@ import (
 	"io"
 	"time"
 
-	"pkt.systems/logport"
-
 	"pkt.systems/lockd/internal/clock"
+	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/storage"
+	"pkt.systems/pslog"
 )
 
 // Config controls retry behaviour.
@@ -20,7 +20,7 @@ type Config struct {
 }
 
 // Wrap returns a backend that retries transient errors according to cfg.
-func Wrap(inner storage.Backend, logger logport.ForLogging, clk clock.Clock, cfg Config) storage.Backend {
+func Wrap(inner storage.Backend, logger pslog.Logger, clk clock.Clock, cfg Config) storage.Backend {
 	if inner == nil {
 		return nil
 	}
@@ -38,7 +38,7 @@ func Wrap(inner storage.Backend, logger logport.ForLogging, clk clock.Clock, cfg
 	}
 	return &backend{
 		inner:  inner,
-		logger: logger,
+		logger: loggingutil.EnsureLogger(logger),
 		clock:  clk,
 		cfg:    cfg,
 	}
@@ -46,7 +46,7 @@ func Wrap(inner storage.Backend, logger logport.ForLogging, clk clock.Clock, cfg
 
 type backend struct {
 	inner  storage.Backend
-	logger logport.ForLogging
+	logger pslog.Logger
 	clock  clock.Clock
 	cfg    Config
 }

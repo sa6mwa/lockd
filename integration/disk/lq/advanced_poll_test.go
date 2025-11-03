@@ -17,7 +17,7 @@ import (
 	lockdclient "pkt.systems/lockd/client"
 	queuetestutil "pkt.systems/lockd/integration/queue/testutil"
 	"pkt.systems/lockd/internal/qrf"
-	"pkt.systems/logport"
+	"pkt.systems/pslog"
 )
 
 func runDiskQueueMultiConsumerContention(t *testing.T) {
@@ -341,10 +341,10 @@ func runDiskQueueHighFanInFanOutSingleServer(t *testing.T) {
 	capture := queuetestutil.NewLogCaptureWithOptions(t, queuetestutil.LogCaptureOptions{
 		MaxEntries:   2000,
 		Prefixes:     []string{"lockd.qrf", "lockd.lsf"},
-		LogLevel:     logport.InfoLevel,
+		LogLevel:     pslog.InfoLevel,
 		LogToTesting: &logToTesting,
 	})
-	clientLogger := lockd.NewTestingLogger(t, logport.InfoLevel)
+	clientLogger := lockd.NewTestingLogger(t, pslog.InfoLevel)
 	baseClientOpts := []lockdclient.Option{
 		lockdclient.WithHTTPTimeout(60 * time.Second),
 		lockdclient.WithKeepAliveTimeout(60 * time.Second),

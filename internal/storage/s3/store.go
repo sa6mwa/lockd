@@ -20,8 +20,9 @@ import (
 	"github.com/minio/minio-go/v7/pkg/encrypt"
 
 	"pkt.systems/kryptograf"
+	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/storage"
-	"pkt.systems/logport"
+	"pkt.systems/pslog"
 )
 
 // Config controls the behaviour of the S3 storage backend.
@@ -146,16 +147,16 @@ func (s *Store) Config() Config {
 	return s.cfg
 }
 
-func (s *Store) loggers(ctx context.Context) (logport.ForLogging, logport.ForLogging) {
-	logger := logport.LoggerFromContext(ctx)
+func (s *Store) loggers(ctx context.Context) (pslog.Logger, pslog.Logger) {
+	logger := pslog.LoggerFromContext(ctx)
 	if logger == nil {
-		logger = logport.NoopLogger()
+		logger = loggingutil.NoopLogger()
 	}
 	logger = logger.With("storage_backend", "s3", "bucket", s.cfg.Bucket)
 	if s.cfg.Prefix != "" {
 		logger = logger.With("prefix", s.cfg.Prefix)
 	}
-	return logger, logger.WithTrace(ctx)
+	return logger, logger
 }
 
 // LoadMeta downloads the metadata object for key and returns its ETag.
@@ -265,6 +266,10 @@ func (s *Store) StoreMeta(ctx context.Context, key string, meta *storage.Meta, e
 		if isPreconditionFailed(err) {
 			logger.Debug("s3.store_meta.cas_mismatch", "key", key, "object", object, "expected_etag", expectedETag)
 			return "", storage.ErrCASMismatch
+		}
+		if isNotFound(err) {
+			logger.Debug("s3.store_meta.not_found", "key", key, "object", object, "expected_etag", expectedETag)
+			return "", storage.ErrNotFound
 		}
 		logger.Debug("s3.store_meta.put_error", "key", key, "object", object, "error", err)
 		return "", s.wrapError(err, "s3: put meta")

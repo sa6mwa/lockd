@@ -22,7 +22,7 @@ import (
 	"pkt.systems/lockd/internal/diagnostics/storagecheck"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/s3"
-	"pkt.systems/logport"
+	"pkt.systems/pslog"
 )
 
 func TestCryptoMinioLocks(t *testing.T) {
@@ -98,10 +98,6 @@ func TestCryptoMinioQueues(t *testing.T) {
 		t.Fatalf("ack message: %v", err)
 	}
 
-	if os.Getenv(cryptotest.EnvVar) == "1" {
-		t.Skip("queue subscribe with storage encryption pending follow-up fix")
-	}
-
 	subPayload := []byte("minio-crypto-subscribe")
 	res := queuetestutil.MustEnqueueBytes(t, cli, queue, subPayload)
 
@@ -166,6 +162,11 @@ func buildMinioConfig(t testing.TB) lockd.Config {
 		QueuePollInterval:          200 * time.Millisecond,
 		QueuePollJitter:            0,
 		QueueResilientPollInterval: time.Second,
+	}
+	cfg.DisableMTLS = true
+	cfg.ListenProto = "tcp"
+	if cfg.Listen == "" {
+		cfg.Listen = "127.0.0.1:0"
 	}
 	cryptotest.MaybeEnableStorageEncryption(t, &cfg)
 	if err := cfg.Validate(); err != nil {
@@ -271,13 +272,13 @@ func startMinioServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client {
 	options := []lockd.TestServerOption{
 		lockd.WithTestConfig(cfg),
 		lockd.WithTestListener("tcp", "127.0.0.1:0"),
-		lockd.WithTestLoggerFromTB(tb, logport.TraceLevel),
+		lockd.WithTestLoggerFromTB(tb, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
 			lockdclient.WithDisableMTLS(true),
 			lockdclient.WithHTTPTimeout(45*time.Second),
 			lockdclient.WithKeepAliveTimeout(45*time.Second),
 			lockdclient.WithCloseTimeout(45*time.Second),
-			lockdclient.WithLogger(lockd.NewTestingLogger(tb, logport.TraceLevel)),
+			lockdclient.WithLogger(lockd.NewTestingLogger(tb, pslog.TraceLevel)),
 		),
 	}
 	ts := lockd.StartTestServer(tb, options...)

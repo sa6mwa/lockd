@@ -15,15 +15,13 @@ import (
 	"github.com/dustin/go-humanize"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"pkt.systems/logport"
-	"pkt.systems/logport/adapters/psl"
-
 	"pkt.systems/lockd"
+	"pkt.systems/pslog"
 )
 
 func submain(ctx context.Context) int {
-	logger := psl.NewStructured(os.Stderr).WithLogLevel().With("app", "lockd").With("sys", "cli.root")
-	cmd := newRootCommand(logger)
+	baseLogger := pslog.NewStructured(os.Stderr).LogLevel(pslog.InfoLevel).With("app", "lockd")
+	cmd := newRootCommand(baseLogger)
 	targetCmd := cmd
 	if len(os.Args) > 1 {
 		if found, _, err := cmd.Find(os.Args[1:]); err == nil && found != nil {
@@ -34,7 +32,7 @@ func submain(ctx context.Context) int {
 	if err := cmd.ExecuteContext(ctx); err != nil {
 		if err != context.Canceled {
 			if targetCmd == cmd {
-				logger.Error("command failed", "error", err)
+				baseLogger.With("sys", "cli.root").Error("command failed", "error", err)
 			} else {
 				fmt.Fprintf(os.Stderr, "%s\n", err)
 			}
@@ -109,7 +107,7 @@ func expandPath(p string) (string, error) {
 	return abs, nil
 }
 
-func newRootCommand(logger logport.ForLogging) *cobra.Command {
+func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 	var cfg lockd.Config
 	var logLevel string
 
@@ -134,6 +132,8 @@ func newRootCommand(logger logport.ForLogging) *cobra.Command {
   lockd --store mem:// --json-util stdlib
 `,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			logger := baseLogger
+			cliLogger := logger.With("sys", "cli.root")
 			ctx := cmd.Context()
 			cmd.SilenceUsage = true
 
@@ -142,7 +142,7 @@ func newRootCommand(logger logport.ForLogging) *cobra.Command {
 				return err
 			}
 			if configFile != "" {
-				logger.Info("loaded config file", "path", configFile)
+				cliLogger.Info("loaded config file", "path", configFile)
 			}
 
 			if err := bindConfig(&cfg); err != nil {
@@ -150,11 +150,12 @@ func newRootCommand(logger logport.ForLogging) *cobra.Command {
 			}
 			logLevel = viper.GetString("log-level")
 
-			level, ok := logport.ParseLevel(logLevel)
+			level, ok := pslog.ParseLevel(logLevel)
 			if ok {
 				logger = logger.LogLevel(level)
+				cliLogger = logger.With("sys", "cli.root")
 			}
-			logger.Info("starting lockd", "store", cfg.Store, "listen", cfg.Listen, "mtls", !cfg.DisableMTLS)
+			cliLogger.Info("starting lockd", "store", cfg.Store, "listen", cfg.Listen, "mtls", !cfg.DisableMTLS)
 
 			server, err := lockd.NewServer(cfg, lockd.WithLogger(logger))
 			if err != nil {
@@ -172,7 +173,7 @@ func newRootCommand(logger logport.ForLogging) *cobra.Command {
 				shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
 				if err := server.Shutdown(shutdownCtx); err != nil {
-					logger.Error("shutdown failed", "error", err)
+					cliLogger.Error("shutdown failed", "error", err)
 				}
 			}()
 
@@ -286,7 +287,7 @@ func newRootCommand(logger logport.ForLogging) *cobra.Command {
 		bindFlag(name)
 	}
 
-	cmd.AddCommand(newVerifyCommand(logger))
+	cmd.AddCommand(newVerifyCommand(baseLogger.With("sys", "cli.verify")))
 	cmd.AddCommand(newAuthCommand())
 	cmd.AddCommand(newClientCommand())
 	cmd.AddCommand(newConfigCommand())

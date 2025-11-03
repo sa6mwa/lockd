@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"path"
 	"regexp"
@@ -208,10 +209,7 @@ func (s *Service) Enqueue(ctx context.Context, queue string, payload io.Reader, 
 	}
 
 	now := s.clk.Now().UTC()
-	delay := opts.Delay
-	if delay < 0 {
-		delay = 0
-	}
+	delay := max(opts.Delay, 0)
 	visibility := opts.Visibility
 	if visibility <= 0 {
 		visibility = s.cfg.DefaultVisibilityTimeout
@@ -482,9 +480,7 @@ func cloneAttributes(src map[string]any) map[string]any {
 		return nil
 	}
 	dst := make(map[string]any, len(src))
-	for k, v := range src {
-		dst[k] = v
-	}
+	maps.Copy(dst, src)
 	return dst
 }
 

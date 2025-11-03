@@ -19,13 +19,14 @@ import (
 	"pkt.systems/lockd/internal/clock"
 	"pkt.systems/lockd/internal/cryptoutil"
 	"pkt.systems/lockd/internal/httpapi"
+	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/lsf"
 	"pkt.systems/lockd/internal/qrf"
 	"pkt.systems/lockd/internal/storage"
 	loggingbackend "pkt.systems/lockd/internal/storage/logging"
 	"pkt.systems/lockd/internal/storage/retry"
 	"pkt.systems/lockd/internal/tlsutil"
-	"pkt.systems/logport"
+	"pkt.systems/pslog"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric"
@@ -34,7 +35,7 @@ import (
 // Server wraps the HTTP server, storage backend, and supporting components.
 type Server struct {
 	cfg          Config
-	logger       logport.ForLogging
+	logger       pslog.Logger
 	backend      storage.Backend
 	handler      *httpapi.Handler
 	httpSrv      *http.Server
@@ -87,7 +88,7 @@ type drainSummary struct {
 type Option func(*options)
 
 type options struct {
-	Logger        logport.ForLogging
+	Logger        pslog.Logger
 	Backend       storage.Backend
 	Clock         clock.Clock
 	OTLPEndpoint  string
@@ -96,7 +97,7 @@ type options struct {
 }
 
 // WithLogger supplies a custom logger.
-func WithLogger(l logport.ForLogging) Option {
+func WithLogger(l pslog.Logger) Option {
 	return func(o *options) {
 		o.Logger = l
 	}
@@ -295,11 +296,7 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 			return nil, err
 		}
 	}
-	logger := o.Logger
-	if logger == nil {
-		logger = logport.NoopLogger()
-	}
-	logger = logger.With("app", "lockd")
+	logger := loggingutil.EnsureLogger(o.Logger)
 	if cfg.StorageEncryptionEnabled() {
 		logger.Info("storage.crypto.envelope enabled", "sys", "storage.crypto.envelope", "enabled", true)
 		if cfg.StorageEncryptionSnappy {
@@ -442,7 +439,7 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 			return context.Background()
 		},
 	}
-	httpSrv.ErrorLog = logport.LogLoggerWithLevel(logger.With("sys", "api.http.server"), logport.ErrorLevel)
+	httpSrv.ErrorLog = pslog.LogLoggerWithLevel(logger.With("sys", "api.http.server"), pslog.ErrorLevel)
 
 	if cfg.MTLSEnabled() {
 		httpSrv.TLSConfig = buildServerTLS(bundle)
@@ -552,10 +549,7 @@ func (s *Server) ShutdownWithOptions(ctx context.Context, opts ...CloseOption) e
 		overallTimeout = resolved.shutdownTimeout
 	}
 	if deadline, ok := ctx.Deadline(); ok {
-		remaining := time.Until(deadline)
-		if remaining < 0 {
-			remaining = 0
-		}
+		remaining := max(time.Until(deadline), 0)
 		if overallTimeout == 0 || (remaining > 0 && remaining < overallTimeout) {
 			overallTimeout = remaining
 		}
@@ -579,10 +573,7 @@ func (s *Server) ShutdownWithOptions(ctx context.Context, opts ...CloseOption) e
 
 	httpCtx := ctx
 	if overallTimeout > 0 {
-		remaining := overallTimeout - summary.Elapsed
-		if remaining < 0 {
-			remaining = 0
-		}
+		remaining := max(overallTimeout-summary.Elapsed, 0)
 		if remaining == 0 {
 			remaining = 10 * time.Millisecond
 		}
@@ -686,10 +677,7 @@ func (s *Server) shutdownState() (bool, time.Duration, bool) {
 	if deadlineNano := s.drainDeadline.Load(); deadlineNano > 0 {
 		deadline := time.Unix(0, deadlineNano)
 		now := s.clock.Now()
-		remaining = deadline.Sub(now)
-		if remaining < 0 {
-			remaining = 0
-		}
+		remaining = max(deadline.Sub(now), 0)
 	}
 	return true, remaining, s.drainNotifyClients.Load()
 }

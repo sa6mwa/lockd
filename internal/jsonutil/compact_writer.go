@@ -356,7 +356,7 @@ func (c *compactor) writeString() error {
 				if err := c.writeByte('u'); err != nil {
 					return err
 				}
-				for i := 0; i < 4; i++ {
+				for range 4 {
 					hx, err := c.readByte()
 					if err != nil {
 						return fmt.Errorf("json: invalid unicode escape")

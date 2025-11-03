@@ -31,8 +31,7 @@ import (
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/disk"
 	"pkt.systems/lockd/internal/uuidv7"
-	"pkt.systems/logport"
-	"pkt.systems/logport/adapters/psl"
+	"pkt.systems/pslog"
 )
 
 type failoverPhase int
@@ -745,17 +744,17 @@ func TestDiskRemoveStateFailoverMultiServer(t *testing.T) {
 
 	primary := lockd.StartTestServer(t,
 		lockd.WithTestBackend(store),
-		lockd.WithTestLoggerFromTB(t, logport.TraceLevel),
+		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
-			lockdclient.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)),
+			lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 			lockdclient.WithHTTPTimeout(2*time.Second),
 		),
 	)
 	backup := lockd.StartTestServer(t,
 		lockd.WithTestBackend(store),
-		lockd.WithTestLoggerFromTB(t, logport.TraceLevel),
+		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
-			lockdclient.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)),
+			lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 			lockdclient.WithHTTPTimeout(2*time.Second),
 		),
 	)
@@ -778,7 +777,7 @@ func TestDiskRemoveStateFailoverMultiServer(t *testing.T) {
 	}
 	releaseLease(t, ctx, seedLease)
 
-	clientLogger, clientLogs := testlog.NewRecorder(t, logport.TraceLevel)
+	clientLogger, clientLogs := testlog.NewRecorder(t, pslog.TraceLevel)
 	failoverClient, err := lockdclient.NewWithEndpoints(
 		[]string{primary.URL(), backup.URL()},
 		lockdclient.WithDisableMTLS(true),
@@ -1029,9 +1028,9 @@ func TestDiskAcquireForUpdateCallbackSingleServer(t *testing.T) {
 	ts := lockd.StartTestServer(t,
 		lockd.WithTestBackend(store),
 		lockd.WithTestChaos(chaos),
-		lockd.WithTestLoggerFromTB(t, logport.TraceLevel),
+		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
-			lockdclient.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)),
+			lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 			lockdclient.WithHTTPTimeout(500*time.Millisecond),
 		),
 	)
@@ -1179,17 +1178,17 @@ func runDiskAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase fail
 	primary := lockd.StartTestServer(t,
 		lockd.WithTestBackend(store),
 		lockd.WithTestChaos(chaos),
-		lockd.WithTestLoggerFromTB(t, logport.TraceLevel),
+		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
-			lockdclient.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)),
+			lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 			lockdclient.WithHTTPTimeout(time.Second),
 		),
 	)
 	backup := lockd.StartTestServer(t,
 		lockd.WithTestBackend(store),
-		lockd.WithTestLoggerFromTB(t, logport.TraceLevel),
+		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
-			lockdclient.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)),
+			lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 			lockdclient.WithHTTPTimeout(time.Second),
 		),
 	)
@@ -1219,7 +1218,7 @@ func runDiskAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase fail
 		t.Fatalf("seed release: %v", err)
 	}
 
-	clientLogger, clientLogs := testlog.NewRecorder(t, logport.TraceLevel)
+	clientLogger, clientLogs := testlog.NewRecorder(t, pslog.TraceLevel)
 	failoverClient, err := lockdclient.NewWithEndpoints(
 		[]string{primary.URL(), backup.URL()},
 		lockdclient.WithDisableMTLS(true),
@@ -1649,7 +1648,7 @@ func directDiskClient(t testing.TB, ts *lockd.TestServer) *lockdclient.Client {
 	baseURL := "http://" + addr.String()
 	cli, err := lockdclient.New(baseURL,
 		lockdclient.WithDisableMTLS(true),
-		lockdclient.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)),
+		lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 		lockdclient.WithHTTPTimeout(time.Second),
 	)
 	if err != nil {
@@ -1793,7 +1792,7 @@ func startDiskServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client {
 		lockdclient.WithHTTPTimeout(60 * time.Second),
 		lockdclient.WithCloseTimeout(60 * time.Second),
 		lockdclient.WithKeepAliveTimeout(60 * time.Second),
-		lockdclient.WithLogger(lockd.NewTestingLogger(tb, logport.TraceLevel)),
+		lockdclient.WithLogger(lockd.NewTestingLogger(tb, pslog.TraceLevel)),
 	}
 
 	options := []lockd.TestServerOption{
@@ -1818,7 +1817,7 @@ func startDiskTestServer(tb testing.TB, cfg lockd.Config) *lockd.TestServer {
 		lockdclient.WithHTTPTimeout(60 * time.Second),
 		lockdclient.WithCloseTimeout(60 * time.Second),
 		lockdclient.WithKeepAliveTimeout(60 * time.Second),
-		lockdclient.WithLogger(lockd.NewTestingLogger(tb, logport.TraceLevel)),
+		lockdclient.WithLogger(lockd.NewTestingLogger(tb, pslog.TraceLevel)),
 	}
 
 	options := []lockd.TestServerOption{
@@ -1835,7 +1834,7 @@ func diskTestLoggerOption(tb testing.TB) lockd.TestServerOption {
 	tb.Helper()
 	levelStr := os.Getenv("LOCKD_BENCH_LOG_LEVEL")
 	if levelStr == "" {
-		return lockd.WithTestLoggerFromTB(tb, logport.TraceLevel)
+		return lockd.WithTestLoggerFromTB(tb, pslog.TraceLevel)
 	}
 
 	logPath := os.Getenv("LOCKD_BENCH_LOG_PATH")
@@ -1851,8 +1850,8 @@ func diskTestLoggerOption(tb testing.TB) lockd.TestServerOption {
 	}
 	tb.Cleanup(func() { _ = file.Close() })
 
-	logger := psl.NewStructured(file).With("app", "lockd").With("sys", "bench.disk")
-	if level, ok := logport.ParseLevel(levelStr); ok {
+    logger := pslog.NewStructured(file).With("sys", "bench.disk")
+	if level, ok := pslog.ParseLevel(levelStr); ok {
 		logger = logger.LogLevel(level)
 	} else {
 		tb.Fatalf("invalid LOCKD_BENCH_LOG_LEVEL %q", levelStr)

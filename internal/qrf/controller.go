@@ -5,7 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"pkt.systems/logport"
+	"pkt.systems/lockd/internal/loggingutil"
+	"pkt.systems/pslog"
 )
 
 // Kind identifies the type of operation under evaluation.
@@ -84,7 +85,7 @@ type Config struct {
 	EngagedRetryAfter  time.Duration
 	RecoveryRetryAfter time.Duration
 
-	Logger logport.ForLogging
+	Logger pslog.Logger
 }
 
 // Snapshot captures the instantaneous metrics observed by the LSF.
@@ -123,7 +124,7 @@ type Decision struct {
 // Controller manages the QRF state machine.
 type Controller struct {
 	cfg    Config
-	logger logport.ForLogging
+	logger pslog.Logger
 
 	mu                 sync.RWMutex
 	state              State
@@ -134,10 +135,7 @@ type Controller struct {
 
 // NewController constructs a QRF controller using the supplied configuration.
 func NewController(cfg Config) *Controller {
-	logger := cfg.Logger
-	if logger == nil {
-		logger = logport.NoopLogger()
-	}
+	logger := loggingutil.EnsureLogger(cfg.Logger)
 	return &Controller{
 		cfg:    cfg,
 		logger: logger.With("sys", "control.qrf.controller"),

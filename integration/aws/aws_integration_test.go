@@ -27,7 +27,7 @@ import (
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/s3"
 	"pkt.systems/lockd/internal/uuidv7"
-	"pkt.systems/logport"
+	"pkt.systems/pslog"
 )
 
 var (
@@ -632,7 +632,7 @@ func TestAWSAcquireForUpdateCallbackFailover(t *testing.T) {
 		t.Fatalf("stop primary: %v", err)
 	}
 
-	clientLogger, clientLogs := testlog.NewRecorder(t, logport.TraceLevel)
+	clientLogger, clientLogs := testlog.NewRecorder(t, pslog.TraceLevel)
 	failoverClient, err := lockdclient.NewWithEndpoints(
 		[]string{primary.URL(), backup.URL()},
 		lockdclient.WithDisableMTLS(true),
@@ -847,7 +847,7 @@ func TestAWSRemoveStateFailover(t *testing.T) {
 	}
 	releaseLease(t, ctx, seedClient, key, seedLease.LeaseID)
 
-	clientLogger, clientLogs := testlog.NewRecorder(t, logport.TraceLevel)
+	clientLogger, clientLogs := testlog.NewRecorder(t, pslog.TraceLevel)
 	failoverClient, err := lockdclient.NewWithEndpoints(
 		[]string{primary.URL(), backup.URL()},
 		lockdclient.WithDisableMTLS(true),
@@ -1100,13 +1100,13 @@ func startAWSTestServer(t testing.TB, cfg lockd.Config, opts ...lockd.TestServer
 
 	options := []lockd.TestServerOption{
 		lockd.WithTestConfig(cfgCopy),
-		lockd.WithTestLoggerFromTB(t, logport.TraceLevel),
+		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
 		lockd.WithTestListener("tcp", "127.0.0.1:0"),
 		lockd.WithTestClientOptions(
 			lockdclient.WithHTTPTimeout(2*time.Minute),
 			lockdclient.WithCloseTimeout(2*time.Minute),
 			lockdclient.WithKeepAliveTimeout(2*time.Minute),
-			lockdclient.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)),
+			lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 		),
 	}
 	options = append(options, opts...)

@@ -15,9 +15,9 @@ import (
 	"time"
 
 	"pkt.systems/lockd/client"
+	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/storage"
-	"pkt.systems/logport"
-	"pkt.systems/logport/adapters/psl"
+	"pkt.systems/pslog"
 )
 
 // TestServer wraps a running lockd.Server with convenient handles for tests.
@@ -46,8 +46,8 @@ func (w *testingWriter) Write(p []byte) (int, error) {
 		w.mu.Unlock()
 		return len(p), nil
 	}
-	lines := bytes.Split(p, []byte{'\n'})
-	for _, line := range lines {
+	lines := bytes.SplitSeq(p, []byte{'\n'})
+	for line := range lines {
 		if len(line) == 0 {
 			continue
 		}
@@ -93,13 +93,14 @@ func (ts *TestServer) Stop(ctx context.Context, opts ...CloseOption) error {
 	return ts.stop(ctx, opts...)
 }
 
-// NewTestingLogger creates a logport logger that writes through testing.TB.
-func NewTestingLogger(t testing.TB, level logport.Level) logport.ForLogging {
+// NewTestingLogger creates a pslog logger that writes through testing.TB.
+func NewTestingLogger(t testing.TB, level pslog.Level) pslog.Logger {
 	writer := &testingWriter{t: t}
 	t.Cleanup(writer.close)
-	logger := psl.NewStructured(writer).WithLogLevel()
-	if level != logport.NoLevel {
+	logger := pslog.NewStructured(writer)
+	if level != pslog.NoLevel {
 		logger = logger.LogLevel(level)
+		logger = logger.With("loglevel", pslog.LevelString(level))
 	}
 	return logger
 }
@@ -152,13 +153,13 @@ type testServerOptions struct {
 	cfgSet           bool
 	mutators         []func(*Config)
 	backend          storage.Backend
-	logger           logport.ForLogging
+	logger           pslog.Logger
 	clientOpts       []client.Option
 	disableClient    bool
 	startTimeout     time.Duration
 	chaosConfig      *ChaosConfig
 	testTB           testing.TB
-	testLogLevel     logport.Level
+	testLogLevel     pslog.Level
 	closeDefaults    []CloseOption
 	closeDefaultsSet bool
 }
@@ -217,7 +218,7 @@ func WithTestBackend(backend storage.Backend) TestServerOption {
 }
 
 // WithTestLogger supplies a custom logger.
-func WithTestLogger(logger logport.ForLogging) TestServerOption {
+func WithTestLogger(logger pslog.Logger) TestServerOption {
 	return func(o *testServerOptions) {
 		o.logger = logger
 	}
@@ -258,7 +259,7 @@ func WithTestChaos(cfg *ChaosConfig) TestServerOption {
 }
 
 // WithTestLoggerFromTB routes server logs to the provided testing logger at the supplied level.
-func WithTestLoggerFromTB(t testing.TB, level logport.Level) TestServerOption {
+func WithTestLoggerFromTB(t testing.TB, level pslog.Level) TestServerOption {
 	return func(o *testServerOptions) {
 		o.testTB = t
 		o.testLogLevel = level
@@ -267,7 +268,7 @@ func WithTestLoggerFromTB(t testing.TB, level logport.Level) TestServerOption {
 
 // WithTestLoggerTB uses the testing logger with Debug level.
 func WithTestLoggerTB(t testing.TB) TestServerOption {
-	return WithTestLoggerFromTB(t, logport.DebugLevel)
+	return WithTestLoggerFromTB(t, pslog.DebugLevel)
 }
 
 // WithTestCloseDefaults overrides the shutdown CloseOptions applied to StartTestServer instances.
@@ -297,7 +298,7 @@ func NewTestServer(ctx context.Context, opts ...TestServerOption) (*TestServer, 
 		},
 		logger:       nil,
 		startTimeout: 5 * time.Second,
-		testLogLevel: logport.DebugLevel,
+		testLogLevel: pslog.DebugLevel,
 	}
 	for _, opt := range opts {
 		opt(&options)
@@ -337,7 +338,7 @@ func NewTestServer(ctx context.Context, opts ...TestServerOption) (*TestServer, 
 		if options.testTB != nil {
 			logger = NewTestingLogger(options.testTB, options.testLogLevel)
 		} else {
-			logger = logport.NoopLogger()
+			logger = loggingutil.NoopLogger()
 		}
 	}
 
@@ -563,11 +564,7 @@ func (c *ChaosConfig) normalize() chaosRuntimeConfig {
 	} else {
 		cfg.seed = time.Now().UnixNano()
 	}
-	if c.MaxDisconnects < 0 {
-		cfg.maxDisconnects = 0
-	} else {
-		cfg.maxDisconnects = c.MaxDisconnects
-	}
+	cfg.maxDisconnects = max(c.MaxDisconnects, 0)
 	return cfg
 }
 

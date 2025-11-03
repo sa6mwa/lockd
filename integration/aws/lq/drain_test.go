@@ -13,7 +13,7 @@ import (
 	api "pkt.systems/lockd/api"
 	shutdowntest "pkt.systems/lockd/integration/internal/shutdowntest"
 	queuetestutil "pkt.systems/lockd/integration/queue/testutil"
-	"pkt.systems/logport"
+	"pkt.systems/pslog"
 )
 
 func TestAWSQueueDrainUsesProductionDefaults(t *testing.T) {
@@ -24,7 +24,7 @@ func TestAWSQueueDrainUsesProductionDefaults(t *testing.T) {
 		lockd.WithDrainLeases(8*time.Second),
 		lockd.WithShutdownTimeout(2*time.Second),
 	)
-	ts := newAWSQueueTestServer(t, cfg, lockd.NewTestingLogger(t, logport.TraceLevel), productionClose)
+	ts := newAWSQueueTestServer(t, cfg, lockd.NewTestingLogger(t, pslog.TraceLevel), productionClose)
 	cli := ts.Client
 	ensureAWSQueueWritableOrSkip(t, cli)
 

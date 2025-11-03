@@ -22,12 +22,13 @@ import (
 	minio "github.com/minio/minio-go/v7"
 
 	"pkt.systems/lockd"
+	"pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/internal/diagnostics/storagecheck"
+	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/s3"
-	"pkt.systems/logport"
-	"pkt.systems/logport/adapters/psl"
+	"pkt.systems/pslog"
 )
 
 const (
@@ -384,7 +385,7 @@ func minioBenchLoggerOptions(tb testing.TB) (lockd.TestServerOption, lockdclient
 	tb.Helper()
 	levelStr := os.Getenv("LOCKD_BENCH_LOG_LEVEL")
 	if levelStr == "" {
-		return lockd.WithTestLogger(logport.NoopLogger()), lockdclient.WithLogger(logport.NoopLogger())
+		return lockd.WithTestLogger(loggingutil.NoopLogger()), lockdclient.WithLogger(loggingutil.NoopLogger())
 	}
 
 	logPath := os.Getenv("LOCKD_BENCH_LOG_PATH")
@@ -412,8 +413,8 @@ func minioBenchLoggerOptions(tb testing.TB) (lockd.TestServerOption, lockdclient
 		tb.Cleanup(func() { _ = os.Remove(logPath) })
 	}
 
-	baseLogger := psl.NewStructured(writer).With("app", "lockd").With("sys", "bench.minio")
-	if level, ok := logport.ParseLevel(levelStr); ok {
+    baseLogger := pslog.NewStructured(writer).With("sys", "bench.minio")
+	if level, ok := pslog.ParseLevel(levelStr); ok {
 		baseLogger = baseLogger.LogLevel(level)
 	} else {
 		tb.Fatalf("invalid LOCKD_BENCH_LOG_LEVEL %q", levelStr)

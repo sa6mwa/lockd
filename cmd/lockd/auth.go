@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -689,12 +690,7 @@ func clientVerificationIssues(clientBundle *tlsutil.ClientBundle, serverBundle *
 }
 
 func hasExtKeyUsage(cert *x509.Certificate, target x509.ExtKeyUsage) bool {
-	for _, ku := range cert.ExtKeyUsage {
-		if ku == target {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(cert.ExtKeyUsage, target)
 }
 
 func ensureDir(path string) error {

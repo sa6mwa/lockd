@@ -27,7 +27,7 @@ import (
 	testlog "pkt.systems/lockd/integration/internal/testlog"
 	memorybackend "pkt.systems/lockd/internal/storage/memory"
 	"pkt.systems/lockd/internal/uuidv7"
-	"pkt.systems/logport"
+	"pkt.systems/pslog"
 )
 
 type failoverPhase int
@@ -546,7 +546,7 @@ func TestMemRemoveStateFailoverMultiServer(t *testing.T) {
 		t.Fatalf("seed release: %v", err)
 	}
 
-	clientLogger, recorder := testlog.NewRecorder(t, logport.TraceLevel)
+	clientLogger, recorder := testlog.NewRecorder(t, pslog.TraceLevel)
 	failoverCli, err := lockdclient.NewWithEndpoints([]string{primary.URL(), secondary.URL()},
 		lockdclient.WithDisableMTLS(true),
 		lockdclient.WithHTTPTimeout(2*time.Second),
@@ -820,9 +820,9 @@ func runMemAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase failo
 		lockd.WithTestConfig(cfg),
 		lockd.WithTestBackend(backend),
 		lockd.WithTestChaos(chaos),
-		lockd.WithTestLoggerFromTB(t, logport.TraceLevel),
+		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
-			lockdclient.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)),
+			lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 			lockdclient.WithHTTPTimeout(time.Second),
 		),
 		lockd.WithTestCloseDefaults(
@@ -833,9 +833,9 @@ func runMemAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase failo
 	backup := lockd.StartTestServer(t,
 		lockd.WithTestConfig(cfg),
 		lockd.WithTestBackend(backend),
-		lockd.WithTestLoggerFromTB(t, logport.TraceLevel),
+		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
-			lockdclient.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)),
+			lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 			lockdclient.WithHTTPTimeout(time.Second),
 		),
 		lockd.WithTestCloseDefaults(
@@ -870,7 +870,7 @@ func runMemAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase failo
 		t.Fatalf("seed release: %v", err)
 	}
 
-	clientLogger, clientLogs := testlog.NewRecorder(t, logport.TraceLevel)
+	clientLogger, clientLogs := testlog.NewRecorder(t, pslog.TraceLevel)
 	failoverClient, err := lockdclient.NewWithEndpoints(
 		[]string{primary.URL(), backup.URL()},
 		lockdclient.WithDisableMTLS(true),
@@ -987,12 +987,12 @@ func startMemServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client {
 	ts := lockd.StartTestServer(tb,
 		lockd.WithTestConfig(cfg),
 		lockd.WithTestListener("tcp", "127.0.0.1:0"),
-		lockd.WithTestLoggerFromTB(tb, logport.TraceLevel),
+		lockd.WithTestLoggerFromTB(tb, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
 			lockdclient.WithHTTPTimeout(60*time.Second),
 			lockdclient.WithCloseTimeout(60*time.Second),
 			lockdclient.WithKeepAliveTimeout(60*time.Second),
-			lockdclient.WithLogger(lockd.NewTestingLogger(tb, logport.TraceLevel)),
+			lockdclient.WithLogger(lockd.NewTestingLogger(tb, pslog.TraceLevel)),
 		),
 	)
 	return ts.Client
@@ -1003,12 +1003,12 @@ func startMemTestServer(tb testing.TB, cfg lockd.Config) *lockd.TestServer {
 	return lockd.StartTestServer(tb,
 		lockd.WithTestConfig(cfg),
 		lockd.WithTestListener("tcp", "127.0.0.1:0"),
-		lockd.WithTestLoggerFromTB(tb, logport.TraceLevel),
+		lockd.WithTestLoggerFromTB(tb, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
 			lockdclient.WithHTTPTimeout(60*time.Second),
 			lockdclient.WithCloseTimeout(60*time.Second),
 			lockdclient.WithKeepAliveTimeout(60*time.Second),
-			lockdclient.WithLogger(lockd.NewTestingLogger(tb, logport.TraceLevel)),
+			lockdclient.WithLogger(lockd.NewTestingLogger(tb, pslog.TraceLevel)),
 		),
 	)
 }
@@ -1024,12 +1024,12 @@ func startMemTestServerWithBackendOpts(tb testing.TB, cfg lockd.Config, backend 
 		lockd.WithTestConfig(cfg),
 		lockd.WithTestBackend(backend),
 		lockd.WithTestListener("tcp", "127.0.0.1:0"),
-		lockd.WithTestLoggerFromTB(tb, logport.TraceLevel),
+		lockd.WithTestLoggerFromTB(tb, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
 			lockdclient.WithHTTPTimeout(60*time.Second),
 			lockdclient.WithCloseTimeout(60*time.Second),
 			lockdclient.WithKeepAliveTimeout(60*time.Second),
-			lockdclient.WithLogger(lockd.NewTestingLogger(tb, logport.TraceLevel)),
+			lockdclient.WithLogger(lockd.NewTestingLogger(tb, pslog.TraceLevel)),
 		),
 	}
 	opts = append(opts, extra...)
@@ -1048,7 +1048,7 @@ func directMemClient(t testing.TB, ts *lockd.TestServer) *lockdclient.Client {
 	baseURL := "http://" + addr.String()
 	cli, err := lockdclient.New(baseURL,
 		lockdclient.WithDisableMTLS(true),
-		lockdclient.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)),
+		lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 		lockdclient.WithHTTPTimeout(time.Second),
 	)
 	if err != nil {

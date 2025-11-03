@@ -8,11 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"pkt.systems/logport"
-
 	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/client"
 	"pkt.systems/lockd/internal/clock"
+	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/memory"
 )
@@ -73,10 +72,7 @@ func (d *drainCapture) run(_ context.Context, policy DrainLeasesPolicy) drainSum
 	d.policy = policy
 	d.calls++
 	d.mu.Unlock()
-	elapsed := policy.GracePeriod
-	if elapsed < 0 {
-		elapsed = 0
-	}
+	elapsed := max(policy.GracePeriod, 0)
 	return drainSummary{ActiveAtStart: 1, Remaining: 0, Elapsed: elapsed}
 }
 
@@ -117,7 +113,7 @@ func newShutdownHarness(t *testing.T) (*Server, *drainCapture, *httpShutdownCapt
 	t.Helper()
 	srv := &Server{
 		cfg:              Config{},
-		logger:           logport.NoopLogger(),
+		logger:           loggingutil.NoopLogger(),
 		backend:          memory.New(),
 		httpSrv:          &http.Server{},
 		clock:            clock.Real{},
@@ -169,7 +165,7 @@ func TestSweeperClearsExpiredLeases(t *testing.T) {
 	srv, err := NewServer(cfg,
 		WithBackend(store),
 		WithClock(newSweeperClock(start)),
-		WithLogger(logport.NoopLogger()),
+		WithLogger(loggingutil.NoopLogger()),
 	)
 	if err != nil {
 		t.Fatalf("new server: %v", err)

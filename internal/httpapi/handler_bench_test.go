@@ -2,10 +2,8 @@ package httpapi
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -14,7 +12,7 @@ import (
 
 	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/internal/storage/memory"
-	"pkt.systems/logport"
+	"pkt.systems/pslog"
 )
 
 func BenchmarkAcquireUpdate(b *testing.B) {
@@ -27,8 +25,7 @@ func BenchmarkAcquireUpdate(b *testing.B) {
 		AcquireBlock: time.Second,
 	})
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for i := 0; b.Loop(); i++ {
 		key := fmt.Sprintf("bench-%d", i)
 		rec := httptest.NewRecorder()
 		body, _ := json.Marshal(api.AcquireRequest{Key: key, Owner: "worker", TTLSeconds: 5})
@@ -65,31 +62,15 @@ func BenchmarkAcquireUpdate(b *testing.B) {
 
 type benchmarkLogger struct{}
 
-func (benchmarkLogger) LogLevel(level logport.Level) logport.ForLogging                       { return benchmarkLogger{} }
-func (benchmarkLogger) LogLevelFromEnv(string) logport.ForLogging                             { return benchmarkLogger{} }
-func (benchmarkLogger) WithLogLevel() logport.ForLogging                                      { return benchmarkLogger{} }
-func (benchmarkLogger) With(keyvals ...any) logport.ForLogging                                { return benchmarkLogger{} }
-func (benchmarkLogger) WithTrace(ctx context.Context) logport.ForLogging                      { return benchmarkLogger{} }
-func (benchmarkLogger) Log(ctx context.Context, level slog.Level, msg string, keyvals ...any) {}
-func (benchmarkLogger) Logp(level logport.Level, msg string, keyvals ...any)                  {}
-func (benchmarkLogger) Logs(level string, msg string, keyvals ...any)                         {}
-func (benchmarkLogger) Logf(level logport.Level, format string, v ...any)                     {}
-func (benchmarkLogger) Debug(msg string, keyvals ...any)                                      {}
-func (benchmarkLogger) Debugf(format string, v ...any)                                        {}
-func (benchmarkLogger) Info(msg string, keyvals ...any)                                       {}
-func (benchmarkLogger) Infof(format string, v ...any)                                         {}
-func (benchmarkLogger) Warn(msg string, keyvals ...any)                                       {}
-func (benchmarkLogger) Warnf(format string, v ...any)                                         {}
-func (benchmarkLogger) Error(msg string, keyvals ...any)                                      {}
-func (benchmarkLogger) Errorf(format string, v ...any)                                        {}
-func (benchmarkLogger) Fatal(msg string, keyvals ...any)                                      {}
-func (benchmarkLogger) Fatalf(format string, v ...any)                                        {}
-func (benchmarkLogger) Panic(msg string, keyvals ...any)                                      {}
-func (benchmarkLogger) Panicf(format string, v ...any)                                        {}
-func (benchmarkLogger) Trace(msg string, keyvals ...any)                                      {}
-func (benchmarkLogger) Tracef(format string, v ...any)                                        {}
-func (benchmarkLogger) Enabled(context.Context, slog.Level) bool                              { return false }
-func (benchmarkLogger) Handle(context.Context, slog.Record) error                             { return nil }
-func (benchmarkLogger) WithAttrs([]slog.Attr) slog.Handler                                    { return benchmarkLogger{} }
-func (benchmarkLogger) WithGroup(string) slog.Handler                                         { return benchmarkLogger{} }
-func (benchmarkLogger) Write(p []byte) (int, error)                                           { return len(p), nil }
+func (benchmarkLogger) Trace(string, ...any)                {}
+func (benchmarkLogger) Debug(string, ...any)                {}
+func (benchmarkLogger) Info(string, ...any)                 {}
+func (benchmarkLogger) Warn(string, ...any)                 {}
+func (benchmarkLogger) Error(string, ...any)                {}
+func (benchmarkLogger) Fatal(string, ...any)                {}
+func (benchmarkLogger) Panic(string, ...any)                {}
+func (benchmarkLogger) Log(pslog.Level, string, ...any)     {}
+func (benchmarkLogger) With(...any) pslog.Logger            { return benchmarkLogger{} }
+func (benchmarkLogger) WithLogLevel() pslog.Logger          { return benchmarkLogger{} }
+func (benchmarkLogger) LogLevel(pslog.Level) pslog.Logger   { return benchmarkLogger{} }
+func (benchmarkLogger) LogLevelFromEnv(string) pslog.Logger { return benchmarkLogger{} }

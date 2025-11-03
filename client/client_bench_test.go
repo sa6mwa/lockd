@@ -126,10 +126,7 @@ func (s *jsonPayloadStream) Read(p []byte) (int, error) {
 				s.stage = 2
 				continue
 			}
-			chunk := int64(len(p))
-			if chunk > s.remaining {
-				chunk = s.remaining
-			}
+			chunk := min(int64(len(p)), s.remaining)
 			for i := 0; i < int(chunk); i++ {
 				p[i] = 'x'
 			}
@@ -168,8 +165,8 @@ func BenchmarkClientGetStateBytes(b *testing.B) {
 
 	b.ReportAllocs()
 	b.SetBytes(int64(len(payload)))
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+
+	for b.Loop() {
 		data, _, _, err := cli.GetStateBytes(ctx, benchKey, benchLease)
 		if err != nil {
 			b.Fatalf("get state bytes: %v", err)
@@ -193,8 +190,8 @@ func BenchmarkClientGetStateStream(b *testing.B) {
 
 	b.ReportAllocs()
 	b.SetBytes(int64(len(payload)))
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+
+	for b.Loop() {
 		reader, _, _, err := cli.GetState(ctx, benchKey, benchLease)
 		if err != nil {
 			b.Fatalf("get state stream: %v", err)
@@ -225,8 +222,8 @@ func BenchmarkClientUpdateStateBytes(b *testing.B) {
 
 	b.ReportAllocs()
 	b.SetBytes(int64(len(payload)))
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+
+	for b.Loop() {
 		if _, err := cli.UpdateStateBytes(ctx, benchKey, benchLease, payload, UpdateStateOptions{}); err != nil {
 			b.Fatalf("update state bytes: %v", err)
 		}
@@ -245,8 +242,8 @@ func BenchmarkClientUpdateStateStream(b *testing.B) {
 
 	b.ReportAllocs()
 	b.SetBytes(bodyLen)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+
+	for b.Loop() {
 		reader := newJSONPayloadStream(bodyLen)
 		if _, err := cli.UpdateState(ctx, benchKey, benchLease, reader, UpdateStateOptions{}); err != nil {
 			b.Fatalf("update state stream: %v", err)

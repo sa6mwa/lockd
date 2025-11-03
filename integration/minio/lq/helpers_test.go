@@ -17,7 +17,7 @@ import (
 	queuetestutil "pkt.systems/lockd/integration/queue/testutil"
 	"pkt.systems/lockd/internal/diagnostics/storagecheck"
 	"pkt.systems/lockd/internal/storage/s3"
-	"pkt.systems/logport"
+	"pkt.systems/pslog"
 )
 
 type minioQueueOptions struct {
@@ -76,7 +76,7 @@ func prepareMinioQueueConfig(t testing.TB, opts minioQueueOptions) lockd.Config 
 
 func startMinioQueueServer(t testing.TB, cfg lockd.Config) *lockd.TestServer {
 	t.Helper()
-	return startMinioQueueServerWithLogger(t, cfg, lockd.NewTestingLogger(t, logport.TraceLevel))
+	return startMinioQueueServerWithLogger(t, cfg, lockd.NewTestingLogger(t, pslog.TraceLevel))
 }
 
 func startMinioQueueServerWithCapture(t testing.TB, cfg lockd.Config) (*lockd.TestServer, *queuetestutil.LogCapture) {
@@ -86,9 +86,9 @@ func startMinioQueueServerWithCapture(t testing.TB, cfg lockd.Config) (*lockd.Te
 	return ts, capture
 }
 
-func startMinioQueueServerWithLogger(t testing.TB, cfg lockd.Config, logger logport.ForLogging) *lockd.TestServer {
+func startMinioQueueServerWithLogger(t testing.TB, cfg lockd.Config, logger pslog.Logger) *lockd.TestServer {
 	t.Helper()
-	clientLogger := lockd.NewTestingLogger(t, logport.TraceLevel)
+	clientLogger := lockd.NewTestingLogger(t, pslog.TraceLevel)
 	clientOpts := []lockdclient.Option{
 		lockdclient.WithHTTPTimeout(60 * time.Second),
 		lockdclient.WithKeepAliveTimeout(60 * time.Second),

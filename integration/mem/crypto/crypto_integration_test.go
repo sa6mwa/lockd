@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
@@ -16,20 +15,20 @@ import (
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/integration/internal/cryptotest"
 	queuetestutil "pkt.systems/lockd/integration/queue/testutil"
-	"pkt.systems/logport"
+	"pkt.systems/lockd/internal/loggingutil"
 )
 
 func TestCryptoMemLocks(t *testing.T) {
 	cfg := buildMemConfig(t)
 	ts := lockd.StartTestServer(t,
 		lockd.WithTestConfig(cfg),
-		lockd.WithTestLogger(logport.NoopLogger()),
+		lockd.WithTestLogger(loggingutil.NoopLogger()),
 		lockd.WithTestClientOptions(
 			lockdclient.WithDisableMTLS(true),
 			lockdclient.WithHTTPTimeout(20*time.Second),
 			lockdclient.WithKeepAliveTimeout(20*time.Second),
 			lockdclient.WithCloseTimeout(20*time.Second),
-			lockdclient.WithLogger(logport.NoopLogger()),
+			lockdclient.WithLogger(loggingutil.NoopLogger()),
 		),
 	)
 	cli := ts.Client
@@ -78,13 +77,13 @@ func TestCryptoMemQueues(t *testing.T) {
 	cfg := buildMemConfig(t)
 	ts := lockd.StartTestServer(t,
 		lockd.WithTestConfig(cfg),
-		lockd.WithTestLogger(logport.NoopLogger()),
+		lockd.WithTestLogger(loggingutil.NoopLogger()),
 		lockd.WithTestClientOptions(
 			lockdclient.WithDisableMTLS(true),
 			lockdclient.WithHTTPTimeout(20*time.Second),
 			lockdclient.WithKeepAliveTimeout(20*time.Second),
 			lockdclient.WithCloseTimeout(20*time.Second),
-			lockdclient.WithLogger(logport.NoopLogger()),
+			lockdclient.WithLogger(loggingutil.NoopLogger()),
 		),
 	)
 	cli := ts.Client
@@ -106,10 +105,6 @@ func TestCryptoMemQueues(t *testing.T) {
 	}
 	if err := msg.Ack(ctx); err != nil {
 		t.Fatalf("ack message: %v", err)
-	}
-
-	if os.Getenv(cryptotest.EnvVar) == "1" {
-		t.Skip("queue subscribe with storage encryption pending follow-up fix")
 	}
 
 	// Re-enqueue for subscription path.

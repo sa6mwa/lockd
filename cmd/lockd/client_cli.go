@@ -18,13 +18,12 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
-	"pkt.systems/logport"
-	"pkt.systems/logport/adapters/psl"
 
 	"pkt.systems/lockd"
 	"pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/internal/tlsutil"
+	"pkt.systems/pslog"
 )
 
 const (
@@ -138,7 +137,7 @@ type clientCLIConfig struct {
 	cachedHTTPClient *http.Client
 	logLevel         string
 	logOutput        string
-	logger           logport.ForLoggingSubset
+	logger           pslog.Base
 	logClosers       []io.Closer
 	loggerReady      bool
 	verboseFlag      *bool
@@ -247,11 +246,11 @@ func (c *clientCLIConfig) setupLogger() error {
 		c.loggerReady = true
 		return nil
 	}
-	level, ok := logport.ParseLevel(levelStr)
+	level, ok := pslog.ParseLevel(levelStr)
 	if !ok {
 		return fmt.Errorf("invalid client log level %q", c.logLevel)
 	}
-	if level == logport.NoLevel || level == logport.Disabled {
+	if level == pslog.NoLevel || level == pslog.Disabled {
 		c.logger = nil
 		c.loggerReady = true
 		return nil
@@ -274,13 +273,9 @@ func (c *clientCLIConfig) setupLogger() error {
 			writer = f
 		}
 	}
-	base := psl.NewStructured(writer).WithLogLevel().With("app", "lockd").With("sys", "client.cli")
-	logger := base.LogLevel(level)
-	subset, ok := logger.(logport.ForLoggingSubset)
-	if !ok {
-		return fmt.Errorf("logger does not implement logport.ForLoggingSubset")
-	}
-	c.logger = subset
+    logger := pslog.NewStructured(writer).With("sys", "client.cli")
+	logger = logger.LogLevel(level)
+	c.logger = logger
 	c.loggerReady = true
 	return nil
 }

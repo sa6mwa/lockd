@@ -9,7 +9,7 @@ Many of our integration assertions depend on the precise sequence of client log
 events (e.g. “primary endpoint failed, backup succeeded”). To make those checks
 easy, we introduced `integration/internal/testlog/testlog.go`:
 
-- `testlog.NewRecorder(t, level)` returns a `logport` logger that still writes
+- `testlog.NewRecorder(t, level)` returns a `pslog` logger that still writes
   through `t.Log` but also records every structured entry (timestamp, message,
   fields).  The recorder exposes helpers to fetch the first entry that matches a
   predicate, the first entry after a given timestamp, and a human-readable

@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"math/rand"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/storage"
-	"pkt.systems/logport"
+	"pkt.systems/pslog"
 )
 
 type candidateProvider interface {
@@ -75,7 +77,7 @@ type Dispatcher struct {
 	wake                  chan struct{}
 	schedulerOnce         sync.Once
 	watchFactory          WatchFactory
-	logger                logport.ForLogging
+	logger                pslog.Logger
 	resilientPollInterval time.Duration
 }
 
@@ -117,7 +119,7 @@ func WithWatchFactory(factory WatchFactory) DispatcherOption {
 }
 
 // WithLogger assigns a base logger used for dispatcher diagnostics.
-func WithLogger(logger logport.ForLogging) DispatcherOption {
+func WithLogger(logger pslog.Logger) DispatcherOption {
 	return func(disp *Dispatcher) {
 		disp.logger = logger
 	}
@@ -172,9 +174,7 @@ func NewDispatcher(svc candidateProvider, opts ...DispatcherOption) *Dispatcher 
 	for _, opt := range opts {
 		opt(d)
 	}
-	if d.logger == nil {
-		d.logger = logport.NoopLogger()
-	}
+	d.logger = loggingutil.EnsureLogger(d.logger)
 	if d.resilientPollInterval <= 0 {
 		d.resilientPollInterval = 5 * time.Minute
 	}
@@ -414,10 +414,7 @@ func (d *Dispatcher) blockUntilWake() {
 			<-d.wake
 			return
 		}
-		interval := d.nextInterval()
-		if interval < 0 {
-			interval = 0
-		}
+		interval := max(d.nextInterval(), 0)
 		timer := time.NewTimer(interval)
 		select {
 		case <-d.wake:
@@ -568,7 +565,7 @@ type queueState struct {
 	watchSub            WatchSubscription
 	watchStop           chan struct{}
 	watchDisabled       bool
-	logger              logport.ForLogging
+	logger              pslog.Logger
 	watchDisabledReason string
 	needsPoll           bool
 	fallbackInterval    time.Duration
@@ -586,12 +583,7 @@ type queueStateSnapshot struct {
 }
 
 func containsReason(reasons []string, reason string) bool {
-	for _, r := range reasons {
-		if r == reason {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(reasons, reason)
 }
 
 func isMissingMetadataError(err error) bool {

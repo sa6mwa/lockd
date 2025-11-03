@@ -23,17 +23,18 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"pkt.systems/logport"
+	"pkt.systems/lockd/internal/loggingutil"
+	"pkt.systems/pslog"
 )
 
 type telemetryBundle struct {
 	tracerProvider *sdktrace.TracerProvider
 	meterProvider  *sdkmetric.MeterProvider
-	logger         logport.ForLogging
+	logger         pslog.Logger
 }
 
 type otelErrorHandler struct {
-	logger logport.ForLogging
+	logger pslog.Logger
 }
 
 func (h otelErrorHandler) Handle(err error) {
@@ -42,12 +43,12 @@ func (h otelErrorHandler) Handle(err error) {
 	}
 	if strings.Contains(err.Error(), "waiting for connections to become ready") {
 		if h.logger != nil {
-			h.logger.Debug("telemetry.exlogport.retry", "error", err)
+			h.logger.Debug("telemetry.exporter.retry", "error", err)
 		}
 		return
 	}
 	if h.logger != nil {
-		h.logger.Warn("telemetry.exlogport.error", "error", err)
+		h.logger.Warn("telemetry.exporter.error", "error", err)
 	}
 }
 
@@ -85,14 +86,12 @@ type otlpTarget struct {
 	insecure bool
 }
 
-func setupTelemetry(ctx context.Context, endpoint string, logger logport.ForLogging) (*telemetryBundle, error) {
+func setupTelemetry(ctx context.Context, endpoint string, logger pslog.Logger) (*telemetryBundle, error) {
 	target, err := resolveOTLPTarget(endpoint)
 	if err != nil {
 		return nil, err
 	}
-	if logger == nil {
-		logger = logport.NoopLogger()
-	}
+	logger = loggingutil.EnsureLogger(logger)
 	res, err := resource.New(ctx,
 		resource.WithSchemaURL(semconv.SchemaURL),
 		resource.WithAttributes(

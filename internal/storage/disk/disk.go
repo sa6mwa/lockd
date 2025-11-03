@@ -19,9 +19,10 @@ import (
 	"time"
 
 	"pkt.systems/kryptograf"
+	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/uuidv7"
-	"pkt.systems/logport"
+	"pkt.systems/pslog"
 )
 
 // Config captures the tunables for the disk backend.
@@ -180,13 +181,13 @@ func (s *Store) Close() error {
 	return nil
 }
 
-func (s *Store) loggers(ctx context.Context) (logport.ForLogging, logport.ForLogging) {
-	logger := logport.LoggerFromContext(ctx)
+func (s *Store) loggers(ctx context.Context) (pslog.Logger, pslog.Logger) {
+	logger := pslog.LoggerFromContext(ctx)
 	if logger == nil {
-		logger = logport.NoopLogger()
+		logger = loggingutil.NoopLogger()
 	}
 	logger = logger.With("storage_backend", "disk")
-	return logger, logger.WithTrace(ctx)
+	return logger, logger
 }
 
 func (s *Store) encodeKey(key string) (string, error) {

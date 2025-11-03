@@ -25,7 +25,7 @@ This repo delivers a tiny, single-binary **lock + state** service—“just enou
 - We like unit tests to be fast and snappy; a total go test ./... run should finish in less than 10 seconds
 - We need good concurrency, fuzz, and race testing, but do not over-do it, instead split the concurrency testing into smaller loads (e.g: one test for two concurrent workers competing for the same lock, then ramp up to 5 concurrent worker in another test)
 - Always add a test case per storage backend with two servers using the same storage endpoint and at least two workers connected to each competing for the lock (beware of http.Client timeouts
-- Import `pkt.systems/logport` as `logport` and `pkt.systems/logport/adapters/psl` as `psl`; do not alias them to shorter names unless a conflict forces it.
+- Import `pkt.systems/pslog` as `pslog`; do not alias it to shorter names unless a conflict forces it.
 
 ## Workflow notes
 

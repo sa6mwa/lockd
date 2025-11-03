@@ -21,9 +21,10 @@ import (
 	"pkt.systems/lockd"
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/internal/cryptoutil"
+	"pkt.systems/lockd/internal/loggingutil"
 	memorybackend "pkt.systems/lockd/internal/storage/memory"
 	"pkt.systems/lockd/internal/tlsutil"
-	"pkt.systems/logport"
+	"pkt.systems/pslog"
 )
 
 const (
@@ -192,19 +193,19 @@ func runMemQueueBenchmark(b *testing.B, scenario queueBenchmarkScenario, payload
 	}
 
 	backend := memorybackend.New()
-	logLevel := logport.NoLevel
+	logLevel := pslog.NoLevel
 	if os.Getenv("MEM_LQ_BENCH_TRACE") == "1" {
-		logLevel = logport.TraceLevel
+		logLevel = pslog.TraceLevel
 	} else if os.Getenv("MEM_LQ_BENCH_DEBUG") == "1" {
-		logLevel = logport.DebugLevel
+		logLevel = pslog.DebugLevel
 	}
 	servers := make([]*lockd.TestServer, 0, scenario.servers)
 	for i := 0; i < scenario.servers; i++ {
 		cfg := buildMemQueueConfig(b)
 		var opts []lockd.TestServerOption
-		var logger logport.ForLogging
-		if logLevel == logport.NoLevel {
-			logger = logport.NoopLogger()
+		var logger pslog.Logger
+		if logLevel == pslog.NoLevel {
+			logger = loggingutil.NoopLogger()
 		} else {
 			logger = lockd.NewTestingLogger(b, logLevel)
 		}

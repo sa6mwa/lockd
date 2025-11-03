@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/retry"
-	"pkt.systems/logport"
 )
 
 type fakeClock struct {
@@ -104,7 +104,7 @@ func (s *stubBackend) Close() error { return nil }
 func TestWrapReturnsNilOnNilInner(t *testing.T) {
 	t.Parallel()
 
-	if retry.Wrap(nil, logport.NoopLogger(), &fakeClock{}, retry.Config{}) != nil {
+	if retry.Wrap(nil, loggingutil.NoopLogger(), &fakeClock{}, retry.Config{}) != nil {
 		t.Fatal("expected nil backend when inner is nil")
 	}
 }
@@ -119,7 +119,7 @@ func TestLoadMetaRetriesTransientErrors(t *testing.T) {
 		},
 	}
 	fc := &fakeClock{}
-	wrapped := retry.Wrap(back, logport.NoopLogger(), fc, retry.Config{
+	wrapped := retry.Wrap(back, loggingutil.NoopLogger(), fc, retry.Config{
 		MaxAttempts: 3,
 		BaseDelay:   5 * time.Millisecond,
 		Multiplier:  2,
@@ -156,7 +156,7 @@ func TestLoadMetaStopsOnNonTransientError(t *testing.T) {
 		},
 	}
 	fc := &fakeClock{}
-	wrapped := retry.Wrap(back, logport.NoopLogger(), fc, retry.Config{MaxAttempts: 3})
+	wrapped := retry.Wrap(back, loggingutil.NoopLogger(), fc, retry.Config{MaxAttempts: 3})
 	_, _, err := wrapped.LoadMeta(context.Background(), "key")
 	if err == nil || err.Error() != "fatal" {
 		t.Fatalf("expected fatal error, got %v", err)
@@ -185,7 +185,7 @@ func TestLoadMetaRespectsContextCancellation(t *testing.T) {
 		},
 	}
 	fc := &fakeClock{}
-	wrapped := retry.Wrap(back, logport.NoopLogger(), fc, retry.Config{MaxAttempts: 5})
+	wrapped := retry.Wrap(back, loggingutil.NoopLogger(), fc, retry.Config{MaxAttempts: 5})
 	_, _, err := wrapped.LoadMeta(ctx, "key")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context cancelled error, got %v", err)

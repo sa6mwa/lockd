@@ -42,7 +42,7 @@ func buildMediumFixture() []byte {
 	var sb strings.Builder
 	sb.Grow(60_000)
 	sb.WriteString(`{"list":[`)
-	for i := 0; i < 128; i++ {
+	for i := range 128 {
 		if i > 0 {
 			sb.WriteByte(',')
 		}
@@ -62,7 +62,7 @@ func buildMediumFixture() []byte {
 func benchmarkCompact(b *testing.B, name string, data []byte) {
 	b.Run(name+"/encoding_json", func(b *testing.B) {
 		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
+		for b.Loop() {
 			var buf bytes.Buffer
 			if err := json.Compact(&buf, data); err != nil {
 				b.Fatalf("json.Compact failed: %v", err)
@@ -71,7 +71,7 @@ func benchmarkCompact(b *testing.B, name string, data []byte) {
 	})
 	b.Run(name+"/compact_lockd", func(b *testing.B) {
 		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
+		for b.Loop() {
 			var buf bytes.Buffer
 			if err := CompactWriter(&buf, bytes.NewReader(data), int64(len(data))); err != nil {
 				b.Fatalf("CompactWriter failed: %v", err)
@@ -80,7 +80,7 @@ func benchmarkCompact(b *testing.B, name string, data []byte) {
 	})
 	b.Run(name+"/compact_jsonv2", func(b *testing.B) {
 		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
+		for b.Loop() {
 			var buf bytes.Buffer
 			if err := jsonutilv2.CompactWriter(&buf, bytes.NewReader(data), int64(len(data))); err != nil {
 				b.Fatalf("CompactWriter v2 failed: %v", err)

@@ -386,20 +386,20 @@ func formatExt(path string) string {
 
 func yamlToJSON(v any) any {
 	switch val := v.(type) {
-	case map[interface{}]interface{}:
+	case map[any]any:
 		out := make(map[string]any, len(val))
 		for k, v := range val {
 			key := fmt.Sprint(k)
 			out[key] = yamlToJSON(v)
 		}
 		return out
-	case map[string]interface{}:
+	case map[string]any:
 		out := make(map[string]any, len(val))
 		for k, v := range val {
 			out[k] = yamlToJSON(v)
 		}
 		return out
-	case []interface{}:
+	case []any:
 		slice := make([]any, len(val))
 		for i, elem := range val {
 			slice[i] = yamlToJSON(elem)

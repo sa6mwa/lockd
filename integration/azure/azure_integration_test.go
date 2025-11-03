@@ -29,7 +29,7 @@ import (
 	"pkt.systems/lockd/internal/storage"
 	azurestore "pkt.systems/lockd/internal/storage/azure"
 	"pkt.systems/lockd/internal/uuidv7"
-	"pkt.systems/logport"
+	"pkt.systems/pslog"
 )
 
 var (
@@ -378,7 +378,7 @@ func TestAzureRemoveStateAcquireForUpdate(t *testing.T) {
 	cli := ts.Client
 	if cli == nil {
 		var err error
-		cli, err = ts.NewClient(lockdclient.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)))
+		cli, err = ts.NewClient(lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)))
 		if err != nil {
 			t.Fatalf("new client: %v", err)
 		}
@@ -603,7 +603,7 @@ func TestAzureAcquireForUpdateCallbackFailover(t *testing.T) {
 	seedClient := backup.Client
 	if seedClient == nil {
 		var err error
-		seedClient, err = backup.NewClient(lockdclient.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)))
+		seedClient, err = backup.NewClient(lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)))
 		if err != nil {
 			t.Fatalf("seed client: %v", err)
 		}
@@ -630,7 +630,7 @@ func TestAzureAcquireForUpdateCallbackFailover(t *testing.T) {
 		t.Fatalf("stop primary: %v", err)
 	}
 
-	clientLogger, clientLogs := testlog.NewRecorder(t, logport.TraceLevel)
+	clientLogger, clientLogs := testlog.NewRecorder(t, pslog.TraceLevel)
 	failoverClient, err := lockdclient.NewWithEndpoints(
 		[]string{primary.URL(), backup.URL()},
 		lockdclient.WithDisableMTLS(true),
@@ -784,7 +784,7 @@ func TestAzureRemoveStateFailover(t *testing.T) {
 	seedClient := backup.Client
 	if seedClient == nil {
 		var err error
-		seedClient, err = backup.NewClient(lockdclient.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)))
+		seedClient, err = backup.NewClient(lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)))
 		if err != nil {
 			t.Fatalf("seed client: %v", err)
 		}
@@ -797,7 +797,7 @@ func TestAzureRemoveStateFailover(t *testing.T) {
 	}
 	releaseLease(t, ctx, seedClient, key, seedLease.LeaseID)
 
-	clientLogger, clientLogs := testlog.NewRecorder(t, logport.TraceLevel)
+	clientLogger, clientLogs := testlog.NewRecorder(t, pslog.TraceLevel)
 	failoverClient, err := lockdclient.NewWithEndpoints(
 		[]string{primary.URL(), backup.URL()},
 		lockdclient.WithDisableMTLS(true),
@@ -849,7 +849,7 @@ func TestAzureRemoveStateCASMismatch(t *testing.T) {
 	cli := ts.Client
 	if cli == nil {
 		var err error
-		cli, err = ts.NewClient(lockdclient.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)))
+		cli, err = ts.NewClient(lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)))
 		if err != nil {
 			t.Fatalf("new client: %v", err)
 		}
@@ -909,7 +909,7 @@ func TestAzureRemoveStateKeepAlive(t *testing.T) {
 	cli := ts.Client
 	if cli == nil {
 		var err error
-		cli, err = ts.NewClient(lockdclient.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)))
+		cli, err = ts.NewClient(lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)))
 		if err != nil {
 			t.Fatalf("new client: %v", err)
 		}
@@ -1090,13 +1090,13 @@ func startAzureTestServer(t testing.TB, cfg lockd.Config, opts ...lockd.TestServ
 	options := []lockd.TestServerOption{
 		lockd.WithTestConfig(cfgCopy),
 		lockd.WithTestListener("tcp", "127.0.0.1:0"),
-		lockd.WithTestLoggerFromTB(t, logport.TraceLevel),
+		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
 			lockdclient.WithHTTPTimeout(2*time.Minute),
 			lockdclient.WithCloseTimeout(2*time.Minute),
 			lockdclient.WithKeepAliveTimeout(2*time.Minute),
 			lockdclient.WithForUpdateTimeout(2*time.Minute),
-			lockdclient.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)),
+			lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 		),
 	}
 	closeDefaults := lockd.WithTestCloseDefaults(
@@ -1117,7 +1117,7 @@ func directClient(t testing.TB, ts *lockd.TestServer) *lockdclient.Client {
 	base := "http://" + addr.String()
 	cli, err := lockdclient.New(base,
 		lockdclient.WithDisableMTLS(true),
-		lockdclient.WithLogger(lockd.NewTestingLogger(t, logport.TraceLevel)),
+		lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 		lockdclient.WithHTTPTimeout(2*time.Minute),
 	)
 	if err != nil {

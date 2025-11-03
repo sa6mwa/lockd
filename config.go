@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -116,14 +117,8 @@ const (
 
 // DefaultQueueMaxConsumers returns an adaptive per-server consumer ceiling derived from CPU count.
 func DefaultQueueMaxConsumers() int {
-	cores := runtime.NumCPU()
-	if cores < 1 {
-		cores = 1
-	}
-	value := cores * defaultQueueConsumersPerCPU
-	if value < defaultQueueConsumersFloor {
-		value = defaultQueueConsumersFloor
-	}
+	cores := max(runtime.NumCPU(), 1)
+	value := max(cores*defaultQueueConsumersPerCPU, defaultQueueConsumersFloor)
 	if value > defaultQueueConsumersCeil {
 		value = defaultQueueConsumersCeil
 	}
@@ -144,12 +139,7 @@ func ValidJSONUtils() []string {
 }
 
 func isValidJSONUtil(name string) bool {
-	for _, option := range jsonUtilChoices {
-		if option == name {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(jsonUtilChoices, name)
 }
 
 // Config captures the tunables for a lockd.Server instance.
@@ -320,10 +310,7 @@ func (c *Config) Validate() error {
 	}
 	if c.DiskJanitorInterval == 0 {
 		if c.DiskRetention > 0 {
-			half := c.DiskRetention / 2
-			if half < time.Minute {
-				half = time.Minute
-			}
+			half := max(c.DiskRetention/2, time.Minute)
 			if half > time.Hour {
 				half = time.Hour
 			}

@@ -572,8 +572,9 @@ func commandContextWithCorrelation(cmd *cobra.Command) (context.Context, string)
 
 func newClientQueueCommand(cfg *clientCLIConfig) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "queue",
-		Short: "Interact with lockd queues",
+		Use:     "queue",
+		Aliases: []string{"q"},
+		Short:   "Interact with lockd queues",
 	}
 	cmd.AddCommand(
 		newClientQueueEnqueueCommand(cfg),
@@ -662,7 +663,7 @@ func newClientQueueEnqueueCommand(cfg *clientCLIConfig) *cobra.Command {
 	}
 	cmd.Flags().StringVarP(&queue, "queue", "q", "", "queue name (required)")
 	cmd.Flags().StringVarP(&data, "data", "d", "", "inline payload data (defaults to empty)")
-	cmd.Flags().StringVar(&payloadFile, "file", "", "path to payload file (overrides --data)")
+	cmd.Flags().StringVarP(&payloadFile, "file", "f", "", "path to payload file (overrides --data)")
 	cmd.Flags().StringVar(&contentType, "content-type", "", "payload content type")
 	cmd.Flags().DurationVar(&delay, "delay", 0, "initial visibility delay")
 	cmd.Flags().DurationVar(&visibility, "visibility", 0, "visibility timeout")
@@ -674,6 +675,7 @@ func newClientQueueEnqueueCommand(cfg *clientCLIConfig) *cobra.Command {
 }
 
 func newClientQueueDequeueCommand(cfg *clientCLIConfig) *cobra.Command {
+	var queue string
 	var owner string
 	var visibility time.Duration
 	var block string
@@ -684,13 +686,13 @@ func newClientQueueDequeueCommand(cfg *clientCLIConfig) *cobra.Command {
 	var output string
 
 	cmd := &cobra.Command{
-		Use:   "dequeue <queue>",
+		Use:   "dequeue",
 		Short: "Dequeue the next available message",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			queueName := strings.TrimSpace(args[0])
-			if queueName == "" {
-				return fmt.Errorf("queue is required")
+			queueName, err := resolveQueueString(queue, envQueueName, "queue", true)
+			if err != nil {
+				return err
 			}
 			if err := cfg.load(); err != nil {
 				return err
@@ -823,9 +825,10 @@ func newClientQueueDequeueCommand(cfg *clientCLIConfig) *cobra.Command {
 	cmd.Flags().DurationVar(&visibility, "visibility", 0, "visibility timeout override")
 	cmd.Flags().IntVar(&pageSize, "page-size", 32, "queue page size override")
 	cmd.Flags().StringVar(&startAfter, "start-after", "", "start listing after the given message ID")
-	cmd.Flags().BoolVar(&stateful, "stateful", false, "acquire workflow state lease")
-	cmd.Flags().StringVar(&payloadOut, "payload-out", "", "write payload to file")
+	cmd.Flags().BoolVarP(&stateful, "stateful", "s", false, "acquire workflow state lease")
+	cmd.Flags().StringVarP(&payloadOut, "payload-out", "o", "", "write payload to file")
 	cmd.Flags().StringVar(&output, "output", string(outputText), "output format (text|json)")
+	cmd.Flags().StringVarP(&queue, "queue", "q", "", "queue name (required)")
 	return cmd
 }
 
@@ -903,7 +906,7 @@ func newClientQueueAckCommand(cfg *clientCLIConfig) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&queue, "queue", "", "queue name")
+	cmd.Flags().StringVarP(&queue, "queue", "q", "", "queue name")
 	cmd.Flags().StringVar(&messageID, "message", "", "message id")
 	cmd.Flags().StringVar(&leaseID, "lease", "", "message lease id")
 	cmd.Flags().StringVar(&metaETag, "meta-etag", "", "message meta etag")
@@ -988,7 +991,7 @@ func newClientQueueNackCommand(cfg *clientCLIConfig) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&queue, "queue", "", "queue name")
+	cmd.Flags().StringVarP(&queue, "queue", "q", "", "queue name")
 	cmd.Flags().StringVar(&messageID, "message", "", "message id")
 	cmd.Flags().StringVar(&leaseID, "lease", "", "message lease id")
 	cmd.Flags().StringVar(&metaETag, "meta-etag", "", "message meta etag")
@@ -1075,7 +1078,7 @@ func newClientQueueExtendCommand(cfg *clientCLIConfig) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&queue, "queue", "", "queue name")
+	cmd.Flags().StringVarP(&queue, "queue", "q", "", "queue name")
 	cmd.Flags().StringVar(&messageID, "message", "", "message id")
 	cmd.Flags().StringVar(&leaseID, "lease", "", "message lease id")
 	cmd.Flags().StringVar(&metaETag, "meta-etag", "", "message meta etag")
@@ -1416,9 +1419,10 @@ func newClientUpdateCommand(cfg *clientCLIConfig) *cobra.Command {
 		Use:   "update [input]",
 		Short: "Upload new state from a file",
 		Example: `  # Pipe edited state back into the server
-  lockd client get orders -o - \
+  eval "$(lockd client acquire --key orders)" \
+    && lockd client get --output - \
     | lockd client edit status.counter++ \
-    | lockd client update --key orders`,
+    | lockd client update`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Args:          cobra.RangeArgs(0, 1),

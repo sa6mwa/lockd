@@ -11,7 +11,6 @@ import (
 	"math/rand"
 	"mime"
 	"mime/multipart"
-	"net"
 	"net/http"
 	"net/textproto"
 	"os"
@@ -322,14 +321,14 @@ func (h *Handler) requireQueueService() (*queue.Service, error) {
 }
 
 func (h *Handler) clientKeyFromRequest(r *http.Request) string {
+	addr := strings.TrimSpace(r.RemoteAddr)
+	if addr != "" {
+		return addr
+	}
 	if id := clientIdentityFromContext(r.Context()); id != "" {
 		return id
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
+	return ""
 }
 
 // Config groups the dependencies required by Handler.

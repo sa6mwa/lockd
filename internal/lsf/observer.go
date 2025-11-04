@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"runtime"
 	"strconv"
@@ -239,6 +240,11 @@ func (o *Observer) updateLoadBaselines(load1, load5, load15 float64) (float64, f
 	o.loadBaseline5 = ewma(o.loadBaseline5, load5, alpha)
 	o.loadBaseline15 = ewma(o.loadBaseline15, load15, alpha)
 
+	floor := loadBaselineFloor()
+	o.loadBaseline1 = math.Max(o.loadBaseline1, floor)
+	o.loadBaseline5 = math.Max(o.loadBaseline5, floor)
+	o.loadBaseline15 = math.Max(o.loadBaseline15, floor)
+
 	return o.loadBaseline1, o.loadBaseline5, o.loadBaseline15,
 		ratio(load1, o.loadBaseline1),
 		ratio(load5, o.loadBaseline5),
@@ -257,6 +263,15 @@ func ewma(current, value, alpha float64) float64 {
 		return value
 	}
 	return current + (value-current)*alpha
+}
+
+func loadBaselineFloor() float64 {
+	cpus := float64(runtime.NumCPU())
+	floor := 0.25
+	if cpus <= 0 {
+		return floor
+	}
+	return math.Max(floor, 0.05*cpus)
 }
 
 func ratio(value, baseline float64) float64 {

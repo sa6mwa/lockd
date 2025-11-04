@@ -20,7 +20,7 @@ import (
 	"pkt.systems/lockd"
 	"pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
-	"pkt.systems/lockd/internal/loggingutil"
+	"pkt.systems/pslog"
 )
 
 func main() {
@@ -172,7 +172,7 @@ func startLockdServer(ctx context.Context, cfg envConfig) (*lockdServerHandle, e
 	if err := serverCfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validate lockd config: %w", err)
 	}
-	srv, stop, err := lockd.StartServer(ctx, serverCfg, lockd.WithLogger(loggingutil.NoopLogger()))
+	srv, stop, err := lockd.StartServer(ctx, serverCfg, lockd.WithLogger(pslog.NewStructured(io.Discard)))
 	if err != nil {
 		return nil, err
 	}
@@ -203,7 +203,7 @@ func exerciseLockd(ctx context.Context, cfg envConfig, baseURL, key string) (str
 	cli, err := lockdclient.New(baseURL,
 		lockdclient.WithDisableMTLS(true),
 		lockdclient.WithHTTPTimeout(15*time.Second),
-		lockdclient.WithLogger(loggingutil.NoopLogger()),
+		lockdclient.WithLogger(pslog.NewStructured(io.Discard)),
 	)
 	if err != nil {
 		return "", "", fmt.Errorf("new client: %w", err)

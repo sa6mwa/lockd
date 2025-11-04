@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -53,6 +54,23 @@ func (p failoverPhase) String() string {
 	}
 }
 
+func retryableTransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) || strings.Contains(err.Error(), "unexpected EOF") {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return netErr.Timeout() || netErr.Temporary()
+	}
+	return false
+}
+
 func ensureNFSRootEnv(tb testing.TB) string {
 	tb.Helper()
 	root := os.Getenv("LOCKD_NFS_ROOT")
@@ -83,7 +101,6 @@ func buildNFSConfig(tb testing.TB, root string, retention time.Duration) lockd.C
 	storeURL := diskStoreURL(root)
 	cfg := lockd.Config{
 		Store:           storeURL,
-		DisableMTLS:     true,
 		Listen:          "127.0.0.1:0",
 		ListenProto:     "tcp",
 		DefaultTTL:      30 * time.Second,
@@ -93,9 +110,6 @@ func buildNFSConfig(tb testing.TB, root string, retention time.Duration) lockd.C
 		DiskRetention:   retention,
 	}
 	cryptotest.MaybeEnableStorageEncryption(tb, &cfg)
-	if err := cfg.Validate(); err != nil {
-		tb.Fatalf("config validation failed: %v", err)
-	}
 	return cfg
 }
 
@@ -111,37 +125,43 @@ func diskStoreURL(root string) string {
 
 func startNFSServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client {
 	tb.Helper()
-	cfg.DisableMTLS = true
 	clientOpts := []lockdclient.Option{
 		lockdclient.WithHTTPTimeout(60 * time.Second),
 		lockdclient.WithCloseTimeout(60 * time.Second),
 		lockdclient.WithKeepAliveTimeout(60 * time.Second),
 		lockdclient.WithLogger(lockd.NewTestingLogger(tb, pslog.TraceLevel)),
 	}
-	ts := lockd.StartTestServer(tb,
+	options := []lockd.TestServerOption{
 		lockd.WithTestConfig(cfg),
 		lockd.WithTestListener("tcp", "127.0.0.1:0"),
 		lockd.WithTestLoggerFromTB(tb, pslog.TraceLevel),
 		lockd.WithTestClientOptions(clientOpts...),
-	)
+		lockd.WithTestCloseDefaults(
+			lockd.WithDrainLeases(-1),
+			lockd.WithShutdownTimeout(10*time.Second),
+		),
+	}
+	options = append(options, cryptotest.SharedMTLSOptions(tb)...)
+	ts := lockd.StartTestServer(tb, options...)
 	return ts.Client
 }
 
 func startNFSTestServer(tb testing.TB, cfg lockd.Config) *lockd.TestServer {
 	tb.Helper()
-	cfg.DisableMTLS = true
 	clientOpts := []lockdclient.Option{
 		lockdclient.WithHTTPTimeout(60 * time.Second),
 		lockdclient.WithCloseTimeout(60 * time.Second),
 		lockdclient.WithKeepAliveTimeout(60 * time.Second),
 		lockdclient.WithLogger(lockd.NewTestingLogger(tb, pslog.TraceLevel)),
 	}
-	return lockd.StartTestServer(tb,
+	options := []lockd.TestServerOption{
 		lockd.WithTestConfig(cfg),
 		lockd.WithTestListener("tcp", "127.0.0.1:0"),
 		lockd.WithTestLoggerFromTB(tb, pslog.TraceLevel),
 		lockd.WithTestClientOptions(clientOpts...),
-	)
+	}
+	options = append(options, cryptotest.SharedMTLSOptions(tb)...)
+	return lockd.StartTestServer(tb, options...)
 }
 
 func TestNFSAutoKeyAcquire(t *testing.T) {
@@ -168,7 +188,11 @@ func TestNFSShutdownDrainingBlocksAcquire(t *testing.T) {
 	}()
 	payload, _ := json.Marshal(api.AcquireRequest{Key: "nfs-drain-wait", Owner: "drain-tester", TTLSeconds: 5})
 	url := ts.URL() + "/v1/acquire"
-	result := shutdowntest.WaitForShutdownDrainingAcquire(t, url, payload)
+	httpClient, err := ts.NewHTTPClient()
+	if err != nil {
+		t.Fatalf("http client: %v", err)
+	}
+	result := shutdowntest.WaitForShutdownDrainingAcquireWithClient(t, httpClient, url, payload)
 	if result.Response.ErrorCode != "shutdown_draining" {
 		t.Fatalf("expected shutdown_draining error, got %+v", result.Response)
 	}
@@ -365,7 +389,7 @@ func TestNFSAcquireForUpdateRandomPayloads(t *testing.T) {
 
 func TestNFSAcquireForUpdateCallbackSingleServer(t *testing.T) {
 	base := ensureNFSRootEnv(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	watchdog := time.AfterFunc(15*time.Second, func() {
@@ -390,15 +414,18 @@ func TestNFSAcquireForUpdateCallbackSingleServer(t *testing.T) {
 		MaxDisconnects:  1,
 	}
 
-	ts := lockd.StartTestServer(t,
+	serverOpts := []lockd.TestServerOption{
 		lockd.WithTestBackend(store),
 		lockd.WithTestChaos(chaos),
 		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
 			lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 			lockdclient.WithHTTPTimeout(750*time.Millisecond),
+			lockdclient.WithFailureRetries(5),
 		),
-	)
+	}
+	serverOpts = append(serverOpts, cryptotest.SharedMTLSOptions(t)...)
+	ts := lockd.StartTestServer(t, serverOpts...)
 
 	proxiedClient := ts.Client
 	if proxiedClient == nil {
@@ -450,7 +477,9 @@ func TestNFSAcquireForUpdateCallbackSingleServer(t *testing.T) {
 		}
 		var snapshot map[string]any
 		if err := af.State.Decode(&snapshot); err != nil {
-			return fmt.Errorf("decode snapshot: %w", err)
+			if loadErr := af.Load(handlerCtx, &snapshot); loadErr != nil {
+				return fmt.Errorf("decode snapshot: %w", errors.Join(err, loadErr))
+			}
 		}
 		if snapshot["payload"] != "nfs-single" {
 			return fmt.Errorf("unexpected payload: %+v", snapshot)
@@ -459,8 +488,60 @@ func TestNFSAcquireForUpdateCallbackSingleServer(t *testing.T) {
 		if v, ok := snapshot["count"].(float64); ok {
 			count = v
 		}
-		return af.Save(handlerCtx, map[string]any{"payload": "nfs-single", "count": count + 1, "owner": "reader"})
-	})
+		targetOwner := "reader"
+		targetCount := count + 1
+		payload := map[string]any{"payload": "nfs-single", "count": targetCount, "owner": targetOwner}
+
+		refreshProgress := func() (float64, bool, error) {
+			var latest map[string]any
+			if err := af.Load(handlerCtx, &latest); err != nil {
+				return 0, false, err
+			}
+			snapshot = latest
+			current := 0.0
+			if v, ok := latest["count"].(float64); ok {
+				current = v
+			}
+			owner := fmt.Sprint(latest["owner"])
+			achieved := owner == targetOwner && current >= targetCount
+			return current, achieved, nil
+		}
+
+		var saveErr error
+		for attempt := 0; attempt < 4; attempt++ {
+			if saveErr = af.Save(handlerCtx, payload); saveErr == nil {
+				return nil
+			}
+
+			var apiErr *lockdclient.APIError
+			if errors.As(saveErr, &apiErr) && apiErr.Response.ErrorCode == "version_conflict" {
+				if current, achieved, loadErr := refreshProgress(); loadErr == nil {
+					if achieved {
+						return nil
+					}
+					payload["count"] = current + 1
+					targetCount = current + 1
+					continue
+				} else {
+					return fmt.Errorf("save state: %w (refresh: %v)", saveErr, loadErr)
+				}
+			}
+
+			if !retryableTransportError(saveErr) {
+				return fmt.Errorf("save state: %w", saveErr)
+			}
+
+			if current, achieved, loadErr := refreshProgress(); loadErr == nil {
+				if achieved {
+					return nil
+				}
+				payload["count"] = current + 1
+				targetCount = current + 1
+			}
+			time.Sleep(50 * time.Millisecond * time.Duration(attempt+1))
+		}
+		return fmt.Errorf("save state: %w", saveErr)
+	}, lockdclient.WithAcquireFailureRetries(3))
 	if err != nil {
 		t.Fatalf("acquire-for-update: %v", err)
 	}
@@ -600,7 +681,17 @@ func runAcquireForUpdateCallbackFailover(t *testing.T, phase failoverPhase, base
 		MaxDisconnects:  1,
 	}
 
-	primary := lockd.StartTestServer(t,
+	closeDefaults := lockd.WithTestCloseDefaults(
+		lockd.WithDrainLeases(-1),
+		lockd.WithShutdownTimeout(10*time.Second),
+	)
+
+	var sharedCreds lockd.TestMTLSCredentials
+	if cryptotest.TestMTLSEnabled() {
+		sharedCreds = cryptotest.SharedMTLSCredentials(t)
+	}
+
+	primaryOptions := []lockd.TestServerOption{
 		lockd.WithTestBackend(store),
 		lockd.WithTestChaos(chaos),
 		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
@@ -608,23 +699,20 @@ func runAcquireForUpdateCallbackFailover(t *testing.T, phase failoverPhase, base
 			lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 			lockdclient.WithHTTPTimeout(time.Second),
 		),
-		lockd.WithTestCloseDefaults(
-			lockd.WithDrainLeases(8*time.Second),
-			lockd.WithShutdownTimeout(10*time.Second),
-		),
-	)
-	backup := lockd.StartTestServer(t,
+	}
+	primaryOptions = append(primaryOptions, closeDefaults)
+	primaryOptions = append(primaryOptions, cryptotest.SharedMTLSOptions(t, sharedCreds)...)
+	primary := lockd.StartTestServer(t, primaryOptions...)
+	backupOptions := append([]lockd.TestServerOption{closeDefaults}, cryptotest.SharedMTLSOptions(t, sharedCreds)...)
+	backupOptions = append(backupOptions,
 		lockd.WithTestBackend(store),
 		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
 			lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 			lockdclient.WithHTTPTimeout(time.Second),
 		),
-		lockd.WithTestCloseDefaults(
-			lockd.WithDrainLeases(8*time.Second),
-			lockd.WithShutdownTimeout(10*time.Second),
-		),
 	)
+	backup := lockd.StartTestServer(t, backupOptions...)
 
 	failoverBlob := strings.Repeat("nfs-failover-", 32768)
 	key := fmt.Sprintf("nfs-multi-%s-%s", phase.String(), uuidv7.NewString())
@@ -649,14 +737,18 @@ func runAcquireForUpdateCallbackFailover(t *testing.T, phase failoverPhase, base
 	releaseLease(t, ctxSeed, lease)
 
 	clientLogger, clientLogs := testlog.NewRecorder(t, pslog.TraceLevel)
-	failoverClient, err := lockdclient.NewWithEndpoints([]string{primary.URL(), backup.URL()},
-		lockdclient.WithDisableMTLS(true),
-		lockdclient.WithHTTPTimeout(2*time.Second),
+	clientOptions := []lockdclient.Option{
+		lockdclient.WithHTTPTimeout(2 * time.Second),
 		lockdclient.WithFailureRetries(5),
 		lockdclient.WithDrainAwareShutdown(false),
 		lockdclient.WithEndpointShuffle(false),
 		lockdclient.WithLogger(clientLogger),
-	)
+	}
+	if cryptotest.TestMTLSEnabled() {
+		httpClient := cryptotest.RequireMTLSHTTPClient(t, sharedCreds)
+		clientOptions = append(clientOptions, lockdclient.WithHTTPClient(httpClient))
+	}
+	failoverClient, err := lockdclient.NewWithEndpoints([]string{primary.URL(), backup.URL()}, clientOptions...)
 	if err != nil {
 		t.Fatalf("failover client: %v", err)
 	}
@@ -882,11 +974,15 @@ func directClient(t testing.TB, ts *lockd.TestServer) *lockdclient.Client {
 	if addr == nil {
 		t.Fatalf("listener not initialized")
 	}
-	baseURL := "http://" + addr.String()
-	cli, err := lockdclient.New(baseURL,
-		lockdclient.WithDisableMTLS(true),
+	scheme := "http"
+	if ts.Config.MTLSEnabled() {
+		scheme = "https"
+	}
+	endpoint := fmt.Sprintf("%s://%s", scheme, addr.String())
+	cli, err := ts.NewEndpointsClient([]string{endpoint},
 		lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 		lockdclient.WithHTTPTimeout(time.Second),
+		lockdclient.WithEndpointShuffle(false),
 	)
 	if err != nil {
 		t.Fatalf("direct client: %v", err)

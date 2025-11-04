@@ -8,6 +8,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/minio/minio-go/v7 v7.0.95
 	pkt.systems/lockd v0.0.0-00010101000000-000000000000
+	pkt.systems/pslog v0.3.0
 )
 
 require (
@@ -56,5 +57,4 @@ require (
 	google.golang.org/grpc v1.75.0 // indirect
 	google.golang.org/protobuf v1.36.10 // indirect
 	pkt.systems/kryptograf v0.4.0 // indirect
-	pkt.systems/pslog v0.2.0 // indirect
 )

@@ -63,7 +63,7 @@ func NewObserver(cfg Config, controller *qrf.Controller, logger pslog.Logger) *O
 	return &Observer{
 		cfg:    cfg,
 		qrf:    controller,
-		logger: logger.With("sys", "control.lsf.observer"),
+		logger: loggingutil.WithSubsystem(logger, "control.lsf.observer"),
 	}
 }
 
@@ -361,7 +361,7 @@ func parseMeminfo(r io.Reader) (meminfo, error) {
 	}
 	totalBytes := totalKB * 1024
 	if availKB, ok := fields["MemAvailable"]; ok && availKB > 0 {
-		availableBytes := min(availKB * 1024, totalBytes)
+		availableBytes := min(availKB*1024, totalBytes)
 		return meminfo{
 			totalBytes:              totalBytes,
 			availableBytes:          availableBytes,
@@ -383,7 +383,7 @@ func parseMeminfo(r io.Reader) (meminfo, error) {
 	if availableKB < 0 {
 		availableKB = 0
 	}
-	availableBytes := min(uint64(availableKB) * 1024, totalBytes)
+	availableBytes := min(uint64(availableKB)*1024, totalBytes)
 
 	includesReclaimable := buffersKB > 0 || cachedKB > 0 || sreclaimableKB > 0
 
@@ -410,7 +410,7 @@ func gatherSystemUsage() (systemUsage, error) {
 	}
 	freeRAM := uint64(si.Freeram) * unit
 	bufferRAM := uint64(si.Bufferram) * unit
-	available := min(freeRAM + bufferRAM, totalRAM)
+	available := min(freeRAM+bufferRAM, totalRAM)
 	if mi, err := readMeminfo(); err == nil && mi.totalBytes > 0 && mi.availableBytes > 0 {
 		totalRAM = mi.totalBytes
 		available = min(mi.availableBytes, totalRAM)

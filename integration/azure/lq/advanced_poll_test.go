@@ -280,11 +280,22 @@ func runAzureQueueMultiServerFailoverClient(t *testing.T) {
 
 	endpoints := []string{serverA.URL(), serverB.URL()}
 	capture := queuetestutil.NewLogCapture(t)
-	failoverClient, err := lockdclient.NewWithEndpoints(endpoints,
-		lockdclient.WithDisableMTLS(true),
+	clientOptions := []lockdclient.Option{
 		lockdclient.WithEndpointShuffle(false),
 		lockdclient.WithLogger(capture.Logger()),
-	)
+	}
+	if serverA.Config.MTLSEnabled() {
+		creds := serverA.TestMTLSCredentials()
+		if !creds.Valid() {
+			t.Fatalf("azure failover: serverA missing MTLS credentials")
+		}
+		httpClient, err := creds.NewHTTPClient()
+		if err != nil {
+			t.Fatalf("azure failover: build MTLS http client: %v", err)
+		}
+		clientOptions = append(clientOptions, lockdclient.WithHTTPClient(httpClient))
+	}
+	failoverClient, err := lockdclient.NewWithEndpoints(endpoints, clientOptions...)
 	if err != nil {
 		t.Fatalf("new failover client: %v", err)
 	}

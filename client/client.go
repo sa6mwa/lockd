@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"pkt.systems/lockd/api"
+	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/pslog"
 )
 
@@ -2033,7 +2034,7 @@ func WithLogger(logger pslog.Base) Option {
 			return
 		}
 		if full, ok := logger.(pslog.Logger); ok {
-			c.logger = full.With("sys", "client.sdk")
+			c.logger = loggingutil.WithSubsystem(full, "client.sdk")
 			return
 		}
 		c.logger = logger

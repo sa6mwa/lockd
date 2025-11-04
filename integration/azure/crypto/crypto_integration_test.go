@@ -160,7 +160,6 @@ func buildAzureConfig(t testing.TB) lockd.Config {
 		QueuePollJitter:            0,
 		QueueResilientPollInterval: time.Second,
 	}
-	cfg.DisableMTLS = true
 	cfg.ListenProto = "tcp"
 	if cfg.Listen == "" {
 		cfg.Listen = "127.0.0.1:0"
@@ -190,13 +189,13 @@ func startServer(t testing.TB, cfg lockd.Config) *lockdclient.Client {
 		lockd.WithTestListener("tcp", "127.0.0.1:0"),
 		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
-			lockdclient.WithDisableMTLS(true),
 			lockdclient.WithHTTPTimeout(90*time.Second),
 			lockdclient.WithKeepAliveTimeout(90*time.Second),
 			lockdclient.WithCloseTimeout(90*time.Second),
 			lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 		),
 	}
+	options = append(options, cryptotest.SharedMTLSOptions(t)...)
 	ts := lockd.StartTestServer(t, options...)
 	if ts.Client != nil {
 		return ts.Client

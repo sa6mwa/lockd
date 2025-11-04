@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -27,11 +29,29 @@ import (
 	shutdowntest "pkt.systems/lockd/integration/internal/shutdowntest"
 	testlog "pkt.systems/lockd/integration/internal/testlog"
 	"pkt.systems/lockd/internal/diagnostics/storagecheck"
+	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/s3"
 	"pkt.systems/lockd/internal/uuidv7"
 	"pkt.systems/pslog"
 )
+
+func retryableTransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) || strings.Contains(err.Error(), "unexpected EOF") {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return netErr.Timeout() || netErr.Temporary()
+	}
+	return false
+}
 
 func TestMinioStoreVerification(t *testing.T) {
 	cfg := loadMinioConfig(t)
@@ -58,7 +78,11 @@ func TestMinioShutdownDrainingBlocksAcquire(t *testing.T) {
 	}()
 	payload, _ := json.Marshal(api.AcquireRequest{Key: "minio-drain-wait", Owner: "drain-tester", TTLSeconds: 5})
 	url := ts.URL() + "/v1/acquire"
-	result := shutdowntest.WaitForShutdownDrainingAcquire(t, url, payload)
+	httpClient, err := ts.NewHTTPClient()
+	if err != nil {
+		t.Fatalf("http client: %v", err)
+	}
+	result := shutdowntest.WaitForShutdownDrainingAcquireWithClient(t, httpClient, url, payload)
 	if result.Response.ErrorCode != "shutdown_draining" {
 		t.Fatalf("expected shutdown_draining error, got %+v", result.Response)
 	}
@@ -263,7 +287,9 @@ func TestMinioAcquireForUpdateCallbackSingleServer(t *testing.T) {
 		}
 		var snapshot map[string]any
 		if err := af.State.Decode(&snapshot); err != nil {
-			return fmt.Errorf("decode snapshot: %w", err)
+			if loadErr := af.Load(handlerCtx, &snapshot); loadErr != nil {
+				return fmt.Errorf("decode snapshot: %w", errors.Join(err, loadErr))
+			}
 		}
 		if snapshot["payload"] != "single-server" {
 			return fmt.Errorf("unexpected payload: %+v", snapshot)
@@ -277,8 +303,18 @@ func TestMinioAcquireForUpdateCallbackSingleServer(t *testing.T) {
 			"count":   count + 1,
 			"owner":   "reader-single",
 		}
-		return af.Save(handlerCtx, updated)
-	})
+		var saveErr error
+		for attempt := 0; attempt < 3; attempt++ {
+			if saveErr = af.Save(handlerCtx, updated); saveErr == nil {
+				return nil
+			}
+			if !retryableTransportError(saveErr) {
+				return fmt.Errorf("save snapshot: %w", saveErr)
+			}
+			time.Sleep(50 * time.Millisecond * time.Duration(attempt+1))
+		}
+		return fmt.Errorf("save snapshot: %w", saveErr)
+	}, lockdclient.WithAcquireFailureRetries(3))
 	watchdog.Stop()
 	if err != nil {
 		t.Fatalf("acquire-for-update callback: %v", err)
@@ -585,15 +621,25 @@ func TestMinioAcquireForUpdateCallbackFailover(t *testing.T) {
 	}
 
 	clientLogger, clientLogs := testlog.NewRecorder(t, pslog.TraceLevel)
-	failoverClient, err := lockdclient.NewWithEndpoints(
-		[]string{primary.URL(), backup.URL()},
-		lockdclient.WithDisableMTLS(true),
-		lockdclient.WithHTTPTimeout(90*time.Second),
-		lockdclient.WithCloseTimeout(90*time.Second),
-		lockdclient.WithKeepAliveTimeout(90*time.Second),
+	clientOptions := []lockdclient.Option{
+		lockdclient.WithHTTPTimeout(90 * time.Second),
+		lockdclient.WithCloseTimeout(90 * time.Second),
+		lockdclient.WithKeepAliveTimeout(90 * time.Second),
 		lockdclient.WithFailureRetries(5),
 		lockdclient.WithEndpointShuffle(false),
 		lockdclient.WithLogger(clientLogger),
+	}
+	if primary.Config.MTLSEnabled() {
+		creds := primary.TestMTLSCredentials()
+		if !creds.Valid() {
+			t.Fatalf("minio failover: missing MTLS credentials")
+		}
+		httpClient := cryptotest.RequireMTLSHTTPClient(t, creds)
+		clientOptions = append(clientOptions, lockdclient.WithHTTPClient(httpClient))
+	}
+	failoverClient, err := lockdclient.NewWithEndpoints(
+		[]string{primary.URL(), backup.URL()},
+		clientOptions...,
 	)
 	if err != nil {
 		t.Fatalf("failover client: %v", err)
@@ -762,15 +808,25 @@ func TestMinioRemoveStateFailover(t *testing.T) {
 	releaseLease(t, ctx, seedClient, key, seedLease.LeaseID)
 
 	clientLogger, clientLogs := testlog.NewRecorder(t, pslog.TraceLevel)
-	failoverClient, err := lockdclient.NewWithEndpoints(
-		[]string{primary.URL(), backup.URL()},
-		lockdclient.WithDisableMTLS(true),
-		lockdclient.WithHTTPTimeout(90*time.Second),
-		lockdclient.WithCloseTimeout(90*time.Second),
-		lockdclient.WithKeepAliveTimeout(90*time.Second),
+	clientOptions := []lockdclient.Option{
+		lockdclient.WithHTTPTimeout(90 * time.Second),
+		lockdclient.WithCloseTimeout(90 * time.Second),
+		lockdclient.WithKeepAliveTimeout(90 * time.Second),
 		lockdclient.WithFailureRetries(5),
 		lockdclient.WithEndpointShuffle(false),
 		lockdclient.WithLogger(clientLogger),
+	}
+	if primary.Config.MTLSEnabled() {
+		creds := primary.TestMTLSCredentials()
+		if !creds.Valid() {
+			t.Fatalf("minio failover: missing MTLS credentials")
+		}
+		httpClient := cryptotest.RequireMTLSHTTPClient(t, creds)
+		clientOptions = append(clientOptions, lockdclient.WithHTTPClient(httpClient))
+	}
+	failoverClient, err := lockdclient.NewWithEndpoints(
+		[]string{primary.URL(), backup.URL()},
+		clientOptions...,
 	)
 	if err != nil {
 		t.Fatalf("failover client: %v", err)
@@ -931,10 +987,6 @@ func loadMinioConfig(tb testing.TB) lockd.Config {
 		SweeperInterval: time.Second,
 	}
 	cryptotest.MaybeEnableStorageEncryption(tb, &cfg)
-
-	if err := cfg.Validate(); err != nil {
-		tb.Fatalf("config validation: %v", err)
-	}
 	return cfg
 }
 
@@ -971,14 +1023,16 @@ func ensureMinioBucket(tb testing.TB, cfg lockd.Config) {
 }
 
 func ensureStoreReady(tb testing.TB, ctx context.Context, cfg lockd.Config) {
-	resetMinioBucketForCrypto(tb, cfg)
-	res, err := storagecheck.VerifyStore(ctx, cfg)
-	if err != nil {
-		tb.Fatalf("verify store: %v", err)
-	}
-	if !res.Passed() {
-		tb.Fatalf("store verification failed: %+v", res)
-	}
+	WithMinioStorageLock(tb, func() {
+		ResetMinioBucketForCrypto(tb, cfg)
+		res, err := storagecheck.VerifyStore(ctx, cfg)
+		if err != nil {
+			tb.Fatalf("verify store: %v", err)
+		}
+		if !res.Passed() {
+			tb.Fatalf("store verification failed: %+v", res)
+		}
+	})
 }
 
 func startLockdServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client {
@@ -986,7 +1040,6 @@ func startLockdServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client {
 
 	cfg.Listen = "127.0.0.1:0"
 	cfg.ListenProto = "tcp"
-	cfg.DisableMTLS = true
 	cfg.JSONMaxBytes = 100 << 20
 	cfg.DefaultTTL = 30 * time.Second
 	cfg.MaxTTL = 2 * time.Minute
@@ -1016,6 +1069,7 @@ func startLockdServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client {
 		loggerOption,
 		lockd.WithTestClientOptions(clientOpts...),
 	}
+	options = append(options, cryptotest.SharedMTLSOptions(tb)...)
 
 	ts := lockd.StartTestServer(tb, options...)
 	return ts.Client
@@ -1024,7 +1078,6 @@ func startLockdServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client {
 func startMinioTestServer(tb testing.TB, cfg lockd.Config, opts ...lockd.TestServerOption) *lockd.TestServer {
 	tb.Helper()
 	cfgCopy := cfg
-	cfgCopy.DisableMTLS = true
 	if cfgCopy.JSONMaxBytes == 0 {
 		cfgCopy.JSONMaxBytes = 100 << 20
 	}
@@ -1058,9 +1111,19 @@ func startMinioTestServer(tb testing.TB, cfg lockd.Config, opts ...lockd.TestSer
 			lockdclient.WithHTTPTimeout(2*time.Minute),
 			lockdclient.WithCloseTimeout(2*time.Minute),
 			lockdclient.WithKeepAliveTimeout(2*time.Minute),
+			lockdclient.WithFailureRetries(5),
 			lockdclient.WithLogger(lockd.NewTestingLogger(tb, pslog.TraceLevel)),
 		),
+		lockd.WithTestCloseDefaults(
+			lockd.WithDrainLeases(-1),
+			lockd.WithShutdownTimeout(10*time.Second),
+		),
 	}
+	var sharedCreds lockd.TestMTLSCredentials
+	if cryptotest.TestMTLSEnabled() {
+		sharedCreds = cryptotest.SharedMTLSCredentials(tb)
+	}
+	options = append(options, cryptotest.SharedMTLSOptions(tb, sharedCreds)...)
 	options = append(options, opts...)
 	return lockd.StartTestServer(tb, options...)
 }
@@ -1074,11 +1137,15 @@ func directClient(tb testing.TB, ts *lockd.TestServer) *lockdclient.Client {
 	if addr == nil {
 		tb.Fatalf("listener not initialized")
 	}
-	baseURL := "http://" + addr.String()
-	cli, err := lockdclient.New(baseURL,
-		lockdclient.WithDisableMTLS(true),
+	scheme := "http"
+	if ts.Config.MTLSEnabled() {
+		scheme = "https"
+	}
+	endpoint := fmt.Sprintf("%s://%s", scheme, addr.String())
+	cli, err := ts.NewEndpointsClient([]string{endpoint},
 		lockdclient.WithLogger(lockd.NewTestingLogger(tb, pslog.TraceLevel)),
 		lockdclient.WithHTTPTimeout(30*time.Second),
+		lockdclient.WithEndpointShuffle(false),
 	)
 	if err != nil {
 		tb.Fatalf("direct client: %v", err)
@@ -1116,7 +1183,7 @@ func minioTestLoggerOption(tb testing.TB) lockd.TestServerOption {
 	}
 	tb.Cleanup(func() { _ = file.Close() })
 
-	logger := pslog.NewStructured(file).With("app", "lockd").With("sys", "bench.minio.harness")
+	logger := loggingutil.WithSubsystem(pslog.NewStructured(file).With("app", "lockd"), "bench.minio.harness")
 	if level, ok := pslog.ParseLevel(levelStr); ok {
 		logger = logger.LogLevel(level)
 	} else {
@@ -1188,48 +1255,5 @@ func cleanupMinio(tb testing.TB, cfg lockd.Config, key string) {
 	}
 	if err := store.DeleteMeta(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 		tb.Logf("delete meta failed: %v", err)
-	}
-}
-
-func resetMinioBucketForCrypto(tb testing.TB, cfg lockd.Config) {
-	if os.Getenv(cryptotest.EnvVar) != "1" {
-		return
-	}
-	minioCfg, _, err := lockd.BuildGenericS3Config(cfg)
-	if err != nil {
-		tb.Fatalf("build s3 config: %v", err)
-	}
-	store, err := s3.New(minioCfg)
-	if err != nil {
-		tb.Fatalf("new minio store: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	client := store.Client()
-	listPrefix := strings.Trim(minioCfg.Prefix, "/")
-	listOpts := minio.ListObjectsOptions{Recursive: true}
-	if listPrefix != "" {
-		listOpts.Prefix = listPrefix
-	}
-	for obj := range client.ListObjects(ctx, minioCfg.Bucket, listOpts) {
-		if obj.Err != nil {
-			tb.Logf("list objects error: %v", obj.Err)
-			continue
-		}
-		if err := client.RemoveObject(ctx, minioCfg.Bucket, obj.Key, minio.RemoveObjectOptions{}); err != nil {
-			tb.Logf("remove object %q: %v", obj.Key, err)
-		}
-	}
-	if keys, err := store.ListMetaKeys(ctx); err == nil {
-		for _, key := range keys {
-			if err := store.RemoveState(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
-				tb.Logf("cleanup state %q: %v", key, err)
-			}
-			if err := store.DeleteMeta(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
-				tb.Logf("cleanup meta %q: %v", key, err)
-			}
-		}
-	} else {
-		tb.Logf("list meta keys: %v", err)
 	}
 }

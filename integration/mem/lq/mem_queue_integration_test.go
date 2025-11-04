@@ -416,7 +416,6 @@ func buildMemQueueConfig(t testing.TB, queueWatch bool) lockd.Config {
 	t.Helper()
 	cfg := lockd.Config{
 		Store:                      "mem://",
-		DisableMTLS:                true,
 		ListenProto:                "tcp",
 		Listen:                     "127.0.0.1:0",
 		DefaultTTL:                 30 * time.Second,
@@ -451,9 +450,6 @@ func buildMemQueueConfig(t testing.TB, queueWatch bool) lockd.Config {
 	cfg.QRFLoadSoftLimitMultiplier = 1.5
 	cfg.QRFLoadHardLimitMultiplier = 3
 	cryptotest.MaybeEnableStorageEncryption(t, &cfg)
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("config validation failed: %v", err)
-	}
 	return cfg
 }
 
@@ -719,8 +715,12 @@ func runMemQueueMultiServerRouting(t *testing.T, mode memQueueMode) {
 	cfg := buildMemQueueConfig(t, mode.queueWatch)
 	backend := memorybackend.New()
 
-	serverA := startMemQueueServerWithBackend(t, cfg, backend)
-	serverB := startMemQueueServerWithBackend(t, cfg, backend)
+	var sharedCreds lockd.TestMTLSCredentials
+	if cryptotest.TestMTLSEnabled() {
+		sharedCreds = cryptotest.SharedMTLSCredentials(t)
+	}
+	serverA := startMemQueueServerWithBackend(t, cfg, backend, cryptotest.SharedMTLSOptions(t, sharedCreds)...)
+	serverB := startMemQueueServerWithBackend(t, cfg, backend, cryptotest.SharedMTLSOptions(t, sharedCreds)...)
 
 	queue := queuetestutil.QueueName("mem-routing")
 	payload := []byte("shared-backend")
@@ -749,18 +749,26 @@ func runMemQueueMultiServerFailoverClient(t *testing.T, mode memQueueMode) {
 	backend := memorybackend.New()
 
 	serverA := startMemQueueServerWithBackend(t, cfg, backend)
-	serverB := startMemQueueServerWithBackend(t, cfg, backend)
+	creds := serverA.TestMTLSCredentials()
+	serverB := startMemQueueServerWithBackend(t, cfg, backend, cryptotest.SharedMTLSOptions(t, creds)...)
 
 	queue := queuetestutil.QueueName("mem-failover")
 	queuetestutil.MustEnqueueBytes(t, serverA.Client, queue, []byte("failover-payload"))
 
 	endpoints := []string{serverA.URL(), serverB.URL()}
 	clientCapture := queuetestutil.NewLogCapture(t)
-	failoverClient, err := lockdclient.NewWithEndpoints(endpoints,
-		lockdclient.WithDisableMTLS(true),
+	failoverOpts := []lockdclient.Option{
 		lockdclient.WithEndpointShuffle(false),
 		lockdclient.WithLogger(clientCapture.Logger()),
-	)
+	}
+	if cryptotest.TestMTLSEnabled() {
+		if !creds.Valid() {
+			t.Fatalf("mem queue failover: missing MTLS credentials")
+		}
+		httpClient := cryptotest.RequireMTLSHTTPClient(t, creds)
+		failoverOpts = append(failoverOpts, lockdclient.WithHTTPClient(httpClient))
+	}
+	failoverClient, err := lockdclient.NewWithEndpoints(endpoints, failoverOpts...)
 	if err != nil {
 		t.Fatalf("new failover client: %v", err)
 	}
@@ -1010,7 +1018,11 @@ func runMemQueueShutdownDrainingSubscribeWithState(t *testing.T, mode memQueueMo
 	}()
 	payload, _ := json.Marshal(api.DequeueRequest{Queue: "drain-queue", Owner: "worker-1", PageSize: 1})
 	url := ts.URL() + "/v1/queue/subscribe-with-state"
-	result := shutdowntest.WaitForShutdownDrainingAcquire(t, url, payload)
+	httpClient, err := ts.NewHTTPClient()
+	if err != nil {
+		t.Fatalf("http client: %v", err)
+	}
+	result := shutdowntest.WaitForShutdownDrainingAcquireWithClient(t, httpClient, url, payload)
 	if result.Response.ErrorCode != "shutdown_draining" {
 		t.Fatalf("expected shutdown_draining error, got %+v", result.Response)
 	}
@@ -1037,7 +1049,7 @@ func startMemQueueServerWithCapture(t testing.TB, cfg lockd.Config) (*lockd.Test
 
 func startMemQueueServer(t testing.TB, cfg lockd.Config) *lockd.TestServer {
 	t.Helper()
-	return lockd.StartTestServer(t,
+	options := []lockd.TestServerOption{
 		lockd.WithTestConfig(cfg),
 		lockd.WithTestLogger(loggingutil.NoopLogger()),
 		lockd.WithTestClientOptions(
@@ -1045,14 +1057,15 @@ func startMemQueueServer(t testing.TB, cfg lockd.Config) *lockd.TestServer {
 			lockdclient.WithHTTPTimeout(30*time.Second),
 			lockdclient.WithKeepAliveTimeout(30*time.Second),
 			lockdclient.WithCloseTimeout(30*time.Second),
-			lockdclient.WithDisableMTLS(true),
 		),
-	)
+	}
+	options = append(options, cryptotest.SharedMTLSOptions(t)...)
+	return lockd.StartTestServer(t, options...)
 }
 
-func startMemQueueServerWithBackend(t testing.TB, cfg lockd.Config, backend *memorybackend.Store) *lockd.TestServer {
+func startMemQueueServerWithBackend(t testing.TB, cfg lockd.Config, backend *memorybackend.Store, extra ...lockd.TestServerOption) *lockd.TestServer {
 	t.Helper()
-	return lockd.StartTestServer(t,
+	options := []lockd.TestServerOption{
 		lockd.WithTestConfig(cfg),
 		lockd.WithTestBackend(backend),
 		lockd.WithTestLogger(loggingutil.NoopLogger()),
@@ -1061,9 +1074,11 @@ func startMemQueueServerWithBackend(t testing.TB, cfg lockd.Config, backend *mem
 			lockdclient.WithHTTPTimeout(30*time.Second),
 			lockdclient.WithKeepAliveTimeout(30*time.Second),
 			lockdclient.WithCloseTimeout(30*time.Second),
-			lockdclient.WithDisableMTLS(true),
 		),
-	)
+	}
+	options = append(options, extra...)
+	options = append(options, cryptotest.SharedMTLSOptions(t)...)
+	return lockd.StartTestServer(t, options...)
 }
 
 func distributeQuota(total, workers int) []int {

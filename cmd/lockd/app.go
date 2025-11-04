@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"pkt.systems/lockd"
+	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/pslog"
 )
 
@@ -32,7 +33,7 @@ func submain(ctx context.Context) int {
 	if err := cmd.ExecuteContext(ctx); err != nil {
 		if err != context.Canceled {
 			if targetCmd == cmd {
-				baseLogger.With("sys", "cli.root").Error("command failed", "error", err)
+				loggingutil.WithSubsystem(baseLogger, "cli.root").Error("command failed", "error", err)
 			} else {
 				fmt.Fprintf(os.Stderr, "%s\n", err)
 			}
@@ -133,7 +134,7 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 `,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger := baseLogger
-			cliLogger := logger.With("sys", "cli.root")
+			cliLogger := loggingutil.WithSubsystem(logger, "cli.root")
 			ctx := cmd.Context()
 			cmd.SilenceUsage = true
 
@@ -153,7 +154,7 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 			level, ok := pslog.ParseLevel(logLevel)
 			if ok {
 				logger = logger.LogLevel(level)
-				cliLogger = logger.With("sys", "cli.root")
+				cliLogger = loggingutil.WithSubsystem(logger, "cli.root")
 			}
 			cliLogger.Info("starting lockd", "store", cfg.Store, "listen", cfg.Listen, "mtls", !cfg.DisableMTLS)
 
@@ -287,7 +288,7 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 		bindFlag(name)
 	}
 
-	cmd.AddCommand(newVerifyCommand(baseLogger.With("sys", "cli.verify")))
+	cmd.AddCommand(newVerifyCommand(loggingutil.WithSubsystem(baseLogger, "cli.verify")))
 	cmd.AddCommand(newAuthCommand())
 	cmd.AddCommand(newClientCommand())
 	cmd.AddCommand(newConfigCommand())

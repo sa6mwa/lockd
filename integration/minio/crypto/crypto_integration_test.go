@@ -18,6 +18,7 @@ import (
 	api "pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/integration/internal/cryptotest"
+	miniointegration "pkt.systems/lockd/integration/minio"
 	queuetestutil "pkt.systems/lockd/integration/queue/testutil"
 	"pkt.systems/lockd/internal/diagnostics/storagecheck"
 	"pkt.systems/lockd/internal/storage"
@@ -163,7 +164,6 @@ func buildMinioConfig(t testing.TB) lockd.Config {
 		QueuePollJitter:            0,
 		QueueResilientPollInterval: time.Second,
 	}
-	cfg.DisableMTLS = true
 	cfg.ListenProto = "tcp"
 	if cfg.Listen == "" {
 		cfg.Listen = "127.0.0.1:0"
@@ -258,13 +258,16 @@ func cleanupMinioQueue(tb testing.TB, cfg lockd.Config, queue string) {
 
 func ensureStoreReady(tb testing.TB, ctx context.Context, cfg lockd.Config) {
 	tb.Helper()
-	res, err := storagecheck.VerifyStore(ctx, cfg)
-	if err != nil {
-		tb.Fatalf("verify store: %v", err)
-	}
-	if !res.Passed() {
-		tb.Fatalf("store verification failed: %+v", res)
-	}
+	miniointegration.WithMinioStorageLock(tb, func() {
+		miniointegration.ResetMinioBucketForCrypto(tb, cfg)
+		res, err := storagecheck.VerifyStore(ctx, cfg)
+		if err != nil {
+			tb.Fatalf("verify store: %v", err)
+		}
+		if !res.Passed() {
+			tb.Fatalf("store verification failed: %+v", res)
+		}
+	})
 }
 
 func startMinioServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client {
@@ -274,13 +277,13 @@ func startMinioServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client {
 		lockd.WithTestListener("tcp", "127.0.0.1:0"),
 		lockd.WithTestLoggerFromTB(tb, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
-			lockdclient.WithDisableMTLS(true),
 			lockdclient.WithHTTPTimeout(45*time.Second),
 			lockdclient.WithKeepAliveTimeout(45*time.Second),
 			lockdclient.WithCloseTimeout(45*time.Second),
 			lockdclient.WithLogger(lockd.NewTestingLogger(tb, pslog.TraceLevel)),
 		),
 	}
+	options = append(options, cryptotest.SharedMTLSOptions(tb)...)
 	ts := lockd.StartTestServer(tb, options...)
 	if ts.Client != nil {
 		return ts.Client

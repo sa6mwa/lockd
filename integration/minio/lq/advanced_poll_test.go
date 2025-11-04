@@ -14,6 +14,7 @@ import (
 	"time"
 
 	lockdclient "pkt.systems/lockd/client"
+	"pkt.systems/lockd/integration/internal/cryptotest"
 	queuetestutil "pkt.systems/lockd/integration/queue/testutil"
 	"pkt.systems/lockd/internal/qrf"
 	"pkt.systems/pslog"
@@ -237,7 +238,9 @@ func runMinioQueueMultiServerRouting(t *testing.T) {
 	})
 
 	serverA := startMinioQueueServer(t, cfg)
-	serverB := startMinioQueueServer(t, cfg)
+	creds := serverA.TestMTLSCredentials()
+	shared := cryptotest.SharedMTLSOptions(t, creds)
+	serverB := startMinioQueueServer(t, cfg, shared...)
 
 	queue := queuetestutil.QueueName("minio-routing")
 	payload := []byte("shared-minio-backend")
@@ -270,18 +273,24 @@ func runMinioQueueMultiServerFailoverClient(t *testing.T) {
 	})
 
 	serverA := startMinioQueueServer(t, cfg)
-	serverB := startMinioQueueServer(t, cfg)
+	creds := serverA.TestMTLSCredentials()
+	sharedOpts := cryptotest.SharedMTLSOptions(t, creds)
+	serverB := startMinioQueueServer(t, cfg, sharedOpts...)
 
 	queue := queuetestutil.QueueName("minio-failover")
 	queuetestutil.MustEnqueueBytes(t, serverA.Client, queue, []byte("failover-payload"))
 
 	endpoints := []string{serverA.URL(), serverB.URL()}
 	capture := queuetestutil.NewLogCapture(t)
-	failoverClient, err := lockdclient.NewWithEndpoints(endpoints,
-		lockdclient.WithDisableMTLS(true),
+	clientOptions := []lockdclient.Option{
 		lockdclient.WithEndpointShuffle(false),
 		lockdclient.WithLogger(capture.Logger()),
-	)
+	}
+	if cryptotest.TestMTLSEnabled() {
+		httpClient := cryptotest.RequireMTLSHTTPClient(t, creds)
+		clientOptions = append(clientOptions, lockdclient.WithHTTPClient(httpClient))
+	}
+	failoverClient, err := lockdclient.NewWithEndpoints(endpoints, clientOptions...)
 	if err != nil {
 		t.Fatalf("new failover client: %v", err)
 	}

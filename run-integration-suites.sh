@@ -4,14 +4,17 @@
 set -uo pipefail
 
 crypto_enabled=1
+mtls_enabled=1
+
 go_test_timeout=${LOCKD_GO_TEST_TIMEOUT:-2m}
 
 print_usage() {
   cat <<'USAGE'
-Usage: run-integration-suites.sh [--disable-crypto] [suite ...]
+Usage: run-integration-suites.sh [--disable-crypto] [--disable-mtls] [suite ...]
 
 Options:
   --disable-crypto   Run suites with LOCKD_TEST_STORAGE_ENCRYPTION=0 (default is 1).
+  --disable-mtls     Run suites with LOCKD_TEST_WITH_MTLS=0 (default is 1).
 USAGE
 }
 
@@ -19,6 +22,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --disable-crypto)
       crypto_enabled=0
+      shift
+      ;;
+    --disable-mtls)
+      mtls_enabled=0
       shift
       ;;
     --help|-h)
@@ -87,8 +94,11 @@ if [[ ${#SUITE_ARGS[@]} -eq 0 || ${SUITE_ARGS[0]} == "list" ]]; then
 fi
 
 SUITES_TO_RUN=()
+bail_on_fail=0
+
 if [[ ${SUITE_ARGS[0]:-} == "all" ]]; then
   SUITES_TO_RUN=("${SUITE_NAMES[@]}")
+  bail_on_fail=1
   if [[ ${#SUITE_ARGS[@]} -gt 1 ]]; then
     SUITES_TO_RUN+=("${SUITE_ARGS[@]:1}")
   fi
@@ -100,12 +110,20 @@ LOG_DIR="integration-logs"
 mkdir -p "$LOG_DIR"
 
 export LOCKD_TEST_STORAGE_ENCRYPTION=$crypto_enabled
+export LOCKD_TEST_WITH_MTLS=$mtls_enabled
 if [[ $crypto_enabled -eq 1 ]]; then
   echo "LOCKD_TEST_STORAGE_ENCRYPTION=1 (encryption enabled)"
 else
   echo "LOCKD_TEST_STORAGE_ENCRYPTION=0 (encryption disabled)"
 fi
+if [[ $mtls_enabled -eq 1 ]]; then
+  echo "LOCKD_TEST_WITH_MTLS=1 (mTLS enabled)"
+else
+  echo "LOCKD_TEST_WITH_MTLS=0 (mTLS disabled)"
+fi
+echo
 
+declare -a RUN_SUITES=()
 declare -A SUITE_STATUS
 EXIT_CODE=0
 
@@ -130,12 +148,17 @@ for suite in "${SUITES_TO_RUN[@]}"; do
     cmd_string="go test -timeout $go_test_timeout -v -tags '$tags' -count=1 ./integration/..."
   fi
   echo "Command: $cmd_string"
-  if bash -c "$cmd_string" 2>&1 | tee "$log_file"; then
+  cmd_goflags="${GOFLAGS:-}"
+  if [[ $cmd_goflags != *"-p="* ]]; then
+    cmd_goflags="${cmd_goflags:+$cmd_goflags }-p=1"
+  fi
+  if GOFLAGS="$cmd_goflags" bash -c "$cmd_string" 2>&1 | tee "$log_file"; then
     SUITE_STATUS[$suite]=0
   else
     SUITE_STATUS[$suite]=1
     EXIT_CODE=1
   fi
+  RUN_SUITES+=("$suite")
   echo "Log: $log_file"
   echo
   # shellcheck disable=SC2154
@@ -143,10 +166,15 @@ for suite in "${SUITES_TO_RUN[@]}"; do
     eval "$RESET_AFTER_SUITE"
   fi
   printf '\n'
+
+  if [[ $bail_on_fail -eq 1 && ${SUITE_STATUS[$suite]} -ne 0 ]]; then
+    echo "Suite $suite failed; aborting remaining suites."
+    break
+  fi
 done
 
 echo "Summary:"
-for suite in "${SUITES_TO_RUN[@]}"; do
+for suite in "${RUN_SUITES[@]}"; do
   status=${SUITE_STATUS[$suite]:-1}
   if [[ $status -eq 0 ]]; then
     printf "  %-15s OK\n" "$suite"

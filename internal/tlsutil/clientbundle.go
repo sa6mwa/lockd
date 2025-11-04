@@ -27,6 +27,11 @@ func LoadClientBundle(path string) (*ClientBundle, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read client bundle: %w", err)
 	}
+	return LoadClientBundleFromBytes(data)
+}
+
+// LoadClientBundleFromBytes parses a client bundle from the provided byte slice.
+func LoadClientBundleFromBytes(data []byte) (*ClientBundle, error) {
 	var (
 		caCerts       []*x509.Certificate
 		caPool        = x509.NewCertPool()

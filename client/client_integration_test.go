@@ -40,7 +40,6 @@ func TestAcquireForUpdateCallbackSingleServer(t *testing.T) {
 		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
 			client.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
-			client.WithAcquireFailureRetries(5),
 			client.WithHTTPTimeout(300*time.Millisecond),
 		),
 	)
@@ -56,11 +55,26 @@ func TestAcquireForUpdateCallbackSingleServer(t *testing.T) {
 	if directAddr == nil {
 		t.Fatalf("server missing listener address")
 	}
-	directURL := "http://" + directAddr.String()
-	seedClient, err := client.New(directURL,
-		client.WithDisableMTLS(true),
+	scheme := "http"
+	seedOptions := []client.Option{
 		client.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
-	)
+	}
+	if ts.Config.MTLSEnabled() {
+		scheme = "https"
+		creds := ts.TestMTLSCredentials()
+		if !creds.Valid() {
+			t.Fatalf("test server missing MTLS credentials")
+		}
+		httpClient, err := creds.NewHTTPClient()
+		if err != nil {
+			t.Fatalf("seed http client: %v", err)
+		}
+		seedOptions = append(seedOptions, client.WithHTTPClient(httpClient))
+	} else {
+		seedOptions = append(seedOptions, client.WithDisableMTLS(true))
+	}
+	directURL := scheme + "://" + directAddr.String()
+	seedClient, err := client.New(directURL, seedOptions...)
 	if err != nil {
 		t.Fatalf("seed client: %v", err)
 	}
@@ -105,7 +119,7 @@ func TestAcquireForUpdateCallbackSingleServer(t *testing.T) {
 			return fmt.Errorf("unexpected snapshot value %d", snapshot["value"])
 		}
 		return af.Save(handlerCtx, map[string]int{"value": 99})
-	})
+	}, client.WithAcquireFailureRetries(5))
 	watchdog.Stop()
 	if err != nil {
 		t.Fatalf("acquire-for-update callback: %v", err)
@@ -164,19 +178,23 @@ func TestAcquireForUpdateCallbackFailoverMultiServer(t *testing.T) {
 		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
 			client.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
-			client.WithAcquireFailureRetries(5),
 			client.WithHTTPTimeout(300*time.Millisecond),
 		),
 	)
-	backup := lockd.StartTestServer(t,
+
+	primaryCreds := primary.TestMTLSCredentials()
+	backupOpts := []lockd.TestServerOption{
 		lockd.WithTestBackend(store),
 		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
 			client.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
-			client.WithAcquireFailureRetries(5),
 			client.WithHTTPTimeout(300*time.Millisecond),
 		),
-	)
+	}
+	if primaryCreds.Valid() {
+		backupOpts = append(backupOpts, lockd.WithTestMTLSCredentials(primaryCreds))
+	}
+	backup := lockd.StartTestServer(t, backupOpts...)
 
 	seedCli := backup.Client
 	if seedCli == nil {
@@ -211,12 +229,23 @@ func TestAcquireForUpdateCallbackFailoverMultiServer(t *testing.T) {
 	seedCancel()
 
 	endpoints := []string{primary.URL(), backup.URL()}
-	failoverClient, err := client.NewWithEndpoints(endpoints,
-		client.WithDisableMTLS(true),
+	failoverOpts := []client.Option{
 		client.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
-		client.WithAcquireFailureRetries(5),
-		client.WithHTTPTimeout(300*time.Millisecond),
-	)
+		client.WithHTTPTimeout(300 * time.Millisecond),
+	}
+	if primary.Config.MTLSEnabled() {
+		if !primaryCreds.Valid() {
+			t.Fatalf("primary missing MTLS credentials")
+		}
+		httpClient, err := primaryCreds.NewHTTPClient()
+		if err != nil {
+			t.Fatalf("failover http client: %v", err)
+		}
+		failoverOpts = append(failoverOpts, client.WithHTTPClient(httpClient))
+	} else {
+		failoverOpts = append(failoverOpts, client.WithDisableMTLS(true))
+	}
+	failoverClient, err := client.NewWithEndpoints(endpoints, failoverOpts...)
 	if err != nil {
 		t.Fatalf("failover client: %v", err)
 	}
@@ -239,7 +268,7 @@ func TestAcquireForUpdateCallbackFailoverMultiServer(t *testing.T) {
 		}
 		snapshot["value"] = 8
 		return af.Save(handlerCtx, snapshot)
-	})
+	}, client.WithAcquireFailureRetries(5))
 	watchdog.Stop()
 	if err != nil {
 		t.Fatalf("acquire-for-update callback: %v", err)

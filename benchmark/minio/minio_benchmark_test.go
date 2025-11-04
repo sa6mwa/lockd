@@ -413,15 +413,15 @@ func minioBenchLoggerOptions(tb testing.TB) (lockd.TestServerOption, lockdclient
 		tb.Cleanup(func() { _ = os.Remove(logPath) })
 	}
 
-    baseLogger := pslog.NewStructured(writer).With("sys", "bench.minio")
+	baseLogger := loggingutil.WithSubsystem(pslog.NewStructured(writer), "bench.minio")
 	if level, ok := pslog.ParseLevel(levelStr); ok {
 		baseLogger = baseLogger.LogLevel(level)
 	} else {
 		tb.Fatalf("invalid LOCKD_BENCH_LOG_LEVEL %q", levelStr)
 	}
 
-	serverLogger := baseLogger.With("sys", "bench.minio.server").WithLogLevel()
-	clientLogger := baseLogger.With("sys", "bench.minio.client").WithLogLevel()
+	serverLogger := loggingutil.WithSubsystem(baseLogger, "bench.minio.server").WithLogLevel()
+	clientLogger := loggingutil.WithSubsystem(baseLogger, "bench.minio.client").WithLogLevel()
 
 	return lockd.WithTestLogger(serverLogger), lockdclient.WithLogger(clientLogger)
 }

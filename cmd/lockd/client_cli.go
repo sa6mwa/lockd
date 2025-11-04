@@ -22,6 +22,7 @@ import (
 	"pkt.systems/lockd"
 	"pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
+	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/tlsutil"
 	"pkt.systems/pslog"
 )
@@ -273,8 +274,7 @@ func (c *clientCLIConfig) setupLogger() error {
 			writer = f
 		}
 	}
-    logger := pslog.NewStructured(writer).With("sys", "client.cli")
-	logger = logger.LogLevel(level)
+	logger := loggingutil.WithSubsystem(pslog.NewStructured(writer), "client.cli").LogLevel(level)
 	c.logger = logger
 	c.loggerReady = true
 	return nil

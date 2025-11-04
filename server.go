@@ -263,16 +263,22 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 	var err error
 	var bundle *tlsutil.Bundle
 	if cfg.MTLSEnabled() || cfg.StorageEncryptionEnabled() {
-		bundle, err = tlsutil.LoadBundle(cfg.BundlePath, cfg.DenylistPath)
+		bundleSource := cfg.BundlePath
+		if len(cfg.BundlePEM) > 0 {
+			bundle, err = tlsutil.LoadBundleFromBytes(cfg.BundlePEM)
+			bundleSource = "<inline>"
+		} else {
+			bundle, err = tlsutil.LoadBundle(cfg.BundlePath, cfg.DenylistPath)
+		}
 		if err != nil {
 			return nil, err
 		}
 		if cfg.StorageEncryptionEnabled() {
 			if bundle.MetadataRootKey == (keymgmt.RootKey{}) {
-				return nil, fmt.Errorf("config: server bundle %q missing kryptograf root key (reissue with 'lockd auth new server')", cfg.BundlePath)
+				return nil, fmt.Errorf("config: server bundle %s missing kryptograf root key (reissue with 'lockd auth new server')", bundleSource)
 			}
 			if bundle.MetadataDescriptor == (keymgmt.Descriptor{}) {
-				return nil, fmt.Errorf("config: server bundle %q missing metadata descriptor (reissue with 'lockd auth new server')", cfg.BundlePath)
+				return nil, fmt.Errorf("config: server bundle %s missing metadata descriptor (reissue with 'lockd auth new server')", bundleSource)
 			}
 			caID, err := cryptoutil.CACertificateID(bundle.CACertPEM)
 			if err != nil {
@@ -298,15 +304,19 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 	}
 	logger := loggingutil.EnsureLogger(o.Logger)
 	if cfg.StorageEncryptionEnabled() {
-		logger.Info("storage.crypto.envelope enabled", "sys", "storage.crypto.envelope", "enabled", true)
+		cryptoLogger := loggingutil.WithSubsystem(logger, "storage.crypto.envelope")
+		cryptoLogger.Info("storage.crypto.envelope enabled", "enabled", true)
+		snappyLogger := loggingutil.WithSubsystem(logger, "storage.pipeline.snappy.pre_encrypt")
 		if cfg.StorageEncryptionSnappy {
-			logger.Info("storage.pipeline.snappy pre-encrypt enabled", "sys", "storage.pipeline.snappy.pre_encrypt", "enabled", true)
+			snappyLogger.Info("storage.pipeline.snappy pre-encrypt enabled", "enabled", true)
 		} else {
-			logger.Info("storage.pipeline.snappy pre-encrypt disabled", "sys", "storage.pipeline.snappy.pre_encrypt", "enabled", false)
+			snappyLogger.Info("storage.pipeline.snappy pre-encrypt disabled", "enabled", false)
 		}
 	} else {
-		logger.Warn("storage.crypto.envelope disabled; falling back to plaintext at rest", "sys", "storage.crypto.envelope", "impact", "data at rest will be stored in plaintext", "enabled", false)
-		logger.Info("storage.pipeline.snappy pre-encrypt disabled", "sys", "storage.pipeline.snappy.pre_encrypt", "enabled", false, "reason", "requires storage.crypto.envelope")
+		cryptoLogger := loggingutil.WithSubsystem(logger, "storage.crypto.envelope")
+		cryptoLogger.Warn("storage.crypto.envelope disabled; falling back to plaintext at rest", "impact", "data at rest will be stored in plaintext", "enabled", false)
+		snappyLogger := loggingutil.WithSubsystem(logger, "storage.pipeline.snappy.pre_encrypt")
+		snappyLogger.Info("storage.pipeline.snappy pre-encrypt disabled", "enabled", false, "reason", "requires storage.crypto.envelope")
 	}
 	var telemetry *telemetryBundle
 	otlpEndpoint := cfg.OTLPEndpoint
@@ -314,7 +324,7 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 		otlpEndpoint = o.OTLPEndpoint
 	}
 	if otlpEndpoint != "" {
-		telemetry, err = setupTelemetry(context.Background(), otlpEndpoint, logger.With("sys", "observability.telemetry.exporter"))
+		telemetry, err = setupTelemetry(context.Background(), otlpEndpoint, loggingutil.WithSubsystem(logger, "observability.telemetry.exporter"))
 		if err != nil {
 			return nil, err
 		}
@@ -343,7 +353,7 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 		MaxDelay:    cfg.StorageRetryMaxDelay,
 		Multiplier:  cfg.StorageRetryMultiplier,
 	}
-	storageLogger := logger.With("sys", "storage.backend.core")
+	storageLogger := loggingutil.WithSubsystem(logger, "storage.backend.core")
 	backend = loggingbackend.Wrap(backend, storageLogger.With("layer", "backend"), "storage.backend.core")
 	backend = retry.Wrap(backend, storageLogger.With("layer", "retry"), serverClock, retryCfg)
 	jsonUtil, err := selectJSONUtil(cfg.JSONUtil)
@@ -439,7 +449,7 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 			return context.Background()
 		},
 	}
-	httpSrv.ErrorLog = pslog.LogLoggerWithLevel(logger.With("sys", "api.http.server"), pslog.ErrorLevel)
+	httpSrv.ErrorLog = pslog.LogLoggerWithLevel(loggingutil.WithSubsystem(logger, "api.http.server"), pslog.ErrorLevel)
 
 	if cfg.MTLSEnabled() {
 		httpSrv.TLSConfig = buildServerTLS(bundle)
@@ -450,7 +460,7 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 
 	srv := &Server{
 		cfg:              cfg,
-		logger:           logger.With("sys", "server.lifecycle.core"),
+		logger:           loggingutil.WithSubsystem(logger, "server.lifecycle.core"),
 		backend:          backend,
 		handler:          handler,
 		httpSrv:          httpSrv,
@@ -722,7 +732,7 @@ func (s *Server) snapshotActiveLeases(ctx context.Context) (leases []leaseSnapsh
 		return nil, nil
 	}
 	start := s.clock.Now()
-	logger := s.logger.With("sys", "server.shutdown.controller")
+	logger := loggingutil.WithSubsystem(s.logger, "server.shutdown.controller")
 	var totalKeys int
 	defer func() {
 		elapsed := s.clock.Now().Sub(start)
@@ -849,7 +859,7 @@ func (s *Server) performDrain(parentCtx context.Context, policy DrainLeasesPolic
 	startActive := len(leases)
 	summary.ActiveAtStart = startActive
 	remaining := startActive
-	logger := s.logger.With("sys", "server.shutdown.controller")
+	logger := loggingutil.WithSubsystem(s.logger, "server.shutdown.controller")
 	logger.Info("shutdown.drain.begin",
 		"active_leases", startActive,
 		"grace_period", policy.GracePeriod,

@@ -20,17 +20,18 @@ import (
 
 func TestCryptoMemLocks(t *testing.T) {
 	cfg := buildMemConfig(t)
-	ts := lockd.StartTestServer(t,
+	options := []lockd.TestServerOption{
 		lockd.WithTestConfig(cfg),
 		lockd.WithTestLogger(loggingutil.NoopLogger()),
 		lockd.WithTestClientOptions(
-			lockdclient.WithDisableMTLS(true),
 			lockdclient.WithHTTPTimeout(20*time.Second),
 			lockdclient.WithKeepAliveTimeout(20*time.Second),
 			lockdclient.WithCloseTimeout(20*time.Second),
 			lockdclient.WithLogger(loggingutil.NoopLogger()),
 		),
-	)
+	}
+	options = append(options, cryptotest.SharedMTLSOptions(t)...)
+	ts := lockd.StartTestServer(t, options...)
 	cli := ts.Client
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -75,17 +76,18 @@ func TestCryptoMemLocks(t *testing.T) {
 
 func TestCryptoMemQueues(t *testing.T) {
 	cfg := buildMemConfig(t)
-	ts := lockd.StartTestServer(t,
+	options := []lockd.TestServerOption{
 		lockd.WithTestConfig(cfg),
 		lockd.WithTestLogger(loggingutil.NoopLogger()),
 		lockd.WithTestClientOptions(
-			lockdclient.WithDisableMTLS(true),
 			lockdclient.WithHTTPTimeout(20*time.Second),
 			lockdclient.WithKeepAliveTimeout(20*time.Second),
 			lockdclient.WithCloseTimeout(20*time.Second),
 			lockdclient.WithLogger(loggingutil.NoopLogger()),
 		),
-	)
+	}
+	options = append(options, cryptotest.SharedMTLSOptions(t)...)
+	ts := lockd.StartTestServer(t, options...)
 	cli := ts.Client
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -159,7 +161,6 @@ func buildMemConfig(t testing.TB) lockd.Config {
 		Store:       "mem://",
 		ListenProto: "tcp",
 		Listen:      "127.0.0.1:0",
-		DisableMTLS: true,
 	}
 	cfg.MemQueueWatch = true
 	cfg.MemQueueWatchSet = true
@@ -167,9 +168,6 @@ func buildMemConfig(t testing.TB) lockd.Config {
 	cfg.QueuePollJitter = 0
 	cfg.QueueResilientPollInterval = time.Second
 	cryptotest.MaybeEnableStorageEncryption(t, &cfg)
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("config validation failed: %v", err)
-	}
 	return cfg
 }
 

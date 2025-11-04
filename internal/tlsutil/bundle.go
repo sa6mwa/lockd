@@ -46,6 +46,15 @@ func LoadBundle(bundlePath, denylistPath string) (*Bundle, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read bundle: %w", err)
 	}
+	return loadBundleFromData(data, denylistPath)
+}
+
+// LoadBundleFromBytes parses a server bundle from the provided byte slice.
+func LoadBundleFromBytes(data []byte) (*Bundle, error) {
+	return loadBundleFromData(data, "")
+}
+
+func loadBundleFromData(data []byte, denylistPath string) (*Bundle, error) {
 	parsed, err := parseBundle(data)
 	if err != nil {
 		return nil, err

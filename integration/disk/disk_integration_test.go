@@ -28,6 +28,7 @@ import (
 	"pkt.systems/lockd/integration/internal/cryptotest"
 	shutdowntest "pkt.systems/lockd/integration/internal/shutdowntest"
 	testlog "pkt.systems/lockd/integration/internal/testlog"
+	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/disk"
 	"pkt.systems/lockd/internal/uuidv7"
@@ -182,7 +183,11 @@ func TestDiskShutdownDrainingBlocksAcquire(t *testing.T) {
 	}()
 	payload, _ := json.Marshal(api.AcquireRequest{Key: "disk-drain-wait", Owner: "drain-tester", TTLSeconds: 5})
 	url := ts.URL() + "/v1/acquire"
-	result := shutdowntest.WaitForShutdownDrainingAcquire(t, url, payload)
+	httpClient, err := ts.NewHTTPClient()
+	if err != nil {
+		t.Fatalf("http client: %v", err)
+	}
+	result := shutdowntest.WaitForShutdownDrainingAcquireWithClient(t, httpClient, url, payload)
 	if result.Response.ErrorCode != "shutdown_draining" {
 		t.Fatalf("expected shutdown_draining error, got %+v", result.Response)
 	}
@@ -742,7 +747,27 @@ func TestDiskRemoveStateFailoverMultiServer(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 
-	primary := lockd.StartTestServer(t,
+	closeDefaults := lockd.WithTestCloseDefaults(
+		lockd.WithDrainLeases(-1),
+		lockd.WithShutdownTimeout(10*time.Second),
+	)
+	var sharedCreds lockd.TestMTLSCredentials
+	if cryptotest.TestMTLSEnabled() {
+		sharedCreds = cryptotest.SharedMTLSCredentials(t)
+	}
+	primaryOptions := []lockd.TestServerOption{
+		lockd.WithTestBackend(store),
+		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
+		lockd.WithTestClientOptions(
+			lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
+			lockdclient.WithHTTPTimeout(2*time.Second),
+		),
+	}
+	primaryOptions = append(primaryOptions, closeDefaults)
+	primaryOptions = append(primaryOptions, cryptotest.SharedMTLSOptions(t, sharedCreds)...)
+	primary := lockd.StartTestServer(t, primaryOptions...)
+	backupOptions := append([]lockd.TestServerOption{closeDefaults}, cryptotest.SharedMTLSOptions(t, sharedCreds)...)
+	backupOptions = append(backupOptions,
 		lockd.WithTestBackend(store),
 		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
@@ -750,14 +775,7 @@ func TestDiskRemoveStateFailoverMultiServer(t *testing.T) {
 			lockdclient.WithHTTPTimeout(2*time.Second),
 		),
 	)
-	backup := lockd.StartTestServer(t,
-		lockd.WithTestBackend(store),
-		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
-		lockd.WithTestClientOptions(
-			lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
-			lockdclient.WithHTTPTimeout(2*time.Second),
-		),
-	)
+	backup := lockd.StartTestServer(t, backupOptions...)
 
 	key := "disk-remove-failover-" + uuidv7.NewString()
 
@@ -778,13 +796,19 @@ func TestDiskRemoveStateFailoverMultiServer(t *testing.T) {
 	releaseLease(t, ctx, seedLease)
 
 	clientLogger, clientLogs := testlog.NewRecorder(t, pslog.TraceLevel)
-	failoverClient, err := lockdclient.NewWithEndpoints(
-		[]string{primary.URL(), backup.URL()},
-		lockdclient.WithDisableMTLS(true),
-		lockdclient.WithHTTPTimeout(2*time.Second),
+	clientOptions := []lockdclient.Option{
+		lockdclient.WithHTTPTimeout(2 * time.Second),
 		lockdclient.WithFailureRetries(5),
 		lockdclient.WithEndpointShuffle(false),
 		lockdclient.WithLogger(clientLogger),
+	}
+	if cryptotest.TestMTLSEnabled() {
+		httpClient := cryptotest.RequireMTLSHTTPClient(t, sharedCreds)
+		clientOptions = append(clientOptions, lockdclient.WithHTTPClient(httpClient))
+	}
+	failoverClient, err := lockdclient.NewWithEndpoints(
+		[]string{primary.URL(), backup.URL()},
+		clientOptions...,
 	)
 	if err != nil {
 		t.Fatalf("failover client: %v", err)
@@ -833,6 +857,9 @@ func TestDiskRemoveStateFailoverMultiServer(t *testing.T) {
 	}
 	releaseLease(t, ctx, verify)
 
+	if testing.Verbose() {
+		t.Logf("disk remove failover log summary:\n%s", clientLogs.Summary())
+	}
 	assertRemoveFailoverLogs(t, clientLogs, primary.URL(), backup.URL())
 }
 
@@ -1025,7 +1052,7 @@ func TestDiskAcquireForUpdateCallbackSingleServer(t *testing.T) {
 		MaxDisconnects:  1,
 	}
 
-	ts := lockd.StartTestServer(t,
+	serverOpts := []lockd.TestServerOption{
 		lockd.WithTestBackend(store),
 		lockd.WithTestChaos(chaos),
 		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
@@ -1033,7 +1060,9 @@ func TestDiskAcquireForUpdateCallbackSingleServer(t *testing.T) {
 			lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 			lockdclient.WithHTTPTimeout(500*time.Millisecond),
 		),
-	)
+	}
+	serverOpts = append(serverOpts, cryptotest.SharedMTLSOptions(t)...)
+	ts := lockd.StartTestServer(t, serverOpts...)
 
 	proxiedClient := ts.Client
 	if proxiedClient == nil {
@@ -1175,7 +1204,16 @@ func runDiskAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase fail
 		MaxDisconnects:  1,
 	}
 
-	primary := lockd.StartTestServer(t,
+	closeDefaults := lockd.WithTestCloseDefaults(
+		lockd.WithDrainLeases(-1),
+		lockd.WithShutdownTimeout(10*time.Second),
+	)
+
+	var sharedCreds lockd.TestMTLSCredentials
+	if cryptotest.TestMTLSEnabled() {
+		sharedCreds = cryptotest.SharedMTLSCredentials(t)
+	}
+	primaryOptions := []lockd.TestServerOption{
 		lockd.WithTestBackend(store),
 		lockd.WithTestChaos(chaos),
 		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
@@ -1183,8 +1221,12 @@ func runDiskAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase fail
 			lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 			lockdclient.WithHTTPTimeout(time.Second),
 		),
-	)
-	backup := lockd.StartTestServer(t,
+	}
+	primaryOptions = append(primaryOptions, closeDefaults)
+	primaryOptions = append(primaryOptions, cryptotest.SharedMTLSOptions(t, sharedCreds)...)
+	primary := lockd.StartTestServer(t, primaryOptions...)
+	backupOptions := append([]lockd.TestServerOption{closeDefaults}, cryptotest.SharedMTLSOptions(t, sharedCreds)...)
+	backupOptions = append(backupOptions,
 		lockd.WithTestBackend(store),
 		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
@@ -1192,6 +1234,7 @@ func runDiskAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase fail
 			lockdclient.WithHTTPTimeout(time.Second),
 		),
 	)
+	backup := lockd.StartTestServer(t, backupOptions...)
 
 	failoverBlob := strings.Repeat("disk-failover-", 32768)
 	key := fmt.Sprintf("disk-multi-%s-%s", phase.String(), uuidv7.NewString())
@@ -1219,13 +1262,19 @@ func runDiskAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase fail
 	}
 
 	clientLogger, clientLogs := testlog.NewRecorder(t, pslog.TraceLevel)
-	failoverClient, err := lockdclient.NewWithEndpoints(
-		[]string{primary.URL(), backup.URL()},
-		lockdclient.WithDisableMTLS(true),
-		lockdclient.WithHTTPTimeout(2*time.Second),
+	clientOptions := []lockdclient.Option{
+		lockdclient.WithHTTPTimeout(2 * time.Second),
 		lockdclient.WithFailureRetries(5),
 		lockdclient.WithEndpointShuffle(false),
 		lockdclient.WithLogger(clientLogger),
+	}
+	if cryptotest.TestMTLSEnabled() {
+		httpClient := cryptotest.RequireMTLSHTTPClient(t, sharedCreds)
+		clientOptions = append(clientOptions, lockdclient.WithHTTPClient(httpClient))
+	}
+	failoverClient, err := lockdclient.NewWithEndpoints(
+		[]string{primary.URL(), backup.URL()},
+		clientOptions...,
 	)
 	if err != nil {
 		t.Fatalf("failover client: %v", err)
@@ -1645,11 +1694,15 @@ func directDiskClient(t testing.TB, ts *lockd.TestServer) *lockdclient.Client {
 	if addr == nil {
 		t.Fatalf("listener not initialized")
 	}
-	baseURL := "http://" + addr.String()
-	cli, err := lockdclient.New(baseURL,
-		lockdclient.WithDisableMTLS(true),
+	scheme := "http"
+	if ts.Config.MTLSEnabled() {
+		scheme = "https"
+	}
+	endpoint := fmt.Sprintf("%s://%s", scheme, addr.String())
+	cli, err := ts.NewEndpointsClient([]string{endpoint},
 		lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 		lockdclient.WithHTTPTimeout(time.Second),
+		lockdclient.WithEndpointShuffle(false),
 	)
 	if err != nil {
 		t.Fatalf("direct client: %v", err)
@@ -1750,7 +1803,6 @@ func buildDiskConfig(tb testing.TB, root string, retention time.Duration) lockd.
 	storeURL := diskStoreURL(root)
 	cfg := lockd.Config{
 		Store:           storeURL,
-		DisableMTLS:     true,
 		Listen:          "127.0.0.1:0",
 		ListenProto:     "tcp",
 		DefaultTTL:      30 * time.Second,
@@ -1764,9 +1816,6 @@ func buildDiskConfig(tb testing.TB, root string, retention time.Duration) lockd.
 		cfg.BundlePath = bundle.(string)
 	} else if cryptotest.MaybeEnableStorageEncryption(tb, &cfg) && cfg.BundlePath != "" {
 		diskEncryptionBundles.Store(root, cfg.BundlePath)
-	}
-	if err := cfg.Validate(); err != nil {
-		tb.Fatalf("config validation failed: %v", err)
 	}
 	return cfg
 }
@@ -1784,8 +1833,6 @@ func diskStoreURL(root string) string {
 func startDiskServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client {
 	tb.Helper()
 
-	cfg.DisableMTLS = true
-
 	loggerOption := diskTestLoggerOption(tb)
 
 	clientOpts := []lockdclient.Option{
@@ -1801,6 +1848,7 @@ func startDiskServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client {
 		loggerOption,
 		lockd.WithTestClientOptions(clientOpts...),
 	}
+	options = append(options, cryptotest.SharedMTLSOptions(tb)...)
 
 	ts := lockd.StartTestServer(tb, options...)
 	return ts.Client
@@ -1809,8 +1857,6 @@ func startDiskServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client {
 func startDiskTestServer(tb testing.TB, cfg lockd.Config) *lockd.TestServer {
 	tb.Helper()
 
-	cfg.DisableMTLS = true
-
 	loggerOption := diskTestLoggerOption(tb)
 
 	clientOpts := []lockdclient.Option{
@@ -1826,6 +1872,7 @@ func startDiskTestServer(tb testing.TB, cfg lockd.Config) *lockd.TestServer {
 		loggerOption,
 		lockd.WithTestClientOptions(clientOpts...),
 	}
+	options = append(options, cryptotest.SharedMTLSOptions(tb)...)
 
 	return lockd.StartTestServer(tb, options...)
 }
@@ -1850,7 +1897,7 @@ func diskTestLoggerOption(tb testing.TB) lockd.TestServerOption {
 	}
 	tb.Cleanup(func() { _ = file.Close() })
 
-    logger := pslog.NewStructured(file).With("sys", "bench.disk")
+	logger := loggingutil.WithSubsystem(pslog.NewStructured(file), "bench.disk")
 	if level, ok := pslog.ParseLevel(levelStr); ok {
 		logger = logger.LogLevel(level)
 	} else {

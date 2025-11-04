@@ -58,7 +58,11 @@ func TestAWSShutdownDrainingBlocksAcquire(t *testing.T) {
 	}()
 	payload, _ := json.Marshal(api.AcquireRequest{Key: "aws-drain-wait", Owner: "drain-tester", TTLSeconds: 5})
 	url := ts.URL() + "/v1/acquire"
-	result := shutdowntest.WaitForShutdownDrainingAcquire(t, url, payload)
+	httpClient, err := ts.NewHTTPClient()
+	if err != nil {
+		t.Fatalf("http client: %v", err)
+	}
+	result := shutdowntest.WaitForShutdownDrainingAcquireWithClient(t, httpClient, url, payload)
 	if result.Response.ErrorCode != "shutdown_draining" {
 		t.Fatalf("expected shutdown_draining error, got %+v", result.Response)
 	}
@@ -633,15 +637,21 @@ func TestAWSAcquireForUpdateCallbackFailover(t *testing.T) {
 	}
 
 	clientLogger, clientLogs := testlog.NewRecorder(t, pslog.TraceLevel)
-	failoverClient, err := lockdclient.NewWithEndpoints(
-		[]string{primary.URL(), backup.URL()},
-		lockdclient.WithDisableMTLS(true),
-		lockdclient.WithHTTPTimeout(90*time.Second),
-		lockdclient.WithCloseTimeout(90*time.Second),
-		lockdclient.WithKeepAliveTimeout(90*time.Second),
+	clientOptions := []lockdclient.Option{
+		lockdclient.WithHTTPTimeout(90 * time.Second),
+		lockdclient.WithCloseTimeout(90 * time.Second),
+		lockdclient.WithKeepAliveTimeout(90 * time.Second),
 		lockdclient.WithFailureRetries(5),
 		lockdclient.WithEndpointShuffle(false),
 		lockdclient.WithLogger(clientLogger),
+	}
+	if cryptotest.TestMTLSEnabled() {
+		httpClient := cryptotest.RequireMTLSHTTPClient(t, cryptotest.SharedMTLSCredentials(t))
+		clientOptions = append(clientOptions, lockdclient.WithHTTPClient(httpClient))
+	}
+	failoverClient, err := lockdclient.NewWithEndpoints(
+		[]string{primary.URL(), backup.URL()},
+		clientOptions...,
 	)
 	if err != nil {
 		t.Fatalf("failover client: %v", err)
@@ -848,15 +858,22 @@ func TestAWSRemoveStateFailover(t *testing.T) {
 	releaseLease(t, ctx, seedClient, key, seedLease.LeaseID)
 
 	clientLogger, clientLogs := testlog.NewRecorder(t, pslog.TraceLevel)
-	failoverClient, err := lockdclient.NewWithEndpoints(
-		[]string{primary.URL(), backup.URL()},
-		lockdclient.WithDisableMTLS(true),
-		lockdclient.WithHTTPTimeout(90*time.Second),
-		lockdclient.WithCloseTimeout(90*time.Second),
-		lockdclient.WithKeepAliveTimeout(90*time.Second),
+	clientOptions := []lockdclient.Option{
+		lockdclient.WithHTTPTimeout(90 * time.Second),
+		lockdclient.WithCloseTimeout(90 * time.Second),
+		lockdclient.WithKeepAliveTimeout(90 * time.Second),
 		lockdclient.WithFailureRetries(5),
 		lockdclient.WithEndpointShuffle(false),
 		lockdclient.WithLogger(clientLogger),
+	}
+	if cryptotest.TestMTLSEnabled() {
+		creds := cryptotest.SharedMTLSCredentials(t)
+		httpClient := cryptotest.RequireMTLSHTTPClient(t, creds)
+		clientOptions = append(clientOptions, lockdclient.WithHTTPClient(httpClient))
+	}
+	failoverClient, err := lockdclient.NewWithEndpoints(
+		[]string{primary.URL(), backup.URL()},
+		clientOptions...,
 	)
 	if err != nil {
 		t.Fatalf("failover client: %v", err)
@@ -1040,7 +1057,7 @@ func loadAWSConfig(t *testing.T) lockd.Config {
 }
 
 func ensureStoreReady(t *testing.T, ctx context.Context, cfg lockd.Config) {
-	resetAWSBucketForCrypto(t, cfg)
+	ResetAWSBucketForCrypto(t, cfg)
 	awsStoreVerifyOnce.Do(func() {
 		res, err := storagecheck.VerifyStore(ctx, cfg)
 		if err != nil {
@@ -1072,7 +1089,6 @@ func startLockdServer(t *testing.T, cfg lockd.Config) *lockdclient.Client {
 func startAWSTestServer(t testing.TB, cfg lockd.Config, opts ...lockd.TestServerOption) *lockd.TestServer {
 	t.Helper()
 	cfgCopy := cfg
-	cfgCopy.DisableMTLS = true
 	if cfgCopy.JSONMaxBytes == 0 {
 		cfgCopy.JSONMaxBytes = 100 << 20
 	}
@@ -1108,8 +1124,13 @@ func startAWSTestServer(t testing.TB, cfg lockd.Config, opts ...lockd.TestServer
 			lockdclient.WithKeepAliveTimeout(2*time.Minute),
 			lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 		),
+		lockd.WithTestCloseDefaults(
+			lockd.WithDrainLeases(-1),
+			lockd.WithShutdownTimeout(10*time.Second),
+		),
 	}
 	options = append(options, opts...)
+	options = append(options, cryptotest.SharedMTLSOptions(t)...)
 	return lockd.StartTestServer(t, options...)
 }
 

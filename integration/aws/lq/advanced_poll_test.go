@@ -50,7 +50,7 @@ func runAWSQueueMultiConsumerContention(t *testing.T) {
 		workers          = 5
 		workerTimeout    = 12 * time.Second
 		workerBlockSecs  = int64(1)
-		workerVisibility = 2 * time.Second
+		workerVisibility = 10 * time.Second
 	)
 	type result struct {
 		idx int
@@ -338,11 +338,22 @@ func runAWSQueueMultiServerFailoverClient(t *testing.T) {
 
 	endpoints := []string{serverA.URL(), serverB.URL()}
 	capture := queuetestutil.NewLogCapture(t)
-	failoverClient, err := lockdclient.NewWithEndpoints(endpoints,
-		lockdclient.WithDisableMTLS(true),
+	clientOptions := []lockdclient.Option{
 		lockdclient.WithEndpointShuffle(false),
 		lockdclient.WithLogger(capture.Logger()),
-	)
+	}
+	if serverA.Config.MTLSEnabled() {
+		creds := serverA.TestMTLSCredentials()
+		if !creds.Valid() {
+			t.Fatalf("aws failover: serverA missing MTLS credentials")
+		}
+		httpClient, err := creds.NewHTTPClient()
+		if err != nil {
+			t.Fatalf("aws failover: build MTLS http client: %v", err)
+		}
+		clientOptions = append(clientOptions, lockdclient.WithHTTPClient(httpClient))
+	}
+	failoverClient, err := lockdclient.NewWithEndpoints(endpoints, clientOptions...)
 	if err != nil {
 		t.Fatalf("new failover client: %v", err)
 	}

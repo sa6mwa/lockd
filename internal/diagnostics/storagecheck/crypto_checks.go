@@ -28,16 +28,28 @@ func prepareCryptoForVerify(cfg lockd.Config) (*storage.Crypto, lockd.Config, er
 
 	out := cfg
 	var (
-		root      keymgmt.RootKey
-		desc      keymgmt.Descriptor
-		contextID string
+		root         keymgmt.RootKey
+		desc         keymgmt.Descriptor
+		contextID    string
+		bundleSource string
 	)
 	if out.MetadataRootKey == (keymgmt.RootKey{}) ||
 		out.MetadataDescriptor == (keymgmt.Descriptor{}) ||
 		strings.TrimSpace(out.MetadataContext) == "" {
-		bundle, err := tlsutil.LoadBundle(cfg.BundlePath, cfg.DenylistPath)
+		var (
+			bundle *tlsutil.Bundle
+			err    error
+		)
+		switch {
+		case len(cfg.BundlePEM) > 0:
+			bundleSource = "<inline>"
+			bundle, err = tlsutil.LoadBundleFromBytes(cfg.BundlePEM)
+		default:
+			bundleSource = cfg.BundlePath
+			bundle, err = tlsutil.LoadBundle(cfg.BundlePath, cfg.DenylistPath)
+		}
 		if err != nil {
-			return nil, cfg, fmt.Errorf("storage verify: load bundle %q: %w", cfg.BundlePath, err)
+			return nil, cfg, fmt.Errorf("storage verify: load bundle %q: %w", bundleSource, err)
 		}
 		caID, err := cryptoutil.CACertificateID(bundle.CACertPEM)
 		if err != nil {

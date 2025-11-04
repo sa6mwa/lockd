@@ -8,12 +8,34 @@ import (
 
 	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/client"
+	"pkt.systems/lockd/internal/tlsutil"
 )
 
 func TestNewTestServerDefault(t *testing.T) {
 	ts := StartTestServer(t)
 	if ts.Client == nil {
 		t.Fatal("expected auto client")
+	}
+	if ts.Config.MTLSEnabled() {
+		if len(ts.Config.BundlePEM) == 0 {
+			t.Fatalf("expected in-memory bundle for default test server")
+		}
+		bundle, err := tlsutil.LoadBundleFromBytes(ts.Config.BundlePEM)
+		if err != nil {
+			t.Fatalf("load bundle: %v", err)
+		}
+		foundIP := false
+		for _, ip := range bundle.ServerCert.IPAddresses {
+			if ip.String() == "127.0.0.1" {
+				foundIP = true
+				break
+			}
+		}
+		if !foundIP {
+			t.Fatalf("expected 127.0.0.1 SAN, got %v", bundle.ServerCert.IPAddresses)
+		}
+	} else if len(ts.Config.BundlePEM) != 0 {
+		t.Fatalf("expected bundle omitted when MTLS disabled, got %d bytes", len(ts.Config.BundlePEM))
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -95,5 +117,26 @@ func TestNewTestServerWithoutClient(t *testing.T) {
 		BlockSecs:  client.BlockNoWait,
 	}); err != nil {
 		t.Fatalf("acquire: %v", err)
+	}
+}
+
+func TestNewTestMTLSMaterialHosts(t *testing.T) {
+	material, err := newTestMTLSMaterial([]string{"127.0.0.1", "localhost"})
+	if err != nil {
+		t.Fatalf("newTestMTLSMaterial: %v", err)
+	}
+	bundle, err := tlsutil.LoadBundleFromBytes(material.serverBundle)
+	if err != nil {
+		t.Fatalf("load bundle: %v", err)
+	}
+	foundIP := false
+	for _, ip := range bundle.ServerCert.IPAddresses {
+		if ip.String() == "127.0.0.1" {
+			foundIP = true
+			break
+		}
+	}
+	if !foundIP {
+		t.Fatalf("expected 127.0.0.1 in server certificate IP SANs, got %v", bundle.ServerCert.IPAddresses)
 	}
 }

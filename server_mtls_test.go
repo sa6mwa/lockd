@@ -131,6 +131,7 @@ func startMTLSServer(t *testing.T, bundlePath string) *runningServer {
 		WithTestConfig(cfg),
 		WithTestListener("tcp", "127.0.0.1:0"),
 		WithTestLoggerFromTB(t, pslog.TraceLevel),
+		WithTestMTLS(),
 		WithoutTestClient(),
 	)
 	if err != nil {

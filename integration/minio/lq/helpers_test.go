@@ -14,6 +14,7 @@ import (
 	"pkt.systems/lockd"
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/integration/internal/cryptotest"
+	miniohelpers "pkt.systems/lockd/integration/minio"
 	queuetestutil "pkt.systems/lockd/integration/queue/testutil"
 	"pkt.systems/lockd/internal/diagnostics/storagecheck"
 	"pkt.systems/lockd/internal/storage/s3"
@@ -60,7 +61,6 @@ func prepareMinioQueueConfig(t testing.TB, opts minioQueueOptions) lockd.Config 
 	cfg.QRFLoadSoftLimitMultiplier = lockd.DefaultQRFLoadSoftLimitMultiplier
 	cfg.QRFLoadHardLimitMultiplier = lockd.DefaultQRFLoadHardLimitMultiplier
 
-	cfg.DisableMTLS = true
 	cfg.ListenProto = "tcp"
 	cfg.Listen = "127.0.0.1:0"
 
@@ -68,25 +68,28 @@ func prepareMinioQueueConfig(t testing.TB, opts minioQueueOptions) lockd.Config 
 	_ = os.Unsetenv("LOCKD_DISK_QUEUE_WATCH")
 
 	cryptotest.MaybeEnableStorageEncryption(t, &cfg)
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("minio queue config validation failed: %v", err)
-	}
 	return cfg
 }
 
-func startMinioQueueServer(t testing.TB, cfg lockd.Config) *lockd.TestServer {
+func startMinioQueueServer(t testing.TB, cfg lockd.Config, opts ...lockd.TestServerOption) *lockd.TestServer {
 	t.Helper()
-	return startMinioQueueServerWithLogger(t, cfg, lockd.NewTestingLogger(t, pslog.TraceLevel))
+	defaultLogger := lockd.NewTestingLogger(t, pslog.TraceLevel)
+	return startMinioQueueServerWithOptions(t, cfg, append([]lockd.TestServerOption{lockd.WithTestLogger(defaultLogger)}, opts...)...)
 }
 
 func startMinioQueueServerWithCapture(t testing.TB, cfg lockd.Config) (*lockd.TestServer, *queuetestutil.LogCapture) {
 	t.Helper()
 	capture := queuetestutil.NewLogCapture(t)
-	ts := startMinioQueueServerWithLogger(t, cfg, capture.Logger())
+	ts := startMinioQueueServerWithOptions(t, cfg, lockd.WithTestLogger(capture.Logger()))
 	return ts, capture
 }
 
 func startMinioQueueServerWithLogger(t testing.TB, cfg lockd.Config, logger pslog.Logger) *lockd.TestServer {
+	t.Helper()
+	return startMinioQueueServerWithOptions(t, cfg, lockd.WithTestLogger(logger))
+}
+
+func startMinioQueueServerWithOptions(t testing.TB, cfg lockd.Config, serverOpts ...lockd.TestServerOption) *lockd.TestServer {
 	t.Helper()
 	clientLogger := lockd.NewTestingLogger(t, pslog.TraceLevel)
 	clientOpts := []lockdclient.Option{
@@ -95,12 +98,14 @@ func startMinioQueueServerWithLogger(t testing.TB, cfg lockd.Config, logger pslo
 		lockdclient.WithCloseTimeout(60 * time.Second),
 		lockdclient.WithLogger(clientLogger),
 	}
-	return lockd.StartTestServer(t,
+	opts := []lockd.TestServerOption{
 		lockd.WithTestConfig(cfg),
-		lockd.WithTestLogger(logger),
 		lockd.WithTestClientOptions(clientOpts...),
-		lockd.WithTestStartTimeout(20*time.Second),
-	)
+		lockd.WithTestStartTimeout(20 * time.Second),
+	}
+	opts = append(opts, cryptotest.SharedMTLSOptions(t)...)
+	opts = append(opts, serverOpts...)
+	return lockd.StartTestServer(t, opts...)
 }
 
 func ensureMinioQueueEnv(t testing.TB) {
@@ -129,9 +134,6 @@ func loadMinioQueueConfig(t testing.TB) lockd.Config {
 		SweeperInterval: time.Second,
 	}
 	cryptotest.MaybeEnableStorageEncryption(t, &cfg)
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("minio queue config validation: %v", err)
-	}
 	return cfg
 }
 
@@ -158,11 +160,14 @@ func ensureMinioQueueBucket(t testing.TB, cfg lockd.Config) {
 }
 
 func ensureMinioQueueReady(t testing.TB, ctx context.Context, cfg lockd.Config) {
-	res, err := storagecheck.VerifyStore(ctx, cfg)
-	if err != nil {
-		t.Fatalf("verify store: %v", err)
-	}
-	if !res.Passed() {
-		t.Fatalf("store verification failed: %+v", res)
-	}
+	miniohelpers.WithMinioStorageLock(t, func() {
+		miniohelpers.ResetMinioBucketForCrypto(t, cfg)
+		res, err := storagecheck.VerifyStore(ctx, cfg)
+		if err != nil {
+			t.Fatalf("verify store: %v", err)
+		}
+		if !res.Passed() {
+			t.Fatalf("store verification failed: %+v", res)
+		}
+	})
 }

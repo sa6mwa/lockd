@@ -18,10 +18,19 @@ type AcquireResult struct {
 }
 
 // WaitForShutdownDrainingAcquire posts to /v1/acquire until the server returns
-// HTTP 503 with error code shutdown_draining.
+// HTTP 503 with error code shutdown_draining using a short-lived HTTP client.
 func WaitForShutdownDrainingAcquire(t testing.TB, url string, payload []byte) AcquireResult {
 	t.Helper()
 	client := &http.Client{Timeout: 2 * time.Second}
+	return WaitForShutdownDrainingAcquireWithClient(t, client, url, payload)
+}
+
+// WaitForShutdownDrainingAcquireWithClient posts to /v1/acquire using the provided HTTP client.
+func WaitForShutdownDrainingAcquireWithClient(t testing.TB, client *http.Client, url string, payload []byte) AcquireResult {
+	t.Helper()
+	if client == nil {
+		client = &http.Client{Timeout: 2 * time.Second}
+	}
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
@@ -29,6 +38,7 @@ func WaitForShutdownDrainingAcquire(t testing.TB, url string, payload []byte) Ac
 			t.Fatalf("build request: %v", err)
 		}
 		req.Header.Set("Content-Type", "application/json")
+		req.Close = true
 		resp, err := client.Do(req)
 		if err != nil {
 			time.Sleep(50 * time.Millisecond)

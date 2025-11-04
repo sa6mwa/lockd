@@ -414,7 +414,7 @@ func New(cfg Config) *Handler {
 	}
 	var queueDisp *queue.Dispatcher
 	if queueSvc != nil {
-		queueLogger := baseLogger.With("sys", "queue.dispatcher.core")
+		queueLogger := loggingutil.WithSubsystem(baseLogger, "queue.dispatcher.core")
 		opts := []queue.DispatcherOption{
 			queue.WithLogger(queueLogger),
 			queue.WithMaxConsumers(cfg.QueueMaxConsumers),
@@ -560,8 +560,7 @@ func (h *Handler) wrap(operation string, fn handlerFunc) http.Handler {
 
 		ctx = correlation.Ensure(ctx)
 
-		logger := h.logger.With(
-			"sys", sys,
+		logger := loggingutil.WithSubsystem(h.logger, sys).With(
 			"req_id", reqID,
 			"method", r.Method,
 			"path", r.URL.Path,

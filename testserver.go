@@ -3,30 +3,49 @@ package lockd
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"math"
 	"math/rand"
 	"net"
+	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"pkt.systems/lockd/client"
+	"pkt.systems/lockd/internal/cryptoutil"
 	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/storage"
+	"pkt.systems/lockd/internal/tlsutil"
 	"pkt.systems/pslog"
+)
+
+const testMTLSEnv = "LOCKD_TEST_WITH_MTLS"
+
+type testMTLSMode int
+
+const (
+	mtlsModeAuto testMTLSMode = iota
+	mtlsModeForceOn
+	mtlsModeForceOff
 )
 
 // TestServer wraps a running lockd.Server with convenient handles for tests.
 type TestServer struct {
-	Server   *Server
-	BaseURL  string
-	Listener net.Addr
-	Client   *client.Client
-	Config   Config
+	Server         *Server
+	BaseURL        string
+	Listener       net.Addr
+	Client         *client.Client
+	Config         Config
+	baseClientOpts []client.Option
+	mtlsMaterial   *testMTLSMaterial
+	extraClients   []*client.Client
+	extraHTTP      []*http.Client
 
 	stop    func(context.Context, ...CloseOption) error
 	backend storage.Backend
@@ -86,6 +105,16 @@ func (ts *TestServer) Stop(ctx context.Context, opts ...CloseOption) error {
 	if ts.Client != nil {
 		_ = ts.Client.Close()
 	}
+	for _, cli := range ts.extraClients {
+		_ = cli.Close()
+	}
+	ts.extraClients = nil
+	for _, httpCli := range ts.extraHTTP {
+		if tr, ok := httpCli.Transport.(*http.Transport); ok {
+			tr.CloseIdleConnections()
+		}
+	}
+	ts.extraHTTP = nil
 	if ts.proxy != nil {
 		_ = ts.proxy.Close()
 		ts.proxy = nil
@@ -140,12 +169,70 @@ func (ts *TestServer) NewClient(opts ...client.Option) (*client.Client, error) {
 	if ts == nil {
 		return nil, fmt.Errorf("nil test server")
 	}
-	options := make([]client.Option, 0, len(opts)+1)
-	if !ts.Config.MTLSEnabled() {
-		options = append(options, client.WithDisableMTLS(true))
+	base := append([]client.Option(nil), ts.baseClientOpts...)
+	if ts.mtlsMaterial != nil {
+		httpClient, err := ts.mtlsMaterial.NewHTTPClient()
+		if err != nil {
+			return nil, err
+		}
+		base = append(base, client.WithHTTPClient(httpClient))
 	}
-	options = append(options, opts...)
-	return client.New(ts.BaseURL, options...)
+	base = append(base, opts...)
+	cli, err := client.New(ts.BaseURL, base...)
+	if err != nil {
+		return nil, err
+	}
+	ts.extraClients = append(ts.extraClients, cli)
+	return cli, nil
+}
+
+// NewEndpointsClient returns a client configured with explicit endpoints while
+// inheriting the test server defaults (mTLS, timeouts, logging, etc.).
+func (ts *TestServer) NewEndpointsClient(endpoints []string, opts ...client.Option) (*client.Client, error) {
+	if ts == nil {
+		return nil, fmt.Errorf("nil test server")
+	}
+	base := append([]client.Option(nil), ts.baseClientOpts...)
+	if ts.mtlsMaterial != nil {
+		httpClient, err := ts.mtlsMaterial.NewHTTPClient()
+		if err != nil {
+			return nil, err
+		}
+		base = append(base, client.WithHTTPClient(httpClient))
+	}
+	base = append(base, opts...)
+	cli, err := client.NewWithEndpoints(endpoints, base...)
+	if err != nil {
+		return nil, err
+	}
+	ts.extraClients = append(ts.extraClients, cli)
+	return cli, nil
+}
+
+// NewHTTPClient returns a raw HTTP client configured for the test server's MTLS settings.
+func (ts *TestServer) NewHTTPClient() (*http.Client, error) {
+	if ts == nil {
+		return nil, fmt.Errorf("nil test server")
+	}
+	if ts.mtlsMaterial == nil {
+		client := &http.Client{Timeout: 5 * time.Second}
+		ts.extraHTTP = append(ts.extraHTTP, client)
+		return client, nil
+	}
+	httpClient, err := ts.mtlsMaterial.NewHTTPClient()
+	if err != nil {
+		return nil, err
+	}
+	ts.extraHTTP = append(ts.extraHTTP, httpClient)
+	return httpClient, nil
+}
+
+// TestMTLSCredentials returns a clone of the MTLS material backing the test server (when enabled).
+func (ts *TestServer) TestMTLSCredentials() TestMTLSCredentials {
+	if ts == nil || ts.mtlsMaterial == nil {
+		return TestMTLSCredentials{}
+	}
+	return TestMTLSCredentials{material: ts.mtlsMaterial.clone()}
 }
 
 type testServerOptions struct {
@@ -155,6 +242,8 @@ type testServerOptions struct {
 	backend          storage.Backend
 	logger           pslog.Logger
 	clientOpts       []client.Option
+	mtlsMaterial     *testMTLSMaterial
+	mtlsProvided     bool
 	disableClient    bool
 	startTimeout     time.Duration
 	chaosConfig      *ChaosConfig
@@ -162,6 +251,7 @@ type testServerOptions struct {
 	testLogLevel     pslog.Level
 	closeDefaults    []CloseOption
 	closeDefaultsSet bool
+	mtlsMode         testMTLSMode
 }
 
 // TestServerOption customises NewTestServer/StartTestServer behaviour.
@@ -231,6 +321,29 @@ func WithTestClientOptions(opts ...client.Option) TestServerOption {
 	}
 }
 
+// WithTestMTLSCredentials reuses the provided MTLS material for the test server.
+func WithTestMTLSCredentials(creds TestMTLSCredentials) TestServerOption {
+	return func(o *testServerOptions) {
+		if o.mtlsProvided {
+			return
+		}
+		if !creds.Valid() {
+			return
+		}
+		shared := creds.cloneMaterial()
+		if shared == nil {
+			return
+		}
+		o.mtlsMaterial = shared
+		o.mtlsProvided = true
+		o.mutators = append(o.mutators, func(cfg *Config) {
+			cfg.BundlePEM = append([]byte(nil), shared.serverBundle...)
+			cfg.BundlePath = ""
+			cfg.DisableMTLS = false
+		})
+	}
+}
+
 // WithoutTestClient disables automatic client creation.
 func WithoutTestClient() TestServerOption {
 	return func(o *testServerOptions) {
@@ -280,6 +393,20 @@ func WithTestCloseDefaults(opts ...CloseOption) TestServerOption {
 	}
 }
 
+// WithTestMTLS forces StartTestServer to configure mutual TLS, regardless of the environment toggle.
+func WithTestMTLS() TestServerOption {
+	return func(o *testServerOptions) {
+		o.mtlsMode = mtlsModeForceOn
+	}
+}
+
+// WithoutTestMTLS disables automatic mTLS configuration for this test server.
+func WithoutTestMTLS() TestServerOption {
+	return func(o *testServerOptions) {
+		o.mtlsMode = mtlsModeForceOff
+	}
+}
+
 func defaultTestCloseDefaults() []CloseOption {
 	return []CloseOption{
 		WithDrainLeases(4 * time.Second),
@@ -291,10 +418,11 @@ func defaultTestCloseDefaults() []CloseOption {
 func NewTestServer(ctx context.Context, opts ...TestServerOption) (*TestServer, error) {
 	options := testServerOptions{
 		cfg: Config{
-			Store:       "mem://",
-			ListenProto: "tcp",
-			Listen:      "127.0.0.1:0",
-			DisableMTLS: true,
+			Store:                    "mem://",
+			ListenProto:              "tcp",
+			Listen:                   "127.0.0.1:0",
+			DisableMTLS:              true,
+			DisableStorageEncryption: true,
 		},
 		logger:       nil,
 		startTimeout: 5 * time.Second,
@@ -341,6 +469,14 @@ func NewTestServer(ctx context.Context, opts ...TestServerOption) (*TestServer, 
 			logger = loggingutil.NoopLogger()
 		}
 	}
+
+	var err error
+	var mtlsMaterial *testMTLSMaterial
+	options.clientOpts, mtlsMaterial, err = prepareTestClientOptions(&cfg, options.clientOpts, options.mtlsMode, options.mtlsMaterial)
+	if err != nil {
+		return nil, err
+	}
+	options.mtlsMaterial = mtlsMaterial
 
 	ctxServer, cancel := context.WithCancel(context.Background())
 	type startResult struct {
@@ -411,15 +547,25 @@ func NewTestServer(ctx context.Context, opts ...TestServerOption) (*TestServer, 
 		return nil, err
 	}
 
-	var cli *client.Client
-	var baseClientOpts []client.Option
-	if !options.disableClient {
-		baseClientOpts = make([]client.Option, 0, len(options.clientOpts)+1)
-		if !cfg.MTLSEnabled() {
-			baseClientOpts = append(baseClientOpts, client.WithDisableMTLS(true))
+	baseClientOpts := make([]client.Option, 0, len(options.clientOpts)+1)
+	if !cfg.MTLSEnabled() {
+		baseClientOpts = append(baseClientOpts, client.WithDisableMTLS(true))
+	}
+	baseClientOpts = append(baseClientOpts, options.clientOpts...)
+
+	clientOptsForAuto := append([]client.Option(nil), baseClientOpts...)
+	if options.mtlsMaterial != nil {
+		httpClient, err := options.mtlsMaterial.NewHTTPClient()
+		if err != nil {
+			_ = stop(context.Background())
+			return nil, err
 		}
-		baseClientOpts = append(baseClientOpts, options.clientOpts...)
-		cli, err = client.New(baseURL, baseClientOpts...)
+		clientOptsForAuto = append(clientOptsForAuto, client.WithHTTPClient(httpClient))
+	}
+
+	var cli *client.Client
+	if !options.disableClient {
+		cli, err = client.New(baseURL, clientOptsForAuto...)
 		if err != nil {
 			_ = stop(context.Background())
 			return nil, err
@@ -427,13 +573,15 @@ func NewTestServer(ctx context.Context, opts ...TestServerOption) (*TestServer, 
 	}
 
 	ts := &TestServer{
-		Server:   srv,
-		BaseURL:  baseURL,
-		Listener: addr,
-		Client:   cli,
-		Config:   cfg,
-		stop:     stop,
-		backend:  backend,
+		Server:         srv,
+		BaseURL:        baseURL,
+		Listener:       addr,
+		Client:         cli,
+		Config:         cfg,
+		stop:           stop,
+		backend:        backend,
+		baseClientOpts: baseClientOpts,
+		mtlsMaterial:   options.mtlsMaterial,
 	}
 
 	if options.chaosConfig != nil {
@@ -457,7 +605,17 @@ func NewTestServer(ctx context.Context, opts ...TestServerOption) (*TestServer, 
 		ts.BaseURL = portURL.String()
 		ts.Listener = proxy.Addr()
 		if !options.disableClient {
-			cli, err = client.New(ts.BaseURL, baseClientOpts...)
+			chaosClientOpts := append([]client.Option(nil), baseClientOpts...)
+			if ts.mtlsMaterial != nil {
+				httpClient, err := ts.mtlsMaterial.NewHTTPClient()
+				if err != nil {
+					proxy.Close()
+					_ = stop(context.Background())
+					return nil, err
+				}
+				chaosClientOpts = append(chaosClientOpts, client.WithHTTPClient(httpClient))
+			}
+			cli, err = client.New(ts.BaseURL, chaosClientOpts...)
 			if err != nil {
 				proxy.Close()
 				_ = stop(context.Background())
@@ -739,6 +897,251 @@ func (cp *chaosProxy) handleConnection(downstream net.Conn, scheme string) {
 		stop()
 		<-errCh
 	}
+}
+
+func prepareTestClientOptions(cfg *Config, base []client.Option, mode testMTLSMode, shared *testMTLSMaterial) ([]client.Option, *testMTLSMaterial, error) {
+	enable := shouldEnableTestMTLS(mode)
+	if strings.EqualFold(cfg.ListenProto, "unix") {
+		enable = false
+	}
+	if enable {
+		if shared != nil {
+			cloned := shared.clone()
+			if len(cfg.BundlePEM) == 0 {
+				cfg.BundlePEM = cloned.serverBundle
+			}
+			cfg.BundlePath = ""
+			cfg.DisableMTLS = false
+			if cfg.ListenProto == "" {
+				cfg.ListenProto = "tcp"
+			}
+			if cfg.Listen == "" && strings.ToLower(cfg.ListenProto) != "unix" {
+				cfg.Listen = "127.0.0.1:0"
+			}
+			return base, cloned, nil
+		}
+		if len(cfg.BundlePEM) == 0 && cfg.BundlePath == "" {
+			hosts := gatherTestMTLSHosts(*cfg)
+			material, err := newTestMTLSMaterial(hosts)
+			if err != nil {
+				return nil, nil, err
+			}
+			cfg.BundlePEM = material.serverBundle
+			cfg.BundlePath = ""
+			cfg.DisableMTLS = false
+			if cfg.ListenProto == "" {
+				cfg.ListenProto = "tcp"
+			}
+			if cfg.Listen == "" && strings.ToLower(cfg.ListenProto) != "unix" {
+				cfg.Listen = "127.0.0.1:0"
+			}
+			return base, material, nil
+		}
+		cfg.DisableMTLS = false
+		if cfg.ListenProto == "" {
+			cfg.ListenProto = "tcp"
+		}
+		if cfg.Listen == "" && strings.ToLower(cfg.ListenProto) != "unix" {
+			cfg.Listen = "127.0.0.1:0"
+		}
+		return base, nil, nil
+	}
+	if cfg.ListenProto == "" {
+		cfg.ListenProto = "tcp"
+	}
+	if cfg.Listen == "" && strings.ToLower(cfg.ListenProto) != "unix" {
+		cfg.Listen = "127.0.0.1:0"
+	}
+	cfg.DisableMTLS = true
+	cfg.BundlePEM = nil
+	return base, nil, nil
+}
+
+func shouldEnableTestMTLS(mode testMTLSMode) bool {
+	switch mode {
+	case mtlsModeForceOn:
+		return true
+	case mtlsModeForceOff:
+		return false
+	default:
+		v := strings.TrimSpace(os.Getenv(testMTLSEnv))
+		if v == "" {
+			return true
+		}
+		switch strings.ToLower(v) {
+		case "0", "false", "off", "no":
+			return false
+		default:
+			return true
+		}
+	}
+}
+
+type testMTLSMaterial struct {
+	serverBundle []byte
+	clientBundle []byte
+	clientParsed *tlsutil.ClientBundle
+}
+
+func (m *testMTLSMaterial) clone() *testMTLSMaterial {
+	if m == nil {
+		return nil
+	}
+	server := append([]byte(nil), m.serverBundle...)
+	client := append([]byte(nil), m.clientBundle...)
+	parsed, err := tlsutil.LoadClientBundleFromBytes(client)
+	if err != nil {
+		return nil
+	}
+	return &testMTLSMaterial{
+		serverBundle: server,
+		clientBundle: client,
+		clientParsed: parsed,
+	}
+}
+
+// TestMTLSCredentials captures ephemeral test-only MTLS material (server bundle + client credentials).
+type TestMTLSCredentials struct {
+	material *testMTLSMaterial
+}
+
+// Valid reports whether the credentials contain MTLS material.
+func (c TestMTLSCredentials) Valid() bool {
+	return c.material != nil
+}
+
+// ServerBundle returns a copy of the PEM-encoded server bundle associated with the credentials.
+func (c TestMTLSCredentials) ServerBundle() []byte {
+	if c.material == nil {
+		return nil
+	}
+	return append([]byte(nil), c.material.serverBundle...)
+}
+
+// NewHTTPClient constructs an HTTP client configured for MTLS using the embedded client bundle.
+func (c TestMTLSCredentials) NewHTTPClient() (*http.Client, error) {
+	if c.material == nil {
+		return nil, fmt.Errorf("test mtls credentials: empty material")
+	}
+	return c.material.clone().NewHTTPClient()
+}
+
+func (c TestMTLSCredentials) cloneMaterial() *testMTLSMaterial {
+	if c.material == nil {
+		return nil
+	}
+	return c.material.clone()
+}
+
+// NewTestMTLSCredentialsFromBundles constructs test MTLS credentials using the provided
+// server and client bundles.
+func NewTestMTLSCredentialsFromBundles(serverBundle, clientBundle []byte) (TestMTLSCredentials, error) {
+	if len(serverBundle) == 0 {
+		return TestMTLSCredentials{}, fmt.Errorf("test mtls credentials: server bundle required")
+	}
+	if len(clientBundle) == 0 {
+		return TestMTLSCredentials{}, fmt.Errorf("test mtls credentials: client bundle required")
+	}
+	parsed, err := tlsutil.LoadClientBundleFromBytes(clientBundle)
+	if err != nil {
+		return TestMTLSCredentials{}, fmt.Errorf("test mtls credentials: parse client bundle: %w", err)
+	}
+	material := &testMTLSMaterial{
+		serverBundle: append([]byte(nil), serverBundle...),
+		clientBundle: append([]byte(nil), clientBundle...),
+		clientParsed: parsed,
+	}
+	return TestMTLSCredentials{material: material}, nil
+}
+
+func newTestMTLSMaterial(hosts []string) (*testMTLSMaterial, error) {
+	ca, err := tlsutil.GenerateCA("lockd-test-ca", 365*24*time.Hour)
+	if err != nil {
+		return nil, fmt.Errorf("mtls: generate ca: %w", err)
+	}
+	caBundle, err := tlsutil.EncodeCABundle(ca.CertPEM, ca.KeyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("mtls: encode ca bundle: %w", err)
+	}
+	material, err := cryptoutil.MetadataMaterialFromBytes(caBundle)
+	if err != nil {
+		return nil, fmt.Errorf("mtls: derive metadata material: %w", err)
+	}
+	dedupedHosts := dedupeHosts(hosts)
+	serverCert, serverKey, err := ca.IssueServer(dedupedHosts, "lockd-test-server", 365*24*time.Hour)
+	if err != nil {
+		return nil, fmt.Errorf("mtls: issue server cert: %w", err)
+	}
+	serverBundle, err := tlsutil.EncodeServerBundle(ca.CertPEM, nil, serverCert, serverKey, nil)
+	if err != nil {
+		return nil, fmt.Errorf("mtls: encode server bundle: %w", err)
+	}
+	augmentedServerBundle, err := cryptoutil.ApplyMetadataMaterial(serverBundle, material)
+	if err != nil {
+		return nil, fmt.Errorf("mtls: augment server bundle: %w", err)
+	}
+	clientCert, clientKey, err := ca.IssueClient("lockd-test-client", 365*24*time.Hour)
+	if err != nil {
+		return nil, fmt.Errorf("mtls: issue client cert: %w", err)
+	}
+	clientBundle, err := tlsutil.EncodeClientBundle(ca.CertPEM, clientCert, clientKey)
+	if err != nil {
+		return nil, fmt.Errorf("mtls: encode client bundle: %w", err)
+	}
+	clientParsed, err := tlsutil.LoadClientBundleFromBytes(clientBundle)
+	if err != nil {
+		return nil, fmt.Errorf("mtls: parse client bundle: %w", err)
+	}
+	return &testMTLSMaterial{
+		serverBundle: augmentedServerBundle,
+		clientBundle: clientBundle,
+		clientParsed: clientParsed,
+	}, nil
+}
+
+func (m *testMTLSMaterial) NewHTTPClient() (*http.Client, error) {
+	if m == nil {
+		return http.DefaultClient, nil
+	}
+	baseTransport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return nil, fmt.Errorf("mtls: default transport is %T, want *http.Transport", http.DefaultTransport)
+	}
+	transport := baseTransport.Clone()
+	transport.TLSClientConfig = &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		RootCAs:      m.clientParsed.CAPool,
+		Certificates: []tls.Certificate{m.clientParsed.Certificate},
+	}
+	return &http.Client{Transport: transport, Timeout: 5 * time.Second}, nil
+}
+
+func dedupeHosts(hosts []string) []string {
+	seen := make(map[string]struct{}, len(hosts))
+	out := make([]string, 0, len(hosts))
+	for _, host := range hosts {
+		host = strings.TrimSpace(host)
+		if host == "" {
+			continue
+		}
+		host = strings.ToLower(host)
+		if _, ok := seen[host]; ok {
+			continue
+		}
+		seen[host] = struct{}{}
+		out = append(out, host)
+	}
+	return out
+}
+
+func gatherTestMTLSHosts(cfg Config) []string {
+	hosts := []string{"*", "127.0.0.1", "localhost"}
+	if cfg.Listen != "" {
+		if h, _, err := net.SplitHostPort(cfg.Listen); err == nil && h != "" && h != "0.0.0.0" && h != "::" && h != "[::]" {
+			hosts = append(hosts, h)
+		}
+	}
+	return hosts
 }
 
 func (cp *chaosProxy) pipe(errCh chan<- error, dst net.Conn, src net.Conn, rng *rand.Rand, disconnectCh <-chan time.Time) {

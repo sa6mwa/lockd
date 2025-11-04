@@ -138,7 +138,7 @@ func NewController(cfg Config) *Controller {
 	logger := loggingutil.EnsureLogger(cfg.Logger)
 	return &Controller{
 		cfg:    cfg,
-		logger: logger.With("sys", "control.qrf.controller"),
+		logger: loggingutil.WithSubsystem(logger, "control.qrf.controller"),
 		state:  StateDisengaged,
 	}
 }

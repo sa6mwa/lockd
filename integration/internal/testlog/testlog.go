@@ -32,7 +32,7 @@ type Recorder struct {
 func NewRecorder(t testing.TB, level pslog.Level) (pslog.Logger, *Recorder) {
 	rec := &Recorder{}
 	writer := &recordingWriter{t: t, recorder: rec}
-	logger := pslog.NewStructured(writer).With("sys", "test.recorder")
+	logger := pslog.NewStructured(writer)
 	if level != pslog.NoLevel {
 		logger = logger.LogLevel(level)
 	}

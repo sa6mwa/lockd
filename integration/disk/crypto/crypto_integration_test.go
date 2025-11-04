@@ -22,17 +22,18 @@ import (
 
 func TestCryptoDiskLocks(t *testing.T) {
 	cfg := buildDiskConfig(t)
-	ts := lockd.StartTestServer(t,
+	options := []lockd.TestServerOption{
 		lockd.WithTestConfig(cfg),
 		lockd.WithTestLogger(loggingutil.NoopLogger()),
 		lockd.WithTestClientOptions(
-			lockdclient.WithDisableMTLS(true),
 			lockdclient.WithHTTPTimeout(30*time.Second),
 			lockdclient.WithKeepAliveTimeout(30*time.Second),
 			lockdclient.WithCloseTimeout(30*time.Second),
 			lockdclient.WithLogger(loggingutil.NoopLogger()),
 		),
-	)
+	}
+	options = append(options, cryptotest.SharedMTLSOptions(t)...)
+	ts := lockd.StartTestServer(t, options...)
 	cli := ts.Client
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -71,17 +72,18 @@ func TestCryptoDiskLocks(t *testing.T) {
 
 func TestCryptoDiskQueues(t *testing.T) {
 	cfg := buildDiskConfig(t)
-	ts := lockd.StartTestServer(t,
+	options := []lockd.TestServerOption{
 		lockd.WithTestConfig(cfg),
 		lockd.WithTestLogger(loggingutil.NoopLogger()),
 		lockd.WithTestClientOptions(
-			lockdclient.WithDisableMTLS(true),
 			lockdclient.WithHTTPTimeout(30*time.Second),
 			lockdclient.WithKeepAliveTimeout(30*time.Second),
 			lockdclient.WithCloseTimeout(30*time.Second),
 			lockdclient.WithLogger(loggingutil.NoopLogger()),
 		),
-	)
+	}
+	options = append(options, cryptotest.SharedMTLSOptions(t)...)
+	ts := lockd.StartTestServer(t, options...)
 	cli := ts.Client
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -155,7 +157,6 @@ func buildDiskConfig(t testing.TB) lockd.Config {
 		Store:       diskStoreURL(root),
 		ListenProto: "tcp",
 		Listen:      "127.0.0.1:0",
-		DisableMTLS: true,
 	}
 	cfg.QueuePollInterval = 150 * time.Millisecond
 	cfg.QueuePollJitter = 0

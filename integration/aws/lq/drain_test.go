@@ -46,7 +46,11 @@ func TestAWSQueueDrainUsesProductionDefaults(t *testing.T) {
 	}()
 
 	payload, _ := json.Marshal(api.AcquireRequest{Key: key + "-wait", Owner: "aws-queue-drain-waiter", TTLSeconds: 5})
-	result := shutdowntest.WaitForShutdownDrainingAcquire(t, ts.URL()+"/v1/acquire", payload)
+	httpClient, err := ts.NewHTTPClient()
+	if err != nil {
+		t.Fatalf("http client: %v", err)
+	}
+	result := shutdowntest.WaitForShutdownDrainingAcquireWithClient(t, httpClient, ts.URL()+"/v1/acquire", payload)
 	if result.Response.ErrorCode != "shutdown_draining" {
 		t.Fatalf("expected shutdown_draining error, got %+v", result.Response)
 	}

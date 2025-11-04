@@ -2,6 +2,45 @@
 # Run selected benchmark suites under ./benchmark.
 set -uo pipefail
 
+crypto_enabled=1
+mtls_enabled=1
+
+print_usage() {
+  cat <<'USAGE'
+Usage: run-benchmark-suites.sh [--disable-crypto] [--disable-mtls] [suite ...]
+
+Options:
+  --disable-crypto   Run benchmarks with LOCKD_TEST_STORAGE_ENCRYPTION=0 (default 1).
+  --disable-mtls     Run benchmarks with LOCKD_TEST_WITH_MTLS=0 (default 1).
+  --help, -h         Show this help text.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --disable-crypto)
+      crypto_enabled=0
+      shift
+      ;;
+    --disable-mtls)
+      mtls_enabled=0
+      shift
+      ;;
+    --help|-h)
+      print_usage
+      exit 0
+      ;;
+    --*)
+      echo "Unknown option: $1" >&2
+      print_usage >&2
+      exit 1
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
 declare -a SUITES
 declare -A SUITE_DIR SUITE_TAGS
 
@@ -22,29 +61,43 @@ list_suites() {
     printf '  - %s\n' "$name"
   done
   echo
-  echo "Usage: $0 [suite ...]"
+  print_usage
 }
 
-if [[ $# -eq 0 || $1 == "list" ]]; then
+if [[ $# -eq 0 || ${1:-} == "list" ]]; then
   list_suites
   exit 0
 fi
 
 SUITES_TO_RUN=()
-if [[ $1 == "all" ]]; then
+if [[ ${1:-} == "all" ]]; then
   SUITES_TO_RUN=("${SUITES[@]}")
   shift
   if [[ $# -gt 0 ]]; then
-    SUITES_TO_RUN+=($@)
+    SUITES_TO_RUN+=("$@")
   fi
 else
-  SUITES_TO_RUN=($@)
+  SUITES_TO_RUN=("$@")
 fi
 
 LOG_DIR="benchmark-logs"
 mkdir -p "$LOG_DIR"
 declare -A STATUS
 EXIT_CODE=0
+
+export LOCKD_TEST_STORAGE_ENCRYPTION=$crypto_enabled
+export LOCKD_TEST_WITH_MTLS=$mtls_enabled
+if [[ $crypto_enabled -eq 1 ]]; then
+  echo "LOCKD_TEST_STORAGE_ENCRYPTION=1 (encryption enabled)"
+else
+  echo "LOCKD_TEST_STORAGE_ENCRYPTION=0 (encryption disabled)"
+fi
+if [[ $mtls_enabled -eq 1 ]]; then
+  echo "LOCKD_TEST_WITH_MTLS=1 (mTLS enabled)"
+else
+  echo "LOCKD_TEST_WITH_MTLS=0 (mTLS disabled)"
+fi
+echo
 
 for suite in "${SUITES_TO_RUN[@]}"; do
   dir=${SUITE_DIR[$suite]:-}

@@ -164,7 +164,11 @@ func TestMemShutdownDrainingBlocksAcquire(t *testing.T) {
 	}()
 	acquirePayload, _ := json.Marshal(api.AcquireRequest{Key: "mem-drain-wait", Owner: "drain-tester", TTLSeconds: 5})
 	url := ts.URL() + "/v1/acquire"
-	result := shutdowntest.WaitForShutdownDrainingAcquire(t, url, acquirePayload)
+	httpClient, err := ts.NewHTTPClient()
+	if err != nil {
+		t.Fatalf("build http client: %v", err)
+	}
+	result := shutdowntest.WaitForShutdownDrainingAcquireWithClient(t, httpClient, url, acquirePayload)
 	if result.Response.ErrorCode != "shutdown_draining" {
 		t.Fatalf("expected shutdown_draining error, got %+v", result.Response)
 	}
@@ -522,8 +526,12 @@ func TestMemRemoveStateFailoverMultiServer(t *testing.T) {
 		lockd.WithDrainLeases(8*time.Second),
 		lockd.WithShutdownTimeout(10*time.Second),
 	)
-	primary := startMemTestServerWithBackendOpts(t, cfg, backend, closeDefaults)
-	secondary := startMemTestServerWithBackendOpts(t, cfg, backend, closeDefaults)
+	var sharedCreds lockd.TestMTLSCredentials
+	if cryptotest.TestMTLSEnabled() {
+		sharedCreds = cryptotest.SharedMTLSCredentials(t)
+	}
+	primary := startMemTestServerWithBackendOpts(t, cfg, backend, append([]lockd.TestServerOption{closeDefaults}, cryptotest.SharedMTLSOptions(t, sharedCreds)...)...)
+	secondary := startMemTestServerWithBackendOpts(t, cfg, backend, append([]lockd.TestServerOption{closeDefaults}, cryptotest.SharedMTLSOptions(t, sharedCreds)...)...)
 
 	key := "mem-remove-failover-" + uuidv7.NewString()
 
@@ -547,13 +555,17 @@ func TestMemRemoveStateFailoverMultiServer(t *testing.T) {
 	}
 
 	clientLogger, recorder := testlog.NewRecorder(t, pslog.TraceLevel)
-	failoverCli, err := lockdclient.NewWithEndpoints([]string{primary.URL(), secondary.URL()},
-		lockdclient.WithDisableMTLS(true),
-		lockdclient.WithHTTPTimeout(2*time.Second),
+	clientOptions := []lockdclient.Option{
+		lockdclient.WithHTTPTimeout(2 * time.Second),
 		lockdclient.WithFailureRetries(5),
 		lockdclient.WithEndpointShuffle(false),
 		lockdclient.WithLogger(clientLogger),
-	)
+	}
+	if cryptotest.TestMTLSEnabled() {
+		httpClient := cryptotest.RequireMTLSHTTPClient(t, sharedCreds)
+		clientOptions = append(clientOptions, lockdclient.WithHTTPClient(httpClient))
+	}
+	failoverCli, err := lockdclient.NewWithEndpoints([]string{primary.URL(), secondary.URL()}, clientOptions...)
 	if err != nil {
 		t.Fatalf("failover client: %v", err)
 	}
@@ -816,7 +828,11 @@ func runMemAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase failo
 		MaxDisconnects:  1,
 	}
 
-	primary := lockd.StartTestServer(t,
+	var sharedCreds lockd.TestMTLSCredentials
+	if cryptotest.TestMTLSEnabled() {
+		sharedCreds = cryptotest.SharedMTLSCredentials(t)
+	}
+	primaryOptions := []lockd.TestServerOption{
 		lockd.WithTestConfig(cfg),
 		lockd.WithTestBackend(backend),
 		lockd.WithTestChaos(chaos),
@@ -829,8 +845,11 @@ func runMemAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase failo
 			lockd.WithDrainLeases(8*time.Second),
 			lockd.WithShutdownTimeout(10*time.Second),
 		),
-	)
-	backup := lockd.StartTestServer(t,
+	}
+	primaryOptions = append(primaryOptions, cryptotest.SharedMTLSOptions(t, sharedCreds)...)
+	primary := lockd.StartTestServer(t, primaryOptions...)
+	backupOptions := append([]lockd.TestServerOption(nil), cryptotest.SharedMTLSOptions(t, sharedCreds)...)
+	backupOptions = append(backupOptions,
 		lockd.WithTestConfig(cfg),
 		lockd.WithTestBackend(backend),
 		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
@@ -843,6 +862,7 @@ func runMemAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase failo
 			lockd.WithShutdownTimeout(10*time.Second),
 		),
 	)
+	backup := lockd.StartTestServer(t, backupOptions...)
 
 	failoverBlob := strings.Repeat("mem-failover-", 32768)
 	key := fmt.Sprintf("mem-multi-%s-%s", phase.String(), uuidv7.NewString())
@@ -871,13 +891,19 @@ func runMemAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase failo
 	}
 
 	clientLogger, clientLogs := testlog.NewRecorder(t, pslog.TraceLevel)
-	failoverClient, err := lockdclient.NewWithEndpoints(
-		[]string{primary.URL(), backup.URL()},
-		lockdclient.WithDisableMTLS(true),
-		lockdclient.WithHTTPTimeout(2*time.Second),
+	failoverOptions := []lockdclient.Option{
+		lockdclient.WithHTTPTimeout(2 * time.Second),
 		lockdclient.WithFailureRetries(5),
 		lockdclient.WithEndpointShuffle(false),
 		lockdclient.WithLogger(clientLogger),
+	}
+	if cryptotest.TestMTLSEnabled() {
+		httpClient := cryptotest.RequireMTLSHTTPClient(t, sharedCreds)
+		failoverOptions = append(failoverOptions, lockdclient.WithHTTPClient(httpClient))
+	}
+	failoverClient, err := lockdclient.NewWithEndpoints(
+		[]string{primary.URL(), backup.URL()},
+		failoverOptions...,
 	)
 	if err != nil {
 		t.Fatalf("failover client: %v", err)
@@ -965,7 +991,6 @@ func buildMemConfig(tb testing.TB) lockd.Config {
 	tb.Helper()
 	cfg := lockd.Config{
 		Store:           "mem://",
-		DisableMTLS:     true,
 		Listen:          "127.0.0.1:0",
 		ListenProto:     "tcp",
 		DefaultTTL:      30 * time.Second,
@@ -976,15 +1001,12 @@ func buildMemConfig(tb testing.TB) lockd.Config {
 	cfg.MemQueueWatch = true
 	cfg.MemQueueWatchSet = true
 	cryptotest.MaybeEnableStorageEncryption(tb, &cfg)
-	if err := cfg.Validate(); err != nil {
-		tb.Fatalf("config validation failed: %v", err)
-	}
 	return cfg
 }
 
 func startMemServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client {
 	tb.Helper()
-	ts := lockd.StartTestServer(tb,
+	options := []lockd.TestServerOption{
 		lockd.WithTestConfig(cfg),
 		lockd.WithTestListener("tcp", "127.0.0.1:0"),
 		lockd.WithTestLoggerFromTB(tb, pslog.TraceLevel),
@@ -994,13 +1016,15 @@ func startMemServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client {
 			lockdclient.WithKeepAliveTimeout(60*time.Second),
 			lockdclient.WithLogger(lockd.NewTestingLogger(tb, pslog.TraceLevel)),
 		),
-	)
+	}
+	options = append(options, cryptotest.SharedMTLSOptions(tb)...)
+	ts := lockd.StartTestServer(tb, options...)
 	return ts.Client
 }
 
 func startMemTestServer(tb testing.TB, cfg lockd.Config) *lockd.TestServer {
 	tb.Helper()
-	return lockd.StartTestServer(tb,
+	options := []lockd.TestServerOption{
 		lockd.WithTestConfig(cfg),
 		lockd.WithTestListener("tcp", "127.0.0.1:0"),
 		lockd.WithTestLoggerFromTB(tb, pslog.TraceLevel),
@@ -1010,7 +1034,9 @@ func startMemTestServer(tb testing.TB, cfg lockd.Config) *lockd.TestServer {
 			lockdclient.WithKeepAliveTimeout(60*time.Second),
 			lockdclient.WithLogger(lockd.NewTestingLogger(tb, pslog.TraceLevel)),
 		),
-	)
+	}
+	options = append(options, cryptotest.SharedMTLSOptions(tb)...)
+	return lockd.StartTestServer(tb, options...)
 }
 
 func startMemTestServerWithBackend(tb testing.TB, cfg lockd.Config, backend *memorybackend.Store) *lockd.TestServer {
@@ -1033,6 +1059,7 @@ func startMemTestServerWithBackendOpts(tb testing.TB, cfg lockd.Config, backend 
 		),
 	}
 	opts = append(opts, extra...)
+	opts = append(opts, cryptotest.SharedMTLSOptions(tb)...)
 	return lockd.StartTestServer(tb, opts...)
 }
 
@@ -1045,11 +1072,15 @@ func directMemClient(t testing.TB, ts *lockd.TestServer) *lockdclient.Client {
 	if addr == nil {
 		t.Fatalf("listener not initialized")
 	}
-	baseURL := "http://" + addr.String()
-	cli, err := lockdclient.New(baseURL,
-		lockdclient.WithDisableMTLS(true),
+	scheme := "http"
+	if ts.Config.MTLSEnabled() {
+		scheme = "https"
+	}
+	endpoint := fmt.Sprintf("%s://%s", scheme, addr.String())
+	cli, err := ts.NewEndpointsClient([]string{endpoint},
 		lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 		lockdclient.WithHTTPTimeout(time.Second),
+		lockdclient.WithEndpointShuffle(false),
 	)
 	if err != nil {
 		t.Fatalf("direct client: %v", err)

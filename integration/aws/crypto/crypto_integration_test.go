@@ -17,6 +17,7 @@ import (
 	"pkt.systems/lockd"
 	api "pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
+	awsintegration "pkt.systems/lockd/integration/aws"
 	"pkt.systems/lockd/integration/internal/cryptotest"
 	queuetestutil "pkt.systems/lockd/integration/queue/testutil"
 	"pkt.systems/lockd/internal/diagnostics/storagecheck"
@@ -163,11 +164,6 @@ func buildAWSConfig(t testing.TB) lockd.Config {
 		QueuePollJitter:            0,
 		QueueResilientPollInterval: time.Second,
 	}
-	cfg.DisableMTLS = true
-	cfg.ListenProto = "tcp"
-	if cfg.Listen == "" {
-		cfg.Listen = "127.0.0.1:0"
-	}
 	if cfg.AWSRegion == "" {
 		cfg.AWSRegion = strings.TrimSpace(os.Getenv("AWS_REGION"))
 	}
@@ -183,6 +179,7 @@ func buildAWSConfig(t testing.TB) lockd.Config {
 
 func ensureStoreReady(t *testing.T, ctx context.Context, cfg lockd.Config) {
 	t.Helper()
+	awsintegration.ResetAWSBucketForCrypto(t, cfg)
 	res, err := storagecheck.VerifyStore(ctx, cfg)
 	if err != nil {
 		t.Fatalf("verify store: %v", err)
@@ -246,13 +243,13 @@ func startServer(t testing.TB, cfg lockd.Config) *lockdclient.Client {
 		lockd.WithTestListener("tcp", "127.0.0.1:0"),
 		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
-			lockdclient.WithDisableMTLS(true),
 			lockdclient.WithHTTPTimeout(90*time.Second),
 			lockdclient.WithKeepAliveTimeout(90*time.Second),
 			lockdclient.WithCloseTimeout(90*time.Second),
 			lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 		),
 	}
+	options = append(options, cryptotest.SharedMTLSOptions(t)...)
 	ts := lockd.StartTestServer(t, options...)
 	if ts.Client != nil {
 		return ts.Client

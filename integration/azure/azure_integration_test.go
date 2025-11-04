@@ -60,7 +60,11 @@ func TestAzureShutdownDrainingBlocksAcquire(t *testing.T) {
 	}()
 	payload, _ := json.Marshal(api.AcquireRequest{Key: "azure-drain-wait", Owner: "drain-tester", TTLSeconds: 5})
 	url := ts.URL() + "/v1/acquire"
-	result := shutdowntest.WaitForShutdownDrainingAcquire(t, url, payload)
+	httpClient, err := ts.NewHTTPClient()
+	if err != nil {
+		t.Fatalf("http client: %v", err)
+	}
+	result := shutdowntest.WaitForShutdownDrainingAcquireWithClient(t, httpClient, url, payload)
 	if result.Response.ErrorCode != "shutdown_draining" {
 		t.Fatalf("expected shutdown_draining error, got %+v", result.Response)
 	}
@@ -584,8 +588,12 @@ func TestAzureAcquireForUpdateCallbackFailover(t *testing.T) {
 	cfg := loadAzureConfig(t)
 	ensureAzureStoreReady(t, context.Background(), cfg)
 
-	primary := startAzureTestServer(t, cfg)
-	backup := startAzureTestServer(t, cfg)
+	var sharedCreds lockd.TestMTLSCredentials
+	if cryptotest.TestMTLSEnabled() {
+		sharedCreds = cryptotest.SharedMTLSCredentials(t)
+	}
+	primary := startAzureTestServer(t, cfg, cryptotest.SharedMTLSOptions(t, sharedCreds)...)
+	backup := startAzureTestServer(t, cfg, cryptotest.SharedMTLSOptions(t, sharedCreds)...)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -631,15 +639,21 @@ func TestAzureAcquireForUpdateCallbackFailover(t *testing.T) {
 	}
 
 	clientLogger, clientLogs := testlog.NewRecorder(t, pslog.TraceLevel)
-	failoverClient, err := lockdclient.NewWithEndpoints(
-		[]string{primary.URL(), backup.URL()},
-		lockdclient.WithDisableMTLS(true),
-		lockdclient.WithHTTPTimeout(90*time.Second),
-		lockdclient.WithCloseTimeout(90*time.Second),
-		lockdclient.WithKeepAliveTimeout(90*time.Second),
+	clientOpts := []lockdclient.Option{
+		lockdclient.WithHTTPTimeout(90 * time.Second),
+		lockdclient.WithCloseTimeout(90 * time.Second),
+		lockdclient.WithKeepAliveTimeout(90 * time.Second),
 		lockdclient.WithFailureRetries(5),
 		lockdclient.WithEndpointShuffle(false),
 		lockdclient.WithLogger(clientLogger),
+	}
+	if cryptotest.TestMTLSEnabled() {
+		httpClient := cryptotest.RequireMTLSHTTPClient(t, sharedCreds)
+		clientOpts = append(clientOpts, lockdclient.WithHTTPClient(httpClient))
+	}
+	failoverClient, err := lockdclient.NewWithEndpoints(
+		[]string{primary.URL(), backup.URL()},
+		clientOpts...,
 	)
 	if err != nil {
 		t.Fatalf("failover client: %v", err)
@@ -798,15 +812,22 @@ func TestAzureRemoveStateFailover(t *testing.T) {
 	releaseLease(t, ctx, seedClient, key, seedLease.LeaseID)
 
 	clientLogger, clientLogs := testlog.NewRecorder(t, pslog.TraceLevel)
-	failoverClient, err := lockdclient.NewWithEndpoints(
-		[]string{primary.URL(), backup.URL()},
-		lockdclient.WithDisableMTLS(true),
-		lockdclient.WithHTTPTimeout(90*time.Second),
-		lockdclient.WithCloseTimeout(90*time.Second),
-		lockdclient.WithKeepAliveTimeout(90*time.Second),
+	clientOptions := []lockdclient.Option{
+		lockdclient.WithHTTPTimeout(90 * time.Second),
+		lockdclient.WithCloseTimeout(90 * time.Second),
+		lockdclient.WithKeepAliveTimeout(90 * time.Second),
 		lockdclient.WithFailureRetries(5),
 		lockdclient.WithEndpointShuffle(false),
 		lockdclient.WithLogger(clientLogger),
+	}
+	if cryptotest.TestMTLSEnabled() {
+		creds := cryptotest.SharedMTLSCredentials(t)
+		httpClient := cryptotest.RequireMTLSHTTPClient(t, creds)
+		clientOptions = append(clientOptions, lockdclient.WithHTTPClient(httpClient))
+	}
+	failoverClient, err := lockdclient.NewWithEndpoints(
+		[]string{primary.URL(), backup.URL()},
+		clientOptions...,
 	)
 	if err != nil {
 		t.Fatalf("failover client: %v", err)
@@ -1061,7 +1082,6 @@ func ensureAzureStoreReady(t *testing.T, ctx context.Context, cfg lockd.Config) 
 func startAzureTestServer(t testing.TB, cfg lockd.Config, opts ...lockd.TestServerOption) *lockd.TestServer {
 	t.Helper()
 	cfgCopy := cfg
-	cfgCopy.DisableMTLS = true
 	if cfgCopy.JSONMaxBytes == 0 {
 		cfgCopy.JSONMaxBytes = 100 << 20
 	}
@@ -1099,12 +1119,13 @@ func startAzureTestServer(t testing.TB, cfg lockd.Config, opts ...lockd.TestServ
 			lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 		),
 	}
+	options = append(options, opts...)
+	options = append(options, cryptotest.SharedMTLSOptions(t)...)
 	closeDefaults := lockd.WithTestCloseDefaults(
-		lockd.WithDrainLeases(0),
-		lockd.WithShutdownTimeout(2*time.Second),
+		lockd.WithDrainLeases(-1),
+		lockd.WithShutdownTimeout(10*time.Second),
 	)
 	options = append(options, closeDefaults)
-	options = append(options, opts...)
 	return lockd.StartTestServer(t, options...)
 }
 
@@ -1114,11 +1135,15 @@ func directClient(t testing.TB, ts *lockd.TestServer) *lockdclient.Client {
 	if addr == nil {
 		t.Fatalf("listener not initialised")
 	}
-	base := "http://" + addr.String()
-	cli, err := lockdclient.New(base,
-		lockdclient.WithDisableMTLS(true),
+	scheme := "http"
+	if ts.Config.MTLSEnabled() {
+		scheme = "https"
+	}
+	endpoint := fmt.Sprintf("%s://%s", scheme, addr.String())
+	cli, err := ts.NewEndpointsClient([]string{endpoint},
 		lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
 		lockdclient.WithHTTPTimeout(2*time.Minute),
+		lockdclient.WithEndpointShuffle(false),
 	)
 	if err != nil {
 		t.Fatalf("direct client: %v", err)

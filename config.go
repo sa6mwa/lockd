@@ -168,6 +168,7 @@ type Config struct {
 	// mTLS
 	DisableMTLS  bool
 	BundlePath   string
+	BundlePEM    []byte
 	DenylistPath string
 	// Storage encryption
 	DisableStorageEncryption bool
@@ -448,15 +449,17 @@ func (c *Config) Validate() error {
 	}
 	requireBundle := c.MTLSEnabled() || c.StorageEncryptionEnabled()
 	if requireBundle {
-		if c.BundlePath == "" {
-			path, err := DefaultBundlePath()
-			if err != nil {
-				return fmt.Errorf("config: resolve bundle path: %w", err)
+		if len(c.BundlePEM) == 0 {
+			if c.BundlePath == "" {
+				path, err := DefaultBundlePath()
+				if err != nil {
+					return fmt.Errorf("config: resolve bundle path: %w", err)
+				}
+				c.BundlePath = path
 			}
-			c.BundlePath = path
-		}
-		if _, err := os.Stat(c.BundlePath); err != nil {
-			return fmt.Errorf("config: bundle %q not found (run 'lockd auth new server')", c.BundlePath)
+			if _, err := os.Stat(c.BundlePath); err != nil {
+				return fmt.Errorf("config: bundle %q not found (run 'lockd auth new server')", c.BundlePath)
+			}
 		}
 	}
 

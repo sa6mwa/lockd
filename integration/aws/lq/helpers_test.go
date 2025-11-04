@@ -16,6 +16,7 @@ import (
 
 	"pkt.systems/lockd"
 	lockdclient "pkt.systems/lockd/client"
+	awsbase "pkt.systems/lockd/integration/aws"
 	"pkt.systems/lockd/integration/internal/cryptotest"
 	queuetestutil "pkt.systems/lockd/integration/queue/testutil"
 	"pkt.systems/lockd/internal/diagnostics/storagecheck"
@@ -98,7 +99,16 @@ func newAWSQueueTestServer(t testing.TB, cfg lockd.Config, serverLogger pslog.Lo
 		lockd.WithTestLogger(serverLogger),
 		lockd.WithTestClientOptions(baseClientOpts...),
 		lockd.WithTestStartTimeout(30 * time.Second),
+		lockd.WithTestCloseDefaults(
+			lockd.WithDrainLeases(-1),
+			lockd.WithShutdownTimeout(10*time.Second),
+		),
 	}
+	var sharedCreds lockd.TestMTLSCredentials
+	if cryptotest.TestMTLSEnabled() {
+		sharedCreds = cryptotest.SharedMTLSCredentials(t)
+	}
+	options = append(options, cryptotest.SharedMTLSOptions(t, sharedCreds)...)
 	options = append(options, opts...)
 	return lockd.StartTestServer(t, options...)
 }
@@ -134,7 +144,7 @@ func loadAWSQueueConfig(t testing.TB) lockd.Config {
 }
 
 func ensureAWSQueueReady(t testing.TB, ctx context.Context, cfg lockd.Config) {
-	resetAWSBucketForCrypto(t, cfg)
+	awsbase.ResetAWSBucketForCrypto(t, cfg)
 	awsQueueStoreVerifyOnce.Do(func() {
 		res, err := storagecheck.VerifyStore(ctx, cfg)
 		if err != nil {

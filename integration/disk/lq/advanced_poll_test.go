@@ -15,6 +15,7 @@ import (
 
 	"pkt.systems/lockd"
 	lockdclient "pkt.systems/lockd/client"
+	"pkt.systems/lockd/integration/internal/cryptotest"
 	queuetestutil "pkt.systems/lockd/integration/queue/testutil"
 	"pkt.systems/lockd/internal/qrf"
 	"pkt.systems/pslog"
@@ -233,8 +234,12 @@ func runDiskQueueMultiServerRouting(t *testing.T) {
 		ResilientInterval: 250 * time.Millisecond,
 	})
 
-	serverA := startDiskQueueServer(t, cfg)
-	serverB := startDiskQueueServer(t, cfg)
+	var sharedCreds lockd.TestMTLSCredentials
+	if cryptotest.TestMTLSEnabled() {
+		sharedCreds = cryptotest.SharedMTLSCredentials(t)
+	}
+	serverA := startDiskQueueServer(t, cfg, cryptotest.SharedMTLSOptions(t, sharedCreds)...)
+	serverB := startDiskQueueServer(t, cfg, cryptotest.SharedMTLSOptions(t, sharedCreds)...)
 
 	queue := queuetestutil.QueueName("disk-routing")
 	payload := []byte("shared-disk-backend")
@@ -268,19 +273,27 @@ func runDiskQueueMultiServerFailoverClient(t *testing.T) {
 		ResilientInterval: 250 * time.Millisecond,
 	})
 
-	serverA := startDiskQueueServer(t, cfg)
-	serverB := startDiskQueueServer(t, cfg)
+	var sharedCreds lockd.TestMTLSCredentials
+	if cryptotest.TestMTLSEnabled() {
+		sharedCreds = cryptotest.SharedMTLSCredentials(t)
+	}
+	serverA := startDiskQueueServer(t, cfg, cryptotest.SharedMTLSOptions(t, sharedCreds)...)
+	serverB := startDiskQueueServer(t, cfg, cryptotest.SharedMTLSOptions(t, sharedCreds)...)
 
 	queue := queuetestutil.QueueName("disk-failover")
 	queuetestutil.MustEnqueueBytes(t, serverA.Client, queue, []byte("failover-payload"))
 
 	endpoints := []string{serverA.URL(), serverB.URL()}
 	capture := queuetestutil.NewLogCapture(t)
-	failoverClient, err := lockdclient.NewWithEndpoints(endpoints,
-		lockdclient.WithDisableMTLS(true),
+	clientOptions := []lockdclient.Option{
 		lockdclient.WithEndpointShuffle(false),
 		lockdclient.WithLogger(capture.Logger()),
-	)
+	}
+	if cryptotest.TestMTLSEnabled() {
+		httpClient := cryptotest.RequireMTLSHTTPClient(t, sharedCreds)
+		clientOptions = append(clientOptions, lockdclient.WithHTTPClient(httpClient))
+	}
+	failoverClient, err := lockdclient.NewWithEndpoints(endpoints, clientOptions...)
 	if err != nil {
 		t.Fatalf("new failover client: %v", err)
 	}
@@ -351,11 +364,13 @@ func runDiskQueueHighFanInFanOutSingleServer(t *testing.T) {
 		lockdclient.WithCloseTimeout(60 * time.Second),
 		lockdclient.WithLogger(clientLogger),
 	}
-	ts := lockd.StartTestServer(t,
+	options := []lockd.TestServerOption{
 		lockd.WithTestConfig(cfg),
 		lockd.WithTestLogger(capture.Logger()),
 		lockd.WithTestClientOptions(baseClientOpts...),
-	)
+	}
+	options = append(options, cryptotest.SharedMTLSOptions(t)...)
+	ts := lockd.StartTestServer(t, options...)
 	queue := queuetestutil.QueueName("disk-highfan-single")
 	cli := ts.Client
 

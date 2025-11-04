@@ -20,6 +20,7 @@ import (
 	"pkt.systems/lockd"
 	"pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
+	"pkt.systems/lockd/integration/internal/cryptotest"
 	"pkt.systems/lockd/internal/uuidv7"
 	"pkt.systems/pslog"
 )
@@ -129,11 +130,17 @@ func QueueOwner(prefix string) string {
 func StartQueueTestServer(t testing.TB, cfg lockd.Config, extraClientOpts ...lockdclient.Option) *lockd.TestServer {
 	t.Helper()
 	serverLogger := lockd.NewTestingLogger(t, pslog.TraceLevel)
-	return StartQueueTestServerWithLogger(t, cfg, serverLogger, extraClientOpts...)
+	return StartQueueTestServerWithOptions(t, cfg, []lockd.TestServerOption{lockd.WithTestLogger(serverLogger)}, extraClientOpts...)
 }
 
 // StartQueueTestServerWithLogger launches a test server with a custom logger.
 func StartQueueTestServerWithLogger(t testing.TB, cfg lockd.Config, logger pslog.Logger, extraClientOpts ...lockdclient.Option) *lockd.TestServer {
+	t.Helper()
+	return StartQueueTestServerWithOptions(t, cfg, []lockd.TestServerOption{lockd.WithTestLogger(logger)}, extraClientOpts...)
+}
+
+// StartQueueTestServerWithOptions allows callers to supply additional server options alongside client options.
+func StartQueueTestServerWithOptions(t testing.TB, cfg lockd.Config, extraServerOpts []lockd.TestServerOption, extraClientOpts ...lockdclient.Option) *lockd.TestServer {
 	t.Helper()
 
 	clientLogger := lockd.NewTestingLogger(t, pslog.TraceLevel)
@@ -147,11 +154,14 @@ func StartQueueTestServerWithLogger(t testing.TB, cfg lockd.Config, logger pslog
 		baseClientOpts = append(baseClientOpts, extraClientOpts...)
 	}
 
-	return lockd.StartTestServer(t,
+	options := []lockd.TestServerOption{
 		lockd.WithTestConfig(cfg),
-		lockd.WithTestLogger(logger),
 		lockd.WithTestClientOptions(baseClientOpts...),
-	)
+	}
+	options = append(options, extraServerOpts...)
+	options = append(options, cryptotest.SharedMTLSOptions(t)...)
+
+	return lockd.StartTestServer(t, options...)
 }
 
 // MustEnqueueBytes enqueues payload to queue, failing the test on error.
@@ -500,7 +510,7 @@ func (c *LogCapture) Logger() pslog.Logger {
 	if level == 0 {
 		level = pslog.TraceLevel
 	}
-    logger := pslog.NewStructured(c).With("sys", "test.capture")
+	logger := pslog.NewStructured(c)
 	return logger.LogLevel(level)
 }
 

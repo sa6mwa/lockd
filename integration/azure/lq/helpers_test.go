@@ -52,14 +52,10 @@ func prepareAzureQueueConfig(t testing.TB, opts azureQueueOptions) lockd.Config 
 
 	cfg.QRFEnabled = false
 
-	cfg.DisableMTLS = true
 	cfg.ListenProto = "tcp"
 	cfg.Listen = "127.0.0.1:0"
 
 	cryptotest.MaybeEnableStorageEncryption(t, &cfg)
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("azure queue config validation failed: %v", err)
-	}
 	return cfg
 }
 
@@ -78,9 +74,6 @@ func loadAzureQueueConfig(t testing.TB) lockd.Config {
 		AzureAccountKey: os.Getenv("LOCKD_AZURE_ACCOUNT_KEY"),
 	}
 	cryptotest.MaybeEnableStorageEncryption(t, &cfg)
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("azure queue config validation: %v", err)
-	}
 	return cfg
 }
 
@@ -130,6 +123,7 @@ func startAzureQueueServerWithLogger(t testing.TB, cfg lockd.Config, logger pslo
 		lockd.WithTestStartTimeout(30 * time.Second),
 		closeDefaults,
 	}
+	options = append(options, cryptotest.SharedMTLSOptions(t)...)
 	options = append(options, extra...)
 	return lockd.StartTestServer(t, options...)
 }

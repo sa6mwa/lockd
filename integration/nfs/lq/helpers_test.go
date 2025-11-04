@@ -44,7 +44,6 @@ func buildNFSQueueConfig(t testing.TB, root string, opts nfsQueueOptions) lockd.
 	t.Helper()
 	cfg := lockd.Config{
 		Store:                      nfsStoreURL(root),
-		DisableMTLS:                true,
 		ListenProto:                "tcp",
 		Listen:                     "127.0.0.1:0",
 		DefaultTTL:                 30 * time.Second,
@@ -67,9 +66,6 @@ func buildNFSQueueConfig(t testing.TB, root string, opts nfsQueueOptions) lockd.
 		cfg.QueuePollJitter = 0
 	}
 	cryptotest.MaybeEnableStorageEncryption(t, &cfg)
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("config validation failed: %v", err)
-	}
 	return cfg
 }
 

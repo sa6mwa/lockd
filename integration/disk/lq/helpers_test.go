@@ -46,7 +46,6 @@ func buildDiskQueueConfig(t testing.TB, root string, opts diskQueueOptions) lock
 	t.Helper()
 	cfg := lockd.Config{
 		Store:           diskStoreURL(root),
-		DisableMTLS:     true,
 		ListenProto:     "tcp",
 		Listen:          "127.0.0.1:0",
 		DefaultTTL:      30 * time.Second,
@@ -85,20 +84,17 @@ func buildDiskQueueConfig(t testing.TB, root string, opts diskQueueOptions) lock
 		cfg.QueueResilientPollInterval = opts.ResilientInterval
 	}
 	cryptotest.MaybeEnableStorageEncryption(t, &cfg)
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("config validation failed: %v", err)
-	}
 	return cfg
 }
 
-func startDiskQueueServer(t testing.TB, cfg lockd.Config) *lockd.TestServer {
+func startDiskQueueServer(t testing.TB, cfg lockd.Config, serverOpts ...lockd.TestServerOption) *lockd.TestServer {
 	t.Helper()
-	return queuetestutil.StartQueueTestServer(t, cfg)
+	return queuetestutil.StartQueueTestServerWithOptions(t, cfg, serverOpts)
 }
 
 func startDiskQueueServerWithLogger(t testing.TB, cfg lockd.Config, logger pslog.Logger) *lockd.TestServer {
 	t.Helper()
-	return queuetestutil.StartQueueTestServerWithLogger(t, cfg, logger)
+	return queuetestutil.StartQueueTestServerWithOptions(t, cfg, []lockd.TestServerOption{lockd.WithTestLogger(logger)}, nil...)
 }
 
 func startDiskQueueServerWithCapture(t testing.TB, cfg lockd.Config) (*lockd.TestServer, *queuetestutil.LogCapture) {

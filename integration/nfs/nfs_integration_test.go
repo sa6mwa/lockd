@@ -279,7 +279,7 @@ func TestNFSAutoKeyAcquireForUpdate(t *testing.T) {
 	runAutoKeyAcquireForUpdateScenario(t, base, "nfs-auto-handler")
 }
 
-func TestNFSRemoveStateSingleServer(t *testing.T) {
+func TestNFSRemoveSingleServer(t *testing.T) {
 	base := ensureNFSRootEnv(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()

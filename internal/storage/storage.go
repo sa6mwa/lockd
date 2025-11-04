@@ -85,8 +85,8 @@ type Backend interface {
 	ReadState(ctx context.Context, key string) (io.ReadCloser, *StateInfo, error)
 	// WriteState uploads a new state blob with optional CAS on the previous ETag.
 	WriteState(ctx context.Context, key string, body io.Reader, opts PutStateOptions) (*PutStateResult, error)
-	// RemoveState deletes stored state if present.
-	RemoveState(ctx context.Context, key string, expectedETag string) error
+	// Remove deletes stored state if present.
+	Remove(ctx context.Context, key string, expectedETag string) error
 
 	// ListObjects enumerates objects under the supplied prefix in ascending
 	// lexical order. Results are limited by opts.Limit when >0 and resume from

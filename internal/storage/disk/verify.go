@@ -128,7 +128,7 @@ func Verify(ctx context.Context, cfg Config) []Check {
 		{
 			name: "Cleanup",
 			fn: func() error {
-				if err := store1.RemoveState(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+				if err := store1.Remove(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 					return err
 				}
 				if err := store1.DeleteMeta(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {

@@ -1017,7 +1017,7 @@ func runMemQueueShutdownDrainingSubscribeWithState(t *testing.T, mode memQueueMo
 		stopCh <- ts.Stop(context.Background(), lockd.WithDrainLeases(2*time.Second), lockd.WithShutdownTimeout(3*time.Second))
 	}()
 	payload, _ := json.Marshal(api.DequeueRequest{Queue: "drain-queue", Owner: "worker-1", PageSize: 1})
-	url := ts.URL() + "/v1/queue/subscribe-with-state"
+	url := ts.URL() + "/v1/queue/subscribeWithState"
 	httpClient, err := ts.NewHTTPClient()
 	if err != nil {
 		t.Fatalf("http client: %v", err)

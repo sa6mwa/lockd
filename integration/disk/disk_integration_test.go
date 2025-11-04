@@ -246,7 +246,7 @@ func runDiskAutoKeyAcquireScenario(t *testing.T, base string, owner string) {
 	}
 }
 
-func TestDiskRemoveStateSingleServer(t *testing.T) {
+func TestDiskRemoveSingleServer(t *testing.T) {
 	ensureDiskRootEnv(t)
 	root := prepareDiskRoot(t, "")
 	cfg := buildDiskConfig(t, root, 0)
@@ -359,7 +359,7 @@ func TestDiskRemoveStateSingleServer(t *testing.T) {
 	})
 }
 
-func TestDiskRemoveStateAcquireForUpdate(t *testing.T) {
+func TestDiskRemoveAcquireForUpdate(t *testing.T) {
 	ensureDiskRootEnv(t)
 	root := prepareDiskRoot(t, "")
 	cfg := buildDiskConfig(t, root, 0)
@@ -385,7 +385,7 @@ func TestDiskRemoveStateAcquireForUpdate(t *testing.T) {
 		watchdog := time.AfterFunc(10*time.Second, func() {
 			buf := make([]byte, 1<<18)
 			n := runtime.Stack(buf, true)
-			panic("TestDiskRemoveStateAcquireForUpdate/remove-in-handler hung:\n" + string(buf[:n]))
+			panic("TestDiskRemoveAcquireForUpdate/remove-in-handler hung:\n" + string(buf[:n]))
 		})
 		defer watchdog.Stop()
 
@@ -440,7 +440,7 @@ func TestDiskRemoveStateAcquireForUpdate(t *testing.T) {
 		watchdog := time.AfterFunc(10*time.Second, func() {
 			buf := make([]byte, 1<<18)
 			n := runtime.Stack(buf, true)
-			panic("TestDiskRemoveStateAcquireForUpdate/remove-and-recreate hung:\n" + string(buf[:n]))
+			panic("TestDiskRemoveAcquireForUpdate/remove-and-recreate hung:\n" + string(buf[:n]))
 		})
 		defer watchdog.Stop()
 
@@ -560,7 +560,7 @@ func TestDiskAcquireForUpdateConcurrency(t *testing.T) {
 	_ = releaseLease(t, ctx, verifier)
 }
 
-func TestDiskRemoveStateMultiServer(t *testing.T) {
+func TestDiskRemoveMultiServer(t *testing.T) {
 	ensureDiskRootEnv(t)
 	root := prepareDiskRoot(t, "")
 
@@ -612,7 +612,7 @@ func TestDiskRemoveStateMultiServer(t *testing.T) {
 	releaseLease(t, ctx, verifier)
 }
 
-func TestDiskRemoveStateCASMismatch(t *testing.T) {
+func TestDiskRemoveCASMismatch(t *testing.T) {
 	ensureDiskRootEnv(t)
 	root := prepareDiskRoot(t, "")
 	cfg := buildDiskConfig(t, root, 0)
@@ -633,7 +633,7 @@ func TestDiskRemoveStateCASMismatch(t *testing.T) {
 	}
 	currentVersion := lease.Version
 
-	staleOpts := lockdclient.RemoveStateOptions{
+	staleOpts := lockdclient.RemoveOptions{
 		IfETag:    staleETag,
 		IfVersion: strconv.FormatInt(currentVersion, 10),
 	}
@@ -669,7 +669,7 @@ func TestDiskRemoveStateCASMismatch(t *testing.T) {
 	releaseLease(t, ctx, verify)
 }
 
-func TestDiskRemoveStateKeepAlive(t *testing.T) {
+func TestDiskRemoveKeepAlive(t *testing.T) {
 	ensureDiskRootEnv(t)
 	root := prepareDiskRoot(t, "")
 	cfg := buildDiskConfig(t, root, 0)
@@ -699,7 +699,7 @@ func TestDiskRemoveStateKeepAlive(t *testing.T) {
 		t.Fatalf("keepalive after remove: %v", err)
 	}
 
-	staleUpdate := lockdclient.UpdateStateOptions{
+	staleUpdate := lockdclient.UpdateOptions{
 		IfETag:    originalETag,
 		IfVersion: strconv.FormatInt(originalVersion, 10),
 	}
@@ -735,7 +735,7 @@ func TestDiskRemoveStateKeepAlive(t *testing.T) {
 	releaseLease(t, ctx, verify)
 }
 
-func TestDiskRemoveStateFailoverMultiServer(t *testing.T) {
+func TestDiskRemoveFailoverMultiServer(t *testing.T) {
 	ensureDiskRootEnv(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -1494,9 +1494,9 @@ func assertFailoverLogs(t testing.TB, rec *testlog.Recorder, primary, backup str
 
 func assertRemoveFailoverLogs(t testing.TB, rec *testlog.Recorder, primary, backup string) {
 	const (
-		startMsg        = "client.remove_state.start"
-		successMsg      = "client.remove_state.success"
-		transportErrMsg = "client.remove_state.transport_error"
+		startMsg        = "client.remove.start"
+		successMsg      = "client.remove.success"
+		transportErrMsg = "client.remove.transport_error"
 		httpErrorMsg    = "client.http.error"
 		httpSuccessMsg  = "client.http.success"
 	)

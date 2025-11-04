@@ -42,8 +42,8 @@ At a high level:
 1. Clients enqueue JSON metadata + optional binary payload via HTTP.
 2. The queue service writes metadata (`q/<queue>/msg/<id>.pb`) and payload
    (`q/<queue>/msg/<id>.bin`) to the configured storage backend using CAS.
-3. Consumers call `/v1/queue/dequeue`, `/v1/queue/dequeue-with-state`, or the
-   streaming variants `/v1/queue/subscribe` and `/v1/queue/subscribe-with-state`.
+3. Consumers call `/v1/queue/dequeue`, `/v1/queue/dequeueWithState`, or the
+   streaming variants `/v1/queue/subscribe` and `/v1/queue/subscribeWithState`.
    The API does **not** list storage directly; instead it blocks on the dispatcher.
 4. The dispatcher is a per-server background component that watches for new
    messages (either via storage polling or disk inotify) and delivers

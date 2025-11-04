@@ -27,6 +27,13 @@ type AcquireResponse struct {
 	CorrelationID string `json:"correlation_id,omitempty"`
 }
 
+// UpdateResponse captures metadata returned by POST /v1/update.
+type UpdateResponse struct {
+	NewVersion   int64  `json:"new_version"`
+	NewStateETag string `json:"new_state_etag"`
+	Bytes        int64  `json:"bytes"`
+}
+
 // KeepAliveRequest represents POST /v1/keepalive.
 type KeepAliveRequest struct {
 	Key        string `json:"key"`
@@ -50,8 +57,8 @@ type ReleaseResponse struct {
 	Released bool `json:"released"`
 }
 
-// RemoveStateResponse is emitted by POST /v1/remove-state.
-type RemoveStateResponse struct {
+// RemoveResponse is emitted by POST /v1/remove.
+type RemoveResponse struct {
 	Removed    bool  `json:"removed"`
 	NewVersion int64 `json:"new_version,omitempty"`
 }

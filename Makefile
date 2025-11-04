@@ -8,6 +8,7 @@ help:
 	@echo "  make test                    # run unit tests"
 	@echo "  make test-integration        # run integration suites (pass SUITES=...)"
 	@echo "  make bench                    # run benchmark suites (pass SUITES=...)"
+	@echo "  make swagger                 # regenerate Swagger/OpenAPI artifacts"
 	@echo "  make diagrams                # render PlantUML sequence diagrams to JPEG"
 
 # Example environment file contents shown when missing
@@ -62,3 +63,8 @@ diagrams: $(PLANTUML_SOURCES)
 	@for svg in $(PLANTUML_OUT_SVG); do \
 		sed -i '0,/<svg[^>]*>/s//&\n  <rect width="100%" height="100%" fill="#ffffff"\/>/' "$$svg"; \
 	done
+
+.PHONY: swagger
+swagger:
+	@echo "Generating Swagger/OpenAPI documentation"
+	@go generate ./swagger

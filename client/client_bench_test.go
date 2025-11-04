@@ -67,7 +67,7 @@ func newClientBenchmarkServer(payload []byte) *httptest.Server {
 			http.Error(w, fmt.Sprintf("read body: %v", err), http.StatusInternalServerError)
 			return
 		}
-		resp := UpdateStateResult{
+		resp := UpdateResult{
 			NewVersion:   2,
 			NewStateETag: strings.Trim(benchETag, `"`),
 			BytesWritten: n,
@@ -152,7 +152,7 @@ func (s *jsonPayloadStream) Read(p []byte) (int, error) {
 	return total, nil
 }
 
-func BenchmarkClientGetStateBytes(b *testing.B) {
+func BenchmarkClientGetBytes(b *testing.B) {
 	payload := makeBenchmarkJSON(256 * 1024)
 	server := newClientBenchmarkServer(payload)
 	defer server.Close()
@@ -167,7 +167,7 @@ func BenchmarkClientGetStateBytes(b *testing.B) {
 	b.SetBytes(int64(len(payload)))
 
 	for b.Loop() {
-		data, _, _, err := cli.GetStateBytes(ctx, benchKey, benchLease)
+		data, _, _, err := cli.GetBytes(ctx, benchKey, benchLease)
 		if err != nil {
 			b.Fatalf("get state bytes: %v", err)
 		}
@@ -177,7 +177,7 @@ func BenchmarkClientGetStateBytes(b *testing.B) {
 	}
 }
 
-func BenchmarkClientGetStateStream(b *testing.B) {
+func BenchmarkClientGetStream(b *testing.B) {
 	payload := makeBenchmarkJSON(256 * 1024)
 	server := newClientBenchmarkServer(payload)
 	defer server.Close()
@@ -192,7 +192,7 @@ func BenchmarkClientGetStateStream(b *testing.B) {
 	b.SetBytes(int64(len(payload)))
 
 	for b.Loop() {
-		reader, _, _, err := cli.GetState(ctx, benchKey, benchLease)
+		reader, _, _, err := cli.Get(ctx, benchKey, benchLease)
 		if err != nil {
 			b.Fatalf("get state stream: %v", err)
 		}
@@ -210,7 +210,7 @@ func BenchmarkClientGetStateStream(b *testing.B) {
 	}
 }
 
-func BenchmarkClientUpdateStateBytes(b *testing.B) {
+func BenchmarkClientUpdateBytes(b *testing.B) {
 	payload := makeBenchmarkJSON(256 * 1024)
 	server := newClientBenchmarkServer(nil)
 	defer server.Close()
@@ -224,13 +224,13 @@ func BenchmarkClientUpdateStateBytes(b *testing.B) {
 	b.SetBytes(int64(len(payload)))
 
 	for b.Loop() {
-		if _, err := cli.UpdateStateBytes(ctx, benchKey, benchLease, payload, UpdateStateOptions{}); err != nil {
+		if _, err := cli.UpdateBytes(ctx, benchKey, benchLease, payload, UpdateOptions{}); err != nil {
 			b.Fatalf("update state bytes: %v", err)
 		}
 	}
 }
 
-func BenchmarkClientUpdateStateStream(b *testing.B) {
+func BenchmarkClientUpdateStream(b *testing.B) {
 	bodyLen := int64(256 * 1024)
 	server := newClientBenchmarkServer(nil)
 	defer server.Close()
@@ -245,7 +245,7 @@ func BenchmarkClientUpdateStateStream(b *testing.B) {
 
 	for b.Loop() {
 		reader := newJSONPayloadStream(bodyLen)
-		if _, err := cli.UpdateState(ctx, benchKey, benchLease, reader, UpdateStateOptions{}); err != nil {
+		if _, err := cli.Update(ctx, benchKey, benchLease, reader, UpdateOptions{}); err != nil {
 			b.Fatalf("update state stream: %v", err)
 		}
 	}

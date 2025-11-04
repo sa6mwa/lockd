@@ -53,11 +53,11 @@ func TestHandlerLeaseCacheAvoidsExtraLoadMeta(t *testing.T) {
 	}
 
 	updateBody := bytes.NewBufferString("  { \"value\" : 42 }\n")
-	upReq := httptest.NewRequest(http.MethodPost, "/v1/update-state?key=orders", updateBody)
+	upReq := httptest.NewRequest(http.MethodPost, "/v1/update?key=orders", updateBody)
 	upReq.Header.Set("X-Lease-ID", acq.LeaseID)
 	upReq.Header.Set("X-Fencing-Token", fence)
 	rr = httptest.NewRecorder()
-	if err := h.handleUpdateState(rr, upReq); err != nil {
+	if err := h.handleUpdate(rr, upReq); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	if rr.Code != http.StatusOK {
@@ -102,7 +102,7 @@ func TestHandlerLeaseCacheAvoidsExtraLoadMeta(t *testing.T) {
 	}
 }
 
-func TestHandlerRemoveStateClearsMeta(t *testing.T) {
+func TestHandlerRemoveClearsMeta(t *testing.T) {
 	store := newStubStore()
 	h := New(Config{
 		Store:                   store,
@@ -133,11 +133,11 @@ func TestHandlerRemoveStateClearsMeta(t *testing.T) {
 	fence := strconv.FormatInt(acq.FencingToken, 10)
 
 	updateBody := bytes.NewBufferString(`{"value":42}`)
-	upReq := httptest.NewRequest(http.MethodPost, "/v1/update-state?key=orders", updateBody)
+	upReq := httptest.NewRequest(http.MethodPost, "/v1/update?key=orders", updateBody)
 	upReq.Header.Set("X-Lease-ID", acq.LeaseID)
 	upReq.Header.Set("X-Fencing-Token", fence)
 	rr = httptest.NewRecorder()
-	if err := h.handleUpdateState(rr, upReq); err != nil {
+	if err := h.handleUpdate(rr, upReq); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	if rr.Code != http.StatusOK {
@@ -155,18 +155,18 @@ func TestHandlerRemoveStateClearsMeta(t *testing.T) {
 	}
 	prevVersion := entry.meta.Version
 
-	rmReq := httptest.NewRequest(http.MethodPost, "/v1/remove-state?key=orders", nil)
+	rmReq := httptest.NewRequest(http.MethodPost, "/v1/remove?key=orders", nil)
 	rmReq.Header.Set("X-Lease-ID", acq.LeaseID)
 	rmReq.Header.Set("X-Fencing-Token", fence)
 	rmReq.Header.Set("X-If-State-ETag", entry.meta.StateETag)
 	rr = httptest.NewRecorder()
-	if err := h.handleRemoveState(rr, rmReq); err != nil {
+	if err := h.handleRemove(rr, rmReq); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	if rr.Code != http.StatusOK {
 		t.Fatalf("remove status=%d body=%s", rr.Code, rr.Body.Bytes())
 	}
-	var resp api.RemoveStateResponse
+	var resp api.RemoveResponse
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode remove: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestHandlerRemoveStateClearsMeta(t *testing.T) {
 		t.Fatalf("expected state to be removed from store")
 	}
 	if removeCount != 1 {
-		t.Fatalf("expected RemoveState to be invoked once, got %d", removeCount)
+		t.Fatalf("expected Remove to be invoked once, got %d", removeCount)
 	}
 }
 
@@ -302,7 +302,7 @@ func (s *stubStore) WriteState(ctx context.Context, key string, body io.Reader, 
 	return result, nil
 }
 
-func (s *stubStore) RemoveState(ctx context.Context, key string, expectedETag string) error {
+func (s *stubStore) Remove(ctx context.Context, key string, expectedETag string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.removeStateCount++

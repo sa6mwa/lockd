@@ -1358,7 +1358,7 @@ func newClientGetCommand(cfg *clientCLIConfig) *cobra.Command {
 			}
 			cli.RegisterLeaseToken(lease, token)
 			ctx, _ := commandContextWithCorrelation(cmd)
-			reader, etag, version, err := cli.GetState(ctx, key, lease)
+			reader, etag, version, err := cli.Get(ctx, key, lease)
 			if err != nil {
 				return err
 			}
@@ -1457,9 +1457,9 @@ func newClientUpdateCommand(cfg *clientCLIConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			opts := lockdclient.UpdateStateOptions{IfVersion: ifVersion, IfETag: ifETag, FencingToken: token}
+			opts := lockdclient.UpdateOptions{IfVersion: ifVersion, IfETag: ifETag, FencingToken: token}
 			ctx, _ := commandContextWithCorrelation(cmd)
-			result, err := cli.UpdateStateBytes(ctx, key, lease, payload, opts)
+			result, err := cli.UpdateBytes(ctx, key, lease, payload, opts)
 			if err != nil {
 				return err
 			}
@@ -1527,9 +1527,9 @@ func newClientRemoveCommand(cfg *clientCLIConfig) *cobra.Command {
 				return err
 			}
 			cli.RegisterLeaseToken(lease, token)
-			opts := lockdclient.RemoveStateOptions{IfVersion: ifVersion, IfETag: ifETag, FencingToken: token}
+			opts := lockdclient.RemoveOptions{IfVersion: ifVersion, IfETag: ifETag, FencingToken: token}
 			ctx, _ := commandContextWithCorrelation(cmd)
-			result, err := cli.RemoveState(ctx, key, lease, opts)
+			result, err := cli.Remove(ctx, key, lease, opts)
 			if err != nil {
 				return err
 			}
@@ -1598,7 +1598,7 @@ func newClientSetCommand(cfg *clientCLIConfig) *cobra.Command {
 			}
 			cli.RegisterLeaseToken(lease, token)
 			ctx := cmd.Context()
-			stateBytes, etag, version, err := cli.GetStateBytes(ctx, key, lease)
+			stateBytes, etag, version, err := cli.GetBytes(ctx, key, lease)
 			if err != nil {
 				return err
 			}
@@ -1616,7 +1616,7 @@ func newClientSetCommand(cfg *clientCLIConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			opts := lockdclient.UpdateStateOptions{FencingToken: token}
+			opts := lockdclient.UpdateOptions{FencingToken: token}
 			if !noCAS {
 				opts.IfVersion = version
 				opts.IfETag = etag
@@ -1627,7 +1627,7 @@ func newClientSetCommand(cfg *clientCLIConfig) *cobra.Command {
 			if ifETag != "" {
 				opts.IfETag = ifETag
 			}
-			result, err := cli.UpdateStateBytes(ctx, key, lease, payload, opts)
+			result, err := cli.UpdateBytes(ctx, key, lease, payload, opts)
 			if err != nil {
 				return err
 			}

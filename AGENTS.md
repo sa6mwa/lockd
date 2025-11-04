@@ -20,7 +20,7 @@ This repo delivers a tiny, single-binary **lock + state** service—“just enou
 
 ## General guidelines (no hard requirements)
 
-- We prefer kebab-case for URI paths (get-state, update-state, etc)
+- We usually prefer kebab-case for URI paths, but the v1 API now ships `/v1/get`, `/v1/update`, and `/v1/remove` for brevity; match whatever the public surface uses.
 - We like all integration tests to finish within 120 seconds in order to iterate fast, adjust technique (not goal of the test) to this constraint (for example timeouts, retries and exponential backoff)
 - We like unit tests to be fast and snappy; a total go test ./... run should finish in less than 10 seconds
 - We need good concurrency, fuzz, and race testing, but do not over-do it, instead split the concurrency testing into smaller loads (e.g: one test for two concurrent workers competing for the same lock, then ramp up to 5 concurrent worker in another test)
@@ -62,8 +62,8 @@ Endpoints:
 * `POST /v1/acquire` → `{key, ttl_seconds, owner, block_seconds}` → `200 {lease_id,...,version}` or `409 waiting`.
 * `POST /v1/keepalive` → `{lease_id, ttl_seconds}` → `200 {expires_at_unix}`.
 * `POST /v1/release` → `{lease_id}` → `200 {released:true}`.
-* `POST /v1/get-state` (requires live lease) → body streamed JSON; headers `X-Key-Version`, `ETag`.
-* `POST /v1/update-state` (requires live lease) → raw JSON body (streamed/compacted), optional CAS headers; `200 {new_version,new_state_etag,bytes}` or `409`.
+* `POST /v1/get` (requires live lease) → body streamed JSON; headers `X-Key-Version`, `ETag`.
+* `POST /v1/update` (requires live lease) → raw JSON body (streamed/compacted), optional CAS headers; `200 {new_version,new_state_etag,bytes}` or `409`.
 * `GET /v1/describe?key=...` → meta only (no state).
 * `GET /healthz`, `GET /readyz`.
 
@@ -203,7 +203,7 @@ Preferred S3/Blob client: github.com/minio/minio-go/v7 (already pulled into the 
   * Parse incrementally, strip insignificant whitespace, **write directly** to uploader (multipart or file).
   * Enforce `json_max_bytes` (default ~100 MB) early.
   * Reject non-JSON bodies with `400`.
-* On `get-state`, stream directly from backend (no full buffering), with `ETag` header and `X-Key-Version`.
+* On `get`, stream directly from backend (no full buffering), with `ETag` header and `X-Key-Version`.
 
 ### Failure semantics
 
@@ -281,7 +281,7 @@ The storage backend is chosen by parsing `cfg.Store`. The S3 impl uses the condi
 
 ## Client SDK (Go)
 
-`client.New(baseURL, bundlePath string, opts ...Option) (*Client, error)` builds an mTLS HTTP/2 client that **skips hostname verification** and pins to the CA in `clientX.pem`. Methods: `Acquire`, `KeepAlive`, `GetState`, `UpdateState`, `Release`. Optional auto-keepalive helper.
+`client.New(baseURL, bundlePath string, opts ...Option) (*Client, error)` builds an mTLS HTTP/2 client that **skips hostname verification** and pins to the CA in `clientX.pem`. Methods: `Acquire`, `KeepAlive`, `Get`, `Update`, `Release`. Optional auto-keepalive helper.
 
 ## Configuration (viper/env)
 
@@ -294,9 +294,9 @@ No multi-holder per key; no clustering/consensus; no advanced policy; no JSON sc
 ## Example flow
 
 1. `Acquire("orders", 30s, block=60s)` → gets a lease.
-2. `GetState()` → JSON + `(version, etag)`.
+2. `Get()` → JSON + `(version, etag)`.
 3. Work.
-4. `UpdateState(if_version=<seen>)` → CAS + bump `version`.
+4. `Update(if_version=<seen>)` → CAS + bump `version`.
 5. `Release()`.
 
 All over **host-agnostic mTLS** with **object-store-backed CAS** so you can run it anywhere without POSIX.

@@ -50,7 +50,7 @@ if err := lease.Save(ctx, checkpoint); err != nil {
 ```
 The lease session tracks fencing tokens automatically; the same `Client`
 instance should be reused for subsequent operations so KeepAlive, Get, Update,
-Release, and RemoveState calls carry the correct `X-Fencing-Token`. When the
+Release, and Remove calls carry the correct `X-Fencing-Token`. When the
 server enters its drain window it sets a `Shutdown-Imminent` header; the Go
 SDK notices this and, by default, releases leases after in-flight work
 completes. You can disable the behaviour via `client.WithDrainAwareShutdown`
@@ -164,7 +164,7 @@ other transports.
 # State removal
 
 Lease holders can delete JSON state explicitly via
-`(*LeaseSession).Remove` or `Client.RemoveState`. CAS headers (If-ETag,
+`(*LeaseSession).Remove` or `Client.Remove`. CAS headers (If-ETag,
 If-Version) are supported to guard against concurrent, stale deletes. When the
 state is deleted the server also clears the metadata entry so a subsequent
 acquire sees a clean slate.

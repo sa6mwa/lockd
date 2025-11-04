@@ -119,11 +119,11 @@ func TestMinioLockLifecycle(t *testing.T) {
 	}
 
 	payload, _ := json.Marshal(map[string]any{"cursor": 7, "source": "minio"})
-	opts := lockdclient.UpdateStateOptions{IfVersion: version, IfETag: etag}
+	opts := lockdclient.UpdateOptions{IfVersion: version, IfETag: etag}
 	if opts.IfVersion == "" {
 		opts.IfVersion = strconv.FormatInt(lease.Version, 10)
 	}
-	if _, err := cli.UpdateStateBytes(ctx, key, lease.LeaseID, payload, opts); err != nil {
+	if _, err := cli.UpdateBytes(ctx, key, lease.LeaseID, payload, opts); err != nil {
 		t.Fatalf("update state: %v", err)
 	}
 
@@ -186,7 +186,7 @@ func TestMinioLockConcurrency(t *testing.T) {
 				}
 				counter++
 				body, _ := json.Marshal(map[string]any{"counter": counter, "last": owner})
-				if _, err := cli.UpdateStateBytes(ctx, key, lease.LeaseID, body, lockdclient.UpdateStateOptions{IfETag: etag, IfVersion: version}); err != nil {
+				if _, err := cli.UpdateBytes(ctx, key, lease.LeaseID, body, lockdclient.UpdateOptions{IfETag: etag, IfVersion: version}); err != nil {
 					t.Fatalf("update state: %v", err)
 				}
 				_ = releaseLease(t, ctx, cli, key, lease.LeaseID)
@@ -341,7 +341,7 @@ func TestMinioAcquireForUpdateCallbackSingleServer(t *testing.T) {
 	}
 }
 
-func TestMinioRemoveStateAcquireForUpdate(t *testing.T) {
+func TestMinioRemoveAcquireForUpdate(t *testing.T) {
 	cfg := loadMinioConfig(t)
 	ensureMinioBucket(t, cfg)
 	ensureStoreReady(t, context.Background(), cfg)
@@ -459,7 +459,7 @@ func TestMinioRemoveStateAcquireForUpdate(t *testing.T) {
 		releaseLease(t, ctx, cli, key, verify.LeaseID)
 	})
 }
-func TestMinioRemoveStateSingleServer(t *testing.T) {
+func TestMinioRemoveSingleServer(t *testing.T) {
 	cfg := loadMinioConfig(t)
 	ensureMinioBucket(t, cfg)
 	ensureStoreReady(t, context.Background(), cfg)
@@ -721,9 +721,9 @@ func TestMinioAcquireForUpdateCallbackFailover(t *testing.T) {
 
 func assertMinioRemoveFailoverLogs(t testing.TB, rec *testlog.Recorder, primary, backup string) {
 	const (
-		startMsg        = "client.remove_state.start"
-		successMsg      = "client.remove_state.success"
-		transportErrMsg = "client.remove_state.transport_error"
+		startMsg        = "client.remove.start"
+		successMsg      = "client.remove.success"
+		transportErrMsg = "client.remove.transport_error"
 		httpErrorMsg    = "client.http.error"
 	)
 
@@ -762,10 +762,10 @@ func assertMinioRemoveFailoverLogs(t testing.TB, rec *testlog.Recorder, primary,
 		t.Fatalf("expected success on backup %s, got %s; logs:\n%s", backup, successEndpoint, rec.Summary())
 	}
 
-	t.Logf("minio remove-state failover log summary: initial=%s success=%s\n%s", initialEndpoint, successEndpoint, rec.Summary())
+	t.Logf("minio remove failover log summary: initial=%s success=%s\n%s", initialEndpoint, successEndpoint, rec.Summary())
 }
 
-func TestMinioRemoveStateFailover(t *testing.T) {
+func TestMinioRemoveFailover(t *testing.T) {
 	cfg := loadMinioConfig(t)
 	ensureMinioBucket(t, cfg)
 	ensureStoreReady(t, context.Background(), cfg)
@@ -861,7 +861,7 @@ func TestMinioRemoveStateFailover(t *testing.T) {
 	assertMinioRemoveFailoverLogs(t, clientLogs, primary.URL(), backup.URL())
 }
 
-func TestMinioRemoveStateCASMismatch(t *testing.T) {
+func TestMinioRemoveCASMismatch(t *testing.T) {
 	cfg := loadMinioConfig(t)
 	ensureMinioBucket(t, cfg)
 	ensureStoreReady(t, context.Background(), cfg)
@@ -881,7 +881,7 @@ func TestMinioRemoveStateCASMismatch(t *testing.T) {
 	}
 	currentVersion := lease.Version
 
-	staleOpts := lockdclient.RemoveStateOptions{
+	staleOpts := lockdclient.RemoveOptions{
 		IfETag:    staleETag,
 		IfVersion: strconv.FormatInt(currentVersion, 10),
 	}
@@ -912,7 +912,7 @@ func TestMinioRemoveStateCASMismatch(t *testing.T) {
 	cleanupMinio(t, cfg, key)
 }
 
-func TestMinioRemoveStateKeepAlive(t *testing.T) {
+func TestMinioRemoveKeepAlive(t *testing.T) {
 	cfg := loadMinioConfig(t)
 	ensureMinioBucket(t, cfg)
 	ensureStoreReady(t, context.Background(), cfg)
@@ -941,7 +941,7 @@ func TestMinioRemoveStateKeepAlive(t *testing.T) {
 		t.Fatalf("keepalive after remove: %v", err)
 	}
 
-	staleUpdate := lockdclient.UpdateStateOptions{
+	staleUpdate := lockdclient.UpdateOptions{
 		IfETag:    originalETag,
 		IfVersion: strconv.FormatInt(originalVersion, 10),
 	}
@@ -1211,7 +1211,7 @@ func acquireWithRetry(t *testing.T, ctx context.Context, cli *lockdclient.Client
 }
 
 func getStateJSON(ctx context.Context, cli *lockdclient.Client, key, leaseID string) (map[string]any, string, string, error) {
-	data, etag, version, err := cli.GetStateBytes(ctx, key, leaseID)
+	data, etag, version, err := cli.GetBytes(ctx, key, leaseID)
 	if err != nil {
 		if apiErr := (*lockdclient.APIError)(nil); errors.As(err, &apiErr) && apiErr.Status == http.StatusNoContent {
 			return nil, "", "", nil
@@ -1250,7 +1250,7 @@ func cleanupMinio(tb testing.TB, cfg lockd.Config, key string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if err := store.RemoveState(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+	if err := store.Remove(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 		tb.Logf("remove state failed: %v", err)
 	}
 	if err := store.DeleteMeta(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {

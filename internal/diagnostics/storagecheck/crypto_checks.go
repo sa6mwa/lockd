@@ -181,7 +181,7 @@ func syntheticStateRoundTrip(ctx context.Context, backend storage.Backend, crypt
 		return fmt.Errorf("store diagnostics meta %q: %w", key, err)
 	}
 	defer func() {
-		_ = backend.RemoveState(ctx, key, "")
+		_ = backend.Remove(ctx, key, "")
 		_ = backend.DeleteMeta(ctx, key, "")
 	}()
 	stateRes, err := backend.WriteState(ctx, key, strings.NewReader("{}"), storage.PutStateOptions{})
@@ -312,7 +312,7 @@ func cleanupSyntheticDiagnostics(ctx context.Context, backend storage.Backend) e
 		if shouldDeferDiagnosticsCleanup(key, now) {
 			continue
 		}
-		if err := backend.RemoveState(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+		if err := backend.Remove(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 			return fmt.Errorf("remove diagnostics state %q: %w", key, err)
 		}
 		if err := backend.DeleteMeta(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {

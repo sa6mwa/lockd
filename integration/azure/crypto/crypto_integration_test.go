@@ -231,7 +231,7 @@ func cleanupAzureKeys(tb testing.TB, cfg lockd.Config, prefixes ...string) {
 			if !strings.HasPrefix(key, prefix) {
 				continue
 			}
-			if err := store.RemoveState(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			if err := store.Remove(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 				tb.Fatalf("cleanup azure state %s: %v", key, err)
 			}
 			if err := store.DeleteMeta(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {

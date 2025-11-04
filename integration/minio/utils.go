@@ -66,7 +66,7 @@ func ResetMinioBucketForCrypto(tb testing.TB, cfg lockd.Config) {
 	}
 	if keys, err := store.ListMetaKeys(ctx); err == nil {
 		for _, key := range keys {
-			if err := store.RemoveState(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			if err := store.Remove(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 				tb.Logf("minio cleanup state %q: %v", key, err)
 			}
 			if err := store.DeleteMeta(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {

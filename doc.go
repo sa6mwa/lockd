@@ -116,7 +116,7 @@
 // as updates and clear the server-side metadata when the delete succeeds.
 //
 // Handshake failures (for example `lease_required` during the initial
-// `GetState`) consume the same bounded retry budget controlled by
+// `Get`) consume the same bounded retry budget controlled by
 // `client.WithAcquireFailureRetries` and `client.WithAcquireBackoff`. Once the
 // handler starts running, further errors are surfaced immediately—the typical
 // pattern is to return the error (acquire-for-update propagates it) and decide

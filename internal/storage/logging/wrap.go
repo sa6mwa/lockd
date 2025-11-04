@@ -280,7 +280,7 @@ func (b *backend) WriteState(ctx context.Context, key string, body io.Reader, op
 	return res, nil
 }
 
-func (b *backend) RemoveState(ctx context.Context, key string, expectedETag string) error {
+func (b *backend) Remove(ctx context.Context, key string, expectedETag string) error {
 	ctx, span, _, verbose, begin, finish := b.start(ctx, "remove_state")
 	defer span.End()
 
@@ -289,7 +289,7 @@ func (b *backend) RemoveState(ctx context.Context, key string, expectedETag stri
 		attribute.Bool("lockd.storage.expected_etag", expectedETag != ""),
 	)
 	verbose.Trace("storage.remove_state.begin", "key", key, "expected_etag", expectedETag)
-	err := b.inner.RemoveState(ctx, key, expectedETag)
+	err := b.inner.Remove(ctx, key, expectedETag)
 	if err != nil {
 		finish("error", err)
 		verbose.Debug("storage.remove_state.error", "key", key, "error", err, "elapsed", time.Since(begin))

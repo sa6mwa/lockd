@@ -777,8 +777,8 @@ func (s *Store) WriteState(ctx context.Context, key string, body io.Reader, opts
 	return result, nil
 }
 
-// RemoveState deletes the JSON state for key, respecting an expected ETag when supplied.
-func (s *Store) RemoveState(ctx context.Context, key string, expectedETag string) (err error) {
+// Remove deletes the JSON state for key, respecting an expected ETag when supplied.
+func (s *Store) Remove(ctx context.Context, key string, expectedETag string) (err error) {
 	logger, verbose := s.loggers(ctx)
 	start := time.Now()
 	verbose.Trace("disk.remove_state.begin", "key", key, "expected_etag", expectedETag)
@@ -1300,7 +1300,7 @@ func (s *Store) sweepOnce() {
 		}
 		// best-effort removal
 		_ = s.DeleteMeta(context.Background(), key, rec.ETag)
-		_ = s.RemoveState(context.Background(), key, "")
+		_ = s.Remove(context.Background(), key, "")
 	}
 }
 

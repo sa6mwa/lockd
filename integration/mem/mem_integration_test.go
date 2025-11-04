@@ -228,7 +228,7 @@ func runMemAutoKeyAcquireScenario(t *testing.T, owner string) {
 
 // Additional tests mirroring the disk suite follow ...
 
-func TestMemRemoveStateSingleServer(t *testing.T) {
+func TestMemRemoveSingleServer(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -271,7 +271,7 @@ func TestMemRemoveStateSingleServer(t *testing.T) {
 	releaseLease(t, ctx, verify)
 }
 
-func TestMemRemoveStateAcquireForUpdate(t *testing.T) {
+func TestMemRemoveAcquireForUpdate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -373,7 +373,7 @@ func TestMemAcquireForUpdateConcurrency(t *testing.T) {
 	}
 }
 
-func TestMemRemoveStateMultiServer(t *testing.T) {
+func TestMemRemoveMultiServer(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -412,7 +412,7 @@ func TestMemRemoveStateMultiServer(t *testing.T) {
 	releaseLease(t, ctx, verifier)
 }
 
-func TestMemRemoveStateCASMismatch(t *testing.T) {
+func TestMemRemoveCASMismatch(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -431,7 +431,7 @@ func TestMemRemoveStateCASMismatch(t *testing.T) {
 	}
 	currentVersion := lease.Version
 
-	staleOpts := lockdclient.RemoveStateOptions{
+	staleOpts := lockdclient.RemoveOptions{
 		IfETag:    staleETag,
 		IfVersion: strconv.FormatInt(currentVersion, 10),
 	}
@@ -459,7 +459,7 @@ func TestMemRemoveStateCASMismatch(t *testing.T) {
 	releaseLease(t, ctx, verify)
 }
 
-func TestMemRemoveStateKeepAlive(t *testing.T) {
+func TestMemRemoveKeepAlive(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -487,7 +487,7 @@ func TestMemRemoveStateKeepAlive(t *testing.T) {
 		t.Fatalf("keepalive after remove: %v", err)
 	}
 
-	staleUpdate := lockdclient.UpdateStateOptions{
+	staleUpdate := lockdclient.UpdateOptions{
 		IfETag:    originalETag,
 		IfVersion: strconv.FormatInt(originalVersion, 10),
 	}
@@ -515,7 +515,7 @@ func TestMemRemoveStateKeepAlive(t *testing.T) {
 	releaseLease(t, ctx, verify)
 }
 
-func TestMemRemoveStateFailoverMultiServer(t *testing.T) {
+func TestMemRemoveFailoverMultiServer(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -1277,7 +1277,7 @@ func recordFailoverLogs(t testing.TB, rec *testlog.Recorder, primary, backup str
 
 func assertRemoveFailoverLogs(t testing.TB, rec *testlog.Recorder, primary, backup string) {
 	const (
-		completeMsg = "client.remove_state.success"
+		completeMsg = "client.remove.success"
 		errorMsg    = "client.http.error"
 		successMsg  = "client.http.success"
 	)

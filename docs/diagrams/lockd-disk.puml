@@ -66,8 +66,8 @@ Disk --> Handler: new_meta_etag
 Handler -> Cache: refresh snapshot
 Handler --> Client: 200 KeepAlive
 
-== GetState ==
-Client -> Handler: POST /v1/get-state
+== Get ==
+Client -> Handler: POST /v1/get
 Handler -> Disk: ReadState(key)
 Disk -> Global: lock
 Disk -> KeyMutex: lock
@@ -80,8 +80,8 @@ Disk -> Global: unlock
 Disk --> Handler: *os.File + info
 Handler --> Client: 200 stream\nheaders: ETag, X-Key-Version, X-Fencing-Token
 
-== UpdateState ==
-Client -> Handler: POST /v1/update-state
+== Update ==
+Client -> Handler: POST /v1/update
 Handler -> Spool: write/compact JSON
 Spool --> Handler: io.ReadSeeker
 Handler -> Disk: WriteState(key, expected_etag)

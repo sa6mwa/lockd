@@ -79,7 +79,7 @@ func (s *stubBackend) WriteState(context.Context, string, io.Reader, storage.Put
 	return nil, storage.ErrNotImplemented
 }
 
-func (s *stubBackend) RemoveState(context.Context, string, string) error {
+func (s *stubBackend) Remove(context.Context, string, string) error {
 	return storage.ErrNotImplemented
 }
 

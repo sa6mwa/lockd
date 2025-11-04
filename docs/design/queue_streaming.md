@@ -13,7 +13,7 @@ measure the real throughput ceiling of the queue service.
 ## Proposed API sketch
 
 _Status:_ the initial streaming implementation now lives under
-`/v1/queue/subscribe` and `/v1/queue/subscribe-with-state`, with the Go SDK
+`/v1/queue/subscribe` and `/v1/queue/subscribeWithState`, with the Go SDK
 exposing `Client.Subscribe` / `Client.SubscribeWithState`. The outline below
 records the original design intent for future refinement.
 

@@ -77,12 +77,12 @@ func TestAcquireLifecycle(t *testing.T) {
 		"X-Fencing-Token": fencingToken,
 	}
 	updateBody := map[string]any{"cursor": 42}
-	status = doJSON(t, server, http.MethodPost, "/v1/update-state?key=orders", stateHeaders, updateBody, nil)
+	status = doJSON(t, server, http.MethodPost, "/v1/update?key=orders", stateHeaders, updateBody, nil)
 	if status != http.StatusOK {
 		t.Fatalf("expected update state 200, got %d", status)
 	}
 
-	getReq, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/get-state?key=orders", http.NoBody)
+	getReq, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/get?key=orders", http.NoBody)
 	getReq.Header.Set("X-Lease-ID", acquireResp.LeaseID)
 	getReq.Header.Set("X-Fencing-Token", fencingToken)
 	getResp, err := http.DefaultClient.Do(getReq)
@@ -160,7 +160,7 @@ func TestAcquireAutoGeneratesKey(t *testing.T) {
 		"X-Fencing-Token": strconv.FormatInt(autoResp.FencingToken, 10),
 	}
 	updateBody := map[string]any{"auto": true}
-	status = doJSON(t, server, http.MethodPost, "/v1/update-state?key="+autoResp.Key, stateHeaders, updateBody, nil)
+	status = doJSON(t, server, http.MethodPost, "/v1/update?key="+autoResp.Key, stateHeaders, updateBody, nil)
 	if status != http.StatusOK {
 		t.Fatalf("expected update state 200, got %d", status)
 	}
@@ -319,7 +319,7 @@ func TestAcquireConflictAndWaiting(t *testing.T) {
 	}
 }
 
-func TestUpdateStateVersionMismatch(t *testing.T) {
+func TestUpdateVersionMismatch(t *testing.T) {
 	store := memory.New()
 	clk := newStubClock(time.Unix(1_700_000_000, 0))
 	handler := New(Config{
@@ -342,11 +342,11 @@ func TestUpdateStateVersionMismatch(t *testing.T) {
 
 	token := strconv.FormatInt(acquire.FencingToken, 10)
 	headers := map[string]string{"X-Lease-ID": acquire.LeaseID, "X-Fencing-Token": token}
-	doJSON(t, server, http.MethodPost, "/v1/update-state?key=stream", headers, map[string]int{"pos": 1}, nil)
+	doJSON(t, server, http.MethodPost, "/v1/update?key=stream", headers, map[string]int{"pos": 1}, nil)
 
 	headers["X-If-Version"] = "0"
 	var errResp api.ErrorResponse
-	status := doJSON(t, server, http.MethodPost, "/v1/update-state?key=stream", headers, map[string]int{"pos": 2}, &errResp)
+	status := doJSON(t, server, http.MethodPost, "/v1/update?key=stream", headers, map[string]int{"pos": 2}, &errResp)
 	if status != http.StatusConflict {
 		t.Fatalf("expected 409 conflict, got %d", status)
 	}
@@ -355,7 +355,7 @@ func TestUpdateStateVersionMismatch(t *testing.T) {
 	}
 }
 
-func TestGetStateRequiresLease(t *testing.T) {
+func TestGetRequiresLease(t *testing.T) {
 	store := memory.New()
 	handler := New(Config{
 		Store:        store,
@@ -376,9 +376,9 @@ func TestGetStateRequiresLease(t *testing.T) {
 	doJSON(t, server, http.MethodPost, "/v1/acquire", nil, acq, &acquire)
 	token := strconv.FormatInt(acquire.FencingToken, 10)
 	headers := map[string]string{"X-Lease-ID": acquire.LeaseID, "X-Fencing-Token": token}
-	doJSON(t, server, http.MethodPost, "/v1/update-state?key=alpha", headers, map[string]int{"pos": 1}, nil)
+	doJSON(t, server, http.MethodPost, "/v1/update?key=alpha", headers, map[string]int{"pos": 1}, nil)
 
-	getReq, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/get-state?key=alpha", http.NoBody)
+	getReq, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/get?key=alpha", http.NoBody)
 	resp, err := http.DefaultClient.Do(getReq)
 	if err != nil {
 		t.Fatalf("request failed: %v", err)

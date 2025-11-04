@@ -88,7 +88,7 @@ func cleanAzureContainer(cfg lockd.Config) error {
 			if !shouldCleanupAzureObject(key) {
 				continue
 			}
-			if err := store.RemoveState(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			if err := store.Remove(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 				return err
 			}
 			if err := store.DeleteMeta(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {

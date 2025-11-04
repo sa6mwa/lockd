@@ -101,14 +101,14 @@ func TestAWSLockLifecycle(t *testing.T) {
 	}
 
 	payload, _ := json.Marshal(map[string]any{"cursor": 42, "source": "aws"})
-	opts := lockdclient.UpdateStateOptions{IfVersion: version}
+	opts := lockdclient.UpdateOptions{IfVersion: version}
 	if opts.IfVersion == "" {
 		opts.IfVersion = strconv.FormatInt(lease.Version, 10)
 	}
 	if etag != "" {
 		opts.IfETag = etag
 	}
-	if _, err := cli.UpdateStateBytes(ctx, key, lease.LeaseID, payload, opts); err != nil {
+	if _, err := cli.UpdateBytes(ctx, key, lease.LeaseID, payload, opts); err != nil {
 		t.Fatalf("update state: %v", err)
 	}
 
@@ -176,7 +176,7 @@ func TestAWSLockConcurrency(t *testing.T) {
 				}
 				counter++
 				body, _ := json.Marshal(map[string]any{"counter": counter, "last": owner})
-				if _, err := cli.UpdateStateBytes(ctx, key, lease.LeaseID, body, lockdclient.UpdateStateOptions{IfETag: etag, IfVersion: version}); err != nil {
+				if _, err := cli.UpdateBytes(ctx, key, lease.LeaseID, body, lockdclient.UpdateOptions{IfETag: etag, IfVersion: version}); err != nil {
 					t.Fatalf("update state: %v", err)
 				}
 				_ = releaseLease(t, ctx, cli, key, lease.LeaseID)
@@ -259,7 +259,7 @@ func TestAWSAutoKeyAcquire(t *testing.T) {
 	cleanupS3(t, cfg, key)
 }
 
-func TestAWSRemoveStateSingleServer(t *testing.T) {
+func TestAWSRemoveSingleServer(t *testing.T) {
 	cfg := loadAWSConfig(t)
 	ensureStoreReady(t, context.Background(), cfg)
 	cli := startLockdServer(t, cfg)
@@ -369,7 +369,7 @@ func TestAWSRemoveStateSingleServer(t *testing.T) {
 	})
 }
 
-func TestAWSRemoveStateAcquireForUpdate(t *testing.T) {
+func TestAWSRemoveAcquireForUpdate(t *testing.T) {
 	cfg := loadAWSConfig(t)
 	ensureStoreReady(t, context.Background(), cfg)
 
@@ -760,9 +760,9 @@ func TestAWSAcquireForUpdateCallbackFailover(t *testing.T) {
 
 func assertAWSRemoveFailoverLogs(t testing.TB, rec *testlog.Recorder, primary, backup string) {
 	const (
-		startMsg        = "client.remove_state.start"
-		successMsg      = "client.remove_state.success"
-		transportErrMsg = "client.remove_state.transport_error"
+		startMsg        = "client.remove.start"
+		successMsg      = "client.remove.success"
+		transportErrMsg = "client.remove.transport_error"
 		httpErrorMsg    = "client.http.error"
 		httpSuccessMsg  = "client.http.success"
 	)
@@ -829,7 +829,7 @@ func assertAWSRemoveFailoverLogs(t testing.TB, rec *testlog.Recorder, primary, b
 		initialEndpoint, successEndpoint, errorEntry != nil, rec.Summary())
 }
 
-func TestAWSRemoveStateFailover(t *testing.T) {
+func TestAWSRemoveFailover(t *testing.T) {
 	cfg := loadAWSConfig(t)
 	ensureStoreReady(t, context.Background(), cfg)
 
@@ -916,7 +916,7 @@ func TestAWSRemoveStateFailover(t *testing.T) {
 	assertAWSRemoveFailoverLogs(t, clientLogs, primary.URL(), backup.URL())
 }
 
-func TestAWSRemoveStateCASMismatch(t *testing.T) {
+func TestAWSRemoveCASMismatch(t *testing.T) {
 	cfg := loadAWSConfig(t)
 	ensureStoreReady(t, context.Background(), cfg)
 	cli := startLockdServer(t, cfg)
@@ -937,7 +937,7 @@ func TestAWSRemoveStateCASMismatch(t *testing.T) {
 	}
 	currentVersion := lease.Version
 
-	staleOpts := lockdclient.RemoveStateOptions{
+	staleOpts := lockdclient.RemoveOptions{
 		IfETag:    staleETag,
 		IfVersion: strconv.FormatInt(currentVersion, 10),
 	}
@@ -967,7 +967,7 @@ func TestAWSRemoveStateCASMismatch(t *testing.T) {
 	releaseLease(t, ctx, cli, key, verify.LeaseID)
 }
 
-func TestAWSRemoveStateKeepAlive(t *testing.T) {
+func TestAWSRemoveKeepAlive(t *testing.T) {
 	cfg := loadAWSConfig(t)
 	ensureStoreReady(t, context.Background(), cfg)
 	cli := startLockdServer(t, cfg)
@@ -997,7 +997,7 @@ func TestAWSRemoveStateKeepAlive(t *testing.T) {
 		t.Fatalf("keepalive after remove: %v", err)
 	}
 
-	staleUpdate := lockdclient.UpdateStateOptions{
+	staleUpdate := lockdclient.UpdateOptions{
 		IfETag:    originalETag,
 		IfVersion: strconv.FormatInt(originalVersion, 10),
 	}
@@ -1153,7 +1153,7 @@ func acquireWithRetry(t *testing.T, ctx context.Context, cli *lockdclient.Client
 }
 
 func getStateJSON(ctx context.Context, cli *lockdclient.Client, key, leaseID string) (map[string]any, string, string, error) {
-	data, etag, version, err := cli.GetStateBytes(ctx, key, leaseID)
+	data, etag, version, err := cli.GetBytes(ctx, key, leaseID)
 	if err != nil {
 		if apiErr := (*lockdclient.APIError)(nil); errors.As(err, &apiErr) && apiErr.Status == http.StatusNoContent {
 			return nil, "", "", nil
@@ -1192,7 +1192,7 @@ func cleanupS3(t *testing.T, cfg lockd.Config, key string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if err := store.RemoveState(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+	if err := store.Remove(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 		t.Logf("remove state failed: %v", err)
 	}
 	if err := store.DeleteMeta(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {

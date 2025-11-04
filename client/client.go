@@ -1163,8 +1163,8 @@ func (a *AcquireForUpdateContext) session() (*LeaseSession, error) {
 	return a.Session, nil
 }
 
-// Update streams a new JSON document via UpdateState, preserving the lease.
-func (a *AcquireForUpdateContext) Update(ctx context.Context, body io.Reader) (*UpdateStateResult, error) {
+// Update streams a new JSON document via Update, preserving the lease.
+func (a *AcquireForUpdateContext) Update(ctx context.Context, body io.Reader) (*UpdateResult, error) {
 	sess, err := a.session()
 	if err != nil {
 		return nil, err
@@ -1173,7 +1173,7 @@ func (a *AcquireForUpdateContext) Update(ctx context.Context, body io.Reader) (*
 }
 
 // UpdateBytes is a convenience wrapper over Update that accepts a byte slice.
-func (a *AcquireForUpdateContext) UpdateBytes(ctx context.Context, body []byte) (*UpdateStateResult, error) {
+func (a *AcquireForUpdateContext) UpdateBytes(ctx context.Context, body []byte) (*UpdateResult, error) {
 	sess, err := a.session()
 	if err != nil {
 		return nil, err
@@ -1182,7 +1182,7 @@ func (a *AcquireForUpdateContext) UpdateBytes(ctx context.Context, body []byte) 
 }
 
 // UpdateWithOptions allows callers to override conditional headers for the update.
-func (a *AcquireForUpdateContext) UpdateWithOptions(ctx context.Context, body io.Reader, opts UpdateStateOptions) (*UpdateStateResult, error) {
+func (a *AcquireForUpdateContext) UpdateWithOptions(ctx context.Context, body io.Reader, opts UpdateOptions) (*UpdateResult, error) {
 	sess, err := a.session()
 	if err != nil {
 		return nil, err
@@ -1218,7 +1218,7 @@ func (a *AcquireForUpdateContext) Save(ctx context.Context, v any) error {
 }
 
 // Remove deletes the current state while the handler holds the lease.
-func (a *AcquireForUpdateContext) Remove(ctx context.Context) (*api.RemoveStateResponse, error) {
+func (a *AcquireForUpdateContext) Remove(ctx context.Context) (*api.RemoveResponse, error) {
 	sess, err := a.session()
 	if err != nil {
 		return nil, err
@@ -1227,7 +1227,7 @@ func (a *AcquireForUpdateContext) Remove(ctx context.Context) (*api.RemoveStateR
 }
 
 // RemoveWithOptions deletes the state while allowing conditional overrides.
-func (a *AcquireForUpdateContext) RemoveWithOptions(ctx context.Context, opts RemoveStateOptions) (*api.RemoveStateResponse, error) {
+func (a *AcquireForUpdateContext) RemoveWithOptions(ctx context.Context, opts RemoveOptions) (*api.RemoveResponse, error) {
 	sess, err := a.session()
 	if err != nil {
 		return nil, err
@@ -1345,9 +1345,9 @@ func (s *LeaseSession) FencingTokenString() string {
 }
 
 // Update streams new JSON state for the session's key while preserving the lease.
-func (s *LeaseSession) Update(ctx context.Context, body io.Reader) (*UpdateStateResult, error) {
+func (s *LeaseSession) Update(ctx context.Context, body io.Reader) (*UpdateResult, error) {
 	ctx = WithCorrelationID(ctx, s.correlation())
-	opts := UpdateStateOptions{
+	opts := UpdateOptions{
 		IfETag: s.StateETag,
 	}
 	if s.Version > 0 {
@@ -1358,12 +1358,12 @@ func (s *LeaseSession) Update(ctx context.Context, body io.Reader) (*UpdateState
 }
 
 // UpdateBytes is a convenience wrapper around Update that accepts an in-memory payload.
-func (s *LeaseSession) UpdateBytes(ctx context.Context, body []byte) (*UpdateStateResult, error) {
+func (s *LeaseSession) UpdateBytes(ctx context.Context, body []byte) (*UpdateResult, error) {
 	return s.Update(ctx, bytes.NewReader(body))
 }
 
 // UpdateWithOptions allows callers to override conditional metadata.
-func (s *LeaseSession) UpdateWithOptions(ctx context.Context, body io.Reader, opts UpdateStateOptions) (*UpdateStateResult, error) {
+func (s *LeaseSession) UpdateWithOptions(ctx context.Context, body io.Reader, opts UpdateOptions) (*UpdateResult, error) {
 	ctx = WithCorrelationID(ctx, s.correlation())
 	if opts.IfETag == "" {
 		opts.IfETag = s.StateETag
@@ -1377,9 +1377,9 @@ func (s *LeaseSession) UpdateWithOptions(ctx context.Context, body io.Reader, op
 	return s.applyUpdate(ctx, body, opts)
 }
 
-func (s *LeaseSession) applyUpdate(ctx context.Context, body io.Reader, opts UpdateStateOptions) (*UpdateStateResult, error) {
+func (s *LeaseSession) applyUpdate(ctx context.Context, body io.Reader, opts UpdateOptions) (*UpdateResult, error) {
 	ctx = WithCorrelationID(ctx, s.correlation())
-	res, err := s.client.UpdateState(ctx, s.Key, s.LeaseID, body, opts)
+	res, err := s.client.Update(ctx, s.Key, s.LeaseID, body, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -1398,9 +1398,9 @@ func (s *LeaseSession) applyUpdate(ctx context.Context, body io.Reader, opts Upd
 
 // Remove deletes the current state while holding the lease, enforcing the
 // cached version and etag when present.
-func (s *LeaseSession) Remove(ctx context.Context) (*api.RemoveStateResponse, error) {
+func (s *LeaseSession) Remove(ctx context.Context) (*api.RemoveResponse, error) {
 	ctx = WithCorrelationID(ctx, s.correlation())
-	opts := RemoveStateOptions{
+	opts := RemoveOptions{
 		IfETag: s.StateETag,
 	}
 	if s.Version > 0 {
@@ -1411,7 +1411,7 @@ func (s *LeaseSession) Remove(ctx context.Context) (*api.RemoveStateResponse, er
 }
 
 // RemoveWithOptions allows callers to override conditional metadata for delete.
-func (s *LeaseSession) RemoveWithOptions(ctx context.Context, opts RemoveStateOptions) (*api.RemoveStateResponse, error) {
+func (s *LeaseSession) RemoveWithOptions(ctx context.Context, opts RemoveOptions) (*api.RemoveResponse, error) {
 	ctx = WithCorrelationID(ctx, s.correlation())
 	if opts.IfETag == "" {
 		opts.IfETag = s.StateETag
@@ -1425,9 +1425,9 @@ func (s *LeaseSession) RemoveWithOptions(ctx context.Context, opts RemoveStateOp
 	return s.applyRemove(ctx, opts)
 }
 
-func (s *LeaseSession) applyRemove(ctx context.Context, opts RemoveStateOptions) (*api.RemoveStateResponse, error) {
+func (s *LeaseSession) applyRemove(ctx context.Context, opts RemoveOptions) (*api.RemoveResponse, error) {
 	ctx = WithCorrelationID(ctx, s.correlation())
-	res, err := s.client.RemoveState(ctx, s.Key, s.LeaseID, opts)
+	res, err := s.client.Remove(ctx, s.Key, s.LeaseID, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -1450,7 +1450,7 @@ func (s *LeaseSession) applyRemove(ctx context.Context, opts RemoveStateOptions)
 // Get refreshes the current state snapshot using the active lease.
 func (s *LeaseSession) Get(ctx context.Context) (*StateSnapshot, error) {
 	ctx = WithCorrelationID(ctx, s.correlation())
-	reader, etag, version, err := s.client.GetState(ctx, s.Key, s.LeaseID)
+	reader, etag, version, err := s.client.Get(ctx, s.Key, s.LeaseID)
 	if err != nil {
 		return nil, err
 	}
@@ -1625,22 +1625,22 @@ func (c *cancelReadCloser) Close() error {
 	return err
 }
 
-// UpdateStateResult captures the response from UpdateState.
-type UpdateStateResult struct {
+// UpdateResult captures the response from Update.
+type UpdateResult struct {
 	NewVersion   int64  `json:"new_version"`
 	NewStateETag string `json:"new_state_etag"`
 	BytesWritten int64  `json:"bytes"`
 }
 
-// UpdateStateOptions controls conditional update semantics.
-type UpdateStateOptions struct {
+// UpdateOptions controls conditional update semantics.
+type UpdateOptions struct {
 	IfETag       string
 	IfVersion    string
 	FencingToken string
 }
 
-// RemoveStateOptions controls conditional delete semantics.
-type RemoveStateOptions struct {
+// RemoveOptions controls conditional delete semantics.
+type RemoveOptions struct {
 	IfETag       string
 	IfVersion    string
 	FencingToken string
@@ -2837,20 +2837,20 @@ func (c *Client) Describe(ctx context.Context, key string) (*api.DescribeRespons
 	return &describe, nil
 }
 
-// GetState streams the JSON state for a key. Caller must close the returned reader.
+// Get streams the JSON state for a key. Caller must close the returned reader.
 // When the key has no state the returned reader is nil.
-func (c *Client) GetState(ctx context.Context, key, leaseID string) (io.ReadCloser, string, string, error) {
+func (c *Client) Get(ctx context.Context, key, leaseID string) (io.ReadCloser, string, string, error) {
 	token, err := c.fencingToken(leaseID, "")
 	if err != nil {
 		return nil, "", "", err
 	}
-	c.logTraceCtx(ctx, "client.get_state.start", "key", key, "lease_id", leaseID, "endpoint", c.lastEndpoint, "fencing_token", token)
+	c.logTraceCtx(ctx, "client.get.start", "key", key, "lease_id", leaseID, "endpoint", c.lastEndpoint, "fencing_token", token)
 	builder := func(base string) (*http.Request, context.CancelFunc, error) {
 		// Use the caller's context without the per-request HTTP timeout so that
 		// AcquireForUpdate handlers can continue reading the snapshot while the
 		// server is draining. Callers are expected to bound ctx themselves.
 		reqCtx, cancel := c.requestContextNoTimeout(ctx)
-		full := fmt.Sprintf("%s/v1/get-state?key=%s", base, url.QueryEscape(key))
+		full := fmt.Sprintf("%s/v1/get?key=%s", base, url.QueryEscape(key))
 		req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, full, http.NoBody)
 		if err != nil {
 			cancel()
@@ -2863,19 +2863,19 @@ func (c *Client) GetState(ctx context.Context, key, leaseID string) (io.ReadClos
 	}
 	resp, cancel, endpoint, err := c.attemptEndpoints(builder, "")
 	if err != nil {
-		c.logErrorCtx(ctx, "client.get_state.transport_error", "key", key, "lease_id", leaseID, "fencing_token", token, "error", err)
+		c.logErrorCtx(ctx, "client.get.transport_error", "key", key, "lease_id", leaseID, "fencing_token", token, "error", err)
 		return nil, "", "", err
 	}
 	if resp.StatusCode == http.StatusNoContent {
 		resp.Body.Close()
 		cancel()
-		c.logDebugCtx(ctx, "client.get_state.empty", "key", key, "lease_id", leaseID, "endpoint", endpoint, "fencing_token", token)
+		c.logDebugCtx(ctx, "client.get.empty", "key", key, "lease_id", leaseID, "endpoint", endpoint, "fencing_token", token)
 		return nil, "", "", nil
 	}
 	if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
 		cancel()
-		c.logWarnCtx(ctx, "client.get_state.error", "key", key, "lease_id", leaseID, "endpoint", endpoint, "fencing_token", token, "status", resp.StatusCode)
+		c.logWarnCtx(ctx, "client.get.error", "key", key, "lease_id", leaseID, "endpoint", endpoint, "fencing_token", token, "status", resp.StatusCode)
 		return nil, "", "", c.decodeError(resp)
 	}
 	if newToken := resp.Header.Get(headerFencingToken); newToken != "" {
@@ -2884,33 +2884,8 @@ func (c *Client) GetState(ctx context.Context, key, leaseID string) (io.ReadClos
 	reader := &cancelReadCloser{ReadCloser: resp.Body, cancel: cancel}
 	etag := resp.Header.Get("ETag")
 	version := resp.Header.Get("X-Key-Version")
-	c.logTraceCtx(ctx, "client.get_state.success", "key", key, "lease_id", leaseID, "endpoint", endpoint, "fencing_token", token, "etag", etag, "version", version)
+	c.logTraceCtx(ctx, "client.get.success", "key", key, "lease_id", leaseID, "endpoint", endpoint, "fencing_token", token, "etag", etag, "version", version)
 	return reader, etag, version, nil
-}
-
-// Update delegates to sess.Update for convenience.
-func (c *Client) Update(ctx context.Context, sess *LeaseSession, body io.Reader) (*UpdateStateResult, error) {
-	return sess.Update(ctx, body)
-}
-
-// UpdateBytes delegates to sess.UpdateBytes.
-func (c *Client) UpdateBytes(ctx context.Context, sess *LeaseSession, body []byte) (*UpdateStateResult, error) {
-	return sess.UpdateBytes(ctx, body)
-}
-
-// UpdateWithOptions delegates to sess.UpdateWithOptions.
-func (c *Client) UpdateWithOptions(ctx context.Context, sess *LeaseSession, body io.Reader, opts UpdateStateOptions) (*UpdateStateResult, error) {
-	return sess.UpdateWithOptions(ctx, body, opts)
-}
-
-// Get delegates to sess.Get.
-func (c *Client) Get(ctx context.Context, sess *LeaseSession) (*StateSnapshot, error) {
-	return sess.Get(ctx)
-}
-
-// GetBytes delegates to sess.GetBytes.
-func (c *Client) GetBytes(ctx context.Context, sess *LeaseSession) ([]byte, error) {
-	return sess.GetBytes(ctx)
 }
 
 // Load delegates to sess.Load.
@@ -2923,14 +2898,9 @@ func (c *Client) Save(ctx context.Context, sess *LeaseSession, v any) error {
 	return sess.Save(ctx, v)
 }
 
-// ReleaseSession delegates to sess.Release for callers that only have the client handle.
-func (c *Client) ReleaseSession(ctx context.Context, sess *LeaseSession) error {
-	return sess.Release(ctx)
-}
-
-// GetStateBytes fetches the JSON state into memory and returns it along with metadata.
-func (c *Client) GetStateBytes(ctx context.Context, key, leaseID string) ([]byte, string, string, error) {
-	reader, etag, version, err := c.GetState(ctx, key, leaseID)
+// GetBytes fetches the JSON state into memory and returns it along with metadata.
+func (c *Client) GetBytes(ctx context.Context, key, leaseID string) ([]byte, string, string, error) {
+	reader, etag, version, err := c.Get(ctx, key, leaseID)
 	if err != nil {
 		return nil, "", "", err
 	}
@@ -2945,18 +2915,18 @@ func (c *Client) GetStateBytes(ctx context.Context, key, leaseID string) ([]byte
 	return data, etag, version, nil
 }
 
-// UpdateState uploads new JSON state from the provided reader.
-func (c *Client) UpdateState(ctx context.Context, key, leaseID string, body io.Reader, opts UpdateStateOptions) (*UpdateStateResult, error) {
+// Update uploads new JSON state from the provided reader.
+func (c *Client) Update(ctx context.Context, key, leaseID string, body io.Reader, opts UpdateOptions) (*UpdateResult, error) {
 	token, err := c.fencingToken(leaseID, opts.FencingToken)
 	if err != nil {
 		return nil, err
 	}
-	c.logTraceCtx(ctx, "client.update_state.start", "key", key, "lease_id", leaseID, "endpoint", c.lastEndpoint, "fencing_token", token)
+	c.logTraceCtx(ctx, "client.update.start", "key", key, "lease_id", leaseID, "endpoint", c.lastEndpoint, "fencing_token", token)
 	bodyFactory, err := makeBodyFactory(body)
 	if err != nil {
 		return nil, err
 	}
-	path := fmt.Sprintf("/v1/update-state?key=%s", url.QueryEscape(key))
+	path := fmt.Sprintf("/v1/update?key=%s", url.QueryEscape(key))
 	builder := func(base string) (*http.Request, context.CancelFunc, error) {
 		reqBody, err := bodyFactory()
 		if err != nil {
@@ -2982,40 +2952,40 @@ func (c *Client) UpdateState(ctx context.Context, key, leaseID string, body io.R
 	}
 	resp, cancel, endpoint, err := c.attemptEndpoints(builder, "")
 	if err != nil {
-		c.logErrorCtx(ctx, "client.update_state.transport_error", "key", key, "lease_id", leaseID, "endpoint", endpoint, "fencing_token", token, "error", err)
+		c.logErrorCtx(ctx, "client.update.transport_error", "key", key, "lease_id", leaseID, "endpoint", endpoint, "fencing_token", token, "error", err)
 		return nil, err
 	}
 	defer cancel()
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		c.logWarnCtx(ctx, "client.update_state.error", "key", key, "lease_id", leaseID, "endpoint", endpoint, "fencing_token", token, "status", resp.StatusCode)
+		c.logWarnCtx(ctx, "client.update.error", "key", key, "lease_id", leaseID, "endpoint", endpoint, "fencing_token", token, "status", resp.StatusCode)
 		return nil, c.decodeError(resp)
 	}
-	var result UpdateStateResult
+	var result UpdateResult
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}
-	c.logTraceCtx(ctx, "client.update_state.success", "key", key, "lease_id", leaseID, "endpoint", endpoint, "fencing_token", token, "new_version", result.NewVersion, "new_etag", result.NewStateETag)
+	c.logTraceCtx(ctx, "client.update.success", "key", key, "lease_id", leaseID, "endpoint", endpoint, "fencing_token", token, "new_version", result.NewVersion, "new_etag", result.NewStateETag)
 	if newToken := resp.Header.Get(headerFencingToken); newToken != "" {
 		c.RegisterLeaseToken(leaseID, newToken)
 	}
 	return &result, nil
 }
 
-// UpdateStateBytes uploads new JSON state from the provided byte slice.
-func (c *Client) UpdateStateBytes(ctx context.Context, key, leaseID string, body []byte, opts UpdateStateOptions) (*UpdateStateResult, error) {
-	return c.UpdateState(ctx, key, leaseID, bytes.NewReader(body), opts)
+// UpdateBytes uploads new JSON state from the provided byte slice.
+func (c *Client) UpdateBytes(ctx context.Context, key, leaseID string, body []byte, opts UpdateOptions) (*UpdateResult, error) {
+	return c.Update(ctx, key, leaseID, bytes.NewReader(body), opts)
 }
 
-// RemoveState deletes the JSON state for key while ensuring the lease and
+// Remove deletes the JSON state for key while ensuring the lease and
 // conditional headers (when provided) are honoured.
-func (c *Client) RemoveState(ctx context.Context, key, leaseID string, opts RemoveStateOptions) (*api.RemoveStateResponse, error) {
+func (c *Client) Remove(ctx context.Context, key, leaseID string, opts RemoveOptions) (*api.RemoveResponse, error) {
 	token, err := c.fencingToken(leaseID, opts.FencingToken)
 	if err != nil {
 		return nil, err
 	}
-	c.logTraceCtx(ctx, "client.remove_state.start", "key", key, "lease_id", leaseID, "endpoint", c.lastEndpoint, "fencing_token", token)
-	path := fmt.Sprintf("/v1/remove-state?key=%s", url.QueryEscape(key))
+	c.logTraceCtx(ctx, "client.remove.start", "key", key, "lease_id", leaseID, "endpoint", c.lastEndpoint, "fencing_token", token)
+	path := fmt.Sprintf("/v1/remove?key=%s", url.QueryEscape(key))
 	builder := func(base string) (*http.Request, context.CancelFunc, error) {
 		reqCtx, cancel := c.requestContext(ctx)
 		req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, base+path, http.NoBody)
@@ -3036,20 +3006,20 @@ func (c *Client) RemoveState(ctx context.Context, key, leaseID string, opts Remo
 	}
 	resp, cancel, endpoint, err := c.attemptEndpoints(builder, "")
 	if err != nil {
-		c.logErrorCtx(ctx, "client.remove_state.transport_error", "key", key, "lease_id", leaseID, "endpoint", endpoint, "fencing_token", token, "error", err)
+		c.logErrorCtx(ctx, "client.remove.transport_error", "key", key, "lease_id", leaseID, "endpoint", endpoint, "fencing_token", token, "error", err)
 		return nil, err
 	}
 	defer cancel()
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		c.logWarnCtx(ctx, "client.remove_state.error", "key", key, "lease_id", leaseID, "endpoint", endpoint, "fencing_token", token, "status", resp.StatusCode)
+		c.logWarnCtx(ctx, "client.remove.error", "key", key, "lease_id", leaseID, "endpoint", endpoint, "fencing_token", token, "status", resp.StatusCode)
 		return nil, c.decodeError(resp)
 	}
-	var result api.RemoveStateResponse
+	var result api.RemoveResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}
-	c.logTraceCtx(ctx, "client.remove_state.success", "key", key, "lease_id", leaseID, "endpoint", endpoint, "fencing_token", token, "removed", result.Removed, "new_version", result.NewVersion)
+	c.logTraceCtx(ctx, "client.remove.success", "key", key, "lease_id", leaseID, "endpoint", endpoint, "fencing_token", token, "removed", result.Removed, "new_version", result.NewVersion)
 	if newToken := resp.Header.Get(headerFencingToken); newToken != "" {
 		c.RegisterLeaseToken(leaseID, newToken)
 	}
@@ -3468,7 +3438,7 @@ func (c *Client) dequeueInternal(ctx context.Context, queue string, opts Dequeue
 	}
 	path := "/v1/queue/dequeue"
 	if stateful {
-		path = "/v1/queue/dequeue-with-state"
+		path = "/v1/queue/dequeueWithState"
 	}
 	cidCtx := CorrelationIDFromContext(ctx)
 	beginFields := []any{
@@ -3882,7 +3852,7 @@ func (c *Client) subscribe(ctx context.Context, queue string, opts SubscribeOpti
 
 	path := "/v1/queue/subscribe"
 	if stateful {
-		path = "/v1/queue/subscribe-with-state"
+		path = "/v1/queue/subscribeWithState"
 	}
 	builder := func(base string) (*http.Request, context.CancelFunc, error) {
 		reqCtx, cancel := c.requestContextNoTimeout(ctx)

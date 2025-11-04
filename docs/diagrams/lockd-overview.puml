@@ -34,15 +34,15 @@ Storage --> Crypto: new_meta_etag
 Crypto --> Handler: new_meta_etag
 Handler --> Client: 200 KeepAlive\nheader: X-Fencing-Token
 
-== GetState ==
-Client -> Handler: POST /v1/get-state\nX-Lease-ID, X-Fencing-Token
+== Get ==
+Client -> Handler: POST /v1/get\nX-Lease-ID, X-Fencing-Token
 Handler -> Storage: ReadState(key)
 Storage --> Crypto: encrypted JSON + ETag
 Crypto --> Handler: JSON stream + ETag
 Handler --> Client: 200 stream JSON\nheaders: ETag, X-Key-Version, X-Fencing-Token
 
-== UpdateState ==
-Client -> Handler: POST /v1/update-state\nbody, CAS headers, X-Fencing-Token
+== Update ==
+Client -> Handler: POST /v1/update\nbody, CAS headers, X-Fencing-Token
 Handler -> Compactor: compact JSON
 Compactor --> Handler: canonical stream
 Handler -> Crypto: EncryptState

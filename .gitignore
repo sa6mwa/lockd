@@ -1,7 +1,7 @@
 /lockd
 /lockc
 /cmd/lockd/lockd
-/cmd/lockc/lockc
+/swagger/internal/swaggerhtml/swaggerhtml
 /server.pem
 /client*.pem
 /ca.pem

@@ -291,7 +291,7 @@ func TestClientCorrelationPropagation(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Correlation-Id", expected)
 			fmt.Fprintf(w, `{"lease_id":"L1","key":"orders","owner":"worker","expires_at_unix":1,"version":1,"fencing_token":1,"correlation_id":"%s"}`, expected)
-		case strings.HasPrefix(r.URL.Path, "/v1/update-state"):
+		case strings.HasPrefix(r.URL.Path, "/v1/update"):
 			updateHeader = r.Header.Get("X-Correlation-Id")
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"new_version":2,"new_state_etag":"etag","bytes":2}`)
@@ -334,7 +334,7 @@ func TestClientCorrelationPropagation(t *testing.T) {
 	}
 }
 
-func TestLeaseSessionRemoveState(t *testing.T) {
+func TestLeaseSessionRemove(t *testing.T) {
 	var removeVersion, removeETag, removeToken string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -342,7 +342,7 @@ func TestLeaseSessionRemoveState(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Fencing-Token", "41")
 			fmt.Fprint(w, `{"lease_id":"L-remove","key":"orders","owner":"worker","expires_at_unix":123,"version":2,"state_etag":"etag-initial","fencing_token":41}`)
-		case strings.HasPrefix(r.URL.Path, "/v1/remove-state"):
+		case strings.HasPrefix(r.URL.Path, "/v1/remove"):
 			removeVersion = r.Header.Get("X-If-Version")
 			removeETag = r.Header.Get("X-If-State-ETag")
 			removeToken = r.Header.Get("X-Fencing-Token")
@@ -670,11 +670,11 @@ func TestClientAcquireAllEndpointsDown(t *testing.T) {
 }
 
 type acquireForUpdateRetryTransport struct {
-	mu            sync.Mutex
-	acquireCalls  int
-	getStateCalls int
-	updateCalls   int
-	releaseCalls  int
+	mu           sync.Mutex
+	acquireCalls int
+	getCalls     int
+	updateCalls  int
+	releaseCalls int
 }
 
 func (t *acquireForUpdateRetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -690,9 +690,9 @@ func (t *acquireForUpdateRetryTransport) RoundTrip(req *http.Request) (*http.Res
 		resp := newJSONResponse(req, http.StatusOK, body)
 		resp.Header.Set("X-Correlation-Id", fmt.Sprintf("cid-%d", t.acquireCalls))
 		return resp, nil
-	case "/v1/get-state":
-		t.getStateCalls++
-		if t.getStateCalls == 1 {
+	case "/v1/get":
+		t.getCalls++
+		if t.getCalls == 1 {
 			return newJSONResponse(req, http.StatusConflict, `{"error":"lease_required"}`), nil
 		}
 		resp := newJSONResponse(req, http.StatusOK, `{"value":1}`)
@@ -701,7 +701,7 @@ func (t *acquireForUpdateRetryTransport) RoundTrip(req *http.Request) (*http.Res
 		resp.Header.Set("X-Fencing-Token", "73")
 		resp.Header.Set("Content-Length", strconv.Itoa(len(`{"value":1}`)))
 		return resp, nil
-	case "/v1/update-state":
+	case "/v1/update":
 		t.updateCalls++
 		resp := newJSONResponse(req, http.StatusOK, `{"new_version":2,"new_state_etag":"etag-updated","bytes":9}`)
 		return resp, nil
@@ -757,7 +757,7 @@ func TestAcquireForUpdateRetriesOnLeaseRequired(t *testing.T) {
 
 	transport.mu.Lock()
 	acquireCalls := transport.acquireCalls
-	getStateCalls := transport.getStateCalls
+	getCalls := transport.getCalls
 	updateCalls := transport.updateCalls
 	releaseCalls := transport.releaseCalls
 	transport.mu.Unlock()
@@ -765,8 +765,8 @@ func TestAcquireForUpdateRetriesOnLeaseRequired(t *testing.T) {
 	if acquireCalls < 2 {
 		t.Fatalf("expected at least two acquire attempts, got %d", acquireCalls)
 	}
-	if getStateCalls < 2 {
-		t.Fatalf("expected get-state retries, got %d", getStateCalls)
+	if getCalls < 2 {
+		t.Fatalf("expected get retries, got %d", getCalls)
 	}
 	if updateCalls != 1 {
 		t.Fatalf("expected exactly one update, got %d", updateCalls)
@@ -1147,7 +1147,7 @@ func TestClientDequeueWithState(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/v1/queue/dequeue-with-state":
+		case "/v1/queue/dequeueWithState":
 			mw := multipart.NewWriter(w)
 			w.Header().Set("Content-Type", "multipart/related; boundary="+mw.Boundary())
 			metaHeader := textproto.MIMEHeader{}
@@ -1370,7 +1370,7 @@ func TestClientSubscribeWithState(t *testing.T) {
 	var ackReq map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/v1/queue/subscribe-with-state":
+		case "/v1/queue/subscribeWithState":
 			mw := multipart.NewWriter(w)
 			w.Header().Set("Content-Type", "multipart/related; boundary="+mw.Boundary())
 			w.WriteHeader(http.StatusOK)

@@ -117,22 +117,22 @@ func (c *Client) Describe(ctx context.Context, key string) (*api.DescribeRespons
 	return c.inner.Describe(ctx, key)
 }
 
-// GetState streams the current JSON state for key.
-func (c *Client) GetState(ctx context.Context, key, leaseID string) (io.ReadCloser, string, string, error) {
-	return c.inner.GetState(ctx, key, leaseID)
+// Get streams the current JSON state for key.
+func (c *Client) Get(ctx context.Context, key, leaseID string) (io.ReadCloser, string, string, error) {
+	return c.inner.Get(ctx, key, leaseID)
 }
 
-// GetStateBytes loads the current JSON state into memory for convenience.
-func (c *Client) GetStateBytes(ctx context.Context, key, leaseID string) ([]byte, string, string, error) {
-	return c.inner.GetStateBytes(ctx, key, leaseID)
+// GetBytes loads the current JSON state into memory for convenience.
+func (c *Client) GetBytes(ctx context.Context, key, leaseID string) ([]byte, string, string, error) {
+	return c.inner.GetBytes(ctx, key, leaseID)
 }
 
-// UpdateState uploads a new JSON state body for key.
-func (c *Client) UpdateState(ctx context.Context, key, leaseID string, body io.Reader, opts lockdclient.UpdateStateOptions) (*lockdclient.UpdateStateResult, error) {
-	return c.inner.UpdateState(ctx, key, leaseID, body, opts)
+// Update uploads a new JSON state body for key.
+func (c *Client) Update(ctx context.Context, key, leaseID string, body io.Reader, opts lockdclient.UpdateOptions) (*lockdclient.UpdateResult, error) {
+	return c.inner.Update(ctx, key, leaseID, body, opts)
 }
 
-// UpdateStateBytes uploads a new JSON state body from an in-memory buffer.
-func (c *Client) UpdateStateBytes(ctx context.Context, key, leaseID string, body []byte, opts lockdclient.UpdateStateOptions) (*lockdclient.UpdateStateResult, error) {
-	return c.inner.UpdateStateBytes(ctx, key, leaseID, body, opts)
+// UpdateBytes uploads a new JSON state body from an in-memory buffer.
+func (c *Client) UpdateBytes(ctx context.Context, key, leaseID string, body []byte, opts lockdclient.UpdateOptions) (*lockdclient.UpdateResult, error) {
+	return c.inner.UpdateBytes(ctx, key, leaseID, body, opts)
 }

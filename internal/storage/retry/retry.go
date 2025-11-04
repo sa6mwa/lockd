@@ -111,9 +111,9 @@ func (b *backend) WriteState(ctx context.Context, key string, body io.Reader, op
 	return res, err
 }
 
-func (b *backend) RemoveState(ctx context.Context, key string, expectedETag string) error {
+func (b *backend) Remove(ctx context.Context, key string, expectedETag string) error {
 	return b.withRetry(ctx, "remove_state", key, func(ctx context.Context) error {
-		return b.inner.RemoveState(ctx, key, expectedETag)
+		return b.inner.Remove(ctx, key, expectedETag)
 	})
 }
 

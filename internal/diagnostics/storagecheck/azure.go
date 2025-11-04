@@ -122,7 +122,7 @@ func verifyAzure(ctx context.Context, azureCfg azurestore.Config, crypto *storag
 	}
 
 	run("DeleteObjects", func(ctx context.Context) error {
-		if err := store.RemoveState(ctx, diagKey, stateETag); err != nil && !errors.Is(err, storage.ErrNotFound) {
+		if err := store.Remove(ctx, diagKey, stateETag); err != nil && !errors.Is(err, storage.ErrNotFound) {
 			return err
 		}
 		if err := store.DeleteMeta(ctx, diagKey, metaETag); err != nil && !errors.Is(err, storage.ErrNotFound) {

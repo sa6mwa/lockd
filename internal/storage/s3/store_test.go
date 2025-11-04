@@ -91,10 +91,10 @@ func TestS3StoreStateLifecycle(t *testing.T) {
 	if _, err := store.WriteState(ctx, "stream", bytes.NewReader([]byte(`{"offset":2}`)), storage.PutStateOptions{ExpectedETag: "wrong"}); err != storage.ErrCASMismatch {
 		t.Fatalf("expected cas mismatch, got %v", err)
 	}
-	if err := store.RemoveState(ctx, "stream", "wrong"); err != storage.ErrCASMismatch {
+	if err := store.Remove(ctx, "stream", "wrong"); err != storage.ErrCASMismatch {
 		t.Fatalf("expected remove cas mismatch, got %v", err)
 	}
-	if err := store.RemoveState(ctx, "stream", res.NewETag); err != nil {
+	if err := store.Remove(ctx, "stream", res.NewETag); err != nil {
 		t.Fatalf("remove state: %v", err)
 	}
 }

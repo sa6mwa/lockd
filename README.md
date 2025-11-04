@@ -153,12 +153,12 @@ Every block above maps to a canonical structured-logging prefix. All logs includ
 ### Request flow
 
 1. **Acquire** – `POST /v1/acquire` → acquire lease (optionally blocking).
-2. **Get state** – `POST /v1/get-state` → stream JSON state with CAS headers.
+2. **Get state** – `POST /v1/get` → stream JSON state with CAS headers.
    Supply `X-Lease-ID` + `X-Fencing-Token` from the acquire response.
-3. **Update state** – `POST /v1/update-state` → upload new JSON with
+3. **Update state** – `POST /v1/update` → upload new JSON with
    `X-If-Version` and/or `X-If-State-ETag` to enforce CAS. Include the current
    `X-Fencing-Token`.
-4. **Remove state (optional)** – `POST /v1/remove-state` → delete the stored JSON
+4. **Remove state (optional)** – `POST /v1/remove` → delete the stored JSON
    blob while holding the lease. Honor the same `X-Lease-ID`, `X-Fencing-Token`,
    and CAS headers (`X-If-Version`, `X-If-State-ETag`) as updates.
 5. **Release** – `POST /v1/release` → release lease with the same fencing token;
@@ -190,6 +190,15 @@ all clients must use the callback helper described above.
 - `cmd/lockd` – CLI entrypoint (Cobra/Viper).
 - `internal/tlsutil` – bundle loading/generation helpers.
 - `integration/` – end-to-end tests (mem, disk, NFS, AWS, MinIO, Azure, OTLP, queues).
+
+## API documentation
+
+The HTTP handlers embed [swaggo](https://github.com/swaggo/swag) annotations so the OpenAPI description can be produced straight from the code. Run `make swagger` (or `go generate ./swagger`) with the `swag` binary on your `PATH` to refresh the spec. Generation writes three artifacts to `swagger/docs/`:
+
+- `swagger.json` and `swagger.yaml` for downstream tooling.
+- `swagger.html`, a self-contained Swagger UI page that inlines the JSON spec.
+
+These files live alongside the CLI so the reusable server library stays swaggo-free. Serve the HTML with any static web host—or just open it locally—to explore the API interactively.
 
 ## Storage Backends
 
@@ -446,7 +455,7 @@ helper again.
 While the handler executes, the helper issues keepalives at half the TTL. A
 failed keepalive cancels the handler’s context, surfaces the error, and the
 helper releases the lease (treating `lease_required` as success). Other client
-calls (`GetState`, `UpdateState`, `KeepAlive`, `Release`) continue to surface
+calls (`Get`, `Update`, `KeepAlive`, `Release`) continue to surface
 `lease_required` immediately so callers can choose their own retry strategy.
 
 For multi-host deployments, build clients with
@@ -512,10 +521,10 @@ to be buffered in memory. On the same 13th Gen Intel Core i7-1355U host:
 
 | Benchmark | ns/op | MB/s | B/op | allocs/op |
 |-----------|------:|-----:|-----:|----------:|
-| `BenchmarkClientGetStateBytes` | 707,158 | 370.72 | 1,218,417 | 131 |
-| `BenchmarkClientGetStateStream` | **219,847** | **1,192.45** | **8,100** | 97 |
-| `BenchmarkClientUpdateStateBytes` | **241,807** | **1,084.16** | 43,330 | 114 |
-| `BenchmarkClientUpdateStateStream` | 402,225 | 651.74 | **9,759** | 122 |
+| `BenchmarkClientGetBytes` | 707,158 | 370.72 | 1,218,417 | 131 |
+| `BenchmarkClientGetStream` | **219,847** | **1,192.45** | **8,100** | 97 |
+| `BenchmarkClientUpdateBytes` | **241,807** | **1,084.16** | 43,330 | 114 |
+| `BenchmarkClientUpdateStream` | 402,225 | 651.74 | **9,759** | 122 |
 
 Streaming reads cut allocations by ~150× and uploads by ~4.4×; throughput is a
 touch lower for uploads because the payload is generated on the fly, but avoids
@@ -544,8 +553,8 @@ threshold. Choose a value that matches your workload and disk characteristics;
 the benchmarks above were gathered via:
 
 ```sh
-set -a && source .env.local && set +a && go test -run=^$ -bench=BenchmarkClientGetState -benchmem ./client
-set -a && source .env.local && set +a && go test -run=^$ -bench=BenchmarkClientUpdateState -benchmem ./client
+set -a && source .env.local && set +a && go test -run=^$ -bench=BenchmarkClientGet -benchmem ./client
+set -a && source .env.local && set +a && go test -run=^$ -bench=BenchmarkClientUpdate -benchmem ./client
 set -a && source .env.local && set +a && go test -run='^$' -bench='BenchmarkLockd(LargeJSON|SmallJSON)' -benchmem ./integration/minio -tags "integration minio bench"
 ```
 
@@ -566,7 +575,7 @@ met:
 
 Acquire-for-update is particularly useful for these scenarios because the state
 reader holds the lease while a worker inspects the JSON payload. Once it computes
-the next cursor it can call `UpdateState` followed by `Release`, avoiding any race
+the next cursor it can call `Update` followed by `Release`, avoiding any race
 window between separate update and release calls.
 
 ### Benchmarking with MinIO

@@ -40,8 +40,8 @@ MetaObj --> S3: new ETag
 S3 --> Handler: new_meta_etag
 Handler --> Client: 200 KeepAlive
 
-== GetState ==
-Client -> Handler: POST /v1/get-state
+== Get ==
+Client -> Handler: POST /v1/get
 Handler -> S3: StatObject(state)
 alt Not found
     S3 --> Handler: ErrNotFound
@@ -54,8 +54,8 @@ else
     Handler --> Client: 200 stream\nheaders: ETag, X-Key-Version, X-Fencing-Token
 end
 
-== UpdateState ==
-Client -> Handler: POST /v1/update-state\nbody, CAS headers, X-Fencing-Token
+== Update ==
+Client -> Handler: POST /v1/update\nbody, CAS headers, X-Fencing-Token
 Handler -> Compactor: compact JSON
 Compactor --> Handler: stream
 Handler -> S3: PutObject(state, stream)\nIf-Match expected_etag (optional)

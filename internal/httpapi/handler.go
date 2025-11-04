@@ -486,15 +486,15 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle("/v1/acquire", h.wrap("acquire", h.handleAcquire))
 	mux.Handle("/v1/keepalive", h.wrap("keepalive", h.handleKeepAlive))
 	mux.Handle("/v1/release", h.wrap("release", h.handleRelease))
-	mux.Handle("/v1/get-state", h.wrap("get-state", h.handleGetState))
-	mux.Handle("/v1/update-state", h.wrap("update-state", h.handleUpdateState))
-	mux.Handle("/v1/remove-state", h.wrap("remove-state", h.handleRemoveState))
+	mux.Handle("/v1/get", h.wrap("get", h.handleGet))
+	mux.Handle("/v1/update", h.wrap("update", h.handleUpdate))
+	mux.Handle("/v1/remove", h.wrap("remove", h.handleRemove))
 	mux.Handle("/v1/describe", h.wrap("describe", h.handleDescribe))
 	mux.Handle("/v1/queue/enqueue", h.wrap("queue.enqueue", h.handleQueueEnqueue))
 	mux.Handle("/v1/queue/dequeue", h.wrap("queue.dequeue", h.handleQueueDequeue))
-	mux.Handle("/v1/queue/dequeue-with-state", h.wrap("queue.dequeue_with_state", h.handleQueueDequeueWithState))
+	mux.Handle("/v1/queue/dequeueWithState", h.wrap("queue.dequeue_with_state", h.handleQueueDequeueWithState))
 	mux.Handle("/v1/queue/subscribe", h.wrap("queue.subscribe", h.handleQueueSubscribe))
-	mux.Handle("/v1/queue/subscribe-with-state", h.wrap("queue.subscribe_with_state", h.handleQueueSubscribeWithState))
+	mux.Handle("/v1/queue/subscribeWithState", h.wrap("queue.subscribe_with_state", h.handleQueueSubscribeWithState))
 	mux.Handle("/v1/queue/ack", h.wrap("queue.ack", h.handleQueueAck))
 	mux.Handle("/v1/queue/nack", h.wrap("queue.nack", h.handleQueueNack))
 	mux.Handle("/v1/queue/extend", h.wrap("queue.extend", h.handleQueueExtend))
@@ -679,6 +679,19 @@ func clientIdentityFromRequest(r *http.Request) string {
 	return fmt.Sprintf("%s#%s", cert.Subject.String(), serial)
 }
 
+// handleAcquire godoc
+// @Summary      Acquire an exclusive lease
+// @Description  Acquire or wait for an exclusive lease on a key. When block_seconds > 0 the request will long-poll until a lease becomes available or the timeout elapses.
+// @Tags         lease
+// @Accept       json
+// @Produce      json
+// @Param        request  body      api.AcquireRequest  true  "Lease acquisition parameters"
+// @Success      200      {object}  api.AcquireResponse
+// @Failure      400      {object}  api.ErrorResponse
+// @Failure      409      {object}  api.ErrorResponse
+// @Failure      503      {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/acquire [post]
 func (h *Handler) handleAcquire(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
 	if err := h.maybeThrottleLock(); err != nil {
@@ -906,6 +919,20 @@ func (h *Handler) handleAcquire(w http.ResponseWriter, r *http.Request) error {
 	}
 }
 
+// handleKeepAlive godoc
+// @Summary      Extend an active lease TTL
+// @Description  Refresh an existing lease before it expires. Returns the new expiration timestamp.
+// @Tags         lease
+// @Accept       json
+// @Produce      json
+// @Param        request  body      api.KeepAliveRequest  true  "Lease keepalive parameters"
+// @Success      200      {object}  api.KeepAliveResponse
+// @Failure      400      {object}  api.ErrorResponse
+// @Failure      404      {object}  api.ErrorResponse
+// @Failure      409      {object}  api.ErrorResponse
+// @Failure      503      {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/keepalive [post]
 func (h *Handler) handleKeepAlive(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
 	if err := h.maybeThrottleLock(); err != nil {
@@ -997,6 +1024,19 @@ func (h *Handler) handleKeepAlive(w http.ResponseWriter, r *http.Request) error 
 	}
 }
 
+// handleRelease godoc
+// @Summary      Release a held lease
+// @Description  Releases the lease associated with the provided key and lease identifier.
+// @Tags         lease
+// @Accept       json
+// @Produce      json
+// @Param        request  body      api.ReleaseRequest  true  "Lease release parameters"
+// @Success      200      {object}  api.ReleaseResponse
+// @Failure      400      {object}  api.ErrorResponse
+// @Failure      404      {object}  api.ErrorResponse
+// @Failure      409      {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/release [post]
 func (h *Handler) handleRelease(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
 	if err := h.maybeThrottleLock(); err != nil {
@@ -1077,7 +1117,23 @@ func (h *Handler) handleRelease(w http.ResponseWriter, r *http.Request) error {
 	}
 }
 
-func (h *Handler) handleGetState(w http.ResponseWriter, r *http.Request) error {
+// handleGet godoc
+// @Summary      Read the JSON checkpoint for a key
+// @Description  Streams the currently committed JSON state for the key owned by the caller's lease. Returns 204 when no state is present.
+// @Tags         lease
+// @Accept       json
+// @Produce      json
+// @Param        key              query   string  true   "Lease key"
+// @Param        X-Lease-ID       header  string  true   "Lease identifier"
+// @Param        X-Fencing-Token  header  string  false  "Optional fencing token proof"
+// @Success      200              {object}  map[string]interface{}  "Streamed JSON state"
+// @Success      204              {string}  string          "No state stored for this key"
+// @Failure      400              {object}  api.ErrorResponse
+// @Failure      401              {object}  api.ErrorResponse
+// @Failure      409              {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/get [post]
+func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
 	if err := h.maybeThrottleLock(); err != nil {
 		return err
@@ -1105,9 +1161,9 @@ func (h *Handler) handleGetState(w http.ResponseWriter, r *http.Request) error {
 	remoteAddr := h.clientKeyFromRequest(r)
 	infoLogger := logger.With("key", key, "lease_id", leaseID, "remote_addr", remoteAddr)
 	infoLogger.Debug("lease.acquire_for_update.load.begin", "fencing_token", fencingToken)
-	verbose.Debug("get_state.begin", "key", key, "lease_id", leaseID)
+	verbose.Debug("get.begin", "key", key, "lease_id", leaseID)
 	if err := validateLease(meta, leaseID, fencingToken, h.clock.Now()); err != nil {
-		verbose.Warn("get_state.validate_failed", "key", key, "lease_id", leaseID, "error", err)
+		verbose.Warn("get.validate_failed", "key", key, "lease_id", leaseID, "error", err)
 		return err
 	}
 	expectState := meta.StateETag != ""
@@ -1121,7 +1177,7 @@ func (h *Handler) handleGetState(w http.ResponseWriter, r *http.Request) error {
 	reader, info, err := h.readStateWithWarmup(stateCtx, key, expectState, verbose)
 	if errors.Is(err, storage.ErrNotFound) {
 		w.WriteHeader(http.StatusNoContent)
-		verbose.Debug("get_state.empty", "key", key, "lease_id", leaseID)
+		verbose.Debug("get.empty", "key", key, "lease_id", leaseID)
 		infoLogger.Debug("lease.acquire_for_update.load.empty")
 		return nil
 	}
@@ -1144,7 +1200,7 @@ func (h *Handler) handleGetState(w http.ResponseWriter, r *http.Request) error {
 		size = info.Size
 	}
 	written, err := io.Copy(w, reader)
-	verbose.Debug("get_state.success",
+	verbose.Debug("get.success",
 		"key", key,
 		"lease_id", leaseID,
 		"bytes", size,
@@ -1164,7 +1220,26 @@ func (h *Handler) handleGetState(w http.ResponseWriter, r *http.Request) error {
 	return err
 }
 
-func (h *Handler) handleUpdateState(w http.ResponseWriter, r *http.Request) error {
+// handleUpdate godoc
+// @Summary      Atomically update the JSON state for a key
+// @Description  Streams JSON from the request body, compacts it, and installs it if the caller holds the lease. Optional CAS headers guard against concurrent updates.
+// @Tags         lease
+// @Accept       json
+// @Produce      json
+// @Param        key                query   string  true   "Lease key"
+// @Param        X-Lease-ID         header  string  true   "Lease identifier"
+// @Param        X-Fencing-Token    header  string  false  "Optional fencing token proof"
+// @Param        X-If-Version       header  string  false  "Conditionally update when the current version matches"
+// @Param        X-If-State-ETag    header  string  false  "Conditionally update when the state ETag matches"
+// @Param        state              body    string  true   "New JSON state payload"
+// @Success      200                {object}  api.UpdateResponse
+// @Failure      400                {object}  api.ErrorResponse
+// @Failure      404                {object}  api.ErrorResponse
+// @Failure      409                {object}  api.ErrorResponse
+// @Failure      503                {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/update [post]
+func (h *Handler) handleUpdate(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
 	if err := h.maybeThrottleLock(); err != nil {
 		return err
@@ -1196,7 +1271,7 @@ func (h *Handler) handleUpdateState(w http.ResponseWriter, r *http.Request) erro
 		"if_match", ifMatch,
 		"if_version", ifVersion,
 	)
-	verbose.Debug("update_state.begin",
+	verbose.Debug("update.begin",
 		"key", key,
 		"lease_id", leaseID,
 		"if_match", ifMatch,
@@ -1222,7 +1297,7 @@ func (h *Handler) handleUpdateState(w http.ResponseWriter, r *http.Request) erro
 		metaETag = etag
 	}
 	if err := validateLease(&meta, leaseID, fencingToken, now); err != nil {
-		verbose.Warn("update_state.validate_failed", "key", key, "lease_id", leaseID, "error", err)
+		verbose.Warn("update.validate_failed", "key", key, "lease_id", leaseID, "error", err)
 		return err
 	}
 	if ifVersion != "" {
@@ -1269,7 +1344,7 @@ func (h *Handler) handleUpdateState(w http.ResponseWriter, r *http.Request) erro
 	})
 	if err != nil {
 		if errors.Is(err, storage.ErrCASMismatch) {
-			verbose.Warn("update_state.etag_conflict", "key", key, "lease_id", leaseID)
+			verbose.Warn("update.etag_conflict", "key", key, "lease_id", leaseID)
 			return httpError{
 				Status:  http.StatusConflict,
 				Code:    "etag_mismatch",
@@ -1280,7 +1355,7 @@ func (h *Handler) handleUpdateState(w http.ResponseWriter, r *http.Request) erro
 		}
 		return fmt.Errorf("write state: %w", err)
 	}
-	verbose.Trace("update_state.payload_written", "key", key, "lease_id", leaseID, "bytes", putRes.BytesWritten, "new_etag", putRes.NewETag)
+	verbose.Trace("update.payload_written", "key", key, "lease_id", leaseID, "bytes", putRes.BytesWritten, "new_etag", putRes.NewETag)
 	if len(putRes.Descriptor) > 0 {
 		meta.StateDescriptor = append([]byte(nil), putRes.Descriptor...)
 	}
@@ -1292,7 +1367,7 @@ func (h *Handler) handleUpdateState(w http.ResponseWriter, r *http.Request) erro
 	newMetaETag, err := h.store.StoreMeta(ctx, key, &meta, metaETag)
 	if err != nil {
 		if errors.Is(err, storage.ErrCASMismatch) {
-			verbose.Trace("update_state.meta_conflict", "key", key, "lease_id", leaseID)
+			verbose.Trace("update.meta_conflict", "key", key, "lease_id", leaseID)
 			return httpError{
 				Status:  http.StatusConflict,
 				Code:    "meta_conflict",
@@ -1304,7 +1379,7 @@ func (h *Handler) handleUpdateState(w http.ResponseWriter, r *http.Request) erro
 		return fmt.Errorf("store meta: %w", err)
 	}
 	h.cacheLease(leaseID, key, meta, newMetaETag)
-	verbose.Debug("update_state.success",
+	verbose.Debug("update.success",
 		"key", key,
 		"lease_id", leaseID,
 		"version", meta.Version,
@@ -1315,10 +1390,10 @@ func (h *Handler) handleUpdateState(w http.ResponseWriter, r *http.Request) erro
 		"new_state_etag", meta.StateETag,
 		"bytes", putRes.BytesWritten,
 	)
-	resp := map[string]any{
-		"new_version":    meta.Version,
-		"new_state_etag": meta.StateETag,
-		"bytes":          putRes.BytesWritten,
+	resp := api.UpdateResponse{
+		NewVersion:   meta.Version,
+		NewStateETag: meta.StateETag,
+		Bytes:        putRes.BytesWritten,
 	}
 	headers := map[string]string{
 		"X-Key-Version":    strconv.FormatInt(meta.Version, 10),
@@ -1329,7 +1404,24 @@ func (h *Handler) handleUpdateState(w http.ResponseWriter, r *http.Request) erro
 	return nil
 }
 
-func (h *Handler) handleRemoveState(w http.ResponseWriter, r *http.Request) error {
+// handleRemove godoc
+// @Summary      Delete the JSON state for a key
+// @Description  Removes the stored state blob if the caller holds the lease. Optional CAS headers guard against concurrent updates.
+// @Tags         lease
+// @Accept       json
+// @Produce      json
+// @Param        key              query   string  true   "Lease key"
+// @Param        X-Lease-ID       header  string  true   "Lease identifier"
+// @Param        X-Fencing-Token  header  string  false  "Optional fencing token proof"
+// @Param        X-If-Version     header  string  false  "Conditionally remove when version matches"
+// @Param        X-If-State-ETag  header  string  false  "Conditionally remove when state ETag matches"
+// @Success      200              {object}  api.RemoveResponse
+// @Failure      400              {object}  api.ErrorResponse
+// @Failure      404              {object}  api.ErrorResponse
+// @Failure      409              {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/remove [post]
+func (h *Handler) handleRemove(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
 	if err := h.maybeThrottleLock(); err != nil {
 		return err
@@ -1355,7 +1447,7 @@ func (h *Handler) handleRemoveState(w http.ResponseWriter, r *http.Request) erro
 		logger = h.logger
 	}
 	verbose := logger
-	verbose.Debug("remove_state.begin",
+	verbose.Debug("remove.begin",
 		"key", key,
 		"lease_id", leaseID,
 		"if_match", ifMatch,
@@ -1378,7 +1470,7 @@ func (h *Handler) handleRemoveState(w http.ResponseWriter, r *http.Request) erro
 		metaETag = etag
 	}
 	if err := validateLease(&meta, leaseID, fencingToken, now); err != nil {
-		verbose.Warn("remove_state.validate_failed", "key", key, "lease_id", leaseID, "error", err)
+		verbose.Warn("remove.validate_failed", "key", key, "lease_id", leaseID, "error", err)
 		return err
 	}
 	if ifVersion != "" {
@@ -1398,7 +1490,7 @@ func (h *Handler) handleRemoveState(w http.ResponseWriter, r *http.Request) erro
 	}
 
 	hadMetaState := meta.StateETag != ""
-	removeErr := h.store.RemoveState(ctx, key, ifMatch)
+	removeErr := h.store.Remove(ctx, key, ifMatch)
 	removed := false
 	switch {
 	case removeErr == nil:
@@ -1406,7 +1498,7 @@ func (h *Handler) handleRemoveState(w http.ResponseWriter, r *http.Request) erro
 	case errors.Is(removeErr, storage.ErrNotFound):
 		removed = hadMetaState
 	case errors.Is(removeErr, storage.ErrCASMismatch):
-		verbose.Debug("remove_state.etag_conflict", "key", key, "lease_id", leaseID)
+		verbose.Debug("remove.etag_conflict", "key", key, "lease_id", leaseID)
 		return httpError{
 			Status:  http.StatusConflict,
 			Code:    "etag_mismatch",
@@ -1435,7 +1527,7 @@ func (h *Handler) handleRemoveState(w http.ResponseWriter, r *http.Request) erro
 		newMetaETag, err := h.store.StoreMeta(ctx, key, &meta, metaETag)
 		if err != nil {
 			if errors.Is(err, storage.ErrCASMismatch) {
-				verbose.Trace("remove_state.meta_conflict", "key", key, "lease_id", leaseID)
+				verbose.Trace("remove.meta_conflict", "key", key, "lease_id", leaseID)
 				return httpError{
 					Status:  http.StatusConflict,
 					Code:    "meta_conflict",
@@ -1449,7 +1541,7 @@ func (h *Handler) handleRemoveState(w http.ResponseWriter, r *http.Request) erro
 		metaETag = newMetaETag
 	}
 	h.cacheLease(leaseID, key, meta, metaETag)
-	resp := api.RemoveStateResponse{
+	resp := api.RemoveResponse{
 		Removed:    removed,
 		NewVersion: meta.Version,
 	}
@@ -1458,7 +1550,7 @@ func (h *Handler) handleRemoveState(w http.ResponseWriter, r *http.Request) erro
 		headerFencingToken: strconv.FormatInt(meta.Lease.FencingToken, 10),
 	}
 	h.writeJSON(w, http.StatusOK, resp, headers)
-	verbose.Debug("remove_state.success",
+	verbose.Debug("remove.success",
 		"key", key,
 		"lease_id", leaseID,
 		"removed", removed,
@@ -1467,6 +1559,16 @@ func (h *Handler) handleRemoveState(w http.ResponseWriter, r *http.Request) erro
 	return nil
 }
 
+// handleDescribe godoc
+// @Summary      Inspect metadata for a key
+// @Description  Returns lease and state metadata without streaming the state payload.
+// @Tags         lease
+// @Produce      json
+// @Param        key  query  string  true  "Lease key"
+// @Success      200  {object}  api.DescribeResponse
+// @Failure      400  {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/describe [get]
 func (h *Handler) handleDescribe(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
 	key := r.URL.Query().Get("key")
@@ -1499,6 +1601,21 @@ func (h *Handler) handleDescribe(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
+// handleQueueEnqueue godoc
+// @Summary      Enqueue a message
+// @Description  Writes a message into the durable queue. The payload is streamed directly and may include optional attributes.
+// @Tags         queue
+// @Accept       multipart/form-data
+// @Produce      json
+// @Param        meta     formData  string  true   "JSON encoded api.EnqueueRequest metadata"
+// @Param        payload  formData  file    false  "Optional payload stream"
+// @Success      200      {object}  api.EnqueueResponse
+// @Failure      400      {object}  api.ErrorResponse
+// @Failure      404      {object}  api.ErrorResponse
+// @Failure      409      {object}  api.ErrorResponse
+// @Failure      503      {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/queue/enqueue [post]
 func (h *Handler) handleQueueEnqueue(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
 	if err := h.maybeThrottleQueue(qrf.KindQueueProducer); err != nil {
@@ -1662,6 +1779,20 @@ func (h *Handler) handleQueueEnqueue(w http.ResponseWriter, r *http.Request) err
 	return nil
 }
 
+// handleQueueDequeue godoc
+// @Summary      Fetch one or more queue messages
+// @Description  Performs a single dequeue attempt, optionally waiting for availability. Responses stream as multipart/related parts containing message metadata and payload.
+// @Tags         queue
+// @Accept       json
+// @Produce      multipart/related
+// @Param        request  body      api.DequeueRequest  true  "Dequeue parameters"
+// @Success      200      {string}  string  "Multipart response with message metadata and optional payload"
+// @Failure      400      {object}  api.ErrorResponse
+// @Failure      404      {object}  api.ErrorResponse
+// @Failure      409      {object}  api.ErrorResponse
+// @Failure      503      {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/queue/dequeue [post]
 func (h *Handler) handleQueueDequeue(w http.ResponseWriter, r *http.Request) error {
 	baseCtx := r.Context()
 	if err := h.maybeThrottleQueue(qrf.KindQueueConsumer); err != nil {
@@ -1849,6 +1980,20 @@ func (h *Handler) handleQueueDequeue(w http.ResponseWriter, r *http.Request) err
 	return nil
 }
 
+// handleQueueDequeueWithState godoc
+// @Summary      Fetch queue messages with state attachments
+// @Description  Dequeues messages and includes their associated state blobs in the multipart response when available.
+// @Tags         queue
+// @Accept       json
+// @Produce      multipart/related
+// @Param        request  body      api.DequeueRequest  true  "Dequeue parameters"
+// @Success      200      {string}  string  "Multipart response with message metadata, payload, and state attachments"
+// @Failure      400      {object}  api.ErrorResponse
+// @Failure      404      {object}  api.ErrorResponse
+// @Failure      409      {object}  api.ErrorResponse
+// @Failure      503      {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/queue/dequeueWithState [post]
 func (h *Handler) handleQueueDequeueWithState(w http.ResponseWriter, r *http.Request) error {
 	baseCtx := r.Context()
 	if err := h.maybeThrottleQueue(qrf.KindQueueConsumer); err != nil {
@@ -1982,10 +2127,38 @@ func (h *Handler) handleQueueDequeueWithState(w http.ResponseWriter, r *http.Req
 	return nil
 }
 
+// handleQueueSubscribe godoc
+// @Summary      Stream queue deliveries
+// @Description  Opens a long-lived multipart stream of deliveries for the specified queue owner. Each part contains message metadata and payload.
+// @Tags         queue
+// @Accept       json
+// @Produce      multipart/related
+// @Param        request  body      api.DequeueRequest  true  "Subscription parameters (queue, owner, wait_seconds, visibility)"
+// @Success      200      {string}  string  "Multipart stream of message deliveries"
+// @Failure      400      {object}  api.ErrorResponse
+// @Failure      404      {object}  api.ErrorResponse
+// @Failure      409      {object}  api.ErrorResponse
+// @Failure      503      {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/queue/subscribe [post]
 func (h *Handler) handleQueueSubscribe(w http.ResponseWriter, r *http.Request) error {
 	return h.handleQueueSubscribeInternal(w, r, false)
 }
 
+// handleQueueSubscribeWithState godoc
+// @Summary      Stream queue deliveries with state
+// @Description  Opens a long-lived multipart stream where each part contains message metadata, payload, and state snapshot when available.
+// @Tags         queue
+// @Accept       json
+// @Produce      multipart/related
+// @Param        request  body      api.DequeueRequest  true  "Subscription parameters (queue, owner, wait_seconds, visibility)"
+// @Success      200      {string}  string  "Multipart stream of message deliveries"
+// @Failure      400      {object}  api.ErrorResponse
+// @Failure      404      {object}  api.ErrorResponse
+// @Failure      409      {object}  api.ErrorResponse
+// @Failure      503      {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/queue/subscribeWithState [post]
 func (h *Handler) handleQueueSubscribeWithState(w http.ResponseWriter, r *http.Request) error {
 	return h.handleQueueSubscribeInternal(w, r, true)
 }
@@ -2298,6 +2471,19 @@ func (h *Handler) handleQueueSubscribeInternal(w http.ResponseWriter, r *http.Re
 	return nil
 }
 
+// handleQueueAck godoc
+// @Summary      Acknowledge a delivered message
+// @Description  Confirms processing of a delivery and deletes the message or its retry lease.
+// @Tags         queue
+// @Accept       json
+// @Produce      json
+// @Param        request  body      api.AckRequest  true  "Acknowledgement payload"
+// @Success      200      {object}  api.AckResponse
+// @Failure      400      {object}  api.ErrorResponse
+// @Failure      404      {object}  api.ErrorResponse
+// @Failure      409      {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/queue/ack [post]
 func (h *Handler) handleQueueAck(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
 	if err := h.maybeThrottleQueue(qrf.KindQueueAck); err != nil {
@@ -2442,6 +2628,19 @@ func (h *Handler) handleQueueAck(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
+// handleQueueNack godoc
+// @Summary      Return a message to the queue
+// @Description  Requeues the delivery with optional delay and last error metadata.
+// @Tags         queue
+// @Accept       json
+// @Produce      json
+// @Param        request  body      api.NackRequest  true  "Negative acknowledgement payload"
+// @Success      200      {object}  api.NackResponse
+// @Failure      400      {object}  api.ErrorResponse
+// @Failure      404      {object}  api.ErrorResponse
+// @Failure      409      {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/queue/nack [post]
 func (h *Handler) handleQueueNack(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
 	if err := h.maybeThrottleQueue(qrf.KindQueueAck); err != nil {
@@ -2561,6 +2760,19 @@ func (h *Handler) handleQueueNack(w http.ResponseWriter, r *http.Request) error 
 	return nil
 }
 
+// handleQueueExtend godoc
+// @Summary      Extend a delivery lease
+// @Description  Extends the visibility timeout and lease window for an in-flight message.
+// @Tags         queue
+// @Accept       json
+// @Produce      json
+// @Param        request  body      api.ExtendRequest  true  "Extend payload"
+// @Success      200      {object}  api.ExtendResponse
+// @Failure      400      {object}  api.ErrorResponse
+// @Failure      404      {object}  api.ErrorResponse
+// @Failure      409      {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/queue/extend [post]
 func (h *Handler) handleQueueExtend(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
 	if err := h.maybeThrottleQueue(qrf.KindQueueAck); err != nil {
@@ -2715,11 +2927,23 @@ func (h *Handler) handleQueueExtend(w http.ResponseWriter, r *http.Request) erro
 	return nil
 }
 
+// handleHealth godoc
+// @Summary      Liveness probe
+// @Tags         system
+// @Produce      plain
+// @Success      200  {string}  string  "OK"
+// @Router       /healthz [get]
 func (h *Handler) handleHealth(w http.ResponseWriter, _ *http.Request) error {
 	w.WriteHeader(http.StatusOK)
 	return nil
 }
 
+// handleReady godoc
+// @Summary      Readiness probe
+// @Tags         system
+// @Produce      plain
+// @Success      200  {string}  string  "Ready"
+// @Router       /readyz [get]
 func (h *Handler) handleReady(w http.ResponseWriter, _ *http.Request) error {
 	w.WriteHeader(http.StatusOK)
 	return nil

@@ -477,8 +477,8 @@ func (s *Store) WriteState(ctx context.Context, key string, body io.Reader, opts
 	return result, nil
 }
 
-// RemoveState deletes the state blob for key, applying CAS when expectedETag is set.
-func (s *Store) RemoveState(ctx context.Context, key string, expectedETag string) error {
+// Remove deletes the state blob for key, applying CAS when expectedETag is set.
+func (s *Store) Remove(ctx context.Context, key string, expectedETag string) error {
 	opts := &azblob.DeleteBlobOptions{}
 	if expectedETag != "" {
 		opts.AccessConditions = &blob.AccessConditions{

@@ -140,7 +140,7 @@ func BenchmarkDiskRawLargeJSON(b *testing.B) {
 		if _, err := env.store.WriteState(ctx, key, bytes.NewReader(payload), storage.PutStateOptions{}); err != nil {
 			b.Fatalf("write state: %v", err)
 		}
-		if err := env.store.RemoveState(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+		if err := env.store.Remove(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 			b.Fatalf("remove state: %v", err)
 		}
 	}
@@ -159,8 +159,8 @@ func BenchmarkLockdDiskLargeJSON(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		key := nextDiskKey("lockd-large", i)
 		lease := acquireWithRetry(b, ctx, cli, key, "bench-large", diskBenchmarkLeaseTTL, diskBenchmarkBlockSecs)
-		opts := lockdclient.UpdateStateOptions{IfVersion: strconv.FormatInt(lease.Version, 10)}
-		if _, err := cli.UpdateStateBytes(ctx, key, lease.LeaseID, payload, opts); err != nil {
+		opts := lockdclient.UpdateOptions{IfVersion: strconv.FormatInt(lease.Version, 10)}
+		if _, err := cli.UpdateBytes(ctx, key, lease.LeaseID, payload, opts); err != nil {
 			b.Fatalf("update state: %v", err)
 		}
 		if _, err := cli.Release(ctx, api.ReleaseRequest{Key: key, LeaseID: lease.LeaseID}); err != nil {
@@ -181,9 +181,9 @@ func BenchmarkLockdDiskLargeJSONStream(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		key := nextDiskKey("lockd-large-stream", i)
 		lease := acquireWithRetry(b, ctx, cli, key, "bench-large-stream", diskBenchmarkLeaseTTL, diskBenchmarkBlockSecs)
-		opts := lockdclient.UpdateStateOptions{IfVersion: strconv.FormatInt(lease.Version, 10)}
+		opts := lockdclient.UpdateOptions{IfVersion: strconv.FormatInt(lease.Version, 10)}
 		stream := newDiskJSONStream(diskLargeJSONSize)
-		if _, err := cli.UpdateState(ctx, key, lease.LeaseID, stream, opts); err != nil {
+		if _, err := cli.Update(ctx, key, lease.LeaseID, stream, opts); err != nil {
 			b.Fatalf("update state stream: %v", err)
 		}
 		if _, err := cli.Release(ctx, api.ReleaseRequest{Key: key, LeaseID: lease.LeaseID}); err != nil {
@@ -209,7 +209,7 @@ func BenchmarkDiskRawSmallJSON(b *testing.B) {
 			if _, err := env.store.WriteState(ctx, key, bytes.NewReader(payload), storage.PutStateOptions{}); err != nil {
 				b.Fatalf("write state: %v", err)
 			}
-			if err := env.store.RemoveState(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			if err := env.store.Remove(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 				b.Fatalf("remove state: %v", err)
 			}
 		}
@@ -235,7 +235,7 @@ func BenchmarkLockdDiskSmallJSONStream(b *testing.B) {
 		key := nextDiskKey("lockd-small-stream", i)
 		lease := acquireWithRetry(b, ctx, cli, key, "bench-small-stream", diskBenchmarkLeaseTTL, diskBenchmarkBlockSecs)
 		stream := newDiskJSONStream(diskSmallJSONSize)
-		if _, err := cli.UpdateState(ctx, key, lease.LeaseID, stream, lockdclient.UpdateStateOptions{IfVersion: strconv.FormatInt(lease.Version, 10)}); err != nil {
+		if _, err := cli.Update(ctx, key, lease.LeaseID, stream, lockdclient.UpdateOptions{IfVersion: strconv.FormatInt(lease.Version, 10)}); err != nil {
 			b.Fatalf("update state stream: %v", err)
 		}
 		if _, err := cli.Release(ctx, api.ReleaseRequest{Key: key, LeaseID: lease.LeaseID}); err != nil {
@@ -290,7 +290,7 @@ func runLockdDiskSmallJSON(b *testing.B, env *diskBenchmarkEnv) {
 		lease := acquireWithRetry(b, ctx, cli, key, "bench-small", diskBenchmarkLeaseTTL, diskBenchmarkBlockSecs)
 		version := strconv.FormatInt(lease.Version, 10)
 		for _, payload := range batch {
-			if _, err := cli.UpdateStateBytes(ctx, key, lease.LeaseID, payload, lockdclient.UpdateStateOptions{IfVersion: version}); err != nil {
+			if _, err := cli.UpdateBytes(ctx, key, lease.LeaseID, payload, lockdclient.UpdateOptions{IfVersion: version}); err != nil {
 				b.Fatalf("update state: %v", err)
 			}
 			version = ""
@@ -318,7 +318,7 @@ func BenchmarkDiskRawConcurrent(b *testing.B) {
 			if _, err := env.store.WriteState(ctx, key, bytes.NewReader(payload), storage.PutStateOptions{}); err != nil {
 				b.Fatalf("write state: %v", err)
 			}
-			if err := env.store.RemoveState(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			if err := env.store.Remove(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 				b.Fatalf("remove state: %v", err)
 			}
 		}
@@ -342,8 +342,8 @@ func BenchmarkLockdDiskConcurrent(b *testing.B) {
 			key := nextDiskKey("lockd-concurrent", int(id))
 			owner := fmt.Sprintf("worker-%d", id)
 			lease := acquireWithRetry(b, ctx, cli, key, owner, diskBenchmarkLeaseTTL, diskBenchmarkBlockSecs)
-			opts := lockdclient.UpdateStateOptions{IfVersion: strconv.FormatInt(lease.Version, 10)}
-			if _, err := cli.UpdateStateBytes(ctx, key, lease.LeaseID, payload, opts); err != nil {
+			opts := lockdclient.UpdateOptions{IfVersion: strconv.FormatInt(lease.Version, 10)}
+			if _, err := cli.UpdateBytes(ctx, key, lease.LeaseID, payload, opts); err != nil {
 				b.Fatalf("update state: %v", err)
 			}
 			if _, err := cli.Release(ctx, api.ReleaseRequest{Key: key, LeaseID: lease.LeaseID}); err != nil {
@@ -369,8 +369,8 @@ func BenchmarkLockdDiskLargeJSONNFS(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		key := nextDiskKey("lockd-large-nfs", i)
 		lease := acquireWithRetry(b, ctx, cli, key, "bench-large-nfs", diskBenchmarkLeaseTTL, diskBenchmarkBlockSecs)
-		opts := lockdclient.UpdateStateOptions{IfVersion: strconv.FormatInt(lease.Version, 10)}
-		if _, err := cli.UpdateStateBytes(ctx, key, lease.LeaseID, payload, opts); err != nil {
+		opts := lockdclient.UpdateOptions{IfVersion: strconv.FormatInt(lease.Version, 10)}
+		if _, err := cli.UpdateBytes(ctx, key, lease.LeaseID, payload, opts); err != nil {
 			b.Fatalf("update state: %v", err)
 		}
 		if _, err := cli.Release(ctx, api.ReleaseRequest{Key: key, LeaseID: lease.LeaseID}); err != nil {

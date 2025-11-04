@@ -102,11 +102,11 @@ func TestAzureLockLifecycle(t *testing.T) {
 	}
 
 	payload, _ := json.Marshal(map[string]any{"cursor": 42, "source": "azure"})
-	opts := lockdclient.UpdateStateOptions{IfVersion: version, IfETag: etag}
+	opts := lockdclient.UpdateOptions{IfVersion: version, IfETag: etag}
 	if opts.IfVersion == "" {
 		opts.IfVersion = strconv.FormatInt(lease.Version, 10)
 	}
-	if _, err := ts.Client.UpdateStateBytes(ctx, key, lease.LeaseID, payload, opts); err != nil {
+	if _, err := ts.Client.UpdateBytes(ctx, key, lease.LeaseID, payload, opts); err != nil {
 		t.Fatalf("update state: %v", err)
 	}
 
@@ -173,7 +173,7 @@ func TestAzureLockConcurrency(t *testing.T) {
 				}
 				counter++
 				body, _ := json.Marshal(map[string]any{"counter": counter, "last": owner})
-				_, err = ts.Client.UpdateStateBytes(ctx, key, lease.LeaseID, body, lockdclient.UpdateStateOptions{IfETag: etag, IfVersion: version})
+				_, err = ts.Client.UpdateBytes(ctx, key, lease.LeaseID, body, lockdclient.UpdateOptions{IfETag: etag, IfVersion: version})
 				if err != nil {
 					var apiErr *lockdclient.APIError
 					if errors.As(err, &apiErr) {
@@ -259,7 +259,7 @@ func TestAzureAutoKeyAcquire(t *testing.T) {
 
 }
 
-func TestAzureRemoveStateSingleServer(t *testing.T) {
+func TestAzureRemoveSingleServer(t *testing.T) {
 	cfg := loadAzureConfig(t)
 	ensureAzureStoreReady(t, context.Background(), cfg)
 
@@ -374,7 +374,7 @@ func TestAzureRemoveStateSingleServer(t *testing.T) {
 	})
 }
 
-func TestAzureRemoveStateAcquireForUpdate(t *testing.T) {
+func TestAzureRemoveAcquireForUpdate(t *testing.T) {
 	cfg := loadAzureConfig(t)
 	ensureAzureStoreReady(t, context.Background(), cfg)
 
@@ -738,9 +738,9 @@ func assertAzureRemoveFailoverLogs(t testing.TB, rec *testlog.Recorder, primary,
 		helper.Helper()
 	}
 	const (
-		startMsg        = "client.remove_state.start"
-		successMsg      = "client.remove_state.success"
-		transportErrMsg = "client.remove_state.transport_error"
+		startMsg        = "client.remove.start"
+		successMsg      = "client.remove.success"
+		transportErrMsg = "client.remove.transport_error"
 		httpErrorMsg    = "client.http.error"
 	)
 
@@ -782,7 +782,7 @@ func assertAzureRemoveFailoverLogs(t testing.TB, rec *testlog.Recorder, primary,
 	t.Logf("azure remove-state failover log summary: initial=%s success=%s\n%s", initialEndpoint, successEndpoint, rec.Summary())
 }
 
-func TestAzureRemoveStateFailover(t *testing.T) {
+func TestAzureRemoveFailover(t *testing.T) {
 	cfg := loadAzureConfig(t)
 	ensureAzureStoreReady(t, context.Background(), cfg)
 
@@ -862,7 +862,7 @@ func TestAzureRemoveStateFailover(t *testing.T) {
 	assertAzureRemoveFailoverLogs(t, clientLogs, primary.URL(), backup.URL())
 }
 
-func TestAzureRemoveStateCASMismatch(t *testing.T) {
+func TestAzureRemoveCASMismatch(t *testing.T) {
 	cfg := loadAzureConfig(t)
 	ensureAzureStoreReady(t, context.Background(), cfg)
 
@@ -892,7 +892,7 @@ func TestAzureRemoveStateCASMismatch(t *testing.T) {
 	}
 	currentVersion := lease.Version
 
-	staleOpts := lockdclient.RemoveStateOptions{
+	staleOpts := lockdclient.RemoveOptions{
 		IfETag:    staleETag,
 		IfVersion: strconv.FormatInt(currentVersion, 10),
 	}
@@ -922,7 +922,7 @@ func TestAzureRemoveStateCASMismatch(t *testing.T) {
 	releaseLease(t, ctx, cli, key, verify.LeaseID)
 }
 
-func TestAzureRemoveStateKeepAlive(t *testing.T) {
+func TestAzureRemoveKeepAlive(t *testing.T) {
 	cfg := loadAzureConfig(t)
 	ensureAzureStoreReady(t, context.Background(), cfg)
 
@@ -961,7 +961,7 @@ func TestAzureRemoveStateKeepAlive(t *testing.T) {
 		t.Fatalf("keepalive after remove: %v", err)
 	}
 
-	staleUpdate := lockdclient.UpdateStateOptions{
+	staleUpdate := lockdclient.UpdateOptions{
 		IfETag:    originalETag,
 		IfVersion: strconv.FormatInt(originalVersion, 10),
 	}
@@ -1014,7 +1014,7 @@ func acquireWithRetry(t *testing.T, ctx context.Context, cli *lockdclient.Client
 }
 
 func getStateJSON(ctx context.Context, cli *lockdclient.Client, key, leaseID string) (map[string]any, string, string, error) {
-	reader, etag, version, err := cli.GetState(ctx, key, leaseID)
+	reader, etag, version, err := cli.Get(ctx, key, leaseID)
 	if err != nil {
 		return nil, "", "", err
 	}
@@ -1162,7 +1162,7 @@ func cleanupAzure(t *testing.T, cfg lockd.Config, key string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := store.RemoveState(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+	if err := store.Remove(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 		t.Logf("remove state failed: %v", err)
 	}
 	if err := store.DeleteMeta(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {

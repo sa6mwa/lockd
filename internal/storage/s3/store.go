@@ -537,8 +537,8 @@ func (s *Store) WriteState(ctx context.Context, key string, body io.Reader, opts
 	return result, nil
 }
 
-// RemoveState deletes the state object, applying CAS when expectedETag is provided.
-func (s *Store) RemoveState(ctx context.Context, key string, expectedETag string) error {
+// Remove deletes the state object, applying CAS when expectedETag is provided.
+func (s *Store) Remove(ctx context.Context, key string, expectedETag string) error {
 	object := s.stateObject(key)
 	logger, verbose := s.loggers(ctx)
 	start := time.Now()

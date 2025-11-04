@@ -79,7 +79,7 @@ func TestDiskStoreRoundTrip(t *testing.T) {
 		t.Fatalf("version = %d want %d", metaLoaded.Version, meta.Version)
 	}
 
-	if err := store.RemoveState(ctx, key, res.NewETag); err != nil {
+	if err := store.Remove(ctx, key, res.NewETag); err != nil {
 		t.Fatalf("remove state: %v", err)
 	}
 
@@ -109,7 +109,7 @@ func TestDiskStoreCAS(t *testing.T) {
 		t.Fatalf("expected cas mismatch, got %v", err)
 	}
 
-	if err := store.RemoveState(ctx, key, "mismatch"); !errors.Is(err, storage.ErrCASMismatch) {
+	if err := store.Remove(ctx, key, "mismatch"); !errors.Is(err, storage.ErrCASMismatch) {
 		t.Fatalf("expected cas mismatch, got %v", err)
 	}
 }

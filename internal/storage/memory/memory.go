@@ -309,8 +309,8 @@ func (s *Store) WriteState(ctx context.Context, key string, body io.Reader, opts
 	return result, nil
 }
 
-// RemoveState deletes the state blob for key, applying CAS when expectedETag is set.
-func (s *Store) RemoveState(_ context.Context, key string, expectedETag string) error {
+// Remove deletes the state blob for key, applying CAS when expectedETag is set.
+func (s *Store) Remove(_ context.Context, key string, expectedETag string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if expectedETag != "" {

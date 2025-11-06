@@ -15,6 +15,7 @@ import (
 	"pkt.systems/lockd/internal/storage"
 	azurestore "pkt.systems/lockd/internal/storage/azure"
 	"pkt.systems/lockd/internal/uuidv7"
+	"pkt.systems/lockd/namespaces"
 )
 
 func verifyAzure(ctx context.Context, azureCfg azurestore.Config, crypto *storage.Crypto) (Result, error) {
@@ -83,7 +84,8 @@ func verifyAzure(ctx context.Context, azureCfg azurestore.Config, crypto *storag
 		return nil
 	})
 
-	diagKey := fmt.Sprintf("lockd-diagnostics-%s", uuidv7.NewString())
+	namespace := namespaces.Default
+	diagKey := path.Join("lockd-diagnostics", uuidv7.NewString())
 	var (
 		metaETag  string
 		stateETag string
@@ -92,17 +94,17 @@ func verifyAzure(ctx context.Context, azureCfg azurestore.Config, crypto *storag
 	run("PutMeta", func(ctx context.Context) error {
 		var err error
 		meta := &storage.Meta{Version: 1}
-		metaETag, err = store.StoreMeta(ctx, diagKey, meta, "")
+	metaETag, err = store.StoreMeta(ctx, namespace, diagKey, meta, "")
 		return err
 	})
 
 	run("GetMeta", func(ctx context.Context) error {
-		_, _, err := store.LoadMeta(ctx, diagKey)
+	_, _, err := store.LoadMeta(ctx, namespace, diagKey)
 		return err
 	})
 
 	run("PutState", func(ctx context.Context) error {
-		res, err := store.WriteState(ctx, diagKey, strings.NewReader("{}"), storage.PutStateOptions{})
+	res, err := store.WriteState(ctx, namespace, diagKey, strings.NewReader("{}"), storage.PutStateOptions{})
 		if err != nil {
 			return err
 		}
@@ -114,18 +116,18 @@ func verifyAzure(ctx context.Context, azureCfg azurestore.Config, crypto *storag
 
 	if crypto != nil && crypto.Enabled() {
 		run("CryptoMetaStateRoundTrip", func(ctx context.Context) error {
-			return verifyMetaStateDecryption(ctx, store, crypto)
+		return verifyMetaStateDecryption(ctx, store, crypto)
 		})
 		run("CryptoQueueRoundTrip", func(ctx context.Context) error {
-			return verifyQueueEncryption(ctx, store, crypto)
+		return verifyQueueEncryption(ctx, store, crypto)
 		})
 	}
 
 	run("DeleteObjects", func(ctx context.Context) error {
-		if err := store.Remove(ctx, diagKey, stateETag); err != nil && !errors.Is(err, storage.ErrNotFound) {
+	if err := store.Remove(ctx, namespace, diagKey, stateETag); err != nil && !errors.Is(err, storage.ErrNotFound) {
 			return err
 		}
-		if err := store.DeleteMeta(ctx, diagKey, metaETag); err != nil && !errors.Is(err, storage.ErrNotFound) {
+	if err := store.DeleteMeta(ctx, namespace, diagKey, metaETag); err != nil && !errors.Is(err, storage.ErrNotFound) {
 			return err
 		}
 		return nil

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"pkt.systems/lockd/internal/storage"
+	"pkt.systems/lockd/namespaces"
 )
 
 func TestStoreMetaCAS(t *testing.T) {
@@ -14,10 +15,12 @@ func TestStoreMetaCAS(t *testing.T) {
 	ctx := context.Background()
 
 	meta := &storage.Meta{Version: 1}
-	if _, err := store.StoreMeta(ctx, "alpha", meta, ""); err != nil {
+	namespace := namespaces.Default
+	key := "alpha"
+	if _, err := store.StoreMeta(ctx, namespace, key, meta, ""); err != nil {
 		t.Fatalf("store meta create: %v", err)
 	}
-	loaded, etag, err := store.LoadMeta(ctx, "alpha")
+	loaded, etag, err := store.LoadMeta(ctx, namespace, key)
 	if err != nil {
 		t.Fatalf("load meta: %v", err)
 	}
@@ -25,17 +28,17 @@ func TestStoreMetaCAS(t *testing.T) {
 		t.Fatalf("expected version 1, got %d", loaded.Version)
 	}
 	meta.Version = 2
-	if _, err := store.StoreMeta(ctx, "alpha", meta, etag); err != nil {
+	if _, err := store.StoreMeta(ctx, namespace, key, meta, etag); err != nil {
 		t.Fatalf("store meta cas: %v", err)
 	}
-	if _, err := store.StoreMeta(ctx, "alpha", meta, "wrong"); !errors.Is(err, storage.ErrCASMismatch) {
+	if _, err := store.StoreMeta(ctx, namespace, key, meta, "wrong"); !errors.Is(err, storage.ErrCASMismatch) {
 		t.Fatalf("expected cas mismatch, got %v", err)
 	}
-	keys, err := store.ListMetaKeys(ctx)
+	keys, err := store.ListMetaKeys(ctx, namespace)
 	if err != nil {
 		t.Fatalf("list meta keys: %v", err)
 	}
-	if len(keys) != 1 || keys[0] != "alpha" {
+	if len(keys) != 1 || keys[0] != key {
 		t.Fatalf("unexpected keys: %v", keys)
 	}
 }
@@ -45,7 +48,9 @@ func TestWriteStateCAS(t *testing.T) {
 	ctx := context.Background()
 
 	body := bytes.NewBufferString(`{"cursor":1}`)
-	res, err := store.WriteState(ctx, "alpha", body, storage.PutStateOptions{})
+	namespace := namespaces.Default
+	stateKey := "alpha"
+	res, err := store.WriteState(ctx, namespace, stateKey, body, storage.PutStateOptions{})
 	if err != nil {
 		t.Fatalf("write state: %v", err)
 	}
@@ -53,7 +58,7 @@ func TestWriteStateCAS(t *testing.T) {
 		t.Fatalf("expected write metadata, got %+v", res)
 	}
 
-	reader, info, err := store.ReadState(ctx, "alpha")
+	reader, info, err := store.ReadState(ctx, namespace, stateKey)
 	if err != nil {
 		t.Fatalf("read state: %v", err)
 	}
@@ -63,7 +68,7 @@ func TestWriteStateCAS(t *testing.T) {
 	}
 
 	newBody := bytes.NewBufferString(`{"cursor":2}`)
-	if _, err := store.WriteState(ctx, "alpha", newBody, storage.PutStateOptions{ExpectedETag: "wrong"}); !errors.Is(err, storage.ErrCASMismatch) {
+	if _, err := store.WriteState(ctx, namespace, stateKey, newBody, storage.PutStateOptions{ExpectedETag: "wrong"}); !errors.Is(err, storage.ErrCASMismatch) {
 		t.Fatalf("expected cas mismatch, got %v", err)
 	}
 }
@@ -71,6 +76,7 @@ func TestWriteStateCAS(t *testing.T) {
 func TestListObjectsPrefixAndStartAfter(t *testing.T) {
 	store := New()
 	ctx := context.Background()
+	namespace := namespaces.Default
 	keys := []string{
 		"meta/alpha.pb",
 		"q/a/msg/001.pb",
@@ -79,12 +85,12 @@ func TestListObjectsPrefixAndStartAfter(t *testing.T) {
 		"q/b/msg/001.pb",
 	}
 	for _, key := range keys {
-		if _, err := store.PutObject(ctx, key, bytes.NewBufferString("body"), storage.PutObjectOptions{}); err != nil {
+		if _, err := store.PutObject(ctx, namespace, key, bytes.NewBufferString("body"), storage.PutObjectOptions{}); err != nil {
 			t.Fatalf("put object %s: %v", key, err)
 		}
 	}
 
-	result, err := store.ListObjects(ctx, storage.ListOptions{Prefix: "q/a/msg/", Limit: 2})
+	result, err := store.ListObjects(ctx, namespace, storage.ListOptions{Prefix: "q/a/msg/", Limit: 2})
 	if err != nil {
 		t.Fatalf("list objects: %v", err)
 	}
@@ -98,7 +104,7 @@ func TestListObjectsPrefixAndStartAfter(t *testing.T) {
 		t.Fatalf("unexpected truncation metadata: %+v", result)
 	}
 
-	result2, err := store.ListObjects(ctx, storage.ListOptions{Prefix: "q/a/msg/", StartAfter: "q/a/msg/002.pb", Limit: 2})
+	result2, err := store.ListObjects(ctx, namespace, storage.ListOptions{Prefix: "q/a/msg/", StartAfter: "q/a/msg/002.pb", Limit: 2})
 	if err != nil {
 		t.Fatalf("list objects start after: %v", err)
 	}
@@ -109,7 +115,7 @@ func TestListObjectsPrefixAndStartAfter(t *testing.T) {
 		t.Fatalf("did not expect truncation after consuming tail: %+v", result2)
 	}
 
-	result3, err := store.ListObjects(ctx, storage.ListOptions{Prefix: "q/a/msg/", StartAfter: "meta/alpha.pb", Limit: 2})
+	result3, err := store.ListObjects(ctx, namespace, storage.ListOptions{Prefix: "q/a/msg/", StartAfter: "meta/alpha.pb", Limit: 2})
 	if err != nil {
 		t.Fatalf("list objects start after meta: %v", err)
 	}

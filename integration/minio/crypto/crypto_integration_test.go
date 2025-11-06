@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"pkt.systems/lockd/internal/diagnostics/storagecheck"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/s3"
+	"pkt.systems/lockd/namespaces"
 	"pkt.systems/pslog"
 )
 
@@ -221,10 +223,10 @@ func cleanupMinioLock(tb testing.TB, cfg lockd.Config, key string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := store.Remove(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+	if err := store.Remove(ctx, namespaces.Default, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 		tb.Fatalf("cleanup state %s: %v", key, err)
 	}
-	if err := store.DeleteMeta(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+	if err := store.DeleteMeta(ctx, namespaces.Default, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 		tb.Fatalf("cleanup meta %s: %v", key, err)
 	}
 }
@@ -239,20 +241,48 @@ func cleanupMinioQueue(tb testing.TB, cfg lockd.Config, queue string) {
 	if err != nil {
 		tb.Fatalf("new s3 store: %v", err)
 	}
-	client := store.Client()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	prefix := strings.Trim(minioCfg.Prefix, "/")
-	if prefix != "" {
-		prefix += "/"
-	}
-	prefix = prefix + "q/" + queue + "/"
-	opts := minio.ListObjectsOptions{Prefix: prefix, Recursive: true}
-	for obj := range client.ListObjects(ctx, minioCfg.Bucket, opts) {
-		if obj.Err != nil {
-			tb.Fatalf("list queue objects: %v", obj.Err)
+	cleanupQueueObjects(tb, store, ctx, queue)
+	cleanupQueueMeta(tb, store, ctx, queue)
+}
+
+func cleanupQueueObjects(tb testing.TB, store storage.Backend, ctx context.Context, queue string) {
+	prefix := fmt.Sprintf("q/%s/", queue)
+	opts := storage.ListOptions{Prefix: prefix, Limit: 1000}
+	for {
+		res, err := store.ListObjects(ctx, namespaces.Default, opts)
+		if err != nil {
+			tb.Fatalf("list queue objects: %v", err)
 		}
-		_ = client.RemoveObject(ctx, minioCfg.Bucket, obj.Key, minio.RemoveObjectOptions{})
+		for _, obj := range res.Objects {
+			if err := store.DeleteObject(ctx, namespaces.Default, obj.Key, storage.DeleteObjectOptions{}); err != nil && !errors.Is(err, storage.ErrNotFound) {
+				tb.Fatalf("delete queue object %s: %v", obj.Key, err)
+			}
+		}
+		if !res.Truncated || res.NextStartAfter == "" {
+			break
+		}
+		opts.StartAfter = res.NextStartAfter
+	}
+}
+
+func cleanupQueueMeta(tb testing.TB, store storage.Backend, ctx context.Context, queue string) {
+	metaPrefix := path.Join("q", queue)
+	keys, err := store.ListMetaKeys(ctx, namespaces.Default)
+	if err != nil {
+		tb.Fatalf("list queue meta keys: %v", err)
+	}
+	for _, key := range keys {
+		if !strings.HasPrefix(key, metaPrefix) {
+			continue
+		}
+		if err := store.Remove(ctx, namespaces.Default, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			tb.Fatalf("cleanup queue state %s: %v", key, err)
+		}
+		if err := store.DeleteMeta(ctx, namespaces.Default, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			tb.Fatalf("cleanup queue meta %s: %v", key, err)
+		}
 	}
 }
 

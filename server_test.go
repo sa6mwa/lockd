@@ -14,6 +14,7 @@ import (
 	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/memory"
+	"pkt.systems/lockd/namespaces"
 )
 
 type sweeperClock struct {
@@ -144,6 +145,8 @@ func TestSweeperClearsExpiredLeases(t *testing.T) {
 	ctx := context.Background()
 	start := time.Unix(1_700_000_000, 0)
 	expired := start.Add(-time.Minute)
+	namespace := namespaces.Default
+	key := "alpha"
 	meta := &storage.Meta{
 		Lease: &storage.Lease{
 			ID:            "L-1",
@@ -152,7 +155,7 @@ func TestSweeperClearsExpiredLeases(t *testing.T) {
 		},
 		Version: 1,
 	}
-	if _, err := store.StoreMeta(ctx, "alpha", meta, ""); err != nil {
+	if _, err := store.StoreMeta(ctx, namespace, key, meta, ""); err != nil {
 		t.Fatalf("store meta: %v", err)
 	}
 	cfg := Config{
@@ -174,7 +177,7 @@ func TestSweeperClearsExpiredLeases(t *testing.T) {
 	defer srv.stopSweeper()
 	// Allow sweeper goroutine to run at least once.
 	time.Sleep(10 * time.Millisecond)
-	updated, _, err := store.LoadMeta(ctx, "alpha")
+	updated, _, err := store.LoadMeta(ctx, namespace, key)
 	if err != nil {
 		t.Fatalf("load meta: %v", err)
 	}
@@ -281,9 +284,10 @@ func TestShutdownAutoReleasesLeases(t *testing.T) {
 	if _, err := lease.KeepAlive(ctx, 30*time.Second); err != nil {
 		t.Fatalf("keepalive during shutdown: %v", err)
 	}
+	namespace := srv.cfg.DefaultNamespace
 
 	waitFor(t, 2*time.Second, 20*time.Millisecond, func() bool {
-		meta, _, err := srv.backend.LoadMeta(ctx, "gamma")
+		meta, _, err := srv.backend.LoadMeta(ctx, namespace, "gamma")
 		if err != nil {
 			return false
 		}

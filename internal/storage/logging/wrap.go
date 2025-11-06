@@ -71,14 +71,16 @@ func (b *backend) start(ctx context.Context, op string) (context.Context, trace.
 	}
 }
 
-func (b *backend) LoadMeta(ctx context.Context, key string) (*storage.Meta, string, error) {
+func (b *backend) LoadMeta(ctx context.Context, namespace, key string) (*storage.Meta, string, error) {
 	ctx, span, _, verbose, begin, finish := b.start(ctx, "load_meta")
 	defer span.End()
 
+	verbose = verbose.With("namespace", namespace)
+	span.SetAttributes(attribute.String("lockd.storage.namespace", namespace))
 	verbose.Trace("storage.load_meta.begin", "key", key)
 	span.SetAttributes(attribute.Bool("lockd.storage.has_key", key != ""))
 
-	meta, etag, err := b.inner.LoadMeta(ctx, key)
+	meta, etag, err := b.inner.LoadMeta(ctx, namespace, key)
 	if err != nil {
 		finish("error", err)
 		verbose.Debug("storage.load_meta.error", "key", key, "error", err, "elapsed", time.Since(begin))
@@ -119,10 +121,12 @@ func (b *backend) LoadMeta(ctx context.Context, key string) (*storage.Meta, stri
 	return meta, etag, nil
 }
 
-func (b *backend) StoreMeta(ctx context.Context, key string, meta *storage.Meta, expectedETag string) (string, error) {
+func (b *backend) StoreMeta(ctx context.Context, namespace, key string, meta *storage.Meta, expectedETag string) (string, error) {
 	ctx, span, _, verbose, begin, finish := b.start(ctx, "store_meta")
 	defer span.End()
 
+	verbose = verbose.With("namespace", namespace)
+	span.SetAttributes(attribute.String("lockd.storage.namespace", namespace))
 	version := int64(0)
 	stateETag := ""
 	owner := ""
@@ -138,6 +142,7 @@ func (b *backend) StoreMeta(ctx context.Context, key string, meta *storage.Meta,
 		}
 	}
 	span.SetAttributes(
+		attribute.String("lockd.storage.namespace", namespace),
 		attribute.Bool("lockd.storage.has_key", key != ""),
 		attribute.Bool("lockd.storage.expected_etag", expectedETag != ""),
 		attribute.Bool("lockd.storage.has_meta", meta != nil),
@@ -151,7 +156,7 @@ func (b *backend) StoreMeta(ctx context.Context, key string, meta *storage.Meta,
 		"lease_expires_at", expires,
 		"fencing", fencing,
 	)
-	newETag, err := b.inner.StoreMeta(ctx, key, meta, expectedETag)
+	newETag, err := b.inner.StoreMeta(ctx, namespace, key, meta, expectedETag)
 	if err != nil {
 		finish("error", err)
 		verbose.Debug("storage.store_meta.error", "key", key, "error", err, "elapsed", time.Since(begin))
@@ -168,16 +173,19 @@ func (b *backend) StoreMeta(ctx context.Context, key string, meta *storage.Meta,
 	return newETag, nil
 }
 
-func (b *backend) DeleteMeta(ctx context.Context, key string, expectedETag string) error {
+func (b *backend) DeleteMeta(ctx context.Context, namespace, key string, expectedETag string) error {
 	ctx, span, _, verbose, begin, finish := b.start(ctx, "delete_meta")
 	defer span.End()
 
+	verbose = verbose.With("namespace", namespace)
+	span.SetAttributes(attribute.String("lockd.storage.namespace", namespace))
 	span.SetAttributes(
+		attribute.String("lockd.storage.namespace", namespace),
 		attribute.Bool("lockd.storage.has_key", key != ""),
 		attribute.Bool("lockd.storage.expected_etag", expectedETag != ""),
 	)
 	verbose.Trace("storage.delete_meta.begin", "key", key, "expected_etag", expectedETag)
-	err := b.inner.DeleteMeta(ctx, key, expectedETag)
+	err := b.inner.DeleteMeta(ctx, namespace, key, expectedETag)
 	if err != nil {
 		finish("error", err)
 		verbose.Debug("storage.delete_meta.error", "key", key, "error", err, "elapsed", time.Since(begin))
@@ -188,12 +196,14 @@ func (b *backend) DeleteMeta(ctx context.Context, key string, expectedETag strin
 	return nil
 }
 
-func (b *backend) ListMetaKeys(ctx context.Context) ([]string, error) {
+func (b *backend) ListMetaKeys(ctx context.Context, namespace string) ([]string, error) {
 	ctx, span, _, verbose, begin, finish := b.start(ctx, "list_meta_keys")
 	defer span.End()
 
+	verbose = verbose.With("namespace", namespace)
+	span.SetAttributes(attribute.String("lockd.storage.namespace", namespace))
 	verbose.Trace("storage.list_meta_keys.begin")
-	keys, err := b.inner.ListMetaKeys(ctx)
+	keys, err := b.inner.ListMetaKeys(ctx, namespace)
 	if err != nil {
 		finish("error", err)
 		verbose.Debug("storage.list_meta_keys.error", "error", err, "elapsed", time.Since(begin))
@@ -205,13 +215,17 @@ func (b *backend) ListMetaKeys(ctx context.Context) ([]string, error) {
 	return keys, nil
 }
 
-func (b *backend) ReadState(ctx context.Context, key string) (io.ReadCloser, *storage.StateInfo, error) {
+func (b *backend) ReadState(ctx context.Context, namespace, key string) (io.ReadCloser, *storage.StateInfo, error) {
 	ctx, span, _, verbose, begin, finish := b.start(ctx, "read_state")
 	defer span.End()
 
-	span.SetAttributes(attribute.Bool("lockd.storage.has_key", key != ""))
+	verbose = verbose.With("namespace", namespace)
+	span.SetAttributes(
+		attribute.String("lockd.storage.namespace", namespace),
+		attribute.Bool("lockd.storage.has_key", key != ""),
+	)
 	verbose.Trace("storage.read_state.begin", "key", key)
-	reader, info, err := b.inner.ReadState(ctx, key)
+	reader, info, err := b.inner.ReadState(ctx, namespace, key)
 	if err != nil {
 		finish("error", err)
 		verbose.Debug("storage.read_state.error", "key", key, "error", err, "elapsed", time.Since(begin))
@@ -243,16 +257,18 @@ func (b *backend) ReadState(ctx context.Context, key string) (io.ReadCloser, *st
 	return reader, info, nil
 }
 
-func (b *backend) WriteState(ctx context.Context, key string, body io.Reader, opts storage.PutStateOptions) (*storage.PutStateResult, error) {
+func (b *backend) WriteState(ctx context.Context, namespace, key string, body io.Reader, opts storage.PutStateOptions) (*storage.PutStateResult, error) {
 	ctx, span, _, verbose, begin, finish := b.start(ctx, "write_state")
 	defer span.End()
 
+	verbose = verbose.With("namespace", namespace)
 	span.SetAttributes(
+		attribute.String("lockd.storage.namespace", namespace),
 		attribute.Bool("lockd.storage.has_key", key != ""),
 		attribute.Bool("lockd.storage.expected_etag", opts.ExpectedETag != ""),
 	)
 	verbose.Trace("storage.write_state.begin", "key", key, "expected_etag", opts.ExpectedETag)
-	res, err := b.inner.WriteState(ctx, key, body, opts)
+	res, err := b.inner.WriteState(ctx, namespace, key, body, opts)
 	if err != nil {
 		finish("error", err)
 		verbose.Debug("storage.write_state.error", "key", key, "error", err, "elapsed", time.Since(begin))
@@ -280,16 +296,18 @@ func (b *backend) WriteState(ctx context.Context, key string, body io.Reader, op
 	return res, nil
 }
 
-func (b *backend) Remove(ctx context.Context, key string, expectedETag string) error {
+func (b *backend) Remove(ctx context.Context, namespace, key string, expectedETag string) error {
 	ctx, span, _, verbose, begin, finish := b.start(ctx, "remove_state")
 	defer span.End()
 
+	verbose = verbose.With("namespace", namespace)
 	span.SetAttributes(
+		attribute.String("lockd.storage.namespace", namespace),
 		attribute.Bool("lockd.storage.has_key", key != ""),
 		attribute.Bool("lockd.storage.expected_etag", expectedETag != ""),
 	)
 	verbose.Trace("storage.remove_state.begin", "key", key, "expected_etag", expectedETag)
-	err := b.inner.Remove(ctx, key, expectedETag)
+	err := b.inner.Remove(ctx, namespace, key, expectedETag)
 	if err != nil {
 		finish("error", err)
 		verbose.Debug("storage.remove_state.error", "key", key, "error", err, "elapsed", time.Since(begin))
@@ -300,11 +318,13 @@ func (b *backend) Remove(ctx context.Context, key string, expectedETag string) e
 	return nil
 }
 
-func (b *backend) ListObjects(ctx context.Context, opts storage.ListOptions) (*storage.ListResult, error) {
+func (b *backend) ListObjects(ctx context.Context, namespace string, opts storage.ListOptions) (*storage.ListResult, error) {
 	ctx, span, _, verbose, begin, finish := b.start(ctx, "list_objects")
 	defer span.End()
 
+	verbose = verbose.With("namespace", namespace)
 	span.SetAttributes(
+		attribute.String("lockd.storage.namespace", namespace),
 		attribute.String("lockd.storage.prefix", opts.Prefix),
 		attribute.String("lockd.storage.start_after", opts.StartAfter),
 		attribute.Int("lockd.storage.limit", opts.Limit),
@@ -314,7 +334,7 @@ func (b *backend) ListObjects(ctx context.Context, opts storage.ListOptions) (*s
 		"start_after", opts.StartAfter,
 		"limit", opts.Limit,
 	)
-	result, err := b.inner.ListObjects(ctx, opts)
+	result, err := b.inner.ListObjects(ctx, namespace, opts)
 	if err != nil {
 		finish("error", err)
 		verbose.Debug("storage.list_objects.error", "error", err, "elapsed", time.Since(begin))
@@ -337,13 +357,17 @@ func (b *backend) ListObjects(ctx context.Context, opts storage.ListOptions) (*s
 	return result, nil
 }
 
-func (b *backend) GetObject(ctx context.Context, key string) (io.ReadCloser, *storage.ObjectInfo, error) {
+func (b *backend) GetObject(ctx context.Context, namespace, key string) (io.ReadCloser, *storage.ObjectInfo, error) {
 	ctx, span, _, verbose, begin, finish := b.start(ctx, "get_object")
 	defer span.End()
 
-	span.SetAttributes(attribute.Bool("lockd.storage.has_key", key != ""))
+	verbose = verbose.With("namespace", namespace)
+	span.SetAttributes(
+		attribute.String("lockd.storage.namespace", namespace),
+		attribute.Bool("lockd.storage.has_key", key != ""),
+	)
 	verbose.Trace("storage.get_object.begin", "key", key)
-	body, info, err := b.inner.GetObject(ctx, key)
+	body, info, err := b.inner.GetObject(ctx, namespace, key)
 	if err != nil {
 		finish("error", err)
 		verbose.Debug("storage.get_object.error", "key", key, "error", err, "elapsed", time.Since(begin))
@@ -365,11 +389,13 @@ func (b *backend) GetObject(ctx context.Context, key string) (io.ReadCloser, *st
 	return body, info, nil
 }
 
-func (b *backend) PutObject(ctx context.Context, key string, body io.Reader, opts storage.PutObjectOptions) (*storage.ObjectInfo, error) {
+func (b *backend) PutObject(ctx context.Context, namespace, key string, body io.Reader, opts storage.PutObjectOptions) (*storage.ObjectInfo, error) {
 	ctx, span, _, verbose, begin, finish := b.start(ctx, "put_object")
 	defer span.End()
 
+	verbose = verbose.With("namespace", namespace)
 	span.SetAttributes(
+		attribute.String("lockd.storage.namespace", namespace),
 		attribute.Bool("lockd.storage.has_key", key != ""),
 		attribute.Bool("lockd.storage.expected_etag", opts.ExpectedETag != ""),
 		attribute.Bool("lockd.storage.if_not_exists", opts.IfNotExists),
@@ -380,7 +406,7 @@ func (b *backend) PutObject(ctx context.Context, key string, body io.Reader, opt
 		"if_not_exists", opts.IfNotExists,
 		"content_type", opts.ContentType,
 	)
-	info, err := b.inner.PutObject(ctx, key, body, opts)
+	info, err := b.inner.PutObject(ctx, namespace, key, body, opts)
 	if err != nil {
 		finish("error", err)
 		verbose.Debug("storage.put_object.error", "key", key, "error", err, "elapsed", time.Since(begin))
@@ -398,11 +424,13 @@ func (b *backend) PutObject(ctx context.Context, key string, body io.Reader, opt
 	return info, nil
 }
 
-func (b *backend) DeleteObject(ctx context.Context, key string, opts storage.DeleteObjectOptions) error {
+func (b *backend) DeleteObject(ctx context.Context, namespace, key string, opts storage.DeleteObjectOptions) error {
 	ctx, span, _, verbose, begin, finish := b.start(ctx, "delete_object")
 	defer span.End()
 
+	verbose = verbose.With("namespace", namespace)
 	span.SetAttributes(
+		attribute.String("lockd.storage.namespace", namespace),
 		attribute.Bool("lockd.storage.has_key", key != ""),
 		attribute.Bool("lockd.storage.expected_etag", opts.ExpectedETag != ""),
 		attribute.Bool("lockd.storage.ignore_not_found", opts.IgnoreNotFound),
@@ -412,7 +440,7 @@ func (b *backend) DeleteObject(ctx context.Context, key string, opts storage.Del
 		"expected_etag", opts.ExpectedETag,
 		"ignore_not_found", opts.IgnoreNotFound,
 	)
-	err := b.inner.DeleteObject(ctx, key, opts)
+	err := b.inner.DeleteObject(ctx, namespace, key, opts)
 	if err != nil {
 		finish("error", err)
 		verbose.Debug("storage.delete_object.error", "key", key, "error", err, "elapsed", time.Since(begin))
@@ -439,9 +467,9 @@ func (b *backend) Close() error {
 	return nil
 }
 
-func (b *backend) SubscribeQueueChanges(queue string) (storage.QueueChangeSubscription, error) {
+func (b *backend) SubscribeQueueChanges(namespace, queue string) (storage.QueueChangeSubscription, error) {
 	if feed, ok := b.inner.(storage.QueueChangeFeed); ok {
-		return feed.SubscribeQueueChanges(queue)
+		return feed.SubscribeQueueChanges(namespace, queue)
 	}
 	return nil, storage.ErrNotImplemented
 }

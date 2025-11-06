@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +19,7 @@ import (
 	"pkt.systems/lockd/integration/internal/cryptotest"
 	"pkt.systems/lockd/internal/storage"
 	azurestore "pkt.systems/lockd/internal/storage/azure"
+	"pkt.systems/lockd/namespaces"
 )
 
 var (
@@ -83,15 +85,15 @@ func cleanAzureContainer(cfg lockd.Config) error {
 			}
 		}
 	}
-	if keys, err := store.ListMetaKeys(ctx); err == nil {
+	if keys, err := store.ListMetaKeys(ctx, namespaces.Default); err == nil {
 		for _, key := range keys {
 			if !shouldCleanupAzureObject(key) {
 				continue
 			}
-			if err := store.Remove(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			if err := store.Remove(ctx, namespaces.Default, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 				return err
 			}
-			if err := store.DeleteMeta(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			if err := store.DeleteMeta(ctx, namespaces.Default, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 				return err
 			}
 		}
@@ -103,7 +105,11 @@ func cleanAzureContainer(cfg lockd.Config) error {
 
 func shouldCleanupAzureObject(name string) bool {
 	name = strings.TrimPrefix(name, "/")
-	prefixes := []string{
+	if name == "" {
+		return false
+	}
+
+	namespaceAwarePrefixes := []string{
 		"lockd-diagnostics/",
 		"meta/azure-",
 		"meta/crypto-azure-",
@@ -111,13 +117,100 @@ func shouldCleanupAzureObject(name string) bool {
 		"state/crypto-azure-",
 		"q/azure-",
 		"q/crypto-azure-",
+	}
+	namespaceAgnosticPrefixes := []string{
 		"azure-",
 		"crypto-azure-",
 	}
-	for _, prefix := range prefixes {
+
+	segments := strings.SplitN(name, "/", 2)
+	rest := name
+	if len(segments) == 2 {
+		rest = segments[1]
+	}
+
+	for _, prefix := range namespaceAwarePrefixes {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+		if strings.HasPrefix(rest, prefix) {
+			return true
+		}
+	}
+	for _, prefix := range namespaceAgnosticPrefixes {
 		if strings.HasPrefix(name, prefix) {
 			return true
 		}
 	}
 	return false
+}
+
+// CleanupQueue removes objects and metadata for the given queue within the namespace.
+func CleanupQueue(tb testing.TB, cfg lockd.Config, namespace, queue string) {
+	tb.Helper()
+	azureCfg, err := lockd.BuildAzureConfig(cfg)
+	if err != nil {
+		tb.Fatalf("build azure config: %v", err)
+	}
+	store, err := azurestore.New(azureCfg)
+	if err != nil {
+		tb.Fatalf("new azure store: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	listOpts := storage.ListOptions{Prefix: path.Join("q", queue) + "/", Limit: 1000}
+	for {
+		res, err := store.ListObjects(ctx, namespace, listOpts)
+		if err != nil {
+			tb.Fatalf("list azure queue objects: %v", err)
+		}
+		for _, obj := range res.Objects {
+			if err := store.DeleteObject(ctx, namespace, obj.Key, storage.DeleteObjectOptions{}); err != nil && !errors.Is(err, storage.ErrNotFound) {
+				tb.Fatalf("delete azure queue object %s: %v", obj.Key, err)
+			}
+		}
+		if !res.Truncated || res.NextStartAfter == "" {
+			break
+		}
+		listOpts.StartAfter = res.NextStartAfter
+	}
+
+	keys, err := store.ListMetaKeys(ctx, namespace)
+	if err != nil {
+		tb.Fatalf("list azure queue meta keys: %v", err)
+	}
+	prefix := path.Join("q", queue)
+	for _, key := range keys {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		if err := store.Remove(ctx, namespace, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			tb.Fatalf("cleanup azure queue state %s: %v", key, err)
+		}
+		if err := store.DeleteMeta(ctx, namespace, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			tb.Fatalf("cleanup azure queue meta %s: %v", key, err)
+		}
+	}
+}
+
+// CleanupKey removes meta and state objects for the provided logical key.
+func CleanupKey(tb testing.TB, cfg lockd.Config, namespace, key string) {
+	tb.Helper()
+	azureCfg, err := lockd.BuildAzureConfig(cfg)
+	if err != nil {
+		tb.Fatalf("build azure config: %v", err)
+	}
+	store, err := azurestore.New(azureCfg)
+	if err != nil {
+		tb.Fatalf("new azure store: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := store.Remove(ctx, namespace, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+		tb.Fatalf("cleanup azure state %s: %v", key, err)
+	}
+	if err := store.DeleteMeta(ctx, namespace, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+		tb.Fatalf("cleanup azure meta %s: %v", key, err)
+	}
 }

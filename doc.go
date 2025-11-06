@@ -16,6 +16,7 @@
 //	    Listen:      ":9341",
 //	    ListenProto: "tcp",
 //	    BundlePath:  "/etc/lockd/server.pem",
+//	    DefaultNamespace: "analytics",
 //	}
 //	srv, err := lockd.NewServer(cfg)
 //	if err != nil { log.Fatal(err) }
@@ -29,6 +30,12 @@
 //	        log.Printf("lockd shutdown: %v", err)
 //	    }
 //	}()
+//
+// Namespaces partition keys and metadata. When callers omit the namespace, the
+// server falls back to `Config.DefaultNamespace` (default "default"). Setting
+// the field on `Config`, providing `Namespace` in `api.AcquireRequest`, or
+// configuring clients via `client.WithDefaultNamespace` keeps each workload’s
+// state isolated under its own prefix.
 //
 // # Unix domain sockets
 //
@@ -61,6 +68,7 @@
 //	cli, err := client.New("https://lockd.example.com")
 //	if err != nil { log.Fatal(err) }
 //	sess, err := cli.Acquire(ctx, api.AcquireRequest{
+//	    Namespace: "orders-v2",
 //	    Key:        "orders",
 //	    Owner:      "worker-1",
 //	    TTLSeconds: 30,
@@ -124,6 +132,32 @@
 //
 // Explicit Release calls elsewhere still treat `lease_required` as success so
 // teardown never hangs even if the lease has already been reclaimed.
+//
+// # Queue service
+//
+// lockd includes an at-least-once queue built on the same storage backends,
+// encryption pipeline, and namespace layout as the lease/state surface. The
+// HTTP API exposes `/v1/queue/enqueue`, `/v1/queue/dequeue`,
+// `/v1/queue/dequeue/state`, `/v1/queue/subscribe`, `/v1/queue/ack`,
+// `/v1/queue/nack`, and `/v1/queue/extend`. Namespaces are required for every
+// queue call; omitting the field falls back to `Config.DefaultNamespace`, and
+// the Go client/CLI mirror the same default/override behaviour (`LOCKD_QUEUE_NAMESPACE`
+// for CLI flows).
+//
+// Producers stream payloads (optionally zero-length) alongside JSON metadata
+// describing `queue`, `delay_seconds`, `visibility_timeout_seconds`,
+// `ttl_seconds`, `max_attempts`, and arbitrary attributes. Consumers issue
+// dequeue requests with an owner identity; responses stream message metadata
+// and payload via multipart/related parts so large blobs never buffer in RAM.
+// State-aware dequeues acquire a workflow lease in the same request and expose
+// helpers that keep message + state fencing tokens aligned when acking,
+// nacking, or extending visibility.
+//
+// The queue dispatcher multiplexes watchers/pollers across namespaces and
+// storage backends. Disk/mem stores use native notifications (inotify /
+// in-process) when available and fall back to polling when disabled or running
+// on NFS. Object stores rely on the same observed-key tracking used by the
+// lock surface so stale reads never reset metadata.
 //
 // # Perimeter defence (LSF + QRF)
 //

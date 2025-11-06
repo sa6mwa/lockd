@@ -58,6 +58,8 @@ const (
 	envQueueStateLease   = "LOCKD_QUEUE_STATE_LEASE"
 	envQueueStateFencing = "LOCKD_QUEUE_STATE_FENCING_TOKEN"
 	envQueueStateETag    = "LOCKD_QUEUE_STATE_ETAG"
+	envNamespace         = "LOCKD_CLIENT_NAMESPACE"
+	envQueueNamespace    = "LOCKD_QUEUE_NAMESPACE"
 
 	defaultBlockDuration = lockd.DefaultClientBlock
 	defaultAcquireTTL    = lockd.DefaultDefaultTTL
@@ -164,6 +166,25 @@ func resolveKeyInput(flagValue string, mode keyResolveMode) (string, error) {
 		return "", fmt.Errorf("key required (specify --key/-k or export %s)", envKey)
 	}
 	return envVal, nil
+}
+
+func resolveNamespaceInput(flagValue string) string {
+	ns := strings.TrimSpace(flagValue)
+	if ns != "" {
+		return ns
+	}
+	return strings.TrimSpace(os.Getenv(envNamespace))
+}
+
+func resolveQueueNamespaceInput(flagValue string) string {
+	ns := strings.TrimSpace(flagValue)
+	if ns != "" {
+		return ns
+	}
+	if env := strings.TrimSpace(os.Getenv(envQueueNamespace)); env != "" {
+		return env
+	}
+	return strings.TrimSpace(os.Getenv(envNamespace))
 }
 
 func (c *clientCLIConfig) load() error {
@@ -555,6 +576,23 @@ func resolveQueueInt64(arg, envVar, flag string, required bool) (int64, error) {
 	return n, nil
 }
 
+func queueNamespaceFromCmd(cmd *cobra.Command) string {
+	if cmd == nil {
+		return resolveQueueNamespaceInput("")
+	}
+	if f := cmd.Flags().Lookup("namespace"); f != nil {
+		if val := strings.TrimSpace(f.Value.String()); val != "" {
+			return resolveQueueNamespaceInput(val)
+		}
+	}
+	if f := cmd.InheritedFlags().Lookup("namespace"); f != nil {
+		if val := strings.TrimSpace(f.Value.String()); val != "" {
+			return resolveQueueNamespaceInput(val)
+		}
+	}
+	return resolveQueueNamespaceInput("")
+}
+
 func resolveCorrelationID() string {
 	if env := strings.TrimSpace(os.Getenv(envCorrelation)); env != "" {
 		if normalized, ok := lockdclient.NormalizeCorrelationID(env); ok {
@@ -576,6 +614,7 @@ func newClientQueueCommand(cfg *clientCLIConfig) *cobra.Command {
 		Aliases: []string{"q"},
 		Short:   "Interact with lockd queues",
 	}
+	cmd.PersistentFlags().StringP("namespace", "n", "", "namespace used for queue operations (defaults to server configuration or "+envNamespace+")")
 	cmd.AddCommand(
 		newClientQueueEnqueueCommand(cfg),
 		newClientQueueDequeueCommand(cfg),
@@ -614,6 +653,7 @@ func newClientQueueEnqueueCommand(cfg *clientCLIConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			ns := queueNamespaceFromCmd(cmd)
 			var reader io.Reader
 			var closer io.Closer
 			if payloadFile != "" {
@@ -637,6 +677,7 @@ func newClientQueueEnqueueCommand(cfg *clientCLIConfig) *cobra.Command {
 				return err
 			}
 			opts := lockdclient.EnqueueOptions{
+				Namespace:   ns,
 				Delay:       delay,
 				Visibility:  visibility,
 				TTL:         ttl,
@@ -702,6 +743,7 @@ func newClientQueueDequeueCommand(cfg *clientCLIConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			ns := queueNamespaceFromCmd(cmd)
 			ownerVal := strings.TrimSpace(owner)
 			if ownerVal == "" {
 				ownerVal = defaultOwner()
@@ -711,6 +753,7 @@ func newClientQueueDequeueCommand(cfg *clientCLIConfig) *cobra.Command {
 				return err
 			}
 			opts := lockdclient.DequeueOptions{
+				Namespace:    ns,
 				Owner:        ownerVal,
 				Visibility:   visibility,
 				BlockSeconds: blockSecs,
@@ -768,6 +811,7 @@ func newClientQueueDequeueCommand(cfg *clientCLIConfig) *cobra.Command {
 				return fmt.Errorf("close payload reader: %w", err)
 			}
 			summary := map[string]any{
+				"namespace":               msg.Namespace(),
 				"queue":                   msg.Queue(),
 				"message_id":              msg.MessageID(),
 				"attempts":                msg.Attempts(),
@@ -794,6 +838,7 @@ func newClientQueueDequeueCommand(cfg *clientCLIConfig) *cobra.Command {
 				return writeJSON(cmd.OutOrStdout(), summary)
 			default:
 				exports := []struct{ name, value string }{
+					{name: envQueueNamespace, value: msg.Namespace()},
 					{name: envQueueName, value: msg.Queue()},
 					{name: envQueueMessageID, value: msg.MessageID()},
 					{name: envQueueLease, value: msg.LeaseID()},
@@ -829,6 +874,13 @@ func newClientQueueDequeueCommand(cfg *clientCLIConfig) *cobra.Command {
 	cmd.Flags().StringVarP(&payloadOut, "payload-out", "o", "", "write payload to file")
 	cmd.Flags().StringVar(&output, "output", string(outputText), "output format (text|json)")
 	cmd.Flags().StringVarP(&queue, "queue", "q", "", "queue name (required)")
+	cmd.Example = strings.TrimSpace(`
+  # Dequeue a message from a specific namespace
+  lockd client queue dequeue --queue my.queue --namespace myns
+
+  # Capture exports for follow-up commands
+  eval "$(lockd client queue dequeue -q my.queue -n myns)"
+`)
 	return cmd
 }
 
@@ -846,6 +898,7 @@ func newClientQueueAckCommand(cfg *clientCLIConfig) *cobra.Command {
 		Use:   "ack",
 		Short: "Acknowledge and remove a queue message",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ns := queueNamespaceFromCmd(cmd)
 			if err := cfg.load(); err != nil {
 				return err
 			}
@@ -888,6 +941,7 @@ func newClientQueueAckCommand(cfg *clientCLIConfig) *cobra.Command {
 			}
 			ctx, _ := commandContextWithCorrelation(cmd)
 			req := api.AckRequest{
+				Namespace:    ns,
 				Queue:        queueName,
 				MessageID:    msgID,
 				LeaseID:      lease,
@@ -932,6 +986,7 @@ func newClientQueueNackCommand(cfg *clientCLIConfig) *cobra.Command {
 		Use:   "nack",
 		Short: "Release a message back to the queue",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ns := queueNamespaceFromCmd(cmd)
 			if err := cfg.load(); err != nil {
 				return err
 			}
@@ -970,6 +1025,7 @@ func newClientQueueNackCommand(cfg *clientCLIConfig) *cobra.Command {
 			}
 			ctx, _ := commandContextWithCorrelation(cmd)
 			req := api.NackRequest{
+				Namespace:    ns,
 				Queue:        queueName,
 				MessageID:    msgID,
 				LeaseID:      lease,
@@ -1017,6 +1073,7 @@ func newClientQueueExtendCommand(cfg *clientCLIConfig) *cobra.Command {
 		Use:   "extend",
 		Short: "Extend a queue message lease",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ns := queueNamespaceFromCmd(cmd)
 			if err := cfg.load(); err != nil {
 				return err
 			}
@@ -1055,6 +1112,7 @@ func newClientQueueExtendCommand(cfg *clientCLIConfig) *cobra.Command {
 			}
 			ctx, _ := commandContextWithCorrelation(cmd)
 			req := api.ExtendRequest{
+				Namespace:       ns,
 				Queue:           queueName,
 				MessageID:       msgID,
 				LeaseID:         lease,
@@ -1097,6 +1155,7 @@ func newClientAcquireCommand(cfg *clientCLIConfig) *cobra.Command {
 	var failureRetries int
 	var idempotency string
 	var keyFlag string
+	var namespace string
 
 	cmd := &cobra.Command{
 		Use:   "acquire",
@@ -1127,7 +1186,9 @@ func newClientAcquireCommand(cfg *clientCLIConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			ns := resolveNamespaceInput(namespace)
 			req := api.AcquireRequest{
+				Namespace:   ns,
 				Key:         key,
 				Owner:       ownerVal,
 				TTLSeconds:  mustDurationSeconds(ttl),
@@ -1164,6 +1225,12 @@ func newClientAcquireCommand(cfg *clientCLIConfig) *cobra.Command {
 					{name: envETag, value: sess.StateETag},
 					{name: envExpires, value: strconv.FormatInt(sess.ExpiresAt, 10)},
 				}
+				if sess.Namespace != "" {
+					exports = append(exports, struct {
+						name  string
+						value string
+					}{name: envNamespace, value: sess.Namespace})
+				}
 				if sess.RetryAfter > 0 {
 					exports = append(exports, struct {
 						name  string
@@ -1187,6 +1254,7 @@ func newClientAcquireCommand(cfg *clientCLIConfig) *cobra.Command {
 	cmd.Flags().StringVar(&output, "output", string(outputText), "output format (text|json)")
 	cmd.Flags().IntVar(&failureRetries, "retries", lockdclient.DefaultAcquireFailureRetries, "max retries on non-conflict failures (-1 disables)")
 	cmd.Flags().StringVar(&idempotency, "idempotency", "", "optional idempotency token")
+	cmd.Flags().StringVarP(&namespace, "namespace", "n", "", "namespace for the key (defaults to server configuration)")
 	return cmd
 }
 
@@ -1196,6 +1264,7 @@ func newClientKeepAliveCommand(cfg *clientCLIConfig) *cobra.Command {
 	var output string
 	var fencing string
 	var keyFlag string
+	var namespace string
 	cmd := &cobra.Command{
 		Use:   "keepalive",
 		Short: "Keep an existing lease alive",
@@ -1226,7 +1295,9 @@ func newClientKeepAliveCommand(cfg *clientCLIConfig) *cobra.Command {
 				return err
 			}
 			cli.RegisterLeaseToken(lease, token)
+			ns := resolveNamespaceInput(namespace)
 			req := api.KeepAliveRequest{
+				Namespace:  ns,
 				Key:        key,
 				LeaseID:    lease,
 				TTLSeconds: mustDurationSeconds(ttl),
@@ -1259,6 +1330,7 @@ func newClientKeepAliveCommand(cfg *clientCLIConfig) *cobra.Command {
 	cmd.Flags().DurationVar(&ttl, "ttl", defaultKeepAliveTTL, "new TTL duration")
 	cmd.Flags().StringVar(&output, "output", string(outputJSON), "output format (text|json)")
 	cmd.Flags().StringVar(&fencing, "fencing-token", "", "fencing token (default from "+envFencingToken+")")
+	cmd.Flags().StringVarP(&namespace, "namespace", "n", "", "namespace for the lease (defaults to server configuration)")
 	return cmd
 }
 
@@ -1267,6 +1339,7 @@ func newClientReleaseCommand(cfg *clientCLIConfig) *cobra.Command {
 	var output string
 	var fencing string
 	var keyFlag string
+	var namespace string
 	cmd := &cobra.Command{
 		Use:   "release",
 		Short: "Release a lease",
@@ -1297,7 +1370,8 @@ func newClientReleaseCommand(cfg *clientCLIConfig) *cobra.Command {
 				return err
 			}
 			cli.RegisterLeaseToken(lease, token)
-			req := api.ReleaseRequest{Key: key, LeaseID: lease}
+			ns := resolveNamespaceInput(namespace)
+			req := api.ReleaseRequest{Namespace: ns, Key: key, LeaseID: lease}
 			ctx, _ := commandContextWithCorrelation(cmd)
 			resp, err := cli.Release(ctx, req)
 			if err != nil {
@@ -1317,6 +1391,7 @@ func newClientReleaseCommand(cfg *clientCLIConfig) *cobra.Command {
 	cmd.Flags().StringVar(&leaseID, "lease", "", "lease identifier")
 	cmd.Flags().StringVar(&output, "output", string(outputJSON), "output format (text|json)")
 	cmd.Flags().StringVar(&fencing, "fencing-token", "", "fencing token (default from "+envFencingToken+")")
+	cmd.Flags().StringVarP(&namespace, "namespace", "n", "", "namespace for the lease (defaults to server configuration)")
 	return cmd
 }
 
@@ -1327,6 +1402,7 @@ func newClientGetCommand(cfg *clientCLIConfig) *cobra.Command {
 	var showMeta bool
 	var fencing string
 	var keyFlag string
+	var namespace string
 	cmd := &cobra.Command{
 		Use:   "get",
 		Short: "Fetch state JSON for a key",
@@ -1357,8 +1433,9 @@ func newClientGetCommand(cfg *clientCLIConfig) *cobra.Command {
 				return err
 			}
 			cli.RegisterLeaseToken(lease, token)
+			ns := resolveNamespaceInput(namespace)
 			ctx, _ := commandContextWithCorrelation(cmd)
-			reader, etag, version, err := cli.Get(ctx, key, lease)
+			reader, etag, version, err := cli.GetWithNamespace(ctx, ns, key, lease)
 			if err != nil {
 				return err
 			}
@@ -1404,6 +1481,7 @@ func newClientGetCommand(cfg *clientCLIConfig) *cobra.Command {
 	cmd.Flags().StringVar(&format, "type", string(stateFormatAuto), "output type (auto|raw|json|yaml)")
 	cmd.Flags().BoolVar(&showMeta, "show-meta", false, "print version/etag metadata to stderr")
 	cmd.Flags().StringVar(&fencing, "fencing-token", "", "fencing token (default from "+envFencingToken+")")
+	cmd.Flags().StringVarP(&namespace, "namespace", "n", "", "namespace for the key (defaults to server configuration)")
 	return cmd
 }
 
@@ -1415,6 +1493,7 @@ func newClientUpdateCommand(cfg *clientCLIConfig) *cobra.Command {
 	var fencing string
 	var output string
 	var keyFlag string
+	var namespace string
 	cmd := &cobra.Command{
 		Use:   "update [input]",
 		Short: "Upload new state from a file",
@@ -1457,7 +1536,8 @@ func newClientUpdateCommand(cfg *clientCLIConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			opts := lockdclient.UpdateOptions{IfVersion: ifVersion, IfETag: ifETag, FencingToken: token}
+			ns := resolveNamespaceInput(namespace)
+			opts := lockdclient.UpdateOptions{Namespace: ns, IfVersion: ifVersion, IfETag: ifETag, FencingToken: token}
 			ctx, _ := commandContextWithCorrelation(cmd)
 			result, err := cli.UpdateBytes(ctx, key, lease, payload, opts)
 			if err != nil {
@@ -1486,6 +1566,7 @@ func newClientUpdateCommand(cfg *clientCLIConfig) *cobra.Command {
 	cmd.Flags().StringVar(&ifETag, "if-etag", "", "conditional update on state etag")
 	cmd.Flags().StringVar(&fencing, "fencing-token", "", "fencing token (default from "+envFencingToken+")")
 	cmd.Flags().StringVar(&output, "output", string(outputJSON), "output format (text|json)")
+	cmd.Flags().StringVarP(&namespace, "namespace", "n", "", "namespace for the key (defaults to server configuration)")
 	return cmd
 }
 
@@ -1496,6 +1577,7 @@ func newClientRemoveCommand(cfg *clientCLIConfig) *cobra.Command {
 	var fencing string
 	var output string
 	var keyFlag string
+	var namespace string
 	cmd := &cobra.Command{
 		Use:     "remove",
 		Aliases: []string{"delete", "rm"},
@@ -1527,7 +1609,8 @@ func newClientRemoveCommand(cfg *clientCLIConfig) *cobra.Command {
 				return err
 			}
 			cli.RegisterLeaseToken(lease, token)
-			opts := lockdclient.RemoveOptions{IfVersion: ifVersion, IfETag: ifETag, FencingToken: token}
+			ns := resolveNamespaceInput(namespace)
+			opts := lockdclient.RemoveOptions{Namespace: ns, IfVersion: ifVersion, IfETag: ifETag, FencingToken: token}
 			ctx, _ := commandContextWithCorrelation(cmd)
 			result, err := cli.Remove(ctx, key, lease, opts)
 			if err != nil {
@@ -1551,6 +1634,7 @@ func newClientRemoveCommand(cfg *clientCLIConfig) *cobra.Command {
 	cmd.Flags().StringVar(&ifVersion, "if-version", "", "conditional remove on version")
 	cmd.Flags().StringVar(&ifETag, "if-etag", "", "conditional remove on state etag")
 	cmd.Flags().StringVar(&fencing, "fencing-token", "", "fencing token (default from "+envFencingToken+")")
+	cmd.Flags().StringVarP(&namespace, "namespace", "n", "", "namespace for the key (defaults to server configuration)")
 	cmd.Flags().StringVar(&output, "output", string(outputJSON), "output format (text|json)")
 	return cmd
 }
@@ -1563,6 +1647,7 @@ func newClientSetCommand(cfg *clientCLIConfig) *cobra.Command {
 	var fencing string
 	var output string
 	var keyFlag string
+	var namespace string
 	cmd := &cobra.Command{
 		Use:   "set mutation [mutation...]",
 		Short: "Mutate JSON state fields for an active lease",
@@ -1597,8 +1682,9 @@ func newClientSetCommand(cfg *clientCLIConfig) *cobra.Command {
 				return err
 			}
 			cli.RegisterLeaseToken(lease, token)
+			ns := resolveNamespaceInput(namespace)
 			ctx := cmd.Context()
-			stateBytes, etag, version, err := cli.GetBytes(ctx, key, lease)
+			stateBytes, etag, version, err := cli.GetBytesWithNamespace(ctx, ns, key, lease)
 			if err != nil {
 				return err
 			}
@@ -1616,7 +1702,7 @@ func newClientSetCommand(cfg *clientCLIConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			opts := lockdclient.UpdateOptions{FencingToken: token}
+			opts := lockdclient.UpdateOptions{Namespace: ns, FencingToken: token}
 			if !noCAS {
 				opts.IfVersion = version
 				opts.IfETag = etag
@@ -1653,6 +1739,7 @@ func newClientSetCommand(cfg *clientCLIConfig) *cobra.Command {
 	cmd.Flags().StringVar(&ifETag, "if-etag", "", "override ETag used for CAS (default from fetched state)")
 	cmd.Flags().BoolVar(&noCAS, "no-cas", false, "skip conditional update using fetched version/etag (fencing token still required)")
 	cmd.Flags().StringVar(&output, "output", string(outputJSON), "output format (text|json)")
+	cmd.Flags().StringVarP(&namespace, "namespace", "n", "", "namespace for the key (defaults to server configuration)")
 	return cmd
 }
 

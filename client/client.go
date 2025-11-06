@@ -25,6 +25,7 @@ import (
 
 	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/internal/loggingutil"
+	"pkt.systems/lockd/namespaces"
 	"pkt.systems/pslog"
 )
 
@@ -54,6 +55,7 @@ func envBool(name string) bool {
 
 // EnqueueOptions controls enqueue behaviour.
 type EnqueueOptions struct {
+	Namespace   string
 	Delay       time.Duration
 	Visibility  time.Duration
 	TTL         time.Duration
@@ -64,6 +66,7 @@ type EnqueueOptions struct {
 
 // DequeueOptions guides dequeue behaviour.
 type DequeueOptions struct {
+	Namespace    string
 	Owner        string
 	Visibility   time.Duration
 	BlockSeconds int64 // set to BlockNoWait (-1) for immediate return, 0 for forever, >0 to wait seconds
@@ -74,6 +77,7 @@ type DequeueOptions struct {
 
 // SubscribeOptions configures continuous streaming consumption via Subscribe.
 type SubscribeOptions struct {
+	Namespace    string
 	Owner        string
 	Visibility   time.Duration
 	BlockSeconds int64
@@ -289,6 +293,14 @@ func (h *QueueMessageHandle) Cursor() string {
 	return h.cursor
 }
 
+// Namespace returns the namespace associated with the message.
+func (h *QueueMessageHandle) Namespace() string {
+	if h == nil {
+		return ""
+	}
+	return h.msg.Namespace
+}
+
 // LeaseID returns the active message lease identifier.
 func (h *QueueMessageHandle) LeaseID() string {
 	if h == nil {
@@ -348,6 +360,7 @@ func (h *QueueMessageHandle) Ack(ctx context.Context) error {
 		return fmt.Errorf("lockd: queue handle already closed")
 	}
 	req := api.AckRequest{
+		Namespace:    h.msg.Namespace,
 		Queue:        h.msg.Queue,
 		MessageID:    h.msg.MessageID,
 		LeaseID:      h.msg.LeaseID,
@@ -402,6 +415,7 @@ func (h *QueueMessageHandle) Nack(ctx context.Context, delay time.Duration, last
 		return fmt.Errorf("lockd: queue handle already closed")
 	}
 	req := api.NackRequest{
+		Namespace:    h.msg.Namespace,
 		Queue:        h.msg.Queue,
 		MessageID:    h.msg.MessageID,
 		LeaseID:      h.msg.LeaseID,
@@ -457,6 +471,7 @@ func (h *QueueMessageHandle) Extend(ctx context.Context, extendBy time.Duration)
 		return fmt.Errorf("lockd: queue handle already closed")
 	}
 	req := api.ExtendRequest{
+		Namespace:       h.msg.Namespace,
 		Queue:           h.msg.Queue,
 		MessageID:       h.msg.MessageID,
 		LeaseID:         h.msg.LeaseID,
@@ -527,6 +542,14 @@ func (m *QueueMessage) Queue() string {
 		return ""
 	}
 	return m.handle.Queue()
+}
+
+// Namespace returns the namespace associated with the message.
+func (m *QueueMessage) Namespace() string {
+	if m == nil || m.handle == nil {
+		return ""
+	}
+	return m.handle.Namespace()
 }
 
 // MessageID returns the message identifier.
@@ -1086,10 +1109,27 @@ func (c *Client) initialize(endpoints []string) error {
 			c.httpTraceEnabled = true
 		}
 	}
+	if c.defaultNamespace == "" {
+		c.defaultNamespace = namespaces.Default
+	} else {
+		normalized, err := namespaces.Normalize(c.defaultNamespace, namespaces.Default)
+		if err != nil {
+			return fmt.Errorf("lockd: client default namespace: %w", err)
+		}
+		c.defaultNamespace = normalized
+	}
 	c.endpoints = normalized
 	c.lastEndpoint = normalized[0]
 	c.logInfo("client.init", "endpoints", normalized)
 	return nil
+}
+
+func (c *Client) namespaceFor(ns string) (string, error) {
+	base := c.defaultNamespace
+	if base == "" {
+		base = namespaces.Default
+	}
+	return namespaces.Normalize(ns, base)
 }
 
 // Default client tuning knobs exposed for callers that want to mirror lockd's defaults.
@@ -1379,6 +1419,9 @@ func (s *LeaseSession) UpdateWithOptions(ctx context.Context, body io.Reader, op
 
 func (s *LeaseSession) applyUpdate(ctx context.Context, body io.Reader, opts UpdateOptions) (*UpdateResult, error) {
 	ctx = WithCorrelationID(ctx, s.correlation())
+	if opts.Namespace == "" {
+		opts.Namespace = s.Namespace
+	}
 	res, err := s.client.Update(ctx, s.Key, s.LeaseID, body, opts)
 	if err != nil {
 		return nil, err
@@ -1427,6 +1470,9 @@ func (s *LeaseSession) RemoveWithOptions(ctx context.Context, opts RemoveOptions
 
 func (s *LeaseSession) applyRemove(ctx context.Context, opts RemoveOptions) (*api.RemoveResponse, error) {
 	ctx = WithCorrelationID(ctx, s.correlation())
+	if opts.Namespace == "" {
+		opts.Namespace = s.Namespace
+	}
 	res, err := s.client.Remove(ctx, s.Key, s.LeaseID, opts)
 	if err != nil {
 		return nil, err
@@ -1450,7 +1496,7 @@ func (s *LeaseSession) applyRemove(ctx context.Context, opts RemoveOptions) (*ap
 // Get refreshes the current state snapshot using the active lease.
 func (s *LeaseSession) Get(ctx context.Context) (*StateSnapshot, error) {
 	ctx = WithCorrelationID(ctx, s.correlation())
-	reader, etag, version, err := s.client.Get(ctx, s.Key, s.LeaseID)
+	reader, etag, version, err := s.client.getWithNamespace(ctx, s.Key, s.LeaseID, s.Namespace)
 	if err != nil {
 		return nil, err
 	}
@@ -1524,6 +1570,7 @@ func (s *LeaseSession) Save(ctx context.Context, v any) error {
 func (s *LeaseSession) KeepAlive(ctx context.Context, ttl time.Duration) (*api.KeepAliveResponse, error) {
 	ctx = WithCorrelationID(ctx, s.correlation())
 	req := api.KeepAliveRequest{
+		Namespace:  s.Namespace,
 		Key:        s.Key,
 		LeaseID:    s.LeaseID,
 		TTLSeconds: int64(ttl.Seconds()),
@@ -1549,8 +1596,9 @@ func (s *LeaseSession) Release(ctx context.Context) error {
 	}
 	s.mu.Unlock()
 	resp, err := s.client.releaseInternal(ctx, api.ReleaseRequest{
-		Key:     s.Key,
-		LeaseID: s.LeaseID,
+		Namespace: s.Namespace,
+		Key:       s.Key,
+		LeaseID:   s.LeaseID,
 	}, s.endpoint)
 	if err != nil {
 		s.mu.Lock()
@@ -1637,6 +1685,7 @@ type UpdateOptions struct {
 	IfETag       string
 	IfVersion    string
 	FencingToken string
+	Namespace    string
 }
 
 // RemoveOptions controls conditional delete semantics.
@@ -1644,6 +1693,7 @@ type RemoveOptions struct {
 	IfETag       string
 	IfVersion    string
 	FencingToken string
+	Namespace    string
 }
 
 type correlationTransport struct {
@@ -1716,6 +1766,7 @@ type Client struct {
 	failureRetries     int
 	drainAwareShutdown bool
 	shutdownNotified   atomic.Bool
+	defaultNamespace   string
 
 	closeOnce sync.Once
 }
@@ -2059,6 +2110,13 @@ func WithDisableMTLS(disable bool) Option {
 	}
 }
 
+// WithDefaultNamespace overrides the namespace applied when requests leave it unspecified.
+func WithDefaultNamespace(ns string) Option {
+	return func(c *Client) {
+		c.defaultNamespace = ns
+	}
+}
+
 // WithFailureRetries overrides how many times non-acquire operations retry on failure.
 // A value <0 allows infinite retries.
 func WithFailureRetries(n int) Option {
@@ -2135,6 +2193,7 @@ func New(baseURL string, opts ...Option) (*Client, error) {
 		disableMTLS:        false,
 		failureRetries:     DefaultFailureRetries,
 		drainAwareShutdown: true,
+		defaultNamespace:   namespaces.Default,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -2160,6 +2219,7 @@ func NewWithEndpoints(endpoints []string, opts ...Option) (*Client, error) {
 		disableMTLS:        false,
 		failureRetries:     DefaultFailureRetries,
 		drainAwareShutdown: true,
+		defaultNamespace:   namespaces.Default,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -2291,7 +2351,13 @@ func (c *Client) Acquire(ctx context.Context, req api.AcquireRequest, opts ...Ac
 	if req.BlockSecs > 0 {
 		deadline = start.Add(time.Duration(req.BlockSecs) * time.Second)
 	}
+	namespace, err := c.namespaceFor(req.Namespace)
+	if err != nil {
+		return nil, err
+	}
+	req.Namespace = namespace
 	currentReq := req
+	currentReq.Namespace = namespace
 	attempt := 0
 
 	for {
@@ -2692,6 +2758,11 @@ func shouldRetryForUpdate(err error) bool {
 
 // KeepAlive extends a lease.
 func (c *Client) KeepAlive(ctx context.Context, req api.KeepAliveRequest) (*api.KeepAliveResponse, error) {
+	namespace, err := c.namespaceFor(req.Namespace)
+	if err != nil {
+		return nil, err
+	}
+	req.Namespace = namespace
 	c.logTraceCtx(ctx, "client.keepalive.start", "key", req.Key, "lease_id", req.LeaseID, "ttl_seconds", req.TTLSeconds)
 	token, err := c.fencingToken(req.LeaseID, "")
 	if err != nil {
@@ -2723,6 +2794,11 @@ func (c *Client) Release(ctx context.Context, req api.ReleaseRequest) (*api.Rele
 }
 
 func (c *Client) releaseInternal(ctx context.Context, req api.ReleaseRequest, preferred string) (*api.ReleaseResponse, error) {
+	namespace, err := c.namespaceFor(req.Namespace)
+	if err != nil {
+		return nil, err
+	}
+	req.Namespace = namespace
 	c.logTraceCtx(ctx, "client.release.start", "key", req.Key, "lease_id", req.LeaseID)
 	token, err := c.fencingToken(req.LeaseID, "")
 	if err != nil {
@@ -2807,10 +2883,14 @@ func (c *Client) releaseInternal(ctx context.Context, req api.ReleaseRequest, pr
 // Describe fetches key metadata without state.
 func (c *Client) Describe(ctx context.Context, key string) (*api.DescribeResponse, error) {
 	c.logTraceCtx(ctx, "client.describe.start", "key", key, "endpoint", c.lastEndpoint)
+	namespace, err := c.namespaceFor("")
+	if err != nil {
+		return nil, err
+	}
 	var describe api.DescribeResponse
 	builder := func(base string) (*http.Request, context.CancelFunc, error) {
 		reqCtx, cancel := c.requestContextNoTimeout(ctx)
-		full := fmt.Sprintf("%s/v1/describe?key=%s", base, url.QueryEscape(key))
+		full := fmt.Sprintf("%s/v1/describe?key=%s&namespace=%s", base, url.QueryEscape(key), url.QueryEscape(namespace))
 		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, full, http.NoBody)
 		if err != nil {
 			cancel()
@@ -2839,7 +2919,7 @@ func (c *Client) Describe(ctx context.Context, key string) (*api.DescribeRespons
 
 // Get streams the JSON state for a key. Caller must close the returned reader.
 // When the key has no state the returned reader is nil.
-func (c *Client) Get(ctx context.Context, key, leaseID string) (io.ReadCloser, string, string, error) {
+func (c *Client) getWithNamespace(ctx context.Context, key, leaseID, namespace string) (io.ReadCloser, string, string, error) {
 	token, err := c.fencingToken(leaseID, "")
 	if err != nil {
 		return nil, "", "", err
@@ -2850,7 +2930,7 @@ func (c *Client) Get(ctx context.Context, key, leaseID string) (io.ReadCloser, s
 		// AcquireForUpdate handlers can continue reading the snapshot while the
 		// server is draining. Callers are expected to bound ctx themselves.
 		reqCtx, cancel := c.requestContextNoTimeout(ctx)
-		full := fmt.Sprintf("%s/v1/get?key=%s", base, url.QueryEscape(key))
+		full := fmt.Sprintf("%s/v1/get?key=%s&namespace=%s", base, url.QueryEscape(key), url.QueryEscape(namespace))
 		req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, full, http.NoBody)
 		if err != nil {
 			cancel()
@@ -2888,6 +2968,18 @@ func (c *Client) Get(ctx context.Context, key, leaseID string) (io.ReadCloser, s
 	return reader, etag, version, nil
 }
 
+func (c *Client) GetWithNamespace(ctx context.Context, namespace, key, leaseID string) (io.ReadCloser, string, string, error) {
+	norm, err := c.namespaceFor(namespace)
+	if err != nil {
+		return nil, "", "", err
+	}
+	return c.getWithNamespace(ctx, key, leaseID, norm)
+}
+
+func (c *Client) Get(ctx context.Context, key, leaseID string) (io.ReadCloser, string, string, error) {
+	return c.GetWithNamespace(ctx, "", key, leaseID)
+}
+
 // Load delegates to sess.Load.
 func (c *Client) Load(ctx context.Context, sess *LeaseSession, v any) error {
 	return sess.Load(ctx, v)
@@ -2899,8 +2991,8 @@ func (c *Client) Save(ctx context.Context, sess *LeaseSession, v any) error {
 }
 
 // GetBytes fetches the JSON state into memory and returns it along with metadata.
-func (c *Client) GetBytes(ctx context.Context, key, leaseID string) ([]byte, string, string, error) {
-	reader, etag, version, err := c.Get(ctx, key, leaseID)
+func (c *Client) GetBytesWithNamespace(ctx context.Context, namespace, key, leaseID string) ([]byte, string, string, error) {
+	reader, etag, version, err := c.GetWithNamespace(ctx, namespace, key, leaseID)
 	if err != nil {
 		return nil, "", "", err
 	}
@@ -2915,8 +3007,17 @@ func (c *Client) GetBytes(ctx context.Context, key, leaseID string) ([]byte, str
 	return data, etag, version, nil
 }
 
+func (c *Client) GetBytes(ctx context.Context, key, leaseID string) ([]byte, string, string, error) {
+	return c.GetBytesWithNamespace(ctx, "", key, leaseID)
+}
+
 // Update uploads new JSON state from the provided reader.
 func (c *Client) Update(ctx context.Context, key, leaseID string, body io.Reader, opts UpdateOptions) (*UpdateResult, error) {
+	namespace, err := c.namespaceFor(opts.Namespace)
+	if err != nil {
+		return nil, err
+	}
+	opts.Namespace = namespace
 	token, err := c.fencingToken(leaseID, opts.FencingToken)
 	if err != nil {
 		return nil, err
@@ -2926,7 +3027,7 @@ func (c *Client) Update(ctx context.Context, key, leaseID string, body io.Reader
 	if err != nil {
 		return nil, err
 	}
-	path := fmt.Sprintf("/v1/update?key=%s", url.QueryEscape(key))
+	path := fmt.Sprintf("/v1/update?key=%s&namespace=%s", url.QueryEscape(key), url.QueryEscape(namespace))
 	builder := func(base string) (*http.Request, context.CancelFunc, error) {
 		reqBody, err := bodyFactory()
 		if err != nil {
@@ -2980,12 +3081,17 @@ func (c *Client) UpdateBytes(ctx context.Context, key, leaseID string, body []by
 // Remove deletes the JSON state for key while ensuring the lease and
 // conditional headers (when provided) are honoured.
 func (c *Client) Remove(ctx context.Context, key, leaseID string, opts RemoveOptions) (*api.RemoveResponse, error) {
+	namespace, err := c.namespaceFor(opts.Namespace)
+	if err != nil {
+		return nil, err
+	}
+	opts.Namespace = namespace
 	token, err := c.fencingToken(leaseID, opts.FencingToken)
 	if err != nil {
 		return nil, err
 	}
 	c.logTraceCtx(ctx, "client.remove.start", "key", key, "lease_id", leaseID, "endpoint", c.lastEndpoint, "fencing_token", token)
-	path := fmt.Sprintf("/v1/remove?key=%s", url.QueryEscape(key))
+	path := fmt.Sprintf("/v1/remove?key=%s&namespace=%s", url.QueryEscape(key), url.QueryEscape(namespace))
 	builder := func(base string) (*http.Request, context.CancelFunc, error) {
 		reqCtx, cancel := c.requestContext(ctx)
 		req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, base+path, http.NoBody)
@@ -3236,6 +3342,11 @@ func qrfStateFromError(err error) string {
 
 // QueueAck acknowledges a queue message via the /v1/queue/ack API.
 func (c *Client) QueueAck(ctx context.Context, req api.AckRequest) (*api.AckResponse, error) {
+	namespace, err := c.namespaceFor(req.Namespace)
+	if err != nil {
+		return nil, err
+	}
+	req.Namespace = namespace
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
@@ -3296,6 +3407,11 @@ func (c *Client) QueueNack(ctx context.Context, req api.NackRequest) (*api.NackR
 	if req.DelaySeconds < 0 {
 		req.DelaySeconds = 0
 	}
+	namespace, err := c.namespaceFor(req.Namespace)
+	if err != nil {
+		return nil, err
+	}
+	req.Namespace = namespace
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
@@ -3353,6 +3469,11 @@ func (c *Client) QueueNack(ctx context.Context, req api.NackRequest) (*api.NackR
 
 // QueueExtend extends a queue message's visibility window using /v1/queue/extend.
 func (c *Client) QueueExtend(ctx context.Context, req api.ExtendRequest) (*api.ExtendResponse, error) {
+	namespace, err := c.namespaceFor(req.Namespace)
+	if err != nil {
+		return nil, err
+	}
+	req.Namespace = namespace
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
@@ -3417,6 +3538,10 @@ func (c *Client) dequeueInternal(ctx context.Context, queue string, opts Dequeue
 	if owner == "" {
 		return nil, fmt.Errorf("lockd: owner is required")
 	}
+	namespace, err := c.namespaceFor(opts.Namespace)
+	if err != nil {
+		return nil, err
+	}
 	waitSeconds := opts.BlockSeconds
 	if waitSeconds < 0 && waitSeconds != BlockNoWait {
 		waitSeconds = BlockNoWait
@@ -3425,6 +3550,7 @@ func (c *Client) dequeueInternal(ctx context.Context, queue string, opts Dequeue
 		waitSeconds = api.BlockNoWait
 	}
 	req := api.DequeueRequest{
+		Namespace:                namespace,
 		Queue:                    queue,
 		Owner:                    owner,
 		VisibilityTimeoutSeconds: secondsFromDuration(opts.Visibility),
@@ -3619,7 +3745,12 @@ func (c *Client) Enqueue(ctx context.Context, queue string, payload io.Reader, o
 	if payload == nil {
 		payload = bytes.NewReader(nil)
 	}
+	namespace, err := c.namespaceFor(opts.Namespace)
+	if err != nil {
+		return nil, err
+	}
 	meta := api.EnqueueRequest{
+		Namespace:                namespace,
 		Queue:                    queue,
 		DelaySeconds:             secondsFromDuration(opts.Delay),
 		VisibilityTimeoutSeconds: secondsFromDuration(opts.Visibility),
@@ -3813,6 +3944,10 @@ func (c *Client) subscribe(ctx context.Context, queue string, opts SubscribeOpti
 	if owner == "" {
 		return fmt.Errorf("lockd: owner is required")
 	}
+	namespace, err := c.namespaceFor("")
+	if err != nil {
+		return err
+	}
 	prefetch := opts.Prefetch
 	if prefetch <= 0 {
 		prefetch = 1
@@ -3825,6 +3960,7 @@ func (c *Client) subscribe(ctx context.Context, queue string, opts SubscribeOpti
 		blockSeconds = api.BlockNoWait
 	}
 	req := api.DequeueRequest{
+		Namespace:                namespace,
 		Queue:                    queue,
 		Owner:                    owner,
 		VisibilityTimeoutSeconds: secondsFromDuration(opts.Visibility),

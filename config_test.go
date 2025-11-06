@@ -40,6 +40,9 @@ func TestConfigValidateDefaults(t *testing.T) {
 	if !cfg.MemQueueWatch {
 		t.Fatal("expected mem queue watch default enabled")
 	}
+	if cfg.DefaultNamespace != DefaultNamespace {
+		t.Fatalf("expected default namespace %q, got %q", DefaultNamespace, cfg.DefaultNamespace)
+	}
 }
 
 func TestConfigValidateErrors(t *testing.T) {
@@ -58,5 +61,9 @@ func TestConfigValidateErrors(t *testing.T) {
 	cfg = Config{Store: "mem://", JSONUtil: "nope"}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected error for invalid json util")
+	}
+	cfg = Config{Store: "mem://", DefaultNamespace: "Invalid Space"}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for invalid default namespace")
 	}
 }

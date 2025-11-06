@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"pkt.systems/lockd"
 	lockdclient "pkt.systems/lockd/client"
 	queuetestutil "pkt.systems/lockd/integration/queue/testutil"
 )
@@ -23,16 +24,20 @@ func TestAzureQueuePollingBasics(t *testing.T) {
 
 	ts := startAzureQueueServer(t, cfg)
 	cli := ts.Client
-	ensureAzureQueueWritableOrSkip(t, cli)
+	ensureAzureQueueWritableOrSkip(t, cfg, cli)
 
 	t.Run("AckRemovesMessage", func(t *testing.T) {
 		queuetestutil.InstallWatchdog(t, "azure-poll-ack", 60*time.Second)
-		queuetestutil.RunQueueAckScenario(t, cli, queuetestutil.QueueName("azure-poll-ack"), []byte("azure poll ack"))
+		queue := queuetestutil.QueueName("azure-poll-ack")
+		scheduleAzureQueueCleanup(t, cfg, queue)
+		queuetestutil.RunQueueAckScenario(t, cli, queue, []byte("azure poll ack"))
 	})
 
 	t.Run("NackRedelivery", func(t *testing.T) {
 		queuetestutil.InstallWatchdog(t, "azure-poll-nack", 60*time.Second)
-		queuetestutil.RunQueueNackScenario(t, cli, queuetestutil.QueueName("azure-poll-nack"), []byte("azure poll nack"))
+		queue := queuetestutil.QueueName("azure-poll-nack")
+		scheduleAzureQueueCleanup(t, cfg, queue)
+		queuetestutil.RunQueueNackScenario(t, cli, queue, []byte("azure poll nack"))
 	})
 }
 
@@ -46,10 +51,11 @@ func TestAzureQueuePollingIdleEnqueueDoesNotPoll(t *testing.T) {
 	})
 
 	queue := queuetestutil.QueueName("azure-poll-idle")
+	scheduleAzureQueueCleanup(t, cfg, queue)
 
 	seedServer := startAzureQueueServer(t, cfg)
 	seedClient := seedServer.Client
-	ensureAzureQueueWritableOrSkip(t, seedClient)
+	ensureAzureQueueWritableOrSkip(t, cfg, seedClient)
 	queuetestutil.MustEnqueueBytes(t, seedClient, queue, []byte("seed-one"))
 	queuetestutil.MustEnqueueBytes(t, seedClient, queue, []byte("seed-two"))
 
@@ -61,7 +67,7 @@ func TestAzureQueuePollingIdleEnqueueDoesNotPoll(t *testing.T) {
 
 	ts, capture := startAzureQueueServerWithCapture(t, cfg)
 	cli := ts.Client
-	ensureAzureQueueWritableOrSkip(t, cli)
+	ensureAzureQueueWritableOrSkip(t, cfg, cli)
 
 	consumerA := queuetestutil.QueueOwner("azure-consumer-a")
 	msgA := queuetestutil.MustDequeueMessage(t, cli, queue, consumerA, 5, 15*time.Second)
@@ -92,8 +98,9 @@ func TestAzureQueuePollingIdleEnqueueDoesNotPoll(t *testing.T) {
 	}
 }
 
-func ensureAzureQueueWritableOrSkip(t *testing.T, cli *lockdclient.Client) {
+func ensureAzureQueueWritableOrSkip(t *testing.T, cfg lockd.Config, cli *lockdclient.Client) {
 	queue := queuetestutil.QueueName("azure-permission-probe")
+	scheduleAzureQueueCleanup(t, cfg, queue)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_, err := cli.Enqueue(ctx, queue, bytes.NewReader([]byte("probe")), lockdclient.EnqueueOptions{ContentType: "text/plain"})

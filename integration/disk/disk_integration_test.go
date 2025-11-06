@@ -32,6 +32,7 @@ import (
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/disk"
 	"pkt.systems/lockd/internal/uuidv7"
+	"pkt.systems/lockd/namespaces"
 	"pkt.systems/pslog"
 )
 
@@ -1074,6 +1075,7 @@ func TestDiskAcquireForUpdateCallbackSingleServer(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = proxiedClient.Close() })
 
+	namespace := namespaces.Default
 	key := "disk-single-" + uuidv7.NewString()
 	seedPayload := map[string]any{"payload": "disk-single", "count": 1}
 
@@ -1082,6 +1084,7 @@ func TestDiskAcquireForUpdateCallbackSingleServer(t *testing.T) {
 
 	seedCtx, seedCancel := context.WithTimeout(ctx, time.Second)
 	seedLease, err := seedCli.Acquire(seedCtx, api.AcquireRequest{
+		Namespace:  namespace,
 		Key:        key,
 		Owner:      "seed",
 		TTLSeconds: 20,
@@ -1104,6 +1107,7 @@ func TestDiskAcquireForUpdateCallbackSingleServer(t *testing.T) {
 
 	handlerCalled := false
 	err = proxiedClient.AcquireForUpdate(ctx, api.AcquireRequest{
+		Namespace:  namespace,
 		Key:        key,
 		Owner:      "reader",
 		TTLSeconds: 20,
@@ -1142,6 +1146,7 @@ func TestDiskAcquireForUpdateCallbackSingleServer(t *testing.T) {
 	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), time.Second)
 	defer verifyCancel()
 	verifyLease, err := seedCli.Acquire(verifyCtx, api.AcquireRequest{
+		Namespace:  namespace,
 		Key:        key,
 		Owner:      "verify",
 		TTLSeconds: 10,
@@ -1588,22 +1593,23 @@ func TestDiskRetentionSweep(t *testing.T) {
 	defer store.Close()
 
 	ctx := context.Background()
+	namespace := namespaces.Default
 	key := "retention-" + uuidv7.NewString()
 
 	meta := storage.Meta{Version: 1, UpdatedAtUnix: 1}
-	if _, err := store.StoreMeta(ctx, key, &meta, ""); err != nil {
+	if _, err := store.StoreMeta(ctx, namespace, key, &meta, ""); err != nil {
 		t.Fatalf("store meta: %v", err)
 	}
-	if _, err := store.WriteState(ctx, key, strings.NewReader(`{"old":true}`), storage.PutStateOptions{}); err != nil {
+	if _, err := store.WriteState(ctx, namespace, key, strings.NewReader(`{"old":true}`), storage.PutStateOptions{}); err != nil {
 		t.Fatalf("write state: %v", err)
 	}
 
 	store.SweepOnceForTests()
 
-	if _, _, err := store.LoadMeta(ctx, key); !errors.Is(err, storage.ErrNotFound) {
+	if _, _, err := store.LoadMeta(ctx, namespace, key); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected meta cleanup, got %v", err)
 	}
-	if _, _, err := store.ReadState(ctx, key); !errors.Is(err, storage.ErrNotFound) {
+	if _, _, err := store.ReadState(ctx, namespace, key); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected state cleanup, got %v", err)
 	}
 }

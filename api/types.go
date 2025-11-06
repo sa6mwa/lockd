@@ -2,6 +2,7 @@ package api
 
 // AcquireRequest models the JSON payload for POST /v1/acquire.
 type AcquireRequest struct {
+	Namespace   string `json:"namespace,omitempty"`
 	Key         string `json:"key"`
 	TTLSeconds  int64  `json:"ttl_seconds"`
 	Owner       string `json:"owner"`
@@ -16,6 +17,7 @@ const (
 
 // AcquireResponse is returned when a lease is granted.
 type AcquireResponse struct {
+	Namespace     string `json:"namespace"`
 	LeaseID       string `json:"lease_id"`
 	Key           string `json:"key"`
 	Owner         string `json:"owner"`
@@ -36,6 +38,7 @@ type UpdateResponse struct {
 
 // KeepAliveRequest represents POST /v1/keepalive.
 type KeepAliveRequest struct {
+	Namespace  string `json:"namespace,omitempty"`
 	Key        string `json:"key"`
 	LeaseID    string `json:"lease_id"`
 	TTLSeconds int64  `json:"ttl_seconds"`
@@ -48,8 +51,9 @@ type KeepAliveResponse struct {
 
 // ReleaseRequest represents POST /v1/release.
 type ReleaseRequest struct {
-	Key     string `json:"key"`
-	LeaseID string `json:"lease_id"`
+	Namespace string `json:"namespace,omitempty"`
+	Key       string `json:"key"`
+	LeaseID   string `json:"lease_id"`
 }
 
 // ReleaseResponse indicates release status.
@@ -65,6 +69,7 @@ type RemoveResponse struct {
 
 // DescribeResponse is returned from GET /v1/describe.
 type DescribeResponse struct {
+	Namespace string `json:"namespace"`
 	Key       string `json:"key"`
 	Owner     string `json:"owner,omitempty"`
 	LeaseID   string `json:"lease_id,omitempty"`
@@ -85,6 +90,7 @@ type ErrorResponse struct {
 
 // EnqueueRequest represents POST /v1/queue/enqueue.
 type EnqueueRequest struct {
+	Namespace                string         `json:"namespace,omitempty"`
 	Queue                    string         `json:"queue,omitempty"`
 	DelaySeconds             int64          `json:"delay_seconds,omitempty"`
 	VisibilityTimeoutSeconds int64          `json:"visibility_timeout_seconds,omitempty"`
@@ -97,6 +103,7 @@ type EnqueueRequest struct {
 
 // EnqueueResponse surfaces details of the enqueued message.
 type EnqueueResponse struct {
+	Namespace                string `json:"namespace,omitempty"`
 	Queue                    string `json:"queue"`
 	MessageID                string `json:"message_id"`
 	Attempts                 int    `json:"attempts"`
@@ -109,6 +116,7 @@ type EnqueueResponse struct {
 
 // DequeueRequest drives POST /v1/queue/dequeue and /v1/queue/subscribe.
 type DequeueRequest struct {
+	Namespace                string `json:"namespace,omitempty"`
 	Queue                    string `json:"queue,omitempty"`
 	Owner                    string `json:"owner,omitempty"`
 	VisibilityTimeoutSeconds int64  `json:"visibility_timeout_seconds,omitempty"`
@@ -119,6 +127,7 @@ type DequeueRequest struct {
 
 // Message carries message metadata and payload delivery info.
 type Message struct {
+	Namespace                string         `json:"namespace,omitempty"`
 	Queue                    string         `json:"queue"`
 	MessageID                string         `json:"message_id"`
 	Attempts                 int            `json:"attempts"`
@@ -147,6 +156,7 @@ type DequeueResponse struct {
 
 // AckRequest acknowledges a processed message.
 type AckRequest struct {
+	Namespace         string `json:"namespace,omitempty"`
 	Queue             string `json:"queue"`
 	MessageID         string `json:"message_id"`
 	LeaseID           string `json:"lease_id"`
@@ -165,6 +175,7 @@ type AckResponse struct {
 
 // NackRequest re-queues a message with optional delay.
 type NackRequest struct {
+	Namespace         string `json:"namespace,omitempty"`
 	Queue             string `json:"queue"`
 	MessageID         string `json:"message_id"`
 	LeaseID           string `json:"lease_id"`
@@ -185,6 +196,7 @@ type NackResponse struct {
 
 // ExtendRequest keeps a lease alive and extends visibility.
 type ExtendRequest struct {
+	Namespace         string `json:"namespace,omitempty"`
 	Queue             string `json:"queue"`
 	MessageID         string `json:"message_id"`
 	LeaseID           string `json:"lease_id"`

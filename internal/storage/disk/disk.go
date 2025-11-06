@@ -38,11 +38,6 @@ type Config struct {
 // Store implements storage.Backend backed by the local filesystem.
 type Store struct {
 	root            string
-	metaDir         string
-	stateDir        string
-	tmpDir          string
-	lockDir         string
-	objectDir       string
 	retention       time.Duration
 	janitorInterval time.Duration
 	now             func() time.Time
@@ -96,27 +91,12 @@ func New(cfg Config) (*Store, error) {
 	}
 
 	root := filepath.Clean(cfg.Root)
-	metaDir := filepath.Join(root, "meta")
-	stateDir := filepath.Join(root, "state")
-	tmpDir := filepath.Join(root, "tmp")
-	objectDir := filepath.Join(root, "objects")
-	for _, dir := range []string{metaDir, stateDir, tmpDir, objectDir} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return nil, fmt.Errorf("disk: prepare directory %q: %w", dir, err)
-		}
-	}
-	lockDir := filepath.Join(root, "locks")
-	if err := os.MkdirAll(lockDir, 0o755); err != nil {
-		return nil, fmt.Errorf("disk: prepare lock directory %q: %w", lockDir, err)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return nil, fmt.Errorf("disk: prepare root directory %q: %w", root, err)
 	}
 
 	s := &Store{
 		root:            root,
-		metaDir:         metaDir,
-		stateDir:        stateDir,
-		tmpDir:          tmpDir,
-		lockDir:         lockDir,
-		objectDir:       objectDir,
 		retention:       cfg.Retention,
 		janitorInterval: cfg.JanitorInterval,
 		now:             cfg.Now,
@@ -190,101 +170,160 @@ func (s *Store) loggers(ctx context.Context) (pslog.Logger, pslog.Logger) {
 	return logger, logger
 }
 
-func (s *Store) encodeKey(key string) (string, error) {
-	if key == "" {
-		return "", fmt.Errorf("disk: key required")
-	}
-	encoded := url.PathEscape(key)
-	if strings.Contains(encoded, "..") {
-		return "", fmt.Errorf("disk: invalid key %q", key)
-	}
-	return encoded, nil
+func (s *Store) namespacePath(namespace string, elems ...string) string {
+	parts := append([]string{s.root, namespace}, elems...)
+	return filepath.Join(parts...)
 }
 
-func (s *Store) metaPath(encoded string) string {
-	return filepath.Join(s.metaDir, encoded+".pb")
+func (s *Store) namespaceMetaDir(namespace string) string {
+	return s.namespacePath(namespace, "meta")
 }
 
-func (s *Store) lockFilePath(key string) (string, error) {
+func (s *Store) namespaceStateDir(namespace string) string {
+	return s.namespacePath(namespace, "state")
+}
+
+func (s *Store) namespaceObjectsDir(namespace string) string {
+	return s.namespacePath(namespace, "objects")
+}
+
+func (s *Store) namespaceLocksDir(namespace string) string {
+	return s.namespacePath(namespace, "locks")
+}
+
+func (s *Store) namespaceTmpDir(namespace string) string {
+	return s.namespacePath(namespace, "tmp")
+}
+
+func (s *Store) encodeKey(namespace, key string) (string, string, error) {
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		return "", "", fmt.Errorf("disk: namespace required")
+	}
+	key = strings.TrimSpace(key)
 	if key == "" {
-		return "", fmt.Errorf("disk: key required for lock path")
+		return "", "", fmt.Errorf("disk: key required")
 	}
 	clean := path.Clean("/" + key)
 	if clean == "/" {
-		return "", fmt.Errorf("disk: invalid lock key %q", key)
+		return "", "", fmt.Errorf("disk: invalid key %q", key)
 	}
-	if strings.Contains(clean, "..") {
-		return "", fmt.Errorf("disk: invalid lock key %q", key)
+	clean = strings.TrimPrefix(clean, "/")
+	if clean == "" || strings.HasPrefix(clean, "../") {
+		return "", "", fmt.Errorf("disk: invalid key %q", key)
 	}
-	relative := strings.TrimPrefix(clean, "/")
-	if relative == "" {
-		return "", fmt.Errorf("disk: invalid lock key %q", key)
-	}
-	segments := strings.Split(relative, "/")
-	lockDir := filepath.Join(append([]string{s.lockDir}, segments[:len(segments)-1]...)...)
-	if err := os.MkdirAll(lockDir, 0o755); err != nil {
-		return "", fmt.Errorf("disk: prepare lock directory %q: %w", lockDir, err)
-	}
-	filename := segments[len(segments)-1] + ".lock"
-	return filepath.Join(lockDir, filename), nil
+	encoded := url.PathEscape(clean)
+	return namespace, encoded, nil
 }
 
-func (s *Store) stateDirPath(encoded string) string {
-	return filepath.Join(s.stateDir, encoded)
+func (s *Store) metaPath(namespace, encoded string) string {
+	return filepath.Join(s.namespaceMetaDir(namespace), encoded+".pb")
 }
 
-func (s *Store) stateDataPath(encoded string) string {
-	return filepath.Join(s.stateDirPath(encoded), "data")
-}
-
-func (s *Store) stateInfoPath(encoded string) string {
-	return filepath.Join(s.stateDirPath(encoded), "info.json")
-}
-
-func (s *Store) objectDataPath(key string) (string, error) {
-	normalized, err := s.normalizeObjectKey(key)
+func (s *Store) lockFilePath(key string) (string, error) {
+	ns, segments, err := storage.SplitNamespacedKey(key)
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(s.objectDir, filepath.FromSlash(normalized)), nil
+	if len(segments) == 0 {
+		return "", fmt.Errorf("disk: invalid lock key %q", key)
+	}
+	encoded := encodePathSegments(segments)
+	lockDir := filepath.Join(append([]string{s.namespaceLocksDir(ns)}, encoded[:len(encoded)-1]...)...)
+	if err := os.MkdirAll(lockDir, 0o755); err != nil {
+		return "", fmt.Errorf("disk: prepare lock directory %q: %w", lockDir, err)
+	}
+	filename := encoded[len(encoded)-1] + ".lock"
+	return filepath.Join(lockDir, filename), nil
 }
 
-func (s *Store) objectInfoPath(key string) (string, error) {
-	dataPath, err := s.objectDataPath(key)
+func (s *Store) stateDirPath(namespace, encoded string) string {
+	return filepath.Join(s.namespaceStateDir(namespace), encoded)
+}
+
+func (s *Store) stateDataPath(namespace, encoded string) string {
+	return filepath.Join(s.stateDirPath(namespace, encoded), "data")
+}
+
+func (s *Store) stateInfoPath(namespace, encoded string) string {
+	return filepath.Join(s.stateDirPath(namespace, encoded), "info.json")
+}
+
+func encodePathSegments(segments []string) []string {
+	encoded := make([]string, len(segments))
+	for i, segment := range segments {
+		encoded[i] = url.PathEscape(segment)
+	}
+	return encoded
+}
+
+func decodePathSegments(segments []string) ([]string, error) {
+	decoded := make([]string, len(segments))
+	for i, segment := range segments {
+		val, err := url.PathUnescape(segment)
+		if err != nil {
+			return nil, err
+		}
+		decoded[i] = val
+	}
+	return decoded, nil
+}
+
+func (s *Store) objectDataPath(namespace, key string) (string, error) {
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		return "", fmt.Errorf("disk: namespace required")
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return "", fmt.Errorf("disk: object key required")
+	}
+	clean := path.Clean("/" + key)
+	if clean == "/" {
+		return "", fmt.Errorf("disk: invalid object key %q", key)
+	}
+	clean = strings.TrimPrefix(clean, "/")
+	if strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("disk: invalid object key %q", key)
+	}
+	segments := strings.Split(clean, "/")
+	encoded := encodePathSegments(segments)
+	dataPath := filepath.Join(append([]string{s.namespaceObjectsDir(namespace)}, encoded...)...)
+	return dataPath, nil
+}
+
+func (s *Store) objectInfoPath(namespace, key string) (string, error) {
+	dataPath, err := s.objectDataPath(namespace, key)
 	if err != nil {
 		return "", err
 	}
 	return dataPath + ".info.json", nil
 }
 
-func (s *Store) normalizeObjectKey(key string) (string, error) {
-	if key == "" {
-		return "", fmt.Errorf("disk: object key required")
+func (s *Store) keyFromObjectPath(namespace string, objectPath string) (string, error) {
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		return "", fmt.Errorf("disk: namespace required")
 	}
-	clean := path.Clean("/" + key)
-	if clean == "/" || clean == "." {
-		return "", fmt.Errorf("disk: invalid object key %q", key)
+	clean := filepath.Clean(objectPath)
+	expectedRoot := s.namespaceObjectsDir(namespace)
+	if !strings.HasPrefix(clean, expectedRoot) {
+		return "", fmt.Errorf("disk: object path outside namespace %q: %s", namespace, objectPath)
 	}
-	clean = strings.TrimPrefix(clean, "/")
-	if clean == "" || strings.HasPrefix(clean, "../") {
-		return "", fmt.Errorf("disk: invalid object key %q", key)
-	}
-	return clean, nil
-}
-
-func (s *Store) keyFromObjectPath(objectPath string) (string, error) {
-	rel, err := filepath.Rel(s.objectDir, objectPath)
+	rel, err := filepath.Rel(expectedRoot, clean)
 	if err != nil {
-		return "", fmt.Errorf("disk: compute relative path: %w", err)
-	}
-	if strings.HasPrefix(rel, "..") {
-		return "", fmt.Errorf("disk: object path outside root: %q", objectPath)
+		return "", fmt.Errorf("disk: relative path: %w", err)
 	}
 	rel = filepath.ToSlash(rel)
-	if rel == "" {
-		return "", fmt.Errorf("disk: empty object key for path %q", objectPath)
+	if rel == "" || rel == "." {
+		return "", fmt.Errorf("disk: unexpected object directory %q", objectPath)
 	}
-	return rel, nil
+	parts := strings.Split(rel, "/")
+	decoded, err := decodePathSegments(parts)
+	if err != nil {
+		return "", err
+	}
+	return path.Join(decoded...), nil
 }
 
 type metaRecord struct {
@@ -311,17 +350,17 @@ type objectInfoRecord struct {
 }
 
 // LoadMeta reads the per-key metadata protobuf and returns it with the stored ETag.
-func (s *Store) LoadMeta(ctx context.Context, key string) (*storage.Meta, string, error) {
+func (s *Store) LoadMeta(ctx context.Context, namespace, key string) (*storage.Meta, string, error) {
 	logger, verbose := s.loggers(ctx)
 	start := time.Now()
 	verbose.Trace("disk.load_meta.begin", "key", key)
 
-	encoded, err := s.encodeKey(key)
+	ns, encoded, err := s.encodeKey(namespace, key)
 	if err != nil {
 		logger.Debug("disk.load_meta.encode_error", "key", key, "error", err)
 		return nil, "", err
 	}
-	rec, err := s.readMetaRecord(encoded)
+	rec, err := s.readMetaRecord(ns, encoded)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			verbose.Debug("disk.load_meta.not_found", "key", key, "elapsed", time.Since(start))
@@ -354,7 +393,7 @@ func (s *Store) LoadMeta(ctx context.Context, key string) (*storage.Meta, string
 }
 
 // StoreMeta persists metadata with conditional semantics when expectedETag is provided.
-func (s *Store) StoreMeta(ctx context.Context, key string, meta *storage.Meta, expectedETag string) (etag string, err error) {
+func (s *Store) StoreMeta(ctx context.Context, namespace, key string, meta *storage.Meta, expectedETag string) (etag string, err error) {
 	logger, verbose := s.loggers(ctx)
 	start := time.Now()
 
@@ -378,21 +417,22 @@ func (s *Store) StoreMeta(ctx context.Context, key string, meta *storage.Meta, e
 		"lease_expires_at", leaseExpires,
 	)
 
-	encoded, err := s.encodeKey(key)
+	ns, encoded, err := s.encodeKey(namespace, key)
 	if err != nil {
 		logger.Debug("disk.store_meta.encode_error", "key", key, "error", err)
 		return "", err
 	}
 
-	glob := globalKeyMutex(encoded)
+	storageKey := path.Join(ns, key)
+	glob := globalKeyMutex(storageKey)
 	glob.Lock()
 	defer glob.Unlock()
 
-	mu := s.keyLock(key)
+	mu := s.keyLock(storageKey)
 	mu.Lock()
 	defer mu.Unlock()
 
-	fl, err := s.acquireFileLock(key)
+	fl, err := s.acquireFileLock(storageKey)
 	if err != nil {
 		logger.Debug("disk.store_meta.filelock_error", "key", key, "error", err)
 		return "", err
@@ -403,7 +443,7 @@ func (s *Store) StoreMeta(ctx context.Context, key string, meta *storage.Meta, e
 		}
 	}()
 
-	current, err := s.readMetaRecord(encoded)
+	current, err := s.readMetaRecord(namespace, encoded)
 	exists := err == nil
 	if err != nil && !errors.Is(err, storage.ErrNotFound) {
 		logger.Debug("disk.store_meta.read_error", "key", key, "error", err)
@@ -433,7 +473,12 @@ func (s *Store) StoreMeta(ctx context.Context, key string, meta *storage.Meta, e
 		logger.Debug("disk.store_meta.encode_error", "key", key, "error", err)
 		return "", err
 	}
-	if err := s.writeBytesAtomic(s.metaPath(encoded), payload, "meta"); err != nil {
+	metaFile := s.metaPath(namespace, encoded)
+	if err := os.MkdirAll(filepath.Dir(metaFile), 0o755); err != nil {
+		logger.Debug("disk.store_meta.mkdir_error", "key", key, "dir", filepath.Dir(metaFile), "error", err)
+		return "", err
+	}
+	if err := s.writeBytesAtomic(namespace, metaFile, payload, "meta"); err != nil {
 		logger.Debug("disk.store_meta.write_error", "key", key, "error", err)
 		return "", err
 	}
@@ -446,24 +491,25 @@ func (s *Store) StoreMeta(ctx context.Context, key string, meta *storage.Meta, e
 }
 
 // DeleteMeta removes the metadata document on disk, honouring an expected ETag when supplied.
-func (s *Store) DeleteMeta(ctx context.Context, key string, expectedETag string) (err error) {
+func (s *Store) DeleteMeta(ctx context.Context, namespace, key string, expectedETag string) (err error) {
 	logger, verbose := s.loggers(ctx)
 	start := time.Now()
 	verbose.Trace("disk.delete_meta.begin", "key", key, "expected_etag", expectedETag)
 
-	encoded, err := s.encodeKey(key)
+	ns, encoded, err := s.encodeKey(namespace, key)
 	if err != nil {
 		logger.Debug("disk.delete_meta.encode_error", "key", key, "error", err)
 		return err
 	}
-	glob := globalKeyMutex(encoded)
+	storageKey := path.Join(ns, key)
+	glob := globalKeyMutex(storageKey)
 	glob.Lock()
 	defer glob.Unlock()
-	mu := s.keyLock(key)
+	mu := s.keyLock(storageKey)
 	mu.Lock()
 	defer mu.Unlock()
 
-	fl, err := s.acquireFileLock(key)
+	fl, err := s.acquireFileLock(storageKey)
 	if err != nil {
 		logger.Debug("disk.delete_meta.filelock_error", "key", key, "error", err)
 		return err
@@ -475,7 +521,7 @@ func (s *Store) DeleteMeta(ctx context.Context, key string, expectedETag string)
 	}()
 
 	if expectedETag != "" {
-		rec, err := s.readMetaRecord(encoded)
+		rec, err := s.readMetaRecord(ns, encoded)
 		if err != nil {
 			logger.Debug("disk.delete_meta.read_error", "key", key, "error", err)
 			return err
@@ -485,7 +531,8 @@ func (s *Store) DeleteMeta(ctx context.Context, key string, expectedETag string)
 			return storage.ErrCASMismatch
 		}
 	}
-	if err := os.Remove(s.metaPath(encoded)); err != nil {
+	metaFile := s.metaPath(ns, encoded)
+	if err := os.Remove(metaFile); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			logger.Debug("disk.delete_meta.not_found", "key", key)
 			return storage.ErrNotFound
@@ -497,18 +544,25 @@ func (s *Store) DeleteMeta(ctx context.Context, key string, expectedETag string)
 	return nil
 }
 
-// ListMetaKeys scans the metadata directory and returns all known keys.
-func (s *Store) ListMetaKeys(ctx context.Context) ([]string, error) {
+// ListMetaKeys scans the metadata directory for the provided namespace and returns keys relative to that namespace.
+func (s *Store) ListMetaKeys(ctx context.Context, namespace string) ([]string, error) {
 	logger, verbose := s.loggers(ctx)
 	start := time.Now()
 	verbose.Trace("disk.list_meta_keys.begin")
-
-	entries, err := os.ReadDir(s.metaDir)
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		return nil, fmt.Errorf("disk: namespace required")
+	}
+	metaDir := s.namespaceMetaDir(namespace)
+	entries, err := os.ReadDir(metaDir)
 	if err != nil {
-		logger.Debug("disk.list_meta_keys.error", "error", err)
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		logger.Debug("disk.list_meta_keys.error", "namespace", namespace, "error", err)
 		return nil, err
 	}
-	keys := make([]string, 0, len(entries))
+	var keys []string
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -518,29 +572,29 @@ func (s *Store) ListMetaKeys(ctx context.Context) ([]string, error) {
 			continue
 		}
 		encoded := strings.TrimSuffix(name, ".pb")
-		key, err := url.PathUnescape(encoded)
+		decoded, err := url.PathUnescape(encoded)
 		if err != nil {
-			logger.Debug("disk.list_meta_keys.decode_error", "encoded", encoded, "error", err)
+			logger.Debug("disk.list_meta_keys.decode_error", "namespace", namespace, "encoded", encoded, "error", err)
 			continue
 		}
-		keys = append(keys, key)
+		keys = append(keys, decoded)
 	}
-	verbose.Debug("disk.list_meta_keys.success", "count", len(keys), "elapsed", time.Since(start))
+	verbose.Debug("disk.list_meta_keys.success", "namespace", namespace, "count", len(keys), "elapsed", time.Since(start))
 	return keys, nil
 }
 
 // ReadState opens the immutable JSON state file for key and returns its metadata.
-func (s *Store) ReadState(ctx context.Context, key string) (io.ReadCloser, *storage.StateInfo, error) {
+func (s *Store) ReadState(ctx context.Context, namespace, key string) (io.ReadCloser, *storage.StateInfo, error) {
 	logger, verbose := s.loggers(ctx)
 	start := time.Now()
 	verbose.Trace("disk.read_state.begin", "key", key)
 
-	encoded, err := s.encodeKey(key)
+	_, encoded, err := s.encodeKey(namespace, key)
 	if err != nil {
 		logger.Debug("disk.read_state.encode_error", "key", key, "error", err)
 		return nil, nil, err
 	}
-	info, err := s.readStateRecord(encoded)
+	info, err := s.readStateRecord(namespace, encoded)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			verbose.Debug("disk.read_state.not_found", "key", key, "elapsed", time.Since(start))
@@ -549,7 +603,7 @@ func (s *Store) ReadState(ctx context.Context, key string) (io.ReadCloser, *stor
 		}
 		return nil, nil, err
 	}
-	file, err := os.Open(s.stateDataPath(encoded))
+	file, err := os.Open(s.stateDataPath(namespace, encoded))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			verbose.Debug("disk.read_state.not_found", "key", key, "elapsed", time.Since(start))
@@ -572,7 +626,8 @@ func (s *Store) ReadState(ctx context.Context, key string) (io.ReadCloser, *stor
 			logger.Debug("disk.read_state.missing_descriptor", "key", key)
 			return nil, nil, fmt.Errorf("disk: missing state descriptor for %q", key)
 		}
-		mat, err := s.crypto.MaterialFromDescriptor(storage.StateObjectContext(key), descriptor)
+		storageKey := path.Join(namespace, key)
+		mat, err := s.crypto.MaterialFromDescriptor(storage.StateObjectContext(storageKey), descriptor)
 		if err != nil {
 			file.Close()
 			logger.Debug("disk.read_state.material_error", "key", key, "error", err)
@@ -609,24 +664,25 @@ func (s *Store) ReadState(ctx context.Context, key string) (io.ReadCloser, *stor
 }
 
 // WriteState stages and atomically replaces the JSON state file, returning the new ETag.
-func (s *Store) WriteState(ctx context.Context, key string, body io.Reader, opts storage.PutStateOptions) (result *storage.PutStateResult, err error) {
+func (s *Store) WriteState(ctx context.Context, namespace, key string, body io.Reader, opts storage.PutStateOptions) (result *storage.PutStateResult, err error) {
 	logger, verbose := s.loggers(ctx)
 	start := time.Now()
 	verbose.Trace("disk.write_state.begin", "key", key, "expected_etag", opts.ExpectedETag)
 
-	encoded, err := s.encodeKey(key)
+	ns, encoded, err := s.encodeKey(namespace, key)
 	if err != nil {
 		logger.Debug("disk.write_state.encode_error", "key", key, "error", err)
 		return nil, err
 	}
-	glob := globalKeyMutex(encoded)
+	storageKey := path.Join(ns, key)
+	glob := globalKeyMutex(storageKey)
 	glob.Lock()
 	defer glob.Unlock()
-	mu := s.keyLock(key)
+	mu := s.keyLock(storageKey)
 	mu.Lock()
 	defer mu.Unlock()
 
-	fl, err := s.acquireFileLock(key)
+	fl, err := s.acquireFileLock(storageKey)
 	if err != nil {
 		logger.Debug("disk.write_state.filelock_error", "key", key, "error", err)
 		return nil, err
@@ -637,13 +693,19 @@ func (s *Store) WriteState(ctx context.Context, key string, body io.Reader, opts
 		}
 	}()
 
-	if err := os.MkdirAll(s.stateDirPath(encoded), 0o755); err != nil {
+	stateDir := s.stateDirPath(ns, encoded)
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		err = fmt.Errorf("disk: ensure state dir: %w", err)
 		logger.Debug("disk.write_state.ensure_dir_error", "key", key, "error", err)
 		return nil, err
 	}
+	tmpDir := s.namespaceTmpDir(ns)
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		logger.Debug("disk.write_state.tmpdir_error", "key", key, "error", err)
+		return nil, err
+	}
 
-	tempFile, err := os.CreateTemp(s.tmpDir, "lockd-state-*")
+	tempFile, err := os.CreateTemp(tmpDir, "lockd-state-*")
 	if err != nil {
 		logger.Debug("disk.write_state.tempfile_error", "key", key, "error", err)
 		return nil, err
@@ -666,14 +728,14 @@ func (s *Store) WriteState(ctx context.Context, key string, body io.Reader, opts
 		var mat kryptograf.Material
 		if ok && len(descFromCtx) > 0 {
 			descriptor = append([]byte(nil), descFromCtx...)
-			mat, err = s.crypto.MaterialFromDescriptor(storage.StateObjectContext(key), descriptor)
+			mat, err = s.crypto.MaterialFromDescriptor(storage.StateObjectContext(storageKey), descriptor)
 			if err != nil {
 				logger.Debug("disk.write_state.material_error", "key", key, "error", err)
 				return nil, err
 			}
 		} else {
 			var descBytes []byte
-			mat, descBytes, err = s.crypto.MintMaterial(storage.StateObjectContext(key))
+			mat, descBytes, err = s.crypto.MintMaterial(storage.StateObjectContext(storageKey))
 			if err != nil {
 				logger.Debug("disk.write_state.mint_descriptor_error", "key", key, "error", err)
 				return nil, err
@@ -720,7 +782,7 @@ func (s *Store) WriteState(ctx context.Context, key string, body io.Reader, opts
 
 	newETag := hex.EncodeToString(hasher.Sum(nil))
 	if opts.ExpectedETag != "" {
-		info, err := s.readStateRecord(encoded)
+		info, err := s.readStateRecord(ns, encoded)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
 				logger.Debug("disk.write_state.cas_not_found", "key", key, "expected_etag", opts.ExpectedETag)
@@ -735,7 +797,7 @@ func (s *Store) WriteState(ctx context.Context, key string, body io.Reader, opts
 		}
 	}
 
-	dataPath := s.stateDataPath(encoded)
+	dataPath := s.stateDataPath(ns, encoded)
 	if err := os.Rename(tempFile.Name(), dataPath); err != nil {
 		if removeErr := os.Remove(dataPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 			logger.Debug("disk.write_state.rename_remove_error", "key", key, "error", removeErr)
@@ -756,7 +818,7 @@ func (s *Store) WriteState(ctx context.Context, key string, body io.Reader, opts
 		ModifiedAtUnix: s.now().Unix(),
 		Descriptor:     append([]byte(nil), descriptor...),
 	}
-	if err := s.writeJSONAtomic(s.stateInfoPath(encoded), info, "state-info"); err != nil {
+	if err := s.writeJSONAtomic(ns, s.stateInfoPath(ns, encoded), info, "state-info"); err != nil {
 		logger.Debug("disk.write_state.write_info_error", "key", key, "error", err)
 		return nil, err
 	}
@@ -778,24 +840,25 @@ func (s *Store) WriteState(ctx context.Context, key string, body io.Reader, opts
 }
 
 // Remove deletes the JSON state for key, respecting an expected ETag when supplied.
-func (s *Store) Remove(ctx context.Context, key string, expectedETag string) (err error) {
+func (s *Store) Remove(ctx context.Context, namespace, key string, expectedETag string) (err error) {
 	logger, verbose := s.loggers(ctx)
 	start := time.Now()
 	verbose.Trace("disk.remove_state.begin", "key", key, "expected_etag", expectedETag)
 
-	encoded, err := s.encodeKey(key)
+	ns, encoded, err := s.encodeKey(namespace, key)
 	if err != nil {
 		logger.Debug("disk.remove_state.encode_error", "key", key, "error", err)
 		return err
 	}
-	glob := globalKeyMutex(encoded)
+	storageKey := path.Join(ns, key)
+	glob := globalKeyMutex(storageKey)
 	glob.Lock()
 	defer glob.Unlock()
-	mu := s.keyLock(key)
+	mu := s.keyLock(storageKey)
 	mu.Lock()
 	defer mu.Unlock()
 
-	fl, err := s.acquireFileLock(key)
+	fl, err := s.acquireFileLock(storageKey)
 	if err != nil {
 		logger.Debug("disk.remove_state.filelock_error", "key", key, "error", err)
 		return err
@@ -807,7 +870,7 @@ func (s *Store) Remove(ctx context.Context, key string, expectedETag string) (er
 	}()
 
 	if expectedETag != "" {
-		info, err := s.readStateRecord(encoded)
+		info, err := s.readStateRecord(ns, encoded)
 		if err != nil {
 			logger.Debug("disk.remove_state.info_error", "key", key, "error", err)
 			return err
@@ -818,8 +881,8 @@ func (s *Store) Remove(ctx context.Context, key string, expectedETag string) (er
 		}
 	}
 
-	dataPath := s.stateDataPath(encoded)
-	infoPath := s.stateInfoPath(encoded)
+	dataPath := s.stateDataPath(ns, encoded)
+	infoPath := s.stateInfoPath(ns, encoded)
 	errData := os.Remove(dataPath)
 	errInfo := os.Remove(infoPath)
 	if errData != nil && !errors.Is(errData, os.ErrNotExist) {
@@ -830,7 +893,7 @@ func (s *Store) Remove(ctx context.Context, key string, expectedETag string) (er
 		logger.Debug("disk.remove_state.remove_info_error", "key", key, "error", errInfo)
 		return errInfo
 	}
-	_ = os.Remove(s.stateDirPath(encoded))
+	_ = os.Remove(s.stateDirPath(ns, encoded))
 	if errors.Is(errData, os.ErrNotExist) && errors.Is(errInfo, os.ErrNotExist) {
 		verbose.Debug("disk.remove_state.not_found", "key", key, "elapsed", time.Since(start))
 		return storage.ErrNotFound
@@ -839,12 +902,12 @@ func (s *Store) Remove(ctx context.Context, key string, expectedETag string) (er
 	return nil
 }
 
-func (s *Store) loadObjectInfo(key string) (*storage.ObjectInfo, error) {
-	dataPath, err := s.objectDataPath(key)
+func (s *Store) loadObjectInfo(namespace, key string) (*storage.ObjectInfo, error) {
+	dataPath, err := s.objectDataPath(namespace, key)
 	if err != nil {
 		return nil, err
 	}
-	infoPath, err := s.objectInfoPath(key)
+	infoPath, err := s.objectInfoPath(namespace, key)
 	if err != nil {
 		return nil, err
 	}
@@ -880,8 +943,8 @@ func (s *Store) loadObjectInfo(key string) (*storage.ObjectInfo, error) {
 	return info, nil
 }
 
-func (s *Store) storeObjectInfo(key string, rec objectInfoRecord) error {
-	infoPath, err := s.objectInfoPath(key)
+func (s *Store) storeObjectInfo(namespace, key string, rec objectInfoRecord) error {
+	infoPath, err := s.objectInfoPath(namespace, key)
 	if err != nil {
 		return err
 	}
@@ -892,7 +955,11 @@ func (s *Store) storeObjectInfo(key string, rec objectInfoRecord) error {
 	if err != nil {
 		return fmt.Errorf("disk: encode object metadata for %q: %w", key, err)
 	}
-	tmp, err := os.CreateTemp(s.tmpDir, "objectinfo-*")
+	tmpDir := s.namespaceTmpDir(namespace)
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		return fmt.Errorf("disk: prepare tmp dir for %q: %w", key, err)
+	}
+	tmp, err := os.CreateTemp(tmpDir, "objectinfo-*")
 	if err != nil {
 		return fmt.Errorf("disk: create temp metadata file for %q: %w", key, err)
 	}
@@ -918,14 +985,35 @@ func (s *Store) storeObjectInfo(key string, rec objectInfoRecord) error {
 }
 
 // ListObjects enumerates on-disk objects using lexical ordering of keys.
-func (s *Store) ListObjects(ctx context.Context, opts storage.ListOptions) (*storage.ListResult, error) {
+func (s *Store) ListObjects(ctx context.Context, namespace string, opts storage.ListOptions) (*storage.ListResult, error) {
 	logger, verbose := s.loggers(ctx)
 	start := time.Now()
-	verbose.Trace("disk.list_objects.begin", "prefix", opts.Prefix, "start_after", opts.StartAfter, "limit", opts.Limit)
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		return nil, fmt.Errorf("disk: namespace required")
+	}
+	verbose.Trace("disk.list_objects.begin",
+		"namespace", namespace,
+		"prefix", opts.Prefix,
+		"start_after", opts.StartAfter,
+		"limit", opts.Limit,
+	)
+
+	objectsDir := s.namespaceObjectsDir(namespace)
+	if _, err := os.Stat(objectsDir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return &storage.ListResult{}, nil
+		}
+		logger.Debug("disk.list_objects.stat_error", "namespace", namespace, "error", err)
+		return nil, fmt.Errorf("disk: list objects: %w", err)
+	}
 
 	keys := make([]string, 0, 64)
-	err := filepath.WalkDir(s.objectDir, func(path string, d os.DirEntry, walkErr error) error {
+	err := filepath.WalkDir(objectsDir, func(p string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
+			if errors.Is(walkErr, os.ErrNotExist) {
+				return nil
+			}
 			return walkErr
 		}
 		if d.IsDir() {
@@ -934,7 +1022,7 @@ func (s *Store) ListObjects(ctx context.Context, opts storage.ListOptions) (*sto
 		if strings.HasSuffix(d.Name(), ".info.json") {
 			return nil
 		}
-		key, err := s.keyFromObjectPath(path)
+		key, err := s.keyFromObjectPath(namespace, p)
 		if err != nil {
 			return err
 		}
@@ -948,9 +1036,10 @@ func (s *Store) ListObjects(ctx context.Context, opts storage.ListOptions) (*sto
 		return nil
 	})
 	if err != nil {
-		logger.Debug("disk.list_objects.walk_error", "error", err)
+		logger.Debug("disk.list_objects.walk_error", "namespace", namespace, "error", err)
 		return nil, fmt.Errorf("disk: list objects: %w", err)
 	}
+
 	sort.Strings(keys)
 	limit := len(keys)
 	if opts.Limit > 0 && opts.Limit < limit {
@@ -960,9 +1049,9 @@ func (s *Store) ListObjects(ctx context.Context, opts storage.ListOptions) (*sto
 		Objects: make([]storage.ObjectInfo, 0, limit),
 	}
 	for i := 0; i < limit; i++ {
-		info, err := s.loadObjectInfo(keys[i])
+		info, err := s.loadObjectInfo(namespace, keys[i])
 		if err != nil {
-			logger.Debug("disk.list_objects.load_error", "key", keys[i], "error", err)
+			logger.Debug("disk.list_objects.load_error", "namespace", namespace, "key", keys[i], "error", err)
 			return nil, err
 		}
 		result.Objects = append(result.Objects, *info)
@@ -972,6 +1061,7 @@ func (s *Store) ListObjects(ctx context.Context, opts storage.ListOptions) (*sto
 		result.NextStartAfter = keys[limit-1]
 	}
 	verbose.Debug("disk.list_objects.success",
+		"namespace", namespace,
 		"prefix", opts.Prefix,
 		"start_after", opts.StartAfter,
 		"limit", opts.Limit,
@@ -983,10 +1073,14 @@ func (s *Store) ListObjects(ctx context.Context, opts storage.ListOptions) (*sto
 }
 
 // GetObject streams the object payload for key.
-func (s *Store) GetObject(ctx context.Context, key string) (io.ReadCloser, *storage.ObjectInfo, error) {
+func (s *Store) GetObject(ctx context.Context, namespace, key string) (io.ReadCloser, *storage.ObjectInfo, error) {
 	logger, verbose := s.loggers(ctx)
-	verbose.Trace("disk.get_object.begin", "key", key)
-	dataPath, err := s.objectDataPath(key)
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		return nil, nil, fmt.Errorf("disk: namespace required")
+	}
+	verbose.Trace("disk.get_object.begin", "namespace", namespace, "key", key)
+	dataPath, err := s.objectDataPath(namespace, key)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -996,10 +1090,10 @@ func (s *Store) GetObject(ctx context.Context, key string) (io.ReadCloser, *stor
 			verbose.Debug("disk.get_object.not_found", "key", key)
 			return nil, nil, storage.ErrNotFound
 		}
-		logger.Debug("disk.get_object.open_error", "key", key, "error", err)
+		logger.Debug("disk.get_object.open_error", "namespace", namespace, "key", key, "error", err)
 		return nil, nil, fmt.Errorf("disk: open object %q: %w", key, err)
 	}
-	info, err := s.loadObjectInfo(key)
+	info, err := s.loadObjectInfo(namespace, key)
 	if err != nil {
 		f.Close()
 		return nil, nil, err
@@ -1007,39 +1101,43 @@ func (s *Store) GetObject(ctx context.Context, key string) (io.ReadCloser, *stor
 	if plain, ok := storage.ObjectPlaintextSizeFromContext(ctx); ok && plain > 0 {
 		info.Size = plain
 	}
-	verbose.Debug("disk.get_object.success", "key", key, "etag", info.ETag, "size", info.Size)
+	verbose.Debug("disk.get_object.success", "namespace", namespace, "key", key, "etag", info.ETag, "size", info.Size)
 	return f, info, nil
 }
 
 // PutObject writes an object to disk with optional conditional semantics.
-func (s *Store) PutObject(ctx context.Context, key string, body io.Reader, opts storage.PutObjectOptions) (*storage.ObjectInfo, error) {
+func (s *Store) PutObject(ctx context.Context, namespace, key string, body io.Reader, opts storage.PutObjectOptions) (*storage.ObjectInfo, error) {
 	logger, verbose := s.loggers(ctx)
-	verbose.Trace("disk.put_object.begin", "key", key, "expected_etag", opts.ExpectedETag, "if_not_exists", opts.IfNotExists)
-	dataPath, err := s.objectDataPath(key)
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		return nil, fmt.Errorf("disk: namespace required")
+	}
+	verbose.Trace("disk.put_object.begin", "namespace", namespace, "key", key, "expected_etag", opts.ExpectedETag, "if_not_exists", opts.IfNotExists)
+	dataPath, err := s.objectDataPath(namespace, key)
 	if err != nil {
 		return nil, err
 	}
 	var current *storage.ObjectInfo
 	if opts.IfNotExists || opts.ExpectedETag != "" {
-		info, err := s.loadObjectInfo(key)
+		info, err := s.loadObjectInfo(namespace, key)
 		if err != nil && !errors.Is(err, storage.ErrNotFound) {
-			logger.Debug("disk.put_object.load_error", "key", key, "error", err)
+			logger.Debug("disk.put_object.load_error", "namespace", namespace, "key", key, "error", err)
 			return nil, err
 		}
 		if err == nil {
 			current = info
 		}
 		if opts.IfNotExists && current != nil {
-			verbose.Debug("disk.put_object.exists", "key", key)
+			verbose.Debug("disk.put_object.exists", "namespace", namespace, "key", key)
 			return nil, storage.ErrCASMismatch
 		}
 		if opts.ExpectedETag != "" {
 			if current == nil {
-				verbose.Debug("disk.put_object.cas_missing", "key", key, "expected_etag", opts.ExpectedETag)
+				verbose.Debug("disk.put_object.cas_missing", "namespace", namespace, "key", key, "expected_etag", opts.ExpectedETag)
 				return nil, storage.ErrNotFound
 			}
 			if current.ETag != opts.ExpectedETag {
-				verbose.Debug("disk.put_object.cas_mismatch", "key", key, "expected_etag", opts.ExpectedETag, "current_etag", current.ETag)
+				verbose.Debug("disk.put_object.cas_mismatch", "namespace", namespace, "key", key, "expected_etag", opts.ExpectedETag, "current_etag", current.ETag)
 				return nil, storage.ErrCASMismatch
 			}
 		}
@@ -1047,7 +1145,11 @@ func (s *Store) PutObject(ctx context.Context, key string, body io.Reader, opts 
 	if err := os.MkdirAll(filepath.Dir(dataPath), 0o755); err != nil {
 		return nil, fmt.Errorf("disk: prepare object directory for %q: %w", key, err)
 	}
-	tmp, err := os.CreateTemp(s.tmpDir, "object-*")
+	tmpDir := s.namespaceTmpDir(namespace)
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		return nil, fmt.Errorf("disk: prepare tmp dir for %q: %w", key, err)
+	}
+	tmp, err := os.CreateTemp(tmpDir, "object-*")
 	if err != nil {
 		return nil, fmt.Errorf("disk: create temp object for %q: %w", key, err)
 	}
@@ -1073,7 +1175,7 @@ func (s *Store) PutObject(ctx context.Context, key string, body io.Reader, opts 
 		return nil, fmt.Errorf("disk: rename object %q: %w", key, err)
 	}
 	now := s.now()
-	if err := s.storeObjectInfo(key, objectInfoRecord{
+	if err := s.storeObjectInfo(namespace, key, objectInfoRecord{
 		ETag:          newETag,
 		ContentType:   opts.ContentType,
 		UpdatedAtUnix: now.Unix(),
@@ -1093,21 +1195,25 @@ func (s *Store) PutObject(ctx context.Context, key string, body io.Reader, opts 
 		info.Size = fi.Size()
 		info.LastModified = fi.ModTime()
 	} else {
-		logger.Debug("disk.put_object.stat_error", "key", key, "error", err)
+		logger.Debug("disk.put_object.stat_error", "namespace", namespace, "key", key, "error", err)
 	}
-	verbose.Debug("disk.put_object.success", "key", key, "size", info.Size, "etag", info.ETag)
+	verbose.Debug("disk.put_object.success", "namespace", namespace, "key", key, "size", info.Size, "etag", info.ETag)
 	return info, nil
 }
 
 // DeleteObject removes an object from disk applying optional CAS semantics.
-func (s *Store) DeleteObject(ctx context.Context, key string, opts storage.DeleteObjectOptions) error {
+func (s *Store) DeleteObject(ctx context.Context, namespace, key string, opts storage.DeleteObjectOptions) error {
 	logger, verbose := s.loggers(ctx)
-	verbose.Trace("disk.delete_object.begin", "key", key, "expected_etag", opts.ExpectedETag, "ignore_not_found", opts.IgnoreNotFound)
-	dataPath, err := s.objectDataPath(key)
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		return fmt.Errorf("disk: namespace required")
+	}
+	verbose.Trace("disk.delete_object.begin", "namespace", namespace, "key", key, "expected_etag", opts.ExpectedETag, "ignore_not_found", opts.IgnoreNotFound)
+	dataPath, err := s.objectDataPath(namespace, key)
 	if err != nil {
 		return err
 	}
-	info, err := s.loadObjectInfo(key)
+	info, err := s.loadObjectInfo(namespace, key)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			if opts.IgnoreNotFound {
@@ -1122,21 +1228,22 @@ func (s *Store) DeleteObject(ctx context.Context, key string, opts storage.Delet
 		return storage.ErrCASMismatch
 	}
 	if err := os.Remove(dataPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		logger.Debug("disk.delete_object.remove_error", "key", key, "error", err)
+		logger.Debug("disk.delete_object.remove_error", "namespace", namespace, "key", key, "error", err)
 		return fmt.Errorf("disk: remove object %q: %w", key, err)
 	}
-	infoPath, err := s.objectInfoPath(key)
+	infoPath, err := s.objectInfoPath(namespace, key)
 	if err != nil {
 		return err
 	}
 	if err := os.Remove(infoPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		logger.Debug("disk.delete_object.remove_info_error", "key", key, "error", err)
+		logger.Debug("disk.delete_object.remove_info_error", "namespace", namespace, "key", key, "error", err)
 		return fmt.Errorf("disk: remove object metadata %q: %w", key, err)
 	}
-	verbose.Debug("disk.delete_object.success", "key", key)
+	verbose.Debug("disk.delete_object.success", "namespace", namespace, "key", key)
 
+	base := s.namespaceObjectsDir(namespace)
 	dir := filepath.Dir(dataPath)
-	for dir != s.objectDir && dir != "." {
+	for dir != base && dir != "." {
 		if err := os.Remove(dir); err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ENOTEMPTY) {
 			break
 		}
@@ -1154,8 +1261,8 @@ func (s *Store) SweepOnceForTests() {
 	s.sweepOnce()
 }
 
-func (s *Store) readMetaRecord(encoded string) (*metaRecord, error) {
-	data, err := os.ReadFile(s.metaPath(encoded))
+func (s *Store) readMetaRecord(namespace, encoded string) (*metaRecord, error) {
+	data, err := os.ReadFile(s.metaPath(namespace, encoded))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, storage.ErrNotFound
@@ -1175,8 +1282,8 @@ func (s *Store) readMetaRecord(encoded string) (*metaRecord, error) {
 	}, nil
 }
 
-func (s *Store) readStateRecord(encoded string) (*stateRecord, error) {
-	data, err := os.ReadFile(s.stateInfoPath(encoded))
+func (s *Store) readStateRecord(namespace, encoded string) (*stateRecord, error) {
+	data, err := os.ReadFile(s.stateInfoPath(namespace, encoded))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, storage.ErrNotFound
@@ -1190,11 +1297,15 @@ func (s *Store) readStateRecord(encoded string) (*stateRecord, error) {
 	return &rec, nil
 }
 
-func (s *Store) writeBytesAtomic(dest string, payload []byte, prefix string) error {
+func (s *Store) writeBytesAtomic(namespace, dest string, payload []byte, prefix string) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(s.tmpDir, "lockd-"+prefix+"-*")
+	tmpDir := s.namespaceTmpDir(namespace)
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(tmpDir, "lockd-"+prefix+"-*")
 	if err != nil {
 		return err
 	}
@@ -1219,11 +1330,15 @@ func (s *Store) writeBytesAtomic(dest string, payload []byte, prefix string) err
 	return nil
 }
 
-func (s *Store) writeJSONAtomic(dest string, v any, prefix string) error {
+func (s *Store) writeJSONAtomic(namespace, dest string, v any, prefix string) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(s.tmpDir, "lockd-"+prefix+"-*")
+	tmpDir := s.namespaceTmpDir(namespace)
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(tmpDir, "lockd-"+prefix+"-*")
 	if err != nil {
 		return err
 	}
@@ -1270,37 +1385,52 @@ func (s *Store) sweepOnce() {
 		return
 	}
 	now := s.now()
-	entries, err := os.ReadDir(s.metaDir)
+	nsEntries, err := os.ReadDir(s.root)
 	if err != nil {
 		return
 	}
-	for _, entry := range entries {
-		if entry.IsDir() {
+	ctx := context.Background()
+	for _, nsEntry := range nsEntries {
+		if !nsEntry.IsDir() {
 			continue
 		}
-		name := entry.Name()
-		if !strings.HasSuffix(name, ".pb") {
-			continue
-		}
-		encoded := strings.TrimSuffix(name, ".pb")
-		rec, err := s.readMetaRecord(encoded)
+		namespace := nsEntry.Name()
+		metaDir := s.namespaceMetaDir(namespace)
+		metaEntries, err := os.ReadDir(metaDir)
 		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
 			continue
 		}
-		if rec.Meta.UpdatedAtUnix == 0 {
-			continue
+		for _, entry := range metaEntries {
+			if entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			if !strings.HasSuffix(name, ".pb") {
+				continue
+			}
+			encoded := strings.TrimSuffix(name, ".pb")
+			rec, err := s.readMetaRecord(namespace, encoded)
+			if err != nil {
+				continue
+			}
+			if rec.Meta.UpdatedAtUnix == 0 {
+				continue
+			}
+			age := now.Sub(time.Unix(rec.Meta.UpdatedAtUnix, 0))
+			if age <= s.retention {
+				continue
+			}
+			decoded, err := url.PathUnescape(encoded)
+			if err != nil {
+				continue
+			}
+			key := decoded
+			_ = s.DeleteMeta(ctx, namespace, key, rec.ETag)
+			_ = s.Remove(ctx, namespace, key, "")
 		}
-		age := now.Sub(time.Unix(rec.Meta.UpdatedAtUnix, 0))
-		if age <= s.retention {
-			continue
-		}
-		key, err := url.PathUnescape(encoded)
-		if err != nil {
-			continue
-		}
-		// best-effort removal
-		_ = s.DeleteMeta(context.Background(), key, rec.ETag)
-		_ = s.Remove(context.Background(), key, "")
 	}
 }
 

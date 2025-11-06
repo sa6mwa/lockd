@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -72,6 +73,7 @@ type Server struct {
 }
 
 type leaseSnapshot struct {
+	Namespace string
 	Key       string
 	Owner     string
 	LeaseID   string
@@ -409,6 +411,7 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 		Crypto:                     crypto,
 		Logger:                     logger,
 		Clock:                      serverClock,
+		DefaultNamespace:           cfg.DefaultNamespace,
 		JSONMaxBytes:               cfg.JSONMaxBytes,
 		CompactWriter:              jsonUtil.compactWriter,
 		DefaultTTL:                 cfg.DefaultTTL,
@@ -749,36 +752,43 @@ func (s *Server) snapshotActiveLeases(ctx context.Context) (leases []leaseSnapsh
 		}
 	}()
 
-	var keys []string
-	keys, err = s.backend.ListMetaKeys(ctx)
-	if err != nil {
-		return nil, err
+	observed := []string{}
+	if s.handler != nil {
+		observed = s.handler.ObservedNamespaces()
 	}
-	totalKeys = len(keys)
+	if len(observed) == 0 {
+		observed = []string{s.cfg.DefaultNamespace}
+	}
 	now := s.clock.Now().Unix()
-	leases = make([]leaseSnapshot, 0, len(keys))
-	for _, key := range keys {
-		var meta *storage.Meta
-		meta, _, err = s.backend.LoadMeta(ctx, key)
-		if err != nil {
-			if errors.Is(err, storage.ErrNotFound) {
+	for _, ns := range observed {
+		relKeys, listErr := s.backend.ListMetaKeys(ctx, ns)
+		if listErr != nil {
+			return nil, listErr
+		}
+		totalKeys += len(relKeys)
+		for _, rel := range relKeys {
+			meta, _, loadErr := s.backend.LoadMeta(ctx, ns, rel)
+			if loadErr != nil {
+				if errors.Is(loadErr, storage.ErrNotFound) {
+					continue
+				}
+				logger.Warn("shutdown.drain.load_meta_failed", "namespace", ns, "key", rel, "error", loadErr)
 				continue
 			}
-			logger.Warn("shutdown.drain.load_meta_failed", "key", key, "error", err)
-			continue
+			if meta.Lease == nil {
+				continue
+			}
+			if meta.Lease.ExpiresAtUnix <= now {
+				continue
+			}
+			leases = append(leases, leaseSnapshot{
+				Namespace: ns,
+				Key:       rel,
+				Owner:     meta.Lease.Owner,
+				LeaseID:   meta.Lease.ID,
+				ExpiresAt: meta.Lease.ExpiresAtUnix,
+			})
 		}
-		if meta.Lease == nil {
-			continue
-		}
-		if meta.Lease.ExpiresAtUnix <= now {
-			continue
-		}
-		leases = append(leases, leaseSnapshot{
-			Key:       key,
-			Owner:     meta.Lease.Owner,
-			LeaseID:   meta.Lease.ID,
-			ExpiresAt: meta.Lease.ExpiresAtUnix,
-		})
 	}
 	return leases, nil
 }
@@ -789,12 +799,16 @@ func (s *Server) forceReleaseLeases(ctx context.Context, leases []leaseSnapshot)
 		return 0
 	}
 	for _, lease := range leases {
-		meta, etag, err := s.backend.LoadMeta(ctx, lease.Key)
+		namespacedKey := lease.Key
+		if lease.Namespace != "" {
+			namespacedKey = lease.Namespace + "/" + lease.Key
+		}
+		meta, etag, err := s.backend.LoadMeta(ctx, lease.Namespace, lease.Key)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
 				continue
 			}
-			s.logger.Warn("shutdown.drain.force_release.load_failed", "key", lease.Key, "error", err)
+			s.logger.Warn("shutdown.drain.force_release.load_failed", "key", namespacedKey, "error", err)
 			continue
 		}
 		if meta.Lease == nil || meta.Lease.ID != lease.LeaseID {
@@ -802,11 +816,11 @@ func (s *Server) forceReleaseLeases(ctx context.Context, leases []leaseSnapshot)
 		}
 		meta.Lease = nil
 		meta.UpdatedAtUnix = s.clock.Now().Unix()
-		if _, err := s.backend.StoreMeta(ctx, lease.Key, meta, etag); err != nil {
+		if _, err := s.backend.StoreMeta(ctx, lease.Namespace, lease.Key, meta, etag); err != nil {
 			if errors.Is(err, storage.ErrCASMismatch) {
 				continue
 			}
-			s.logger.Warn("shutdown.drain.force_release.store_failed", "key", lease.Key, "error", err)
+			s.logger.Warn("shutdown.drain.force_release.store_failed", "key", namespacedKey, "error", err)
 			continue
 		}
 		released++
@@ -872,7 +886,11 @@ func (s *Server) performDrain(parentCtx context.Context, policy DrainLeasesPolic
 			if i >= 5 {
 				break
 			}
-			sample = append(sample, lease.Key)
+			namespacedKey := lease.Key
+			if lease.Namespace != "" {
+				namespacedKey = lease.Namespace + "/" + lease.Key
+			}
+			sample = append(sample, namespacedKey)
 		}
 		if len(sample) > 0 {
 			logger.Debug("shutdown.drain.sample", "keys", sample)
@@ -982,33 +1000,44 @@ func (s *Server) stopSweeper() {
 }
 
 func (s *Server) sweepExpired(ctx context.Context) error {
-	keys, err := s.backend.ListMetaKeys(ctx)
-	if err != nil {
-		return err
+	observed := []string{}
+	if s.handler != nil {
+		observed = s.handler.ObservedNamespaces()
+	}
+	if len(observed) == 0 {
+		observed = []string{s.cfg.DefaultNamespace}
 	}
 	now := s.clock.Now().Unix()
-	for _, key := range keys {
-		meta, etag, err := s.backend.LoadMeta(ctx, key)
+	for _, ns := range observed {
+		relKeys, err := s.backend.ListMetaKeys(ctx, ns)
 		if err != nil {
-			if errors.Is(err, storage.ErrNotFound) {
+			return err
+		}
+		sort.Strings(relKeys)
+		for _, rel := range relKeys {
+			namespacedKey := ns + "/" + rel
+			meta, etag, err := s.backend.LoadMeta(ctx, ns, rel)
+			if err != nil {
+				if errors.Is(err, storage.ErrNotFound) {
+					continue
+				}
+				s.logger.Warn("sweeper load meta failed", "namespace", ns, "key", namespacedKey, "error", err)
 				continue
 			}
-			s.logger.Warn("sweeper load meta failed", "key", key, "error", err)
-			continue
-		}
-		if meta.Lease == nil {
-			continue
-		}
-		if meta.Lease.ExpiresAtUnix > now {
-			continue
-		}
-		meta.Lease = nil
-		meta.UpdatedAtUnix = now
-		if _, err := s.backend.StoreMeta(ctx, key, meta, etag); err != nil {
-			if errors.Is(err, storage.ErrCASMismatch) {
+			if meta.Lease == nil {
 				continue
 			}
-			s.logger.Warn("sweeper store meta failed", "key", key, "error", err)
+			if meta.Lease.ExpiresAtUnix > now {
+				continue
+			}
+			meta.Lease = nil
+			meta.UpdatedAtUnix = now
+			if _, err := s.backend.StoreMeta(ctx, ns, rel, meta, etag); err != nil {
+				if errors.Is(err, storage.ErrCASMismatch) {
+					continue
+				}
+				s.logger.Warn("sweeper store meta failed", "namespace", ns, "key", namespacedKey, "error", err)
+			}
 		}
 	}
 	return nil
@@ -1091,6 +1120,8 @@ func StartServer(ctx context.Context, cfg Config, opts ...Option) (*Server, func
 	if err != nil {
 		return nil, nil, err
 	}
+	effective := srv.cfg
+	srv.logger.Info("server.starting", "listen", effective.Listen, "network", effective.ListenProto, "store", effective.Store, "mtls", effective.MTLSEnabled(), "default_namespace", effective.DefaultNamespace)
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- srv.Start()

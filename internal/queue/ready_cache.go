@@ -23,6 +23,7 @@ var readyCacheTrace = os.Getenv("LOCKD_READY_CACHE_TRACE") == "1"
 
 type readyCache struct {
 	svc   *Service
+	ns    string
 	queue string
 
 	mu      sync.Mutex
@@ -39,9 +40,10 @@ type readyEntry struct {
 
 type readyHeap []*readyEntry
 
-func newReadyCache(svc *Service, queue string) *readyCache {
+func newReadyCache(svc *Service, namespace, queue string) *readyCache {
 	return &readyCache{
 		svc:     svc,
+		ns:      namespace,
 		queue:   queue,
 		entries: make(map[string]*readyEntry),
 		items:   readyHeap{},
@@ -207,11 +209,11 @@ func (c *readyCache) refresh(ctx context.Context, pageSize int, now time.Time, f
 	scans := 0
 	for {
 		scans++
-		objects, next, truncated, err := c.svc.listMessageObjects(ctx, c.queue, cursor, pageSize)
+		objects, next, truncated, err := c.svc.listMessageObjects(ctx, c.ns, c.queue, cursor, pageSize)
 		if err != nil {
 			if readyCacheTrace {
 				if elapsed := time.Since(start); elapsed > 0 {
-					fmt.Fprintf(os.Stderr, "ready_cache refresh error queue=%s scans=%d elapsed=%s\n", c.queue, scans, elapsed)
+					fmt.Fprintf(os.Stderr, "ready_cache refresh error namespace=%s queue=%s scans=%d elapsed=%s\n", c.ns, c.queue, scans, elapsed)
 				}
 			}
 			return readyAdded, err
@@ -232,7 +234,7 @@ func (c *readyCache) refresh(ctx context.Context, pageSize int, now time.Time, f
 				}
 				continue
 			}
-			descPtr, err := c.svc.loadDescriptor(ctx, obj.Key)
+			descPtr, err := c.svc.loadDescriptor(ctx, c.ns, c.queue, obj.Key)
 			if err != nil {
 				if errors.Is(err, storage.ErrNotFound) {
 					continue
@@ -264,7 +266,7 @@ func (c *readyCache) refresh(ctx context.Context, pageSize int, now time.Time, f
 	}
 	if readyCacheTrace {
 		if elapsed := time.Since(start); elapsed > 0 {
-			fmt.Fprintf(os.Stderr, "ready_cache refresh queue=%s readyAdded=%v scans=%d elapsed=%s pageSize=%d\n", c.queue, readyAdded, scans, elapsed, pageSize)
+			fmt.Fprintf(os.Stderr, "ready_cache refresh namespace=%s queue=%s readyAdded=%v scans=%d elapsed=%s pageSize=%d\n", c.ns, c.queue, readyAdded, scans, elapsed, pageSize)
 		}
 	}
 	return readyAdded, nil
@@ -273,14 +275,14 @@ func (c *readyCache) refresh(ctx context.Context, pageSize int, now time.Time, f
 func (c *readyCache) handleDescriptor(ctx context.Context, desc MessageDescriptor, now time.Time) (bool, error) {
 	doc := desc.Document
 	if doc.ExpiresAt != nil && doc.ExpiresAt.Before(now) {
-		_ = c.svc.deleteMessageInternal(ctx, c.queue, doc.ID, desc.MetadataETag, false)
+		_ = c.svc.deleteMessageInternal(ctx, c.ns, c.queue, doc.ID, desc.MetadataETag, false)
 		c.remove(doc.ID)
 		return false, nil
 	}
 
 	if doc.MaxAttempts > 0 && doc.Attempts >= doc.MaxAttempts {
 		docCopy := doc
-		if err := c.svc.moveToDLQInternal(ctx, c.queue, doc.ID, &docCopy, desc.MetadataETag, false); err != nil {
+		if err := c.svc.moveToDLQInternal(ctx, c.ns, c.queue, doc.ID, &docCopy, desc.MetadataETag, false); err != nil {
 			return false, err
 		}
 		c.remove(doc.ID)

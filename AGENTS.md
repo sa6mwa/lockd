@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This repo delivers a tiny, single-binary **lock + state** service—“just enough etcd”—focused on **exclusive leases** and **atomic JSON state**. It coordinates workers so **only one holder at a time** can read/advance a shared checkpoint (JSON up to ~50 MB). It favors reliability and simplicity, runs well in `FROM scratch`, and avoids POSIX assumptions.
+This repo delivers a tiny, single-binary **lock + state + queue** service—“just enough etcd”—focused on **exclusive leases**, **atomic JSON state**, and an **at-least-once queue**. It coordinates workers so **only one holder at a time** can read/advance a shared checkpoint or dequeue a message (JSON up to ~100 MB by default, configurable). It favors reliability and simplicity, runs well in `FROM scratch`, and avoids POSIX assumptions.
 
 ## Context (what matters)
 
@@ -14,9 +14,9 @@ This repo delivers a tiny, single-binary **lock + state** service—“just enou
 * **Config**: cobra CLI + viper (env prefix `LOCKD_`).
 * **Layout**:
 
-  * `/` → server library (export `lockd.Server`, `lockd.Config`, etc.).
-  * `cmd/lockd/` → main server app using the library.
-* `client/` → Go client SDK (`client.New(...)`).
+* `/` → server library (export `lockd.Server`, `lockd.Config`, queue dispatcher helpers, etc.).
+* `cmd/lockd/` → main server app using the library and bundling the CLI (leases + queue commands).
+* `client/` → Go client SDK (`client.New(...)`) plus CLI helpers.
 
 ## General guidelines (no hard requirements)
 
@@ -35,17 +35,19 @@ This repo delivers a tiny, single-binary **lock + state** service—“just enou
 
 ## Debugging guardrails
 
-* Long-running unit or integration tests (especially around AcquireForUpdate or chaos scenarios) must include watchdog timers that panic after 5–10 s and dump all goroutines via `runtime.Stack`. Retain or extend these guards whenever you touch the tests so hangs always surface actionable traces.
-* If a hang is reported (in CI or by a teammate), treat it as a bug until proven otherwise. First step: reproduce with the watchdogs enabled to capture the stack trace, then follow up with targeted logging rather than letting the suite spin indefinitely.
-* The chaos proxy used by test harnesses should default to a single disconnect (`MaxDisconnects=1`) when simulating network drops. This gives deterministic “one failover” coverage without thrashing the client retry logic.
-* Client integration coverage lives in `client/client_integration_test.go` under the `integration` build tag. Run focused failover tests with `go test -tags integration -run 'TestAcquireForUpdate(Callback)?(ReconnectSingleServer|FailoverMultiServer)' ./client`.
-* Acquire-for-update handshake retries are bounded by `DefaultFailureRetries` (default 5; override with `client.WithAcquireFailureRetries`). Keep README.md/doc.go aligned when adjusting the constant, and note that other client calls surface `lease_required` immediately so callers can decide how to react.
-* Integration tests must exercise the production `client.Client` and associated session APIs exactly as shipped. Do not introduce test-only clients or release helpers to “make a scenario pass”; if a case fails, fix the real client (and document it) so user workflows and tests stay aligned.
-* Object-store backends may surface stale `LoadMeta`/`ReadState` results briefly; the handler now tracks “observed” keys and uses short warmup retries before treating a key as new. Preserve that logic (and the observed-key tracking) when touching storage code so we don’t accidentally wipe metadata on S3/Blob eventual reads.
+* **Watchdogs everywhere** – Long-running unit or integration tests (AcquireForUpdate, queue chaos, etc.) must install watchdog timers that panic after 5–10 s and dump all goroutines via `runtime.Stack`. Keep these guards in place when modifying the tests so hangs always yield actionable traces.
+* **Hangs are bugs** – Reproduce any reported hang with watchdogs enabled first, capture the stack trace, and only then add instrumentation. Never let suites spin indefinitely.
+* **Deterministic chaos** – The chaos proxy used by test harnesses should default to a single disconnect (`MaxDisconnects=1`) when simulating network drops. This gives deterministic “one failover” coverage without thrashing the client retry logic.
+* **Real clients only** – Integration tests (lease + queue) must exercise the production `client.Client` APIs exactly as shipped. Do not introduce test-only clients to “make a scenario pass”; fix the real client (and document it) so user workflows and tests stay aligned.
+* **Acquire-for-update contract** – Acquire-for-update handshake retries are bounded by `DefaultFailureRetries` (default 5; override with `client.WithAcquireFailureRetries`). Keep README.md / doc.go / client/doc.go aligned when adjusting the constant, and note that other client calls surface `lease_required` immediately so callers can decide how to react.
+* **Namespace + queue coverage** – Every backend-facing integration suite needs at least one test with two servers sharing the same store and multiple workers per namespace competing for the same lock/queue. This guarantees namespace wiring never regresses and queue watchers remain deterministic.
+* **Observed key tracking** – Object-store backends may surface stale `LoadMeta`/`ReadState` results briefly; the handler tracks “observed” keys and uses short warm-up retries before treating a key as new. Preserve that logic (and the observed-key tracking) whenever touching storage code so we don’t accidentally wipe metadata on S3/Blob eventual reads.
 
 ## Primary use-case
 
 A single worker holds a lease for a **key** (stream), reads the JSON checkpoint/cursor, does work, updates the checkpoint atomically (CAS), and releases. If the worker dies, lease expiry hands off to the next worker which resumes from the last committed state.
+
+A sibling workflow feeds the **at-least-once queue**: producers enqueue payloads (optionally with workflow state), consumers dequeue with owner identities, process the payload, then ack/nack/extend using fencing-protected helpers. DLQ moves happen automatically after `max_attempts`, and queue state shares the same namespace/observed-key semantics as the lock surface.
 
 ## HTTP API (behavioral sketch, `/v1`)
 

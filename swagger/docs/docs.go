@@ -87,6 +87,18 @@ const docTemplate = `{
                 "summary": "Acquire an exclusive lease",
                 "parameters": [
                     {
+                        "type": "string",
+                        "description": "Namespace override when the request body omits it",
+                        "name": "namespace",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Key to acquire when the request body omits it",
+                        "name": "key",
+                        "in": "query"
+                    },
+                    {
                         "description": "Lease acquisition parameters",
                         "name": "request",
                         "in": "body",
@@ -142,6 +154,12 @@ const docTemplate = `{
                 "parameters": [
                     {
                         "type": "string",
+                        "description": "Namespace override (defaults to server setting)",
+                        "name": "namespace",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
                         "description": "Lease key",
                         "name": "key",
                         "in": "query",
@@ -183,6 +201,12 @@ const docTemplate = `{
                 ],
                 "summary": "Read the JSON checkpoint for a key",
                 "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Namespace override (defaults to server setting)",
+                        "name": "namespace",
+                        "in": "query"
+                    },
                     {
                         "type": "string",
                         "description": "Lease key",
@@ -259,6 +283,18 @@ const docTemplate = `{
                 "summary": "Extend an active lease TTL",
                 "parameters": [
                     {
+                        "type": "string",
+                        "description": "Namespace override when the request body omits it",
+                        "name": "namespace",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Key override when the request body omits it",
+                        "name": "key",
+                        "in": "query"
+                    },
+                    {
                         "description": "Lease keepalive parameters",
                         "name": "request",
                         "in": "body",
@@ -322,6 +358,12 @@ const docTemplate = `{
                 "summary": "Acknowledge a delivered message",
                 "parameters": [
                     {
+                        "type": "string",
+                        "description": "Namespace override when the request body omits it",
+                        "name": "namespace",
+                        "in": "query"
+                    },
+                    {
                         "description": "Acknowledgement payload",
                         "name": "request",
                         "in": "body",
@@ -378,6 +420,24 @@ const docTemplate = `{
                 ],
                 "summary": "Fetch one or more queue messages",
                 "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Namespace override when the request body omits it",
+                        "name": "namespace",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Queue name override when the request body omits it",
+                        "name": "queue",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Owner override when the request body omits it",
+                        "name": "owner",
+                        "in": "query"
+                    },
                     {
                         "description": "Dequeue parameters",
                         "name": "request",
@@ -442,6 +502,24 @@ const docTemplate = `{
                 "summary": "Fetch queue messages with state attachments",
                 "parameters": [
                     {
+                        "type": "string",
+                        "description": "Namespace override when the request body omits it",
+                        "name": "namespace",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Queue name override when the request body omits it",
+                        "name": "queue",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Owner override when the request body omits it",
+                        "name": "owner",
+                        "in": "query"
+                    },
+                    {
                         "description": "Dequeue parameters",
                         "name": "request",
                         "in": "body",
@@ -504,6 +582,18 @@ const docTemplate = `{
                 ],
                 "summary": "Enqueue a message",
                 "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Namespace override when the metadata omits it",
+                        "name": "namespace",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Queue override when the metadata omits it",
+                        "name": "queue",
+                        "in": "query"
+                    },
                     {
                         "type": "string",
                         "description": "JSON encoded api.EnqueueRequest metadata",
@@ -572,6 +662,12 @@ const docTemplate = `{
                 "summary": "Extend a delivery lease",
                 "parameters": [
                     {
+                        "type": "string",
+                        "description": "Namespace override when the request body omits it",
+                        "name": "namespace",
+                        "in": "query"
+                    },
+                    {
                         "description": "Extend payload",
                         "name": "request",
                         "in": "body",
@@ -629,6 +725,12 @@ const docTemplate = `{
                 "summary": "Return a message to the queue",
                 "parameters": [
                     {
+                        "type": "string",
+                        "description": "Namespace override when the request body omits it",
+                        "name": "namespace",
+                        "in": "query"
+                    },
+                    {
                         "description": "Negative acknowledgement payload",
                         "name": "request",
                         "in": "body",
@@ -685,6 +787,24 @@ const docTemplate = `{
                 ],
                 "summary": "Stream queue deliveries",
                 "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Namespace override when the request body omits it",
+                        "name": "namespace",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Queue name override when the request body omits it",
+                        "name": "queue",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Owner override when the request body omits it",
+                        "name": "owner",
+                        "in": "query"
+                    },
                     {
                         "description": "Subscription parameters (queue, owner, wait_seconds, visibility)",
                         "name": "request",
@@ -749,6 +869,24 @@ const docTemplate = `{
                 "summary": "Stream queue deliveries with state",
                 "parameters": [
                     {
+                        "type": "string",
+                        "description": "Namespace override when the request body omits it",
+                        "name": "namespace",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Queue name override when the request body omits it",
+                        "name": "queue",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Owner override when the request body omits it",
+                        "name": "owner",
+                        "in": "query"
+                    },
+                    {
                         "description": "Subscription parameters (queue, owner, wait_seconds, visibility)",
                         "name": "request",
                         "in": "body",
@@ -812,6 +950,18 @@ const docTemplate = `{
                 "summary": "Release a held lease",
                 "parameters": [
                     {
+                        "type": "string",
+                        "description": "Namespace override when the request body omits it",
+                        "name": "namespace",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Key override when the request body omits it",
+                        "name": "key",
+                        "in": "query"
+                    },
+                    {
                         "description": "Lease release parameters",
                         "name": "request",
                         "in": "body",
@@ -868,6 +1018,12 @@ const docTemplate = `{
                 ],
                 "summary": "Delete the JSON state for a key",
                 "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Namespace override (defaults to server setting)",
+                        "name": "namespace",
+                        "in": "query"
+                    },
                     {
                         "type": "string",
                         "description": "Lease key",
@@ -948,6 +1104,12 @@ const docTemplate = `{
                 ],
                 "summary": "Atomically update the JSON state for a key",
                 "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Namespace override (defaults to server setting)",
+                        "name": "namespace",
+                        "in": "query"
+                    },
                     {
                         "type": "string",
                         "description": "Lease key",
@@ -1041,6 +1203,9 @@ const docTemplate = `{
                 "meta_etag": {
                     "type": "string"
                 },
+                "namespace": {
+                    "type": "string"
+                },
                 "queue": {
                     "type": "string"
                 },
@@ -1075,6 +1240,9 @@ const docTemplate = `{
                 "key": {
                     "type": "string"
                 },
+                "namespace": {
+                    "type": "string"
+                },
                 "owner": {
                     "type": "string"
                 },
@@ -1101,6 +1269,9 @@ const docTemplate = `{
                 "lease_id": {
                     "type": "string"
                 },
+                "namespace": {
+                    "type": "string"
+                },
                 "owner": {
                     "type": "string"
                 },
@@ -1118,6 +1289,9 @@ const docTemplate = `{
         "api.DequeueRequest": {
             "type": "object",
             "properties": {
+                "namespace": {
+                    "type": "string"
+                },
                 "owner": {
                     "type": "string"
                 },
@@ -1150,6 +1324,9 @@ const docTemplate = `{
                 "lease_id": {
                     "type": "string"
                 },
+                "namespace": {
+                    "type": "string"
+                },
                 "owner": {
                     "type": "string"
                 },
@@ -1177,6 +1354,9 @@ const docTemplate = `{
                     "type": "integer"
                 },
                 "message_id": {
+                    "type": "string"
+                },
+                "namespace": {
                     "type": "string"
                 },
                 "not_visible_until_unix": {
@@ -1231,6 +1411,9 @@ const docTemplate = `{
                 "meta_etag": {
                     "type": "string"
                 },
+                "namespace": {
+                    "type": "string"
+                },
                 "queue": {
                     "type": "string"
                 },
@@ -1271,6 +1454,9 @@ const docTemplate = `{
                 "lease_id": {
                     "type": "string"
                 },
+                "namespace": {
+                    "type": "string"
+                },
                 "ttl_seconds": {
                     "type": "integer"
                 }
@@ -1301,6 +1487,9 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "meta_etag": {
+                    "type": "string"
+                },
+                "namespace": {
                     "type": "string"
                 },
                 "queue": {
@@ -1335,6 +1524,9 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "lease_id": {
+                    "type": "string"
+                },
+                "namespace": {
                     "type": "string"
                 }
             }

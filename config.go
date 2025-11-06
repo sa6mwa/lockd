@@ -147,6 +147,7 @@ type Config struct {
 	Listen               string
 	ListenProto          string
 	Store                string
+	DefaultNamespace     string
 	JSONMaxBytes         int64
 	JSONUtil             string
 	SpoolMemoryThreshold int64
@@ -261,6 +262,11 @@ func (c *Config) Validate() error {
 	if c.Store == "" {
 		return fmt.Errorf("config: store is required")
 	}
+	ns, err := NormalizeNamespace(c.DefaultNamespace, DefaultNamespace)
+	if err != nil {
+		return fmt.Errorf("config: default namespace: %w", err)
+	}
+	c.DefaultNamespace = ns
 	if c.JSONMaxBytes <= 0 {
 		c.JSONMaxBytes = DefaultJSONMaxBytes
 	}

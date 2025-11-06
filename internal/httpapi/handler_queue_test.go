@@ -25,11 +25,11 @@ type flakyPutStore struct {
 	failFlag  uint32
 }
 
-func (s *flakyPutStore) PutObject(ctx context.Context, key string, body io.Reader, opts storage.PutObjectOptions) (*storage.ObjectInfo, error) {
+	func (s *flakyPutStore) PutObject(ctx context.Context, namespace, key string, body io.Reader, opts storage.PutObjectOptions) (*storage.ObjectInfo, error) {
 	if s.targetKey != "" && key == s.targetKey && opts.ExpectedETag != "" && atomic.CompareAndSwapUint32(&s.failFlag, 0, 1) {
 		return nil, storage.ErrNotFound
 	}
-	return s.Backend.PutObject(ctx, key, body, opts)
+	return s.Backend.PutObject(ctx, namespace, key, body, opts)
 }
 
 func TestHandleQueueDequeueRetriesOnMissingMetaDuringIncrement(t *testing.T) {
@@ -51,14 +51,15 @@ func TestHandleQueueDequeueRetriesOnMissingMetaDuringIncrement(t *testing.T) {
 
 	ctx := context.Background()
 	queueName := "retry-queue"
-	msg, err := qSvc.Enqueue(ctx, queueName, bytes.NewReader([]byte("payload")), queue.EnqueueOptions{})
+	namespace := "default"
+	msg, err := qSvc.Enqueue(ctx, namespace, queueName, bytes.NewReader([]byte("payload")), queue.EnqueueOptions{})
 	if err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
 	store.targetKey = path.Join("q", queueName, "msg", msg.ID+".pb")
 
-	body := `{"queue":"` + queueName + `","owner":"worker","wait_seconds":0}`
+	body := `{"namespace":"` + namespace + `","queue":"` + queueName + `","owner":"worker","wait_seconds":0}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/queue/dequeue", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -76,9 +77,12 @@ func TestHandleQueueDequeueRetriesOnMissingMetaDuringIncrement(t *testing.T) {
 
 func TestHandlerReleasePendingDeliveriesAbortsAndCleans(t *testing.T) {
 	h := &Handler{}
+	namespace := "default"
 	delivery := &queueDelivery{
-		handler: h,
-		message: &api.Message{MessageID: "m-1"},
+		handler:   h,
+		namespace: namespace,
+		queueName: "queue",
+		message:   &api.Message{MessageID: "m-1"},
 	}
 
 	aborted := false
@@ -91,31 +95,34 @@ func TestHandlerReleasePendingDeliveriesAbortsAndCleans(t *testing.T) {
 	}
 	delivery.finalizeMu.Unlock()
 
-	h.trackPendingDelivery("queue", "worker", delivery)
+	h.trackPendingDelivery(namespace, "queue", "worker", delivery)
 
-	h.releasePendingDeliveries("queue", "worker")
+	h.releasePendingDeliveries(namespace, "queue", "worker")
 
 	if !aborted {
 		t.Fatalf("expected delivery to be aborted")
 	}
 
-	if _, ok := h.pendingDeliveries.Load("queue"); ok {
+	if _, ok := h.pendingDeliveries.Load(handlerQueueKey(namespace, "queue")); ok {
 		t.Fatalf("expected queue entry to be cleared")
 	}
 }
 
 func TestHandlerClearPendingDeliveryRemovesMessage(t *testing.T) {
 	h := &Handler{}
+	namespace := "default"
 	delivery := &queueDelivery{
-		handler: h,
-		message: &api.Message{MessageID: "m-1"},
+		handler:   h,
+		namespace: namespace,
+		queueName: "queue",
+		message:   &api.Message{MessageID: "m-1"},
 	}
 
-	h.trackPendingDelivery("queue", "worker", delivery)
+	h.trackPendingDelivery(namespace, "queue", "worker", delivery)
 
-	h.clearPendingDelivery("queue", "worker", "m-1")
+	h.clearPendingDelivery(namespace, "queue", "worker", "m-1")
 
-	if _, ok := h.pendingDeliveries.Load("queue"); ok {
+	if _, ok := h.pendingDeliveries.Load(handlerQueueKey(namespace, "queue")); ok {
 		t.Fatalf("expected queue entry to be removed after clear")
 	}
 }

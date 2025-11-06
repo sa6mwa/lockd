@@ -1,17 +1,18 @@
 package retry_test
 
 import (
-	"bytes"
-	"context"
-	"errors"
-	"fmt"
-	"io"
-	"testing"
-	"time"
+    "bytes"
+    "context"
+    "errors"
+    "fmt"
+    "io"
+    "testing"
+    "time"
 
-	"pkt.systems/lockd/internal/loggingutil"
-	"pkt.systems/lockd/internal/storage"
-	"pkt.systems/lockd/internal/storage/retry"
+    "pkt.systems/lockd/internal/loggingutil"
+    "pkt.systems/lockd/internal/storage"
+    "pkt.systems/lockd/internal/storage/retry"
+    "pkt.systems/lockd/namespaces"
 )
 
 type fakeClock struct {
@@ -39,64 +40,64 @@ func (f *fakeClock) Sleep(d time.Duration) {
 }
 
 type stubBackend struct {
-	loadMetaErrs  []error
-	loadMetaCalls int
-	hook          func(int)
+    loadMetaErrs  []error
+    loadMetaCalls int
+    hook          func(int)
 }
 
-func (s *stubBackend) LoadMeta(ctx context.Context, key string) (*storage.Meta, string, error) {
-	s.loadMetaCalls++
-	if s.hook != nil {
-		s.hook(s.loadMetaCalls)
-	}
-	var err error
+func (s *stubBackend) LoadMeta(ctx context.Context, namespace, key string) (*storage.Meta, string, error) {
+    s.loadMetaCalls++
+    if s.hook != nil {
+        s.hook(s.loadMetaCalls)
+    }
+    var err error
 	if idx := s.loadMetaCalls - 1; idx < len(s.loadMetaErrs) {
 		err = s.loadMetaErrs[idx]
 	}
 	if err != nil {
 		return nil, "", err
 	}
-	return &storage.Meta{Version: int64(s.loadMetaCalls)}, fmt.Sprintf("etag-%d", s.loadMetaCalls), nil
+    return &storage.Meta{Version: int64(s.loadMetaCalls)}, fmt.Sprintf("etag-%d", s.loadMetaCalls), nil
 }
 
-func (s *stubBackend) StoreMeta(context.Context, string, *storage.Meta, string) (string, error) {
-	return "", storage.ErrNotImplemented
+func (s *stubBackend) StoreMeta(context.Context, string, string, *storage.Meta, string) (string, error) {
+    return "", storage.ErrNotImplemented
 }
 
-func (s *stubBackend) DeleteMeta(context.Context, string, string) error {
-	return storage.ErrNotImplemented
+func (s *stubBackend) DeleteMeta(context.Context, string, string, string) error {
+    return storage.ErrNotImplemented
 }
 
-func (s *stubBackend) ListMetaKeys(context.Context) ([]string, error) {
-	return nil, storage.ErrNotImplemented
+func (s *stubBackend) ListMetaKeys(context.Context, string) ([]string, error) {
+    return nil, storage.ErrNotImplemented
 }
 
-func (s *stubBackend) ReadState(context.Context, string) (io.ReadCloser, *storage.StateInfo, error) {
-	return io.NopCloser(bytes.NewReader(nil)), nil, storage.ErrNotImplemented
+func (s *stubBackend) ReadState(context.Context, string, string) (io.ReadCloser, *storage.StateInfo, error) {
+    return io.NopCloser(bytes.NewReader(nil)), nil, storage.ErrNotImplemented
 }
 
-func (s *stubBackend) WriteState(context.Context, string, io.Reader, storage.PutStateOptions) (*storage.PutStateResult, error) {
-	return nil, storage.ErrNotImplemented
+func (s *stubBackend) WriteState(context.Context, string, string, io.Reader, storage.PutStateOptions) (*storage.PutStateResult, error) {
+    return nil, storage.ErrNotImplemented
 }
 
-func (s *stubBackend) Remove(context.Context, string, string) error {
-	return storage.ErrNotImplemented
+func (s *stubBackend) Remove(context.Context, string, string, string) error {
+    return storage.ErrNotImplemented
 }
 
-func (s *stubBackend) ListObjects(context.Context, storage.ListOptions) (*storage.ListResult, error) {
-	return nil, storage.ErrNotImplemented
+func (s *stubBackend) ListObjects(context.Context, string, storage.ListOptions) (*storage.ListResult, error) {
+    return nil, storage.ErrNotImplemented
 }
 
-func (s *stubBackend) GetObject(context.Context, string) (io.ReadCloser, *storage.ObjectInfo, error) {
-	return nil, nil, storage.ErrNotImplemented
+func (s *stubBackend) GetObject(context.Context, string, string) (io.ReadCloser, *storage.ObjectInfo, error) {
+    return nil, nil, storage.ErrNotImplemented
 }
 
-func (s *stubBackend) PutObject(context.Context, string, io.Reader, storage.PutObjectOptions) (*storage.ObjectInfo, error) {
-	return nil, storage.ErrNotImplemented
+func (s *stubBackend) PutObject(context.Context, string, string, io.Reader, storage.PutObjectOptions) (*storage.ObjectInfo, error) {
+    return nil, storage.ErrNotImplemented
 }
 
-func (s *stubBackend) DeleteObject(context.Context, string, storage.DeleteObjectOptions) error {
-	return storage.ErrNotImplemented
+func (s *stubBackend) DeleteObject(context.Context, string, string, storage.DeleteObjectOptions) error {
+    return storage.ErrNotImplemented
 }
 
 func (s *stubBackend) Close() error { return nil }
@@ -125,7 +126,7 @@ func TestLoadMetaRetriesTransientErrors(t *testing.T) {
 		Multiplier:  2,
 		MaxDelay:    10 * time.Millisecond,
 	})
-	meta, etag, err := wrapped.LoadMeta(context.Background(), "key")
+    meta, etag, err := wrapped.LoadMeta(context.Background(), namespaces.Default, "key")
 	if err != nil {
 		t.Fatalf("LoadMeta returned error: %v", err)
 	}
@@ -157,7 +158,7 @@ func TestLoadMetaStopsOnNonTransientError(t *testing.T) {
 	}
 	fc := &fakeClock{}
 	wrapped := retry.Wrap(back, loggingutil.NoopLogger(), fc, retry.Config{MaxAttempts: 3})
-	_, _, err := wrapped.LoadMeta(context.Background(), "key")
+    _, _, err := wrapped.LoadMeta(context.Background(), namespaces.Default, "key")
 	if err == nil || err.Error() != "fatal" {
 		t.Fatalf("expected fatal error, got %v", err)
 	}
@@ -174,10 +175,10 @@ func TestLoadMetaRespectsContextCancellation(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	back := &stubBackend{
-		loadMetaErrs: []error{
-			storage.NewTransientError(errors.New("flaky")),
-			storage.NewTransientError(errors.New("flaky")),
-		},
+			loadMetaErrs: []error{
+				storage.NewTransientError(errors.New("flaky")),
+				storage.NewTransientError(errors.New("flaky retry")),
+			},
 		hook: func(attempt int) {
 			if attempt == 1 {
 				cancel()
@@ -186,7 +187,7 @@ func TestLoadMetaRespectsContextCancellation(t *testing.T) {
 	}
 	fc := &fakeClock{}
 	wrapped := retry.Wrap(back, loggingutil.NoopLogger(), fc, retry.Config{MaxAttempts: 5})
-	_, _, err := wrapped.LoadMeta(ctx, "key")
+    _, _, err := wrapped.LoadMeta(ctx, namespaces.Default, "key")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context cancelled error, got %v", err)
 	}

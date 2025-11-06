@@ -179,21 +179,62 @@ func (s *Store) prefixed(parts ...string) string {
 	return path.Join(s.prefix, name)
 }
 
+func escapeSegments(p string) []string {
+	p = strings.TrimPrefix(p, "/")
+	if p == "" {
+		return nil
+	}
+	parts := strings.Split(p, "/")
+	escaped := make([]string, len(parts))
+	for i, segment := range parts {
+		escaped[i] = url.PathEscape(segment)
+	}
+	return escaped
+}
+
+func unescapeSegments(parts []string) ([]string, error) {
+	if len(parts) == 0 {
+		return nil, nil
+	}
+	decoded := make([]string, len(parts))
+	for i, segment := range parts {
+		value, err := url.PathUnescape(segment)
+		if err != nil {
+			return nil, err
+		}
+		decoded[i] = value
+	}
+	return decoded, nil
+}
+
 const (
 	metaContentTypePlain     = "application/x-protobuf"
 	metaContentTypeEncrypted = "application/vnd.lockd+protobuf-encrypted"
 )
 
-func (s *Store) metaBlob(key string) string {
-	return s.prefixed("meta", url.PathEscape(key)+".pb")
+func (s *Store) metaBlob(namespace, key string) (string, error) {
+	object, err := storage.NamespacedMetaObject(namespace, key)
+	if err != nil {
+		return "", err
+	}
+	return s.prefixed(escapeSegments(object)...), nil
 }
 
-func (s *Store) stateBlob(key string) string {
-	return s.prefixed("state", url.PathEscape(key)+".json")
+func (s *Store) stateBlob(namespace, key string) (string, error) {
+	object, err := storage.NamespacedStateObject(namespace, key)
+	if err != nil {
+		return "", err
+	}
+	return s.prefixed(escapeSegments(object)...), nil
 }
 
-func (s *Store) objectBlob(key string) string {
-	return s.prefixed(strings.TrimPrefix(key, "/"))
+func (s *Store) objectBlob(namespace, key string) (string, error) {
+	base := path.Join(namespace, strings.TrimPrefix(key, "/"))
+	segments := escapeSegments(strings.TrimPrefix(base, "/"))
+	if len(segments) == 0 {
+		return "", fmt.Errorf("azure: object key required")
+	}
+	return s.prefixed(segments...), nil
 }
 
 func (s *Store) trimObjectPrefix(name string) string {
@@ -213,8 +254,13 @@ func (s *Store) metaContentType() string {
 }
 
 // LoadMeta fetches the protobuf metadata document for key and returns its ETag.
-func (s *Store) LoadMeta(ctx context.Context, key string) (*storage.Meta, string, error) {
-	resp, err := s.client.DownloadStream(ctx, s.container, s.metaBlob(key), nil)
+
+func (s *Store) LoadMeta(ctx context.Context, namespace, key string) (*storage.Meta, string, error) {
+	blobName, err := s.metaBlob(namespace, key)
+	if err != nil {
+		return nil, "", err
+	}
+	resp, err := s.client.DownloadStream(ctx, s.container, blobName, nil)
 	if err != nil {
 		if isNotFound(err) {
 			return nil, "", storage.ErrNotFound
@@ -238,8 +284,12 @@ func (s *Store) LoadMeta(ctx context.Context, key string) (*storage.Meta, string
 }
 
 // StoreMeta writes the protobuf metadata document using conditional semantics when expectedETag is supplied.
-func (s *Store) StoreMeta(ctx context.Context, key string, meta *storage.Meta, expectedETag string) (string, error) {
+func (s *Store) StoreMeta(ctx context.Context, namespace, key string, meta *storage.Meta, expectedETag string) (string, error) {
 	payload, err := storage.MarshalMeta(meta, s.crypto)
+	if err != nil {
+		return "", err
+	}
+	blobName, err := s.metaBlob(namespace, key)
 	if err != nil {
 		return "", err
 	}
@@ -261,7 +311,7 @@ func (s *Store) StoreMeta(ctx context.Context, key string, meta *storage.Meta, e
 			},
 		}
 	}
-	resp, err := s.client.UploadStream(ctx, s.container, s.metaBlob(key), bytes.NewReader(payload), opts)
+	resp, err := s.client.UploadStream(ctx, s.container, blobName, bytes.NewReader(payload), opts)
 	if err != nil {
 		if isPreconditionFailed(err) {
 			return "", storage.ErrCASMismatch
@@ -275,8 +325,11 @@ func (s *Store) StoreMeta(ctx context.Context, key string, meta *storage.Meta, e
 }
 
 // DeleteMeta removes the metadata document for key, respecting the expected ETag when provided.
-func (s *Store) DeleteMeta(ctx context.Context, key string, expectedETag string) error {
-	blobName := s.metaBlob(key)
+func (s *Store) DeleteMeta(ctx context.Context, namespace, key string, expectedETag string) error {
+	blobName, err := s.metaBlob(namespace, key)
+	if err != nil {
+		return err
+	}
 	if expectedETag != "" {
 		opts := &azblob.DeleteBlobOptions{
 			AccessConditions: &blob.AccessConditions{
@@ -297,7 +350,7 @@ func (s *Store) DeleteMeta(ctx context.Context, key string, expectedETag string)
 		}
 		return nil
 	}
-	_, err := s.client.DeleteBlob(ctx, s.container, blobName, nil)
+	_, err = s.client.DeleteBlob(ctx, s.container, blobName, nil)
 	if err != nil {
 		if isNotFound(err) {
 			return storage.ErrNotFound
@@ -307,11 +360,20 @@ func (s *Store) DeleteMeta(ctx context.Context, key string, expectedETag string)
 	return nil
 }
 
-// ListMetaKeys enumerates the keys with stored metadata beneath the configured prefix.
-func (s *Store) ListMetaKeys(ctx context.Context) ([]string, error) {
-	prefix := s.prefixed("meta") + "/"
+// ListMetaKeys enumerates the keys with stored metadata within the namespace.
+func (s *Store) ListMetaKeys(ctx context.Context, namespace string) ([]string, error) {
+	metaBase := path.Join(namespace, "meta")
+	prefixSegments := escapeSegments(metaBase)
+	blobPrefix := s.prefixed(prefixSegments...)
+	if blobPrefix != "" {
+		blobPrefix = strings.TrimPrefix(blobPrefix, "/")
+	}
+	prefixValue := blobPrefix
+	if prefixValue != "" {
+		prefixValue += "/"
+	}
 	pager := s.client.NewListBlobsFlatPager(s.container, &azblob.ListBlobsFlatOptions{
-		Prefix: &prefix,
+		Prefix: &prefixValue,
 	})
 	var keys []string
 	for pager.More() {
@@ -323,24 +385,32 @@ func (s *Store) ListMetaKeys(ctx context.Context) ([]string, error) {
 			if item.Name == nil {
 				continue
 			}
-			name := strings.TrimPrefix(*item.Name, prefix)
-			name = strings.TrimSuffix(name, ".pb")
-			if name == "" {
+			rel := strings.TrimPrefix(*item.Name, prefixValue)
+			if strings.HasPrefix(rel, "tmp/") || rel == "" {
 				continue
 			}
-			key, err := url.PathUnescape(name)
+			if !strings.HasSuffix(rel, ".pb") {
+				continue
+			}
+			entry := strings.TrimSuffix(rel, ".pb")
+			parts := strings.Split(entry, "/")
+			decoded, err := unescapeSegments(parts)
 			if err != nil {
 				continue
 			}
-			keys = append(keys, key)
+			keys = append(keys, path.Join(decoded...))
 		}
 	}
 	return keys, nil
 }
 
 // ReadState streams the JSON state blob for key and returns associated metadata.
-func (s *Store) ReadState(ctx context.Context, key string) (io.ReadCloser, *storage.StateInfo, error) {
-	resp, err := s.client.DownloadStream(ctx, s.container, s.stateBlob(key), nil)
+func (s *Store) ReadState(ctx context.Context, namespace, key string) (io.ReadCloser, *storage.StateInfo, error) {
+	blobName, err := s.stateBlob(namespace, key)
+	if err != nil {
+		return nil, nil, err
+	}
+	resp, err := s.client.DownloadStream(ctx, s.container, blobName, nil)
 	if err != nil {
 		if isNotFound(err) {
 			return nil, nil, storage.ErrNotFound
@@ -374,28 +444,33 @@ func (s *Store) ReadState(ctx context.Context, key string) (io.ReadCloser, *stor
 	if plain, ok := storage.StatePlaintextSizeFromContext(ctx); ok && plain > 0 {
 		info.Size = plain
 	}
+	objectCtx := storage.StateObjectContext(path.Join(namespace, key))
 	if encrypted {
 		if len(descriptor) == 0 {
 			resp.Body.Close()
 			return nil, nil, fmt.Errorf("azure: missing state descriptor for %q", key)
 		}
-		mat, err := s.crypto.MaterialFromDescriptor(storage.StateObjectContext(key), descriptor)
+		mat, err := s.crypto.MaterialFromDescriptor(objectCtx, descriptor)
 		if err != nil {
 			resp.Body.Close()
 			return nil, nil, err
 		}
-		decReader, err := s.crypto.DecryptReaderForMaterial(resp.Body, mat)
+		reader, err := s.crypto.DecryptReaderForMaterial(resp.Body, mat)
 		if err != nil {
 			resp.Body.Close()
 			return nil, nil, err
 		}
-		return decReader, info, nil
+		return reader, info, nil
 	}
 	return resp.Body, info, nil
 }
 
 // WriteState uploads a new state blob, optionally enforcing a previous ETag.
-func (s *Store) WriteState(ctx context.Context, key string, body io.Reader, opts storage.PutStateOptions) (*storage.PutStateResult, error) {
+func (s *Store) WriteState(ctx context.Context, namespace, key string, body io.Reader, opts storage.PutStateOptions) (*storage.PutStateResult, error) {
+	blobName, err := s.stateBlob(namespace, key)
+	if err != nil {
+		return nil, err
+	}
 	uploadOpts := &azblob.UploadStreamOptions{
 		HTTPHeaders: &blob.HTTPHeaders{
 			BlobContentType: to.Ptr(storage.ContentTypeJSON),
@@ -412,6 +487,7 @@ func (s *Store) WriteState(ctx context.Context, key string, body io.Reader, opts
 	var descriptor []byte
 	var plainBytes atomic.Int64
 	reader := body
+	objectCtx := storage.StateObjectContext(path.Join(namespace, key))
 	if encrypted {
 		uploadOpts.HTTPHeaders.BlobContentType = to.Ptr(storage.ContentTypeJSONEncrypted)
 		descFromCtx, ok := storage.StateDescriptorFromContext(ctx)
@@ -419,13 +495,13 @@ func (s *Store) WriteState(ctx context.Context, key string, body io.Reader, opts
 		var err error
 		if ok && len(descFromCtx) > 0 {
 			descriptor = append([]byte(nil), descFromCtx...)
-			mat, err = s.crypto.MaterialFromDescriptor(storage.StateObjectContext(key), descriptor)
+			mat, err = s.crypto.MaterialFromDescriptor(objectCtx, descriptor)
 			if err != nil {
 				return nil, err
 			}
 		} else {
 			var descBytes []byte
-			mat, descBytes, err = s.crypto.MintMaterial(storage.StateObjectContext(key))
+			mat, descBytes, err = s.crypto.MintMaterial(objectCtx)
 			if err != nil {
 				return nil, err
 			}
@@ -456,7 +532,7 @@ func (s *Store) WriteState(ctx context.Context, key string, body io.Reader, opts
 	} else {
 		reader = countingReader{r: body, n: &plainBytes}
 	}
-	resp, err := s.client.UploadStream(ctx, s.container, s.stateBlob(key), reader, uploadOpts)
+	resp, err := s.client.UploadStream(ctx, s.container, blobName, reader, uploadOpts)
 	if err != nil {
 		if isPreconditionFailed(err) {
 			return nil, storage.ErrCASMismatch
@@ -478,7 +554,7 @@ func (s *Store) WriteState(ctx context.Context, key string, body io.Reader, opts
 }
 
 // Remove deletes the state blob for key, applying CAS when expectedETag is set.
-func (s *Store) Remove(ctx context.Context, key string, expectedETag string) error {
+func (s *Store) Remove(ctx context.Context, namespace, key string, expectedETag string) error {
 	opts := &azblob.DeleteBlobOptions{}
 	if expectedETag != "" {
 		opts.AccessConditions = &blob.AccessConditions{
@@ -487,7 +563,11 @@ func (s *Store) Remove(ctx context.Context, key string, expectedETag string) err
 			},
 		}
 	}
-	_, err := s.client.DeleteBlob(ctx, s.container, s.stateBlob(key), opts)
+	blobName, err := s.stateBlob(namespace, key)
+	if err != nil {
+		return err
+	}
+	_, err = s.client.DeleteBlob(ctx, s.container, blobName, opts)
 	if err != nil {
 		if isPreconditionFailed(err) {
 			return storage.ErrCASMismatch
@@ -500,11 +580,20 @@ func (s *Store) Remove(ctx context.Context, key string, expectedETag string) err
 	return nil
 }
 
-// ListObjects enumerates blobs stored under opts.Prefix.
-func (s *Store) ListObjects(ctx context.Context, opts storage.ListOptions) (*storage.ListResult, error) {
-	prefix := s.objectBlob(strings.TrimPrefix(opts.Prefix, "/"))
+// ListObjects enumerates blobs stored under opts.Prefix within the namespace.
+func (s *Store) ListObjects(ctx context.Context, namespace string, opts storage.ListOptions) (*storage.ListResult, error) {
+	base := path.Join(namespace, strings.TrimPrefix(opts.Prefix, "/"))
+	segments := escapeSegments(base)
+	blobPrefix := s.prefixed(segments...)
+	if blobPrefix != "" {
+		blobPrefix = strings.TrimPrefix(blobPrefix, "/")
+	}
+	prefixValue := blobPrefix
+	if prefixValue != "" {
+		prefixValue += "/"
+	}
 	pager := s.client.NewListBlobsFlatPager(s.container, &azblob.ListBlobsFlatOptions{
-		Prefix: to.Ptr(prefix),
+		Prefix: &prefixValue,
 	})
 	result := &storage.ListResult{}
 	limit := opts.Limit
@@ -512,6 +601,11 @@ func (s *Store) ListObjects(ctx context.Context, opts storage.ListOptions) (*sto
 		limit = int(^uint(0) >> 1)
 	}
 	lastKey := ""
+	trimNamespace := strings.Trim(namespace, "/")
+	if trimNamespace != "" {
+		trimNamespace += "/"
+	}
+	logicalPrefix := strings.TrimPrefix(opts.Prefix, "/")
 outer:
 	for pager.More() {
 		page, err := pager.NextPage(ctx)
@@ -522,8 +616,18 @@ outer:
 			if item.Name == nil {
 				continue
 			}
-			logical := s.trimObjectPrefix(*item.Name)
-			if opts.Prefix != "" && !strings.HasPrefix(logical, opts.Prefix) {
+			trimmed := s.trimObjectPrefix(*item.Name)
+			if trimNamespace != "" {
+				if !strings.HasPrefix(trimmed, trimNamespace) {
+					continue
+				}
+				trimmed = strings.TrimPrefix(trimmed, trimNamespace)
+			}
+			logical := strings.TrimPrefix(trimmed, "/")
+			if logical == "" {
+				continue
+			}
+			if logicalPrefix != "" && !strings.HasPrefix(logical, logicalPrefix) {
 				continue
 			}
 			if opts.StartAfter != "" && logical <= opts.StartAfter {
@@ -533,9 +637,7 @@ outer:
 				result.Truncated = true
 				break outer
 			}
-			info := storage.ObjectInfo{
-				Key: logical,
-			}
+			info := storage.ObjectInfo{Key: logical}
 			if item.Properties != nil {
 				if item.Properties.ETag != nil {
 					info.ETag = string(*item.Properties.ETag)
@@ -560,9 +662,12 @@ outer:
 	return result, nil
 }
 
-// GetObject opens the blob referenced by key.
-func (s *Store) GetObject(ctx context.Context, key string) (io.ReadCloser, *storage.ObjectInfo, error) {
-	blobName := s.objectBlob(strings.TrimPrefix(key, "/"))
+// GetObject opens the blob referenced by key within the namespace.
+func (s *Store) GetObject(ctx context.Context, namespace, key string) (io.ReadCloser, *storage.ObjectInfo, error) {
+	blobName, err := s.objectBlob(namespace, key)
+	if err != nil {
+		return nil, nil, err
+	}
 	resp, err := s.client.DownloadStream(ctx, s.container, blobName, nil)
 	if err != nil {
 		if isNotFound(err) {
@@ -595,9 +700,12 @@ func (s *Store) GetObject(ctx context.Context, key string) (io.ReadCloser, *stor
 	return resp.Body, info, nil
 }
 
-// PutObject uploads a blob with CAS/creation semantics.
-func (s *Store) PutObject(ctx context.Context, key string, body io.Reader, opts storage.PutObjectOptions) (*storage.ObjectInfo, error) {
-	blobName := s.objectBlob(strings.TrimPrefix(key, "/"))
+// PutObject uploads a blob with CAS/creation semantics within the namespace.
+func (s *Store) PutObject(ctx context.Context, namespace, key string, body io.Reader, opts storage.PutObjectOptions) (*storage.ObjectInfo, error) {
+	blobName, err := s.objectBlob(namespace, key)
+	if err != nil {
+		return nil, err
+	}
 	uploadOpts := &azblob.UploadStreamOptions{
 		HTTPHeaders: &blob.HTTPHeaders{},
 	}
@@ -628,20 +736,22 @@ func (s *Store) PutObject(ctx context.Context, key string, body io.Reader, opts 
 		}
 		return nil, fmt.Errorf("azure: upload object: %w", err)
 	}
-	info := &storage.ObjectInfo{Key: key}
+	info := &storage.ObjectInfo{Key: key, ContentType: opts.ContentType}
 	if resp.ETag != nil {
 		info.ETag = string(*resp.ETag)
 	}
-	info.ContentType = opts.ContentType
 	if len(opts.Descriptor) > 0 {
 		info.Descriptor = append([]byte(nil), opts.Descriptor...)
 	}
 	return info, nil
 }
 
-// DeleteObject removes the blob, optionally enforcing a matching ETag.
-func (s *Store) DeleteObject(ctx context.Context, key string, opts storage.DeleteObjectOptions) error {
-	blobName := s.objectBlob(strings.TrimPrefix(key, "/"))
+// DeleteObject removes the blob, optionally enforcing a matching ETag within the namespace.
+func (s *Store) DeleteObject(ctx context.Context, namespace, key string, opts storage.DeleteObjectOptions) error {
+	blobName, err := s.objectBlob(namespace, key)
+	if err != nil {
+		return err
+	}
 	deleteOpts := &azblob.DeleteBlobOptions{}
 	if opts.ExpectedETag != "" {
 		deleteOpts.AccessConditions = &blob.AccessConditions{
@@ -650,7 +760,7 @@ func (s *Store) DeleteObject(ctx context.Context, key string, opts storage.Delet
 			},
 		}
 	}
-	_, err := s.client.DeleteBlob(ctx, s.container, blobName, deleteOpts)
+	_, err = s.client.DeleteBlob(ctx, s.container, blobName, deleteOpts)
 	if err != nil {
 		if isPreconditionFailed(err) {
 			return storage.ErrCASMismatch

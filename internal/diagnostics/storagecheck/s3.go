@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/s3"
 	"pkt.systems/lockd/internal/uuidv7"
+	"pkt.systems/lockd/namespaces"
 )
 
 // Result captures the outcome of store verification checks.
@@ -127,11 +129,7 @@ func verifyObjectStore(ctx context.Context, provider string, s3cfg s3.Config, in
 		})
 	}
 
-	verifyPrefix := strings.Trim(s3cfg.Prefix, "/")
-	if verifyPrefix != "" {
-		verifyPrefix += "/"
-	}
-	verifyPrefix = path.Join(verifyPrefix, "lockd-diagnostics")
+	verifyPrefix := path.Join(strings.Trim(s3cfg.Prefix, "/"), namespaces.Default, "lockd-diagnostics")
 	keyID := uuidv7.NewString()
 	metaObject := path.Join(verifyPrefix, "meta", keyID+".json")
 	stateObject := path.Join(verifyPrefix, "state", keyID+".json")
@@ -238,27 +236,50 @@ func verifyObjectStore(ctx context.Context, provider string, s3cfg s3.Config, in
 }
 
 func buildAWSPolicy(bucket, prefix string) string {
-	resources := []string{fmt.Sprintf("arn:aws:s3:::%s", bucket)}
+	bucketARN := fmt.Sprintf("arn:aws:s3:::%s", bucket)
 	trim := strings.Trim(prefix, "/")
-	metaRes := fmt.Sprintf("arn:aws:s3:::%s/meta/*", bucket)
-	stateRes := fmt.Sprintf("arn:aws:s3:::%s/state/*", bucket)
-	queueRes := fmt.Sprintf("arn:aws:s3:::%s/q/*", bucket)
-	diagMeta := fmt.Sprintf("arn:aws:s3:::%s/lockd-diagnostics/meta/*", bucket)
-	diagState := fmt.Sprintf("arn:aws:s3:::%s/lockd-diagnostics/state/*", bucket)
-	diagQueue := fmt.Sprintf("arn:aws:s3:::%s/lockd-diagnostics/q/*", bucket)
+	basePrefix := fmt.Sprintf("arn:aws:s3:::%s/*", bucket)
 	if trim != "" {
-		metaRes = fmt.Sprintf("arn:aws:s3:::%s/%s/meta/*", bucket, trim)
-		stateRes = fmt.Sprintf("arn:aws:s3:::%s/%s/state/*", bucket, trim)
-		queueRes = fmt.Sprintf("arn:aws:s3:::%s/%s/q/*", bucket, trim)
-		diagMeta = fmt.Sprintf("arn:aws:s3:::%s/%s/lockd-diagnostics/meta/*", bucket, trim)
-		diagState = fmt.Sprintf("arn:aws:s3:::%s/%s/lockd-diagnostics/state/*", bucket, trim)
-		diagQueue = fmt.Sprintf("arn:aws:s3:::%s/%s/lockd-diagnostics/q/*", bucket, trim)
-		resources = append(resources, fmt.Sprintf("arn:aws:s3:::%s/%s", bucket, trim))
+		basePrefix = fmt.Sprintf("arn:aws:s3:::%s/%s/*", bucket, trim)
 	}
-	resources = append(resources, metaRes, stateRes, queueRes, diagMeta, diagState, diagQueue)
+	metaRes := fmt.Sprintf("arn:aws:s3:::%s/*/meta/*", bucket)
+	stateRes := fmt.Sprintf("arn:aws:s3:::%s/*/state/*", bucket)
+	queueRes := fmt.Sprintf("arn:aws:s3:::%s/*/q/*", bucket)
+	diagPrefix := path.Join(trim, namespaces.Default, "lockd-diagnostics")
+	diagMeta := fmt.Sprintf("arn:aws:s3:::%s/%s/meta/*", bucket, diagPrefix)
+	diagState := fmt.Sprintf("arn:aws:s3:::%s/%s/state/*", bucket, diagPrefix)
+	diagQueue := fmt.Sprintf("arn:aws:s3:::%s/%s/q/*", bucket, diagPrefix)
+	if trim != "" {
+		metaRes = fmt.Sprintf("arn:aws:s3:::%s/%s/*/meta/*", bucket, trim)
+		stateRes = fmt.Sprintf("arn:aws:s3:::%s/%s/*/state/*", bucket, trim)
+		queueRes = fmt.Sprintf("arn:aws:s3:::%s/%s/*/q/*", bucket, trim)
+	}
+
+	objectSet := map[string]struct{}{
+		basePrefix: {},
+		metaRes:    {},
+		stateRes:   {},
+		queueRes:   {},
+		diagMeta:   {},
+		diagState:  {},
+		diagQueue:  {},
+	}
+	objectResources := make([]string, 0, len(objectSet))
+	for res := range objectSet {
+		objectResources = append(objectResources, res)
+	}
+	sort.Strings(objectResources)
 	policy := map[string]any{
 		"Version": "2012-10-17",
 		"Statement": []any{
+			map[string]any{
+				"Effect": "Allow",
+				"Action": []string{
+					"s3:ListBucket",
+					"s3:GetBucketLocation",
+				},
+				"Resource": []string{bucketARN},
+			},
 			map[string]any{
 				"Effect": "Allow",
 				"Action": []string{
@@ -268,7 +289,7 @@ func buildAWSPolicy(bucket, prefix string) string {
 					"s3:ListBucket",
 					"s3:AbortMultipartUpload",
 				},
-				"Resource": resources,
+				"Resource": objectResources,
 			},
 		},
 	}

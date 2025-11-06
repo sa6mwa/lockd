@@ -18,6 +18,7 @@ import (
 	minio "github.com/minio/minio-go/v7"
 
 	"pkt.systems/lockd/internal/storage"
+	"pkt.systems/lockd/namespaces"
 )
 
 func TestS3StoreMetaLifecycle(t *testing.T) {
@@ -29,12 +30,14 @@ func TestS3StoreMetaLifecycle(t *testing.T) {
 		t.Fatalf("new store: %v", err)
 	}
 	ctx := context.Background()
+	namespace := namespaces.Default
+	key := "alpha"
 	meta := &storage.Meta{Version: 1}
-	initialETag, err := store.StoreMeta(ctx, "alpha", meta, "")
+	initialETag, err := store.StoreMeta(ctx, namespace, key, meta, "")
 	if err != nil {
 		t.Fatalf("store meta create: %v", err)
 	}
-	got, gotETag, err := store.LoadMeta(ctx, "alpha")
+	got, gotETag, err := store.LoadMeta(ctx, namespace, key)
 	if err != nil {
 		t.Fatalf("load meta: %v", err)
 	}
@@ -42,20 +45,20 @@ func TestS3StoreMetaLifecycle(t *testing.T) {
 		t.Fatalf("expected version 1, got %d", got.Version)
 	}
 	meta.Version = 2
-	newETag, err := store.StoreMeta(ctx, "alpha", meta, gotETag)
+	newETag, err := store.StoreMeta(ctx, namespace, key, meta, gotETag)
 	if err != nil {
 		t.Fatalf("store meta update: %v", err)
 	}
-	if _, err := store.StoreMeta(ctx, "alpha", meta, "bogus"); err != storage.ErrCASMismatch {
+	if _, err := store.StoreMeta(ctx, namespace, key, meta, "bogus"); err != storage.ErrCASMismatch {
 		t.Fatalf("expected cas mismatch, got %v", err)
 	}
-	if err := store.DeleteMeta(ctx, "alpha", "wrong"); err != storage.ErrCASMismatch {
+	if err := store.DeleteMeta(ctx, namespace, key, "wrong"); err != storage.ErrCASMismatch {
 		t.Fatalf("expected delete cas mismatch, got %v", err)
 	}
-	if err := store.DeleteMeta(ctx, "alpha", newETag); err != nil {
+	if err := store.DeleteMeta(ctx, namespace, key, newETag); err != nil {
 		t.Fatalf("delete meta: %v", err)
 	}
-	if err := store.DeleteMeta(ctx, "alpha", initialETag); err != storage.ErrNotFound {
+	if err := store.DeleteMeta(ctx, namespace, key, initialETag); err != storage.ErrNotFound {
 		t.Fatalf("expected not found on second delete, got %v", err)
 	}
 }
@@ -69,11 +72,12 @@ func TestS3StoreStateLifecycle(t *testing.T) {
 		t.Fatalf("new store: %v", err)
 	}
 	ctx := context.Background()
-	res, err := store.WriteState(ctx, "stream", bytes.NewReader([]byte(`{"offset":1}`)), storage.PutStateOptions{})
+	namespace := namespaces.Default
+	res, err := store.WriteState(ctx, namespace, "stream", bytes.NewReader([]byte(`{"offset":1}`)), storage.PutStateOptions{})
 	if err != nil {
 		t.Fatalf("write state: %v", err)
 	}
-	reader, info, err := store.ReadState(ctx, "stream")
+	reader, info, err := store.ReadState(ctx, namespace, "stream")
 	if err != nil {
 		t.Fatalf("read state: %v", err)
 	}
@@ -88,13 +92,13 @@ func TestS3StoreStateLifecycle(t *testing.T) {
 	if info.ETag == "" || info.ETag != res.NewETag {
 		t.Fatalf("expected etag match, got %q vs %q", info.ETag, res.NewETag)
 	}
-	if _, err := store.WriteState(ctx, "stream", bytes.NewReader([]byte(`{"offset":2}`)), storage.PutStateOptions{ExpectedETag: "wrong"}); err != storage.ErrCASMismatch {
+	if _, err := store.WriteState(ctx, namespace, "stream", bytes.NewReader([]byte(`{"offset":2}`)), storage.PutStateOptions{ExpectedETag: "wrong"}); err != storage.ErrCASMismatch {
 		t.Fatalf("expected cas mismatch, got %v", err)
 	}
-	if err := store.Remove(ctx, "stream", "wrong"); err != storage.ErrCASMismatch {
+	if err := store.Remove(ctx, namespace, "stream", "wrong"); err != storage.ErrCASMismatch {
 		t.Fatalf("expected remove cas mismatch, got %v", err)
 	}
-	if err := store.Remove(ctx, "stream", res.NewETag); err != nil {
+	if err := store.Remove(ctx, namespace, "stream", res.NewETag); err != nil {
 		t.Fatalf("remove state: %v", err)
 	}
 }

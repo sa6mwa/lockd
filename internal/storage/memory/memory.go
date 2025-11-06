@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"path"
 	"sort"
 	"strings"
 	"sync"
@@ -37,6 +38,18 @@ type Store struct {
 	queueWatchMu      sync.Mutex
 
 	crypto *storage.Crypto
+}
+
+func canonicalKey(namespace, key string) (string, error) {
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		return "", fmt.Errorf("memory: namespace required")
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return "", fmt.Errorf("memory: key required")
+	}
+	return namespace + "/" + key, nil
 }
 
 type metaEntry struct {
@@ -102,10 +115,14 @@ func (s *Store) Close() error {
 }
 
 // LoadMeta returns a copy of the metadata stored for key.
-func (s *Store) LoadMeta(_ context.Context, key string) (*storage.Meta, string, error) {
+func (s *Store) LoadMeta(_ context.Context, namespace, key string) (*storage.Meta, string, error) {
+	storageKey, err := canonicalKey(namespace, key)
+	if err != nil {
+		return nil, "", err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	entry, ok := s.metas[key]
+	entry, ok := s.metas[storageKey]
 	if !ok {
 		return nil, "", storage.ErrNotFound
 	}
@@ -121,10 +138,14 @@ func (s *Store) LoadMeta(_ context.Context, key string) (*storage.Meta, string, 
 }
 
 // StoreMeta writes metadata for key, enforcing CAS when expectedETag is provided.
-func (s *Store) StoreMeta(_ context.Context, key string, meta *storage.Meta, expectedETag string) (string, error) {
+func (s *Store) StoreMeta(_ context.Context, namespace, key string, meta *storage.Meta, expectedETag string) (string, error) {
+	storageKey, err := canonicalKey(namespace, key)
+	if err != nil {
+		return "", err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	entry, exists := s.metas[key]
+	entry, exists := s.metas[storageKey]
 	if expectedETag != "" {
 		if !exists {
 			return "", storage.ErrNotFound
@@ -144,7 +165,7 @@ func (s *Store) StoreMeta(_ context.Context, key string, meta *storage.Meta, exp
 	if len(meta.StateDescriptor) > 0 {
 		clone.StateDescriptor = append([]byte(nil), meta.StateDescriptor...)
 	}
-	s.metas[key] = &metaEntry{
+	s.metas[storageKey] = &metaEntry{
 		data: &clone,
 		etag: etag,
 	}
@@ -152,11 +173,15 @@ func (s *Store) StoreMeta(_ context.Context, key string, meta *storage.Meta, exp
 }
 
 // DeleteMeta removes metadata for key, respecting the expected ETag when present.
-func (s *Store) DeleteMeta(_ context.Context, key string, expectedETag string) error {
+func (s *Store) DeleteMeta(_ context.Context, namespace, key string, expectedETag string) error {
+	storageKey, err := canonicalKey(namespace, key)
+	if err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if expectedETag != "" {
-		entry, ok := s.metas[key]
+		entry, ok := s.metas[storageKey]
 		if !ok {
 			return storage.ErrNotFound
 		}
@@ -164,25 +189,37 @@ func (s *Store) DeleteMeta(_ context.Context, key string, expectedETag string) e
 			return storage.ErrCASMismatch
 		}
 	}
-	delete(s.metas, key)
+	delete(s.metas, storageKey)
 	return nil
 }
 
 // ListMetaKeys enumerates the in-memory metadata keys.
-func (s *Store) ListMetaKeys(_ context.Context) ([]string, error) {
+func (s *Store) ListMetaKeys(_ context.Context, namespace string) ([]string, error) {
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		return nil, fmt.Errorf("memory: namespace required")
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	prefix := namespace + "/"
 	keys := make([]string, 0, len(s.metas))
 	for key := range s.metas {
-		keys = append(keys, key)
+		if strings.HasPrefix(key, prefix) {
+			keys = append(keys, strings.TrimPrefix(key, prefix))
+		}
 	}
+	sort.Strings(keys)
 	return keys, nil
 }
 
 // ReadState returns a streaming reader for the stored state blob.
-func (s *Store) ReadState(ctx context.Context, key string) (io.ReadCloser, *storage.StateInfo, error) {
+func (s *Store) ReadState(ctx context.Context, namespace, key string) (io.ReadCloser, *storage.StateInfo, error) {
+	storageKey, err := canonicalKey(namespace, key)
+	if err != nil {
+		return nil, nil, err
+	}
 	s.mu.RLock()
-	entry, ok := s.state[key]
+	entry, ok := s.state[storageKey]
 	if !ok {
 		s.mu.RUnlock()
 		return nil, nil, storage.ErrNotFound
@@ -205,14 +242,14 @@ func (s *Store) ReadState(ctx context.Context, key string) (io.ReadCloser, *stor
 		if ctxDesc, ok := storage.StateDescriptorFromContext(ctx); ok && len(ctxDesc) > 0 {
 			descriptor = append([]byte(nil), ctxDesc...)
 		} else if len(descriptor) == 0 {
-			if metaEntry, ok := s.metas[key]; ok && metaEntry.data != nil && len(metaEntry.data.StateDescriptor) > 0 {
+			if metaEntry, ok := s.metas[storageKey]; ok && metaEntry.data != nil && len(metaEntry.data.StateDescriptor) > 0 {
 				descriptor = append([]byte(nil), metaEntry.data.StateDescriptor...)
 			}
 		}
 		if len(descriptor) == 0 {
 			return nil, nil, fmt.Errorf("memory: missing state descriptor for %q", key)
 		}
-		mat, err := s.crypto.MaterialFromDescriptor(storage.StateObjectContext(key), descriptor)
+		mat, err := s.crypto.MaterialFromDescriptor(storage.StateObjectContext(storageKey), descriptor)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -240,7 +277,11 @@ func (s *Store) ReadState(ctx context.Context, key string) (io.ReadCloser, *stor
 }
 
 // WriteState replaces the state blob for key and returns the new ETag.
-func (s *Store) WriteState(ctx context.Context, key string, body io.Reader, opts storage.PutStateOptions) (*storage.PutStateResult, error) {
+func (s *Store) WriteState(ctx context.Context, namespace, key string, body io.Reader, opts storage.PutStateOptions) (*storage.PutStateResult, error) {
+	storageKey, err := canonicalKey(namespace, key)
+	if err != nil {
+		return nil, err
+	}
 	plaintext, err := io.ReadAll(body)
 	if err != nil {
 		return nil, err
@@ -248,7 +289,7 @@ func (s *Store) WriteState(ctx context.Context, key string, body io.Reader, opts
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if opts.ExpectedETag != "" {
-		entry, ok := s.state[key]
+		entry, ok := s.state[storageKey]
 		if !ok {
 			return nil, storage.ErrNotFound
 		}
@@ -264,12 +305,12 @@ func (s *Store) WriteState(ctx context.Context, key string, body io.Reader, opts
 		var mat kryptograf.Material
 		if ok && len(descFromCtx) > 0 {
 			descriptor = append([]byte(nil), descFromCtx...)
-			mat, err = s.crypto.MaterialFromDescriptor(storage.StateObjectContext(key), descriptor)
+			mat, err = s.crypto.MaterialFromDescriptor(storage.StateObjectContext(storageKey), descriptor)
 			if err != nil {
 				return nil, err
 			}
 		} else {
-			mat, descBytes, err = s.crypto.MintMaterial(storage.StateObjectContext(key))
+			mat, descBytes, err = s.crypto.MintMaterial(storage.StateObjectContext(storageKey))
 			if err != nil {
 				return nil, err
 			}
@@ -292,7 +333,7 @@ func (s *Store) WriteState(ctx context.Context, key string, body io.Reader, opts
 		ciphertext = append([]byte(nil), plaintext...)
 	}
 	etag := uuidv7.NewString()
-	s.state[key] = &stateEntry{
+	s.state[storageKey] = &stateEntry{
 		payload:    ciphertext,
 		etag:       etag,
 		updated:    time.Now().UTC(),
@@ -310,11 +351,15 @@ func (s *Store) WriteState(ctx context.Context, key string, body io.Reader, opts
 }
 
 // Remove deletes the state blob for key, applying CAS when expectedETag is set.
-func (s *Store) Remove(_ context.Context, key string, expectedETag string) error {
+func (s *Store) Remove(_ context.Context, namespace, key string, expectedETag string) error {
+	storageKey, err := canonicalKey(namespace, key)
+	if err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if expectedETag != "" {
-		entry, ok := s.state[key]
+		entry, ok := s.state[storageKey]
 		if !ok {
 			return storage.ErrNotFound
 		}
@@ -322,14 +367,22 @@ func (s *Store) Remove(_ context.Context, key string, expectedETag string) error
 			return storage.ErrCASMismatch
 		}
 	}
-	delete(s.state, key)
+	delete(s.state, storageKey)
 	return nil
 }
 
 // ListObjects returns in-memory objects sorted lexicographically.
-func (s *Store) ListObjects(_ context.Context, opts storage.ListOptions) (*storage.ListResult, error) {
+func (s *Store) ListObjects(_ context.Context, namespace string, opts storage.ListOptions) (*storage.ListResult, error) {
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		return nil, fmt.Errorf("memory: namespace required")
+	}
+	prefix := namespace + "/"
+	canonicalPrefix := prefix + strings.TrimPrefix(opts.Prefix, "/")
+	if opts.Prefix == "" {
+		canonicalPrefix = prefix
+	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.keysDirty {
 		s.sortedKeys = s.sortedKeys[:0]
 		for key := range s.objs {
@@ -338,65 +391,54 @@ func (s *Store) ListObjects(_ context.Context, opts storage.ListOptions) (*stora
 		sort.Strings(s.sortedKeys)
 		s.keysDirty = false
 	}
-	keys := s.sortedKeys
-	startIdx := 0
+	keys := append([]string(nil), s.sortedKeys...)
+	s.mu.Unlock()
+
+	result := &storage.ListResult{}
+	count := 0
+	startAfter := ""
 	if opts.StartAfter != "" {
-		startIdx = sort.Search(len(keys), func(i int) bool { return keys[i] > opts.StartAfter })
+		startAfter = prefix + opts.StartAfter
 	}
-	limit := len(keys)
-	if opts.Limit > 0 && opts.Limit < limit {
-		limit = opts.Limit
-	}
-	result := &storage.ListResult{
-		Objects: make([]storage.ObjectInfo, 0, limit),
-	}
-	seenPrefix := false
-	added := 0
-	for idx := startIdx; idx < len(keys); idx++ {
-		key := keys[idx]
-		if opts.Prefix != "" && !strings.HasPrefix(key, opts.Prefix) {
-			if seenPrefix {
-				break
-			}
+	for _, key := range keys {
+		if !strings.HasPrefix(key, prefix) {
 			continue
 		}
-		if opts.Prefix != "" {
-			seenPrefix = true
+		if startAfter != "" && key <= startAfter {
+			continue
+		}
+		if opts.Prefix != "" && !strings.HasPrefix(key, canonicalPrefix) {
+			continue
 		}
 		entry := s.objs[key]
+		relative := strings.TrimPrefix(key, prefix)
 		result.Objects = append(result.Objects, storage.ObjectInfo{
-			Key:          key,
+			Key:          relative,
 			ETag:         entry.etag,
 			Size:         int64(len(entry.payload)),
 			LastModified: entry.updated,
 			ContentType:  entry.contentType,
+			Descriptor:   append([]byte(nil), entry.descriptor...),
 		})
-		added++
-		if opts.Limit > 0 && added >= opts.Limit {
-			if idx+1 < len(keys) {
-				result.Truncated = true
-				result.NextStartAfter = key
-			}
-			return result, nil
-		}
-	}
-	if opts.Limit > 0 && added >= opts.Limit {
-		return result, nil
-	}
-	if opts.Limit <= 0 && opts.Prefix == "" && startIdx+added < len(keys) {
-		if added > 0 {
+		count++
+		if opts.Limit > 0 && count >= opts.Limit {
 			result.Truncated = true
-			result.NextStartAfter = result.Objects[len(result.Objects)-1].Key
+			result.NextStartAfter = relative
+			break
 		}
 	}
 	return result, nil
 }
 
 // GetObject returns the payload for key if present.
-func (s *Store) GetObject(ctx context.Context, key string) (io.ReadCloser, *storage.ObjectInfo, error) {
+func (s *Store) GetObject(ctx context.Context, namespace, key string) (io.ReadCloser, *storage.ObjectInfo, error) {
+	storageKey, err := canonicalKey(namespace, key)
+	if err != nil {
+		return nil, nil, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	entry, ok := s.objs[key]
+	entry, ok := s.objs[storageKey]
 	if !ok {
 		return nil, nil, storage.ErrNotFound
 	}
@@ -415,13 +457,17 @@ func (s *Store) GetObject(ctx context.Context, key string) (io.ReadCloser, *stor
 }
 
 // PutObject stores or replaces the object for key depending on opts.
-func (s *Store) PutObject(_ context.Context, key string, body io.Reader, opts storage.PutObjectOptions) (*storage.ObjectInfo, error) {
+func (s *Store) PutObject(_ context.Context, namespace, key string, body io.Reader, opts storage.PutObjectOptions) (*storage.ObjectInfo, error) {
+	storageKey, err := canonicalKey(namespace, key)
+	if err != nil {
+		return nil, err
+	}
 	payload, err := io.ReadAll(body)
 	if err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
-	entry, exists := s.objs[key]
+	entry, exists := s.objs[storageKey]
 	switch {
 	case opts.IfNotExists && exists:
 		s.mu.Unlock()
@@ -438,7 +484,7 @@ func (s *Store) PutObject(_ context.Context, key string, body io.Reader, opts st
 	}
 	etag := uuidv7.NewString()
 	now := time.Now().UTC()
-	s.objs[key] = &objectEntry{
+	s.objs[storageKey] = &objectEntry{
 		payload:     payload,
 		etag:        etag,
 		contentType: opts.ContentType,
@@ -449,10 +495,10 @@ func (s *Store) PutObject(_ context.Context, key string, body io.Reader, opts st
 		if s.keysDirty {
 			// will rebuild on next read
 		} else {
-			s.insertKeyLocked(key)
+			s.insertKeyLocked(storageKey)
 		}
 	}
-	queue, queueOK := queueNameFromObjectKey(key)
+	queue, queueOK := queuePathFromObjectKey(storageKey)
 	s.mu.Unlock()
 
 	if queueOK {
@@ -469,9 +515,13 @@ func (s *Store) PutObject(_ context.Context, key string, body io.Reader, opts st
 }
 
 // DeleteObject removes the object for key with optional CAS.
-func (s *Store) DeleteObject(_ context.Context, key string, opts storage.DeleteObjectOptions) error {
+func (s *Store) DeleteObject(_ context.Context, namespace, key string, opts storage.DeleteObjectOptions) error {
+	storageKey, err := canonicalKey(namespace, key)
+	if err != nil {
+		return err
+	}
 	s.mu.Lock()
-	entry, exists := s.objs[key]
+	entry, exists := s.objs[storageKey]
 	if !exists {
 		s.mu.Unlock()
 		if opts.IgnoreNotFound {
@@ -483,13 +533,13 @@ func (s *Store) DeleteObject(_ context.Context, key string, opts storage.DeleteO
 		s.mu.Unlock()
 		return storage.ErrCASMismatch
 	}
-	delete(s.objs, key)
+	delete(s.objs, storageKey)
 	if s.keysDirty {
 		// defer rebuild
 	} else {
-		s.removeKeyLocked(key)
+		s.removeKeyLocked(storageKey)
 	}
-	queue, queueOK := queueNameFromObjectKey(key)
+	queue, queueOK := queuePathFromObjectKey(storageKey)
 	s.mu.Unlock()
 
 	if queueOK {
@@ -499,27 +549,27 @@ func (s *Store) DeleteObject(_ context.Context, key string, opts storage.DeleteO
 }
 
 // SubscribeQueueChanges implements storage.QueueChangeFeed for the in-memory backend.
-func (s *Store) SubscribeQueueChanges(queue string) (storage.QueueChangeSubscription, error) {
+func (s *Store) SubscribeQueueChanges(namespace, queue string) (storage.QueueChangeSubscription, error) {
 	if !s.queueWatchEnabled {
 		return nil, storage.ErrNotImplemented
 	}
-	queue = strings.TrimSpace(queue)
-	if queue == "" {
-		return nil, fmt.Errorf("memory: queue name required")
+	storageQueue, err := canonicalKey(namespace, path.Join("q", queue))
+	if err != nil {
+		return nil, err
 	}
 	sub := &memoryQueueSubscription{
 		store:  s,
-		queue:  queue,
+		queue:  storageQueue,
 		events: make(chan struct{}, 1),
 	}
 	s.queueWatchMu.Lock()
 	if s.queueWatchers == nil {
 		s.queueWatchers = make(map[string]map[*memoryQueueSubscription]struct{})
 	}
-	watchers := s.queueWatchers[queue]
+	watchers := s.queueWatchers[storageQueue]
 	if watchers == nil {
 		watchers = make(map[*memoryQueueSubscription]struct{})
-		s.queueWatchers[queue] = watchers
+		s.queueWatchers[storageQueue] = watchers
 	}
 	watchers[sub] = struct{}{}
 	s.queueWatchMu.Unlock()
@@ -577,19 +627,24 @@ func (s *Store) removeKeyLocked(key string) {
 	}
 }
 
-func queueNameFromObjectKey(key string) (string, bool) {
-	if !strings.HasPrefix(key, "q/") {
+func queuePathFromObjectKey(key string) (string, bool) {
+	key = strings.TrimPrefix(strings.TrimSpace(key), "/")
+	if key == "" {
 		return "", false
 	}
 	parts := strings.Split(key, "/")
-	if len(parts) < 3 {
+	if len(parts) < 4 {
 		return "", false
 	}
-	queue := strings.TrimSpace(parts[1])
-	if queue == "" {
+	if parts[1] != "q" {
 		return "", false
 	}
-	return queue, true
+	namespace := strings.TrimSpace(parts[0])
+	queue := strings.TrimSpace(parts[2])
+	if namespace == "" || queue == "" {
+		return "", false
+	}
+	return strings.Join(parts[:3], "/"), true
 }
 
 type memoryQueueSubscription struct {

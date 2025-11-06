@@ -10,7 +10,6 @@ import (
 	"maps"
 	"math"
 	"path"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +19,7 @@ import (
 	"pkt.systems/lockd/internal/correlation"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/uuidv7"
+	"pkt.systems/lockd/namespaces"
 )
 
 var (
@@ -66,32 +66,36 @@ func New(store storage.Backend, clk clock.Clock, cfg Config) (*Service, error) {
 	}, nil
 }
 
-func (s *Service) readyCacheForQueue(queue string) *readyCache {
-	if value, ok := s.ready.Load(queue); ok {
+func (s *Service) readyCacheForQueue(namespace, queue string) *readyCache {
+	key := readyCacheKey(namespace, queue)
+	if value, ok := s.ready.Load(key); ok {
 		return value.(*readyCache)
 	}
-	cache := newReadyCache(s, queue)
-	actual, loaded := s.ready.LoadOrStore(queue, cache)
+	cache := newReadyCache(s, namespace, queue)
+	actual, loaded := s.ready.LoadOrStore(key, cache)
 	if loaded {
 		return actual.(*readyCache)
 	}
 	return cache
 }
 
-func (s *Service) notifyCacheUpdate(queue string, desc MessageDescriptor) {
-	if value, ok := s.ready.Load(queue); ok {
+func (s *Service) notifyCacheUpdate(namespace, queue string, desc MessageDescriptor) {
+	key := readyCacheKey(namespace, queue)
+	if value, ok := s.ready.Load(key); ok {
 		value.(*readyCache).upsert(desc)
 	}
 }
 
-func (s *Service) removeFromReadyCache(queue, id string) {
-	if value, ok := s.ready.Load(queue); ok {
+func (s *Service) removeFromReadyCache(namespace, queue, id string) {
+	key := readyCacheKey(namespace, queue)
+	if value, ok := s.ready.Load(key); ok {
 		value.(*readyCache).remove(id)
 	}
 }
 
-func (s *Service) invalidateQueueCache(queue string) {
-	if value, ok := s.ready.Load(queue); ok {
+func (s *Service) invalidateQueueCache(namespace, queue string) {
+	key := readyCacheKey(namespace, queue)
+	if value, ok := s.ready.Load(key); ok {
 		value.(*readyCache).invalidate()
 	}
 }
@@ -108,6 +112,7 @@ type EnqueueOptions struct {
 
 // Message describes an enqueued message.
 type Message struct {
+	Namespace        string
 	Queue            string
 	ID               string
 	EnqueuedAt       time.Time
@@ -126,6 +131,7 @@ type Message struct {
 
 // MessageDescriptor provides a lightweight summary from listing.
 type MessageDescriptor struct {
+	Namespace    string
 	ID           string
 	MetadataKey  string
 	MetadataETag string
@@ -135,6 +141,7 @@ type MessageDescriptor struct {
 // StateDocument captures metadata about queue state blobs.
 type StateDocument struct {
 	Type          string    `json:"type"`
+	Namespace     string    `json:"namespace"`
 	Queue         string    `json:"queue"`
 	MessageID     string    `json:"message_id"`
 	CreatedAt     time.Time `json:"created_at"`
@@ -145,6 +152,7 @@ type StateDocument struct {
 // MessageDocument captures per-message metadata stored alongside payloads.
 type MessageDocument struct {
 	Type               string         `json:"type"`
+	Namespace          string         `json:"namespace,omitempty"`
 	Queue              string         `json:"queue"`
 	ID                 string         `json:"id"`
 	EnqueuedAt         time.Time      `json:"enqueued_at"`
@@ -168,8 +176,12 @@ type messageDocument = MessageDocument
 type stateDocument = StateDocument
 
 // Enqueue inserts a new message into queue and returns its metadata.
-func (s *Service) Enqueue(ctx context.Context, queue string, payload io.Reader, opts EnqueueOptions) (*Message, error) {
+func (s *Service) Enqueue(ctx context.Context, namespace, queue string, payload io.Reader, opts EnqueueOptions) (*Message, error) {
 	name, err := sanitizeQueueName(queue)
+	if err != nil {
+		return nil, err
+	}
+	ns, err := sanitizeNamespace(namespace)
 	if err != nil {
 		return nil, err
 	}
@@ -182,7 +194,7 @@ func (s *Service) Enqueue(ctx context.Context, queue string, payload io.Reader, 
 		payload = bytes.NewReader(nil)
 	}
 	payloadContentType := contentTypeOrDefault(opts.ContentType)
-	reader, payloadDescriptor, counting, err := s.preparePayloadReader(payloadKey, payload)
+	reader, payloadDescriptor, counting, err := s.preparePayloadReader(ns, payloadKey, payload)
 	if err != nil {
 		return nil, err
 	}
@@ -194,7 +206,7 @@ func (s *Service) Enqueue(ctx context.Context, queue string, payload io.Reader, 
 	if s.crypto != nil && s.crypto.Enabled() {
 		payloadOpts.ContentType = storage.ContentTypeOctetStreamEncrypted
 	}
-	payloadInfo, err := s.store.PutObject(ctx, payloadKey, reader, payloadOpts)
+	payloadInfo, err := s.store.PutObject(ctx, ns, payloadKey, reader, payloadOpts)
 	if err != nil {
 		if errors.Is(err, storage.ErrCASMismatch) {
 			return nil, fmt.Errorf("queue: payload already exists: %w", err)
@@ -238,6 +250,7 @@ func (s *Service) Enqueue(ctx context.Context, queue string, payload io.Reader, 
 
 	doc := messageDocument{
 		Type:               "queue_msg",
+		Namespace:          ns,
 		Queue:              name,
 		ID:                 id,
 		EnqueuedAt:         now,
@@ -256,7 +269,7 @@ func (s *Service) Enqueue(ctx context.Context, queue string, payload io.Reader, 
 		doc.PayloadDescriptor = append([]byte(nil), payloadDescriptor...)
 	}
 
-	metaPayload, metaDescriptor, err := s.encodeMessageMeta(metaKey, &doc)
+	metaPayload, metaDescriptor, err := s.encodeMessageMeta(ns, metaKey, &doc)
 	if err != nil {
 		return nil, err
 	}
@@ -268,26 +281,28 @@ func (s *Service) Enqueue(ctx context.Context, queue string, payload io.Reader, 
 	if s.crypto != nil && s.crypto.Enabled() {
 		metaOpts.ContentType = storage.ContentTypeProtobufEncrypted
 	}
-	metaInfo, err := s.store.PutObject(ctx, metaKey, bytes.NewReader(metaPayload), metaOpts)
+	metaInfo, err := s.store.PutObject(ctx, ns, metaKey, bytes.NewReader(metaPayload), metaOpts)
 	if err != nil {
-		if rmErr := s.store.DeleteObject(ctx, payloadKey, storage.DeleteObjectOptions{}); rmErr != nil {
+		if rmErr := s.store.DeleteObject(ctx, ns, payloadKey, storage.DeleteObjectOptions{}); rmErr != nil {
 			// best-effort clean-up, log via wrapped backend if available
 		}
 		return nil, err
 	}
 	if metaInfo != nil && metaInfo.ETag != "" {
 		desc := MessageDescriptor{
+			Namespace:    ns,
 			ID:           doc.ID,
 			MetadataKey:  metaKey,
 			MetadataETag: metaInfo.ETag,
 			Document:     doc,
 		}
-		s.notifyCacheUpdate(name, desc)
+		s.notifyCacheUpdate(ns, name, desc)
 	} else {
-		s.invalidateQueueCache(name)
+		s.invalidateQueueCache(ns, name)
 	}
 
 	result := &Message{
+		Namespace:       ns,
 		Queue:           name,
 		ID:              id,
 		EnqueuedAt:      now,
@@ -322,12 +337,12 @@ func (c *countingReader) Count() int64 {
 	return c.count
 }
 
-func (s *Service) preparePayloadReader(payloadKey string, payload io.Reader) (io.Reader, []byte, *countingReader, error) {
+func (s *Service) preparePayloadReader(namespace, payloadPath string, payload io.Reader) (io.Reader, []byte, *countingReader, error) {
 	counting := &countingReader{r: payload}
 	if s.crypto == nil || !s.crypto.Enabled() {
 		return counting, nil, counting, nil
 	}
-	mat, descBytes, err := s.crypto.MintMaterial(storage.QueuePayloadContext(payloadKey))
+	mat, descBytes, err := s.crypto.MintMaterial(storage.QueuePayloadContext(namespace, payloadPath))
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -352,7 +367,7 @@ func (s *Service) preparePayloadReader(payloadKey string, payload io.Reader) (io
 	return pr, append([]byte(nil), descBytes...), counting, nil
 }
 
-func (s *Service) encodeMessageMeta(metaKey string, doc *messageDocument) ([]byte, []byte, error) {
+func (s *Service) encodeMessageMeta(namespace, metaPath string, doc *messageDocument) ([]byte, []byte, error) {
 	payload, err := marshalMessageDocument(doc)
 	if err != nil {
 		return nil, nil, err
@@ -364,14 +379,14 @@ func (s *Service) encodeMessageMeta(metaKey string, doc *messageDocument) ([]byt
 	descriptor := append([]byte(nil), doc.MetaDescriptor...)
 	var mat kryptograf.Material
 	if len(descriptor) > 0 {
-		mat, err = s.crypto.MaterialFromDescriptor(storage.QueueMetaContext(metaKey), descriptor)
+		mat, err = s.crypto.MaterialFromDescriptor(storage.QueueMetaContext(namespace, metaPath), descriptor)
 		if err != nil {
 			descriptor = nil
 		}
 	}
 	if len(descriptor) == 0 {
 		var descBytes []byte
-		mat, descBytes, err = s.crypto.MintMaterial(storage.QueueMetaContext(metaKey))
+		mat, descBytes, err = s.crypto.MintMaterial(storage.QueueMetaContext(namespace, metaPath))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -393,32 +408,58 @@ func (s *Service) encodeMessageMeta(metaKey string, doc *messageDocument) ([]byt
 	return buf.Bytes(), descriptor, nil
 }
 
-var queueNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
-
 func sanitizeQueueName(name string) (string, error) {
 	name = strings.TrimSpace(name)
-	if !queueNamePattern.MatchString(name) {
+	if name == "" {
 		return "", ErrInvalidQueue
 	}
-	return name, nil
+	normalized, err := namespaces.NormalizeComponent(name)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrInvalidQueue, err)
+	}
+	return normalized, nil
+}
+
+func sanitizeNamespace(namespace string) (string, error) {
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		namespace = namespaces.Default
+	}
+	normalized, err := namespaces.Normalize(namespace, namespace)
+	if err != nil {
+		return "", err
+	}
+	return normalized, nil
+}
+
+func readyCacheKey(namespace, queue string) string {
+	return namespace + "/" + queue
+}
+
+func queueBasePath(queue string) string {
+	return path.Join("q", queue)
 }
 
 func messageMetaPath(queue, id string) string {
-	return path.Join("q", queue, "msg", id+metaFileExtension)
+	return path.Join(queueBasePath(queue), "msg", id+metaFileExtension)
 }
 
 func messagePayloadPath(queue, id string) string {
-	return path.Join("q", queue, "msg", id+".bin")
+	return path.Join(queueBasePath(queue), "msg", id+".bin")
 }
 
 // EnsureMessageReady verifies that the message payload and its metadata exist before delivery.
-func (s *Service) EnsureMessageReady(ctx context.Context, queue, id string) error {
+func (s *Service) EnsureMessageReady(ctx context.Context, namespace, queue, id string) error {
 	name, err := sanitizeQueueName(queue)
 	if err != nil {
 		return err
 	}
+	ns, err := sanitizeNamespace(namespace)
+	if err != nil {
+		return err
+	}
 	key := messagePayloadPath(name, id)
-	body, _, err := s.store.GetObject(ctx, key)
+	body, _, err := s.store.GetObject(ctx, ns, key)
 	if err != nil {
 		return err
 	}
@@ -429,37 +470,53 @@ func (s *Service) EnsureMessageReady(ctx context.Context, queue, id string) erro
 }
 
 func messageStatePath(queue, id string) string {
-	return path.Join("q", queue, "state", id+".json")
+	return path.Join(queueBasePath(queue), "state", id+".json")
 }
 
 func messageDLQMetaPath(queue, id string) string {
-	return path.Join("q", queue, "dlq", "msg", id+metaFileExtension)
+	return path.Join(queueBasePath(queue), "dlq", "msg", id+metaFileExtension)
 }
 
 func messageDLQStatePath(queue, id string) string {
-	return path.Join("q", queue, "dlq", "state", id+".json")
+	return path.Join(queueBasePath(queue), "dlq", "state", id+".json")
 }
 
 func messageDLQPayloadPath(queue, id string) string {
-	return path.Join("q", queue, "dlq", "msg", id+".bin")
+	return path.Join(queueBasePath(queue), "dlq", "msg", id+".bin")
+}
+
+func fullObjectKey(namespace, relPath string) string {
+	rel := strings.TrimPrefix(relPath, "/")
+	if namespace == "" {
+		return rel
+	}
+	return namespace + "/" + rel
 }
 
 // MessageLeaseKey returns the logical lock key used for message leasing.
-func MessageLeaseKey(queue, id string) (string, error) {
+func MessageLeaseKey(namespace, queue, id string) (string, error) {
 	name, err := sanitizeQueueName(queue)
 	if err != nil {
 		return "", err
 	}
-	return path.Join("q", name, "msg", id), nil
+	ns, err := sanitizeNamespace(namespace)
+	if err != nil {
+		return "", err
+	}
+	return path.Join(ns, queueBasePath(name), "msg", id), nil
 }
 
 // StateLeaseKey returns the logical lock key used for workflow state leasing.
-func StateLeaseKey(queue, id string) (string, error) {
+func StateLeaseKey(namespace, queue, id string) (string, error) {
 	name, err := sanitizeQueueName(queue)
 	if err != nil {
 		return "", err
 	}
-	return path.Join("q", name, "state", id), nil
+	ns, err := sanitizeNamespace(namespace)
+	if err != nil {
+		return "", err
+	}
+	return path.Join(ns, queueBasePath(name), "state", id), nil
 }
 
 // IsQueueStateKey reports whether the logical key belongs to a queue state lease.
@@ -469,10 +526,14 @@ func IsQueueStateKey(key string) bool {
 		return false
 	}
 	segments := strings.Split(clean, "/")
-	if len(segments) != 4 {
+	if len(segments) < 4 {
 		return false
 	}
-	return segments[0] == "q" && segments[2] == "state"
+	idx := len(segments) - 4
+	if segments[idx] != "q" {
+		return false
+	}
+	return segments[idx+2] == "state"
 }
 
 func cloneAttributes(src map[string]any) map[string]any {
@@ -492,12 +553,16 @@ func contentTypeOrDefault(contentType string) string {
 }
 
 // ListMessages enumerates message metadata objects in lexical order.
-func (s *Service) ListMessages(ctx context.Context, queue string, startAfter string, limit int) ([]MessageDescriptor, string, bool, error) {
+func (s *Service) ListMessages(ctx context.Context, namespace, queue string, startAfter string, limit int) ([]MessageDescriptor, string, bool, error) {
 	name, err := sanitizeQueueName(queue)
 	if err != nil {
 		return nil, "", false, err
 	}
-	prefix := path.Join("q", name, "msg") + "/"
+	ns, err := sanitizeNamespace(namespace)
+	if err != nil {
+		return nil, "", false, err
+	}
+	prefix := path.Join(queueBasePath(name), "msg") + "/"
 	opts := storage.ListOptions{
 		Prefix: prefix,
 		Limit:  limit,
@@ -505,7 +570,7 @@ func (s *Service) ListMessages(ctx context.Context, queue string, startAfter str
 	if startAfter != "" {
 		opts.StartAfter = startAfter
 	}
-	result, err := s.store.ListObjects(ctx, opts)
+	result, err := s.store.ListObjects(ctx, ns, opts)
 	if err != nil {
 		return nil, "", false, err
 	}
@@ -515,7 +580,7 @@ func (s *Service) ListMessages(ctx context.Context, queue string, startAfter str
 			continue
 		}
 		id := strings.TrimSuffix(path.Base(obj.Key), metaFileExtension)
-		docPtr, etag, err := s.loadMessageDocument(ctx, obj.Key)
+		docPtr, etag, err := s.loadMessageDocument(ctx, ns, name, obj.Key)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
 				continue
@@ -526,6 +591,7 @@ func (s *Service) ListMessages(ctx context.Context, queue string, startAfter str
 			continue
 		}
 		descriptor := MessageDescriptor{
+			Namespace:    ns,
 			ID:           docPtr.ID,
 			MetadataKey:  obj.Key,
 			MetadataETag: etag,
@@ -538,12 +604,16 @@ func (s *Service) ListMessages(ctx context.Context, queue string, startAfter str
 }
 
 // NextCandidate returns the next visible message ready for processing.
-func (s *Service) NextCandidate(ctx context.Context, queue string, startAfter string, pageSize int) (*MessageDescriptor, string, error) {
+func (s *Service) NextCandidate(ctx context.Context, namespace, queue string, startAfter string, pageSize int) (*MessageDescriptor, string, error) {
 	name, err := sanitizeQueueName(queue)
 	if err != nil {
 		return nil, "", err
 	}
-	cache := s.readyCacheForQueue(name)
+	ns, err := sanitizeNamespace(namespace)
+	if err != nil {
+		return nil, "", err
+	}
+	cache := s.readyCacheForQueue(ns, name)
 	if startAfter != "" {
 		cache.resetWithCursor(startAfter)
 	}
@@ -555,22 +625,35 @@ func (s *Service) NextCandidate(ctx context.Context, queue string, startAfter st
 	if desc == nil {
 		return nil, "", storage.ErrNotFound
 	}
+	desc.Namespace = ns
 	return desc, "", nil
 }
 
 // RefreshReadyCache syncs the ready cache for the provided queue immediately.
-func (s *Service) RefreshReadyCache(ctx context.Context, queue string) error {
+func (s *Service) RefreshReadyCache(ctx context.Context, namespace, queue string) error {
 	name, err := sanitizeQueueName(queue)
 	if err != nil {
 		return err
 	}
-	cache := s.readyCacheForQueue(name)
+	ns, err := sanitizeNamespace(namespace)
+	if err != nil {
+		return err
+	}
+	cache := s.readyCacheForQueue(ns, name)
 	_, err = cache.refresh(ctx, defaultCachePageSize, s.clk.Now().UTC(), false)
 	return err
 }
 
-func (s *Service) listMessageObjects(ctx context.Context, queue string, startAfter string, limit int) ([]storage.ObjectInfo, string, bool, error) {
-	prefix := path.Join("q", queue, "msg") + "/"
+func (s *Service) listMessageObjects(ctx context.Context, namespace, queue string, startAfter string, limit int) ([]storage.ObjectInfo, string, bool, error) {
+	name, err := sanitizeQueueName(queue)
+	if err != nil {
+		return nil, "", false, err
+	}
+	ns, err := sanitizeNamespace(namespace)
+	if err != nil {
+		return nil, "", false, err
+	}
+	prefix := path.Join(queueBasePath(name), "msg") + "/"
 	opts := storage.ListOptions{
 		Prefix: prefix,
 		Limit:  limit,
@@ -578,19 +661,20 @@ func (s *Service) listMessageObjects(ctx context.Context, queue string, startAft
 	if startAfter != "" {
 		opts.StartAfter = startAfter
 	}
-	result, err := s.store.ListObjects(ctx, opts)
+	result, err := s.store.ListObjects(ctx, ns, opts)
 	if err != nil {
 		return nil, "", false, err
 	}
 	return result.Objects, result.NextStartAfter, result.Truncated, nil
 }
 
-func (s *Service) loadDescriptor(ctx context.Context, metadataKey string) (*MessageDescriptor, error) {
-	doc, etag, err := s.loadMessageDocument(ctx, metadataKey)
+func (s *Service) loadDescriptor(ctx context.Context, namespace, queue, metadataKey string) (*MessageDescriptor, error) {
+	doc, etag, err := s.loadMessageDocument(ctx, namespace, queue, metadataKey)
 	if err != nil {
 		return nil, err
 	}
 	return &MessageDescriptor{
+		Namespace:    namespace,
 		ID:           doc.ID,
 		MetadataKey:  metadataKey,
 		MetadataETag: etag,
@@ -599,11 +683,12 @@ func (s *Service) loadDescriptor(ctx context.Context, metadataKey string) (*Mess
 }
 
 // loadMessageDocument fetches and decodes the message metadata.
-func (s *Service) loadMessageDocument(ctx context.Context, metadataKey string) (*messageDocument, string, error) {
-	reader, info, err := s.store.GetObject(ctx, metadataKey)
+func (s *Service) loadMessageDocument(ctx context.Context, namespace, queue, metadataKey string) (*messageDocument, string, error) {
+	reader, info, err := s.store.GetObject(ctx, namespace, metadataKey)
 	if err != nil {
 		return nil, "", err
 	}
+	displayKey := fullObjectKey(namespace, metadataKey)
 	var (
 		data       []byte
 		descriptor []byte
@@ -615,9 +700,9 @@ func (s *Service) loadMessageDocument(ctx context.Context, metadataKey string) (
 	if encrypted {
 		if len(descriptor) == 0 {
 			reader.Close()
-			return nil, "", fmt.Errorf("queue: missing metadata descriptor for %s", metadataKey)
+			return nil, "", fmt.Errorf("queue: missing metadata descriptor for %s", displayKey)
 		}
-		mat, err := s.crypto.MaterialFromDescriptor(storage.QueueMetaContext(metadataKey), descriptor)
+		mat, err := s.crypto.MaterialFromDescriptor(storage.QueueMetaContext(namespace, metadataKey), descriptor)
 		if err != nil {
 			reader.Close()
 			return nil, "", err
@@ -630,14 +715,14 @@ func (s *Service) loadMessageDocument(ctx context.Context, metadataKey string) (
 		defer decReader.Close()
 		data, err = io.ReadAll(decReader)
 		if err != nil {
-			return nil, "", fmt.Errorf("queue: read message %q: %w", metadataKey, err)
+			return nil, "", fmt.Errorf("queue: read message %q: %w", displayKey, err)
 		}
 	} else {
 		defer reader.Close()
 		var err error
 		data, err = io.ReadAll(reader)
 		if err != nil {
-			return nil, "", fmt.Errorf("queue: read message %q: %w", metadataKey, err)
+			return nil, "", fmt.Errorf("queue: read message %q: %w", displayKey, err)
 		}
 	}
 	doc, err := unmarshalMessageDocument(data)
@@ -651,29 +736,46 @@ func (s *Service) loadMessageDocument(ctx context.Context, metadataKey string) (
 	if len(descriptor) > 0 {
 		doc.MetaDescriptor = descriptor
 	}
+	if doc.Namespace == "" {
+		doc.Namespace = namespace
+	}
+	if doc.Queue == "" {
+		doc.Queue = queue
+	}
 	return doc, etag, nil
 }
 
 // GetMessage loads the metadata document for the provided queue/id pair.
-func (s *Service) GetMessage(ctx context.Context, queue, id string) (*MessageDocument, string, error) {
+func (s *Service) GetMessage(ctx context.Context, namespace, queue, id string) (*MessageDocument, string, error) {
 	name, err := sanitizeQueueName(queue)
 	if err != nil {
 		return nil, "", err
 	}
-	return s.loadMessageDocument(ctx, messageMetaPath(name, id))
+	ns, err := sanitizeNamespace(namespace)
+	if err != nil {
+		return nil, "", err
+	}
+	return s.loadMessageDocument(ctx, ns, name, messageMetaPath(name, id))
 }
 
 // SaveMessageDocument writes metadata via CAS.
-func (s *Service) SaveMessageDocument(ctx context.Context, queue, id string, doc *messageDocument, expectedETag string) (string, error) {
+func (s *Service) SaveMessageDocument(ctx context.Context, namespace, queue, id string, doc *messageDocument, expectedETag string) (string, error) {
 	name, err := sanitizeQueueName(queue)
 	if err != nil {
 		return "", err
 	}
-	if doc.Queue != name || doc.ID != id {
+	ns, err := sanitizeNamespace(namespace)
+	if err != nil {
+		return "", err
+	}
+	if doc.Namespace == "" {
+		doc.Namespace = ns
+	}
+	if doc.Namespace != ns || doc.Queue != name || doc.ID != id {
 		return "", fmt.Errorf("queue: document mismatch for %s/%s", name, id)
 	}
 	metaKey := messageMetaPath(name, id)
-	metaPayload, metaDescriptor, err := s.encodeMessageMeta(metaKey, doc)
+	metaPayload, metaDescriptor, err := s.encodeMessageMeta(ns, metaKey, doc)
 	if err != nil {
 		return "", err
 	}
@@ -685,7 +787,7 @@ func (s *Service) SaveMessageDocument(ctx context.Context, queue, id string, doc
 	if s.crypto != nil && s.crypto.Enabled() {
 		opts.ContentType = storage.ContentTypeProtobufEncrypted
 	}
-	info, err := s.store.PutObject(ctx, metaKey, bytes.NewReader(metaPayload), opts)
+	info, err := s.store.PutObject(ctx, ns, metaKey, bytes.NewReader(metaPayload), opts)
 	if err != nil {
 		return "", err
 	}
@@ -695,42 +797,47 @@ func (s *Service) SaveMessageDocument(ctx context.Context, queue, id string, doc
 	}
 	if newETag != "" {
 		desc := MessageDescriptor{
+			Namespace:    ns,
 			ID:           doc.ID,
 			MetadataKey:  metaKey,
 			MetadataETag: newETag,
 			Document:     *doc,
 		}
-		s.notifyCacheUpdate(name, desc)
+		s.notifyCacheUpdate(ns, name, desc)
 	} else {
-		s.invalidateQueueCache(name)
+		s.invalidateQueueCache(ns, name)
 	}
 	return newETag, nil
 }
 
 // DeleteMessage removes metadata and payload (best-effort) respecting CAS.
-func (s *Service) DeleteMessage(ctx context.Context, queue, id string, expectedETag string) error {
-	return s.deleteMessageInternal(ctx, queue, id, expectedETag, true)
+func (s *Service) DeleteMessage(ctx context.Context, namespace, queue, id string, expectedETag string) error {
+	return s.deleteMessageInternal(ctx, namespace, queue, id, expectedETag, true)
 }
 
-func (s *Service) deleteMessageInternal(ctx context.Context, queue, id string, expectedETag string, notify bool) error {
+func (s *Service) deleteMessageInternal(ctx context.Context, namespace, queue, id string, expectedETag string, notify bool) error {
 	name, err := sanitizeQueueName(queue)
 	if err != nil {
 		return err
 	}
+	ns, err := sanitizeNamespace(namespace)
+	if err != nil {
+		return err
+	}
 	metaKey := messageMetaPath(name, id)
-	if err := s.store.DeleteObject(ctx, metaKey, storage.DeleteObjectOptions{ExpectedETag: expectedETag}); err != nil {
+	if err := s.store.DeleteObject(ctx, ns, metaKey, storage.DeleteObjectOptions{ExpectedETag: expectedETag}); err != nil {
 		return err
 	}
 	payloadKey := messagePayloadPath(name, id)
-	_ = s.store.DeleteObject(ctx, payloadKey, storage.DeleteObjectOptions{IgnoreNotFound: true})
+	_ = s.store.DeleteObject(ctx, ns, payloadKey, storage.DeleteObjectOptions{IgnoreNotFound: true})
 	if notify {
-		s.removeFromReadyCache(name, id)
+		s.removeFromReadyCache(ns, name, id)
 	}
 	return nil
 }
 
 // IncrementAttempts updates attempts and visibility after a successful lease acquire.
-func (s *Service) IncrementAttempts(ctx context.Context, queue string, doc *messageDocument, expectedETag string, visibility time.Duration) (string, error) {
+func (s *Service) IncrementAttempts(ctx context.Context, namespace, queue string, doc *messageDocument, expectedETag string, visibility time.Duration) (string, error) {
 	if visibility <= 0 {
 		visibility = time.Duration(doc.VisibilityTimeout) * time.Second
 		if visibility <= 0 {
@@ -743,22 +850,28 @@ func (s *Service) IncrementAttempts(ctx context.Context, queue string, doc *mess
 	doc.VisibilityTimeout = int64(visibility / time.Second)
 	doc.UpdatedAt = now
 	doc.LastError = nil
-	return s.SaveMessageDocument(ctx, queue, doc.ID, doc, expectedETag)
+	if doc != nil && doc.Namespace == "" {
+		doc.Namespace = namespace
+	}
+	return s.SaveMessageDocument(ctx, namespace, queue, doc.ID, doc, expectedETag)
 }
 
 // Reschedule moves message visibility forward without incrementing attempts (used for nack).
-func (s *Service) Reschedule(ctx context.Context, queue string, doc *messageDocument, expectedETag string, delay time.Duration) (string, error) {
+func (s *Service) Reschedule(ctx context.Context, namespace, queue string, doc *messageDocument, expectedETag string, delay time.Duration) (string, error) {
 	if delay < 0 {
 		delay = 0
 	}
 	now := s.clk.Now().UTC()
 	doc.NotVisibleUntil = now.Add(delay)
 	doc.UpdatedAt = now
-	return s.SaveMessageDocument(ctx, queue, doc.ID, doc, expectedETag)
+	if doc != nil && doc.Namespace == "" {
+		doc.Namespace = namespace
+	}
+	return s.SaveMessageDocument(ctx, namespace, queue, doc.ID, doc, expectedETag)
 }
 
 // ExtendVisibility pushes not_visible_until forward relative to now.
-func (s *Service) ExtendVisibility(ctx context.Context, queue string, doc *messageDocument, expectedETag string, extension time.Duration) (string, error) {
+func (s *Service) ExtendVisibility(ctx context.Context, namespace, queue string, doc *messageDocument, expectedETag string, extension time.Duration) (string, error) {
 	if extension <= 0 {
 		extension = time.Duration(doc.VisibilityTimeout) * time.Second
 		if extension <= 0 {
@@ -769,12 +882,19 @@ func (s *Service) ExtendVisibility(ctx context.Context, queue string, doc *messa
 	doc.NotVisibleUntil = now.Add(extension)
 	doc.VisibilityTimeout = int64(extension / time.Second)
 	doc.UpdatedAt = now
-	return s.SaveMessageDocument(ctx, queue, doc.ID, doc, expectedETag)
+	if doc != nil && doc.Namespace == "" {
+		doc.Namespace = namespace
+	}
+	return s.SaveMessageDocument(ctx, namespace, queue, doc.ID, doc, expectedETag)
 }
 
 // GetPayload streams the message payload.
-func (s *Service) GetPayload(ctx context.Context, queue, id string) (io.ReadCloser, *storage.ObjectInfo, error) {
+func (s *Service) GetPayload(ctx context.Context, namespace, queue, id string) (io.ReadCloser, *storage.ObjectInfo, error) {
 	name, err := sanitizeQueueName(queue)
+	if err != nil {
+		return nil, nil, err
+	}
+	ns, err := sanitizeNamespace(namespace)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -783,7 +903,7 @@ func (s *Service) GetPayload(ctx context.Context, queue, id string) (io.ReadClos
 	if ctxDesc, ok := storage.ObjectDescriptorFromContext(ctx); ok && len(ctxDesc) > 0 {
 		descriptor = append([]byte(nil), ctxDesc...)
 	}
-	reader, info, err := s.store.GetObject(ctx, payloadKey)
+	reader, info, err := s.store.GetObject(ctx, ns, payloadKey)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -793,9 +913,9 @@ func (s *Service) GetPayload(ctx context.Context, queue, id string) (io.ReadClos
 		}
 		if len(descriptor) == 0 {
 			reader.Close()
-			return nil, nil, fmt.Errorf("queue: missing payload descriptor for %s", payloadKey)
+			return nil, nil, fmt.Errorf("queue: missing payload descriptor for %s", fullObjectKey(ns, payloadKey))
 		}
-		mat, err := s.crypto.MaterialFromDescriptor(storage.QueuePayloadContext(payloadKey), descriptor)
+		mat, err := s.crypto.MaterialFromDescriptor(storage.QueuePayloadContext(ns, payloadKey), descriptor)
 		if err != nil {
 			reader.Close()
 			return nil, nil, err
@@ -815,8 +935,12 @@ func (s *Service) GetPayload(ctx context.Context, queue, id string) (io.ReadClos
 }
 
 // EnsureStateExists creates an empty state document if missing.
-func (s *Service) EnsureStateExists(ctx context.Context, queue, id string) (string, error) {
+func (s *Service) EnsureStateExists(ctx context.Context, namespace, queue, id string) (string, error) {
 	name, err := sanitizeQueueName(queue)
+	if err != nil {
+		return "", err
+	}
+	ns, err := sanitizeNamespace(namespace)
 	if err != nil {
 		return "", err
 	}
@@ -828,6 +952,7 @@ func (s *Service) EnsureStateExists(ctx context.Context, queue, id string) (stri
 	}
 	doc := stateDocument{
 		Type:          "queue_state",
+		Namespace:     ns,
 		Queue:         name,
 		MessageID:     id,
 		CreatedAt:     now,
@@ -838,13 +963,13 @@ func (s *Service) EnsureStateExists(ctx context.Context, queue, id string) (stri
 	if err != nil {
 		return "", fmt.Errorf("queue: marshal state: %w", err)
 	}
-	info, err := s.store.PutObject(ctx, stateKey, bytes.NewReader(payload), storage.PutObjectOptions{
+	info, err := s.store.PutObject(ctx, ns, stateKey, bytes.NewReader(payload), storage.PutObjectOptions{
 		IfNotExists: true,
 		ContentType: "application/json",
 	})
 	if err != nil {
 		if errors.Is(err, storage.ErrCASMismatch) {
-			reader, meta, loadErr := s.store.GetObject(ctx, stateKey)
+			reader, meta, loadErr := s.store.GetObject(ctx, ns, stateKey)
 			if loadErr != nil {
 				return "", loadErr
 			}
@@ -863,16 +988,23 @@ func (s *Service) EnsureStateExists(ctx context.Context, queue, id string) (stri
 }
 
 // MoveToDLQ moves metadata/payload/state to the dead-letter queue.
-func (s *Service) MoveToDLQ(ctx context.Context, queue, id string, doc *messageDocument, metaETag string) error {
-	return s.moveToDLQInternal(ctx, queue, id, doc, metaETag, true)
+func (s *Service) MoveToDLQ(ctx context.Context, namespace, queue, id string, doc *messageDocument, metaETag string) error {
+	return s.moveToDLQInternal(ctx, namespace, queue, id, doc, metaETag, true)
 }
 
-func (s *Service) moveToDLQInternal(ctx context.Context, queue, id string, doc *messageDocument, metaETag string, notify bool) error {
+func (s *Service) moveToDLQInternal(ctx context.Context, namespace, queue, id string, doc *messageDocument, metaETag string, notify bool) error {
 	name, err := sanitizeQueueName(queue)
 	if err != nil {
 		return err
 	}
-	if doc.Queue != name || doc.ID != id {
+	ns, err := sanitizeNamespace(namespace)
+	if err != nil {
+		return err
+	}
+	if doc.Namespace == "" {
+		doc.Namespace = ns
+	}
+	if doc.Namespace != ns || doc.Queue != name || doc.ID != id {
 		return fmt.Errorf("queue: document mismatch for DLQ move")
 	}
 	metaKey := messageMetaPath(name, id)
@@ -887,7 +1019,7 @@ func (s *Service) moveToDLQInternal(ctx context.Context, queue, id string, doc *
 		"time_rfc3339": s.clk.Now().UTC().Format(time.RFC3339Nano),
 	}
 	doc.MetaDescriptor = nil
-	metaPayload, metaDescriptor, err := s.encodeMessageMeta(dlqMeta, doc)
+	metaPayload, metaDescriptor, err := s.encodeMessageMeta(ns, dlqMeta, doc)
 	if err != nil {
 		return err
 	}
@@ -899,28 +1031,28 @@ func (s *Service) moveToDLQInternal(ctx context.Context, queue, id string, doc *
 	if s.crypto != nil && s.crypto.Enabled() {
 		metaOpts.ContentType = storage.ContentTypeProtobufEncrypted
 	}
-	if _, err := s.store.PutObject(ctx, dlqMeta, bytes.NewReader(metaPayload), metaOpts); err != nil {
+	if _, err := s.store.PutObject(ctx, ns, dlqMeta, bytes.NewReader(metaPayload), metaOpts); err != nil {
 		return err
 	}
-	if err := s.copyObject(ctx, payloadKey, dlqPayload, true, storage.QueuePayloadContext(payloadKey), storage.QueuePayloadContext(dlqPayload)); err != nil {
+	if err := s.copyObject(ctx, ns, payloadKey, dlqPayload, true, storage.QueuePayloadContext(ns, payloadKey), storage.QueuePayloadContext(ns, dlqPayload)); err != nil {
 		return err
 	}
-	if err := s.copyObject(ctx, stateKey, dlqState, true, "", ""); err != nil {
+	if err := s.copyObject(ctx, ns, stateKey, dlqState, true, "", ""); err != nil {
 		return err
 	}
-	if err := s.store.DeleteObject(ctx, metaKey, storage.DeleteObjectOptions{ExpectedETag: metaETag}); err != nil {
+	if err := s.store.DeleteObject(ctx, ns, metaKey, storage.DeleteObjectOptions{ExpectedETag: metaETag}); err != nil {
 		return err
 	}
-	_ = s.store.DeleteObject(ctx, payloadKey, storage.DeleteObjectOptions{IgnoreNotFound: true})
-	_ = s.store.DeleteObject(ctx, stateKey, storage.DeleteObjectOptions{IgnoreNotFound: true})
+	_ = s.store.DeleteObject(ctx, ns, payloadKey, storage.DeleteObjectOptions{IgnoreNotFound: true})
+	_ = s.store.DeleteObject(ctx, ns, stateKey, storage.DeleteObjectOptions{IgnoreNotFound: true})
 	if notify {
-		s.removeFromReadyCache(name, id)
+		s.removeFromReadyCache(ns, name, id)
 	}
 	return nil
 }
 
-func (s *Service) copyObject(ctx context.Context, srcKey, dstKey string, ifNotExists bool, srcContext, dstContext string) error {
-	reader, info, err := s.store.GetObject(ctx, srcKey)
+func (s *Service) copyObject(ctx context.Context, namespace, srcKey, dstKey string, ifNotExists bool, srcContext, dstContext string) error {
+	reader, info, err := s.store.GetObject(ctx, namespace, srcKey)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil
@@ -936,7 +1068,7 @@ func (s *Service) copyObject(ctx context.Context, srcKey, dstKey string, ifNotEx
 		}
 		if len(descriptor) == 0 {
 			reader.Close()
-			return fmt.Errorf("queue: missing descriptor for %s", srcKey)
+			return fmt.Errorf("queue: missing descriptor for %s", fullObjectKey(namespace, srcKey))
 		}
 		mat, err := s.crypto.MaterialFromDescriptor(srcContext, descriptor)
 		if err != nil {
@@ -997,7 +1129,7 @@ func (s *Service) copyObject(ctx context.Context, srcKey, dstKey string, ifNotEx
 	if ifNotExists {
 		opts.IfNotExists = true
 	}
-	if _, err := s.store.PutObject(ctx, dstKey, finalReader, opts); err != nil {
+	if _, err := s.store.PutObject(ctx, namespace, dstKey, finalReader, opts); err != nil {
 		if ifNotExists && errors.Is(err, storage.ErrCASMismatch) {
 			return nil
 		}
@@ -1007,8 +1139,12 @@ func (s *Service) copyObject(ctx context.Context, srcKey, dstKey string, ifNotEx
 }
 
 // DeleteState removes the workflow state document for queue message.
-func (s *Service) DeleteState(ctx context.Context, queue, id string, expectedETag string) error {
+func (s *Service) DeleteState(ctx context.Context, namespace, queue, id string, expectedETag string) error {
 	name, err := sanitizeQueueName(queue)
+	if err != nil {
+		return err
+	}
+	ns, err := sanitizeNamespace(namespace)
 	if err != nil {
 		return err
 	}
@@ -1017,7 +1153,7 @@ func (s *Service) DeleteState(ctx context.Context, queue, id string, expectedETa
 		ExpectedETag:   expectedETag,
 		IgnoreNotFound: expectedETag == "",
 	}
-	err = s.store.DeleteObject(ctx, stateKey, opts)
+	err = s.store.DeleteObject(ctx, ns, stateKey, opts)
 	if errors.Is(err, storage.ErrNotFound) && expectedETag == "" {
 		return nil
 	}
@@ -1025,35 +1161,55 @@ func (s *Service) DeleteState(ctx context.Context, queue, id string, expectedETa
 }
 
 // LoadState retrieves the JSON state document associated with the queue message.
-func (s *Service) LoadState(ctx context.Context, queue, id string) (*StateDocument, string, error) {
+func (s *Service) LoadState(ctx context.Context, namespace, queue, id string) (*StateDocument, string, error) {
 	name, err := sanitizeQueueName(queue)
 	if err != nil {
 		return nil, "", err
 	}
+	ns, err := sanitizeNamespace(namespace)
+	if err != nil {
+		return nil, "", err
+	}
 	stateKey := messageStatePath(name, id)
-	reader, info, err := s.store.GetObject(ctx, stateKey)
+	reader, info, err := s.store.GetObject(ctx, ns, stateKey)
 	if err != nil {
 		return nil, "", err
 	}
 	defer reader.Close()
 	var doc stateDocument
 	if err := json.NewDecoder(reader).Decode(&doc); err != nil {
-		return nil, "", fmt.Errorf("queue: decode state %q: %w", stateKey, err)
+		return nil, "", fmt.Errorf("queue: decode state %q: %w", fullObjectKey(ns, stateKey), err)
 	}
 	etag := ""
 	if info != nil {
 		etag = info.ETag
 	}
+	if doc.Namespace == "" {
+		doc.Namespace = ns
+	}
+	if doc.Queue == "" {
+		doc.Queue = name
+	}
 	return &doc, etag, nil
 }
 
 // SaveState updates the workflow state document via CAS.
-func (s *Service) SaveState(ctx context.Context, queue, id string, doc *stateDocument, expectedETag string) (string, error) {
+func (s *Service) SaveState(ctx context.Context, namespace, queue, id string, doc *stateDocument, expectedETag string) (string, error) {
 	name, err := sanitizeQueueName(queue)
 	if err != nil {
 		return "", err
 	}
-	if doc.Queue != name || doc.MessageID != id {
+	ns, err := sanitizeNamespace(namespace)
+	if err != nil {
+		return "", err
+	}
+	if doc.Namespace == "" {
+		doc.Namespace = ns
+	}
+	if doc.Queue == "" {
+		doc.Queue = name
+	}
+	if doc.Namespace != ns || doc.Queue != name || doc.MessageID != id {
 		return "", fmt.Errorf("queue: state document mismatch for %s/%s", name, id)
 	}
 	now := s.clk.Now().UTC()
@@ -1063,7 +1219,7 @@ func (s *Service) SaveState(ctx context.Context, queue, id string, doc *stateDoc
 		return "", fmt.Errorf("queue: marshal state: %w", err)
 	}
 	stateKey := messageStatePath(name, id)
-	info, err := s.store.PutObject(ctx, stateKey, bytes.NewReader(payload), storage.PutObjectOptions{
+	info, err := s.store.PutObject(ctx, ns, stateKey, bytes.NewReader(payload), storage.PutObjectOptions{
 		ContentType:  "application/json",
 		ExpectedETag: expectedETag,
 	})
@@ -1077,7 +1233,7 @@ func (s *Service) SaveState(ctx context.Context, queue, id string, doc *stateDoc
 }
 
 // Nack updates metadata with a delay and optional error payload.
-func (s *Service) Nack(ctx context.Context, queue string, doc *messageDocument, expectedETag string, delay time.Duration, lastErr any) (string, error) {
+func (s *Service) Nack(ctx context.Context, namespace, queue string, doc *messageDocument, expectedETag string, delay time.Duration, lastErr any) (string, error) {
 	if delay < 0 {
 		delay = 0
 	}
@@ -1093,16 +1249,19 @@ func (s *Service) Nack(ctx context.Context, queue string, doc *messageDocument, 
 		doc.VisibilityTimeout = seconds
 	}
 	doc.UpdatedAt = now
+	if doc != nil && doc.Namespace == "" {
+		doc.Namespace = namespace
+	}
 	doc.LastError = lastErr
-	return s.SaveMessageDocument(ctx, queue, doc.ID, doc, expectedETag)
+	return s.SaveMessageDocument(ctx, namespace, queue, doc.ID, doc, expectedETag)
 }
 
 // Ack removes state (if present) and message metadata/payload.
-func (s *Service) Ack(ctx context.Context, queue, id string, metaETag string, stateETag string, stateRequired bool) error {
-	if err := s.DeleteState(ctx, queue, id, stateETag); err != nil {
+func (s *Service) Ack(ctx context.Context, namespace, queue, id string, metaETag string, stateETag string, stateRequired bool) error {
+	if err := s.DeleteState(ctx, namespace, queue, id, stateETag); err != nil {
 		if stateRequired || (!errors.Is(err, storage.ErrNotFound) && stateETag != "") {
 			return err
 		}
 	}
-	return s.DeleteMessage(ctx, queue, id, metaETag)
+	return s.DeleteMessage(ctx, namespace, queue, id, metaETag)
 }

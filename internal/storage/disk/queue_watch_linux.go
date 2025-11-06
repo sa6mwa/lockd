@@ -5,8 +5,8 @@ package disk
 import (
 	"fmt"
 	"os"
-	"path"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -29,15 +29,20 @@ func queueWatchSupported(root string) bool {
 }
 
 // SubscribeQueueChanges registers a filesystem watcher for queue message changes.
-func (s *Store) SubscribeQueueChanges(queue string) (storage.QueueChangeSubscription, error) {
+func (s *Store) SubscribeQueueChanges(namespace, queue string) (storage.QueueChangeSubscription, error) {
 	if !s.queueWatchEnabled {
 		return nil, storage.ErrNotImplemented
 	}
-	normalized, err := s.normalizeObjectKey(path.Join("q", queue, "msg"))
-	if err != nil {
-		return nil, err
+	namespace = strings.TrimSpace(namespace)
+	queue = strings.TrimSpace(queue)
+	if namespace == "" {
+		return nil, fmt.Errorf("disk: queue watcher namespace required")
 	}
-	dir := filepath.Join(s.objectDir, filepath.FromSlash(normalized))
+	if queue == "" {
+		return nil, fmt.Errorf("disk: queue watcher requires queue name")
+	}
+	encoded := encodePathSegments([]string{"q", queue, "msg"})
+	dir := filepath.Join(append([]string{s.namespaceObjectsDir(namespace)}, encoded...)...)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("disk: prepare queue directory %q: %w", dir, err)
 	}

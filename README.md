@@ -32,7 +32,7 @@ worker to resume from the last committed state.
 
 - **Exclusive leases** (one holder per key) with configurable TTLs, keepalive,
   and a background sweeper to reap expired locks.
-- **Atomic JSON state** up to ~50 MB with CAS via version + ETag headers.
+- **Atomic JSON state** up to ~100 MB (configurable) with CAS via version + ETag headers.
 - **Monotonic fencing tokens** protect against delayed clients; every lease-bound
   request must include the latest `X-Fencing-Token` issued by the server.
 - **Acquire-for-update helper** wraps acquire + get + update into a single callback that
@@ -247,10 +247,10 @@ Shutdown tuning:
 ### Disk (SSD/NVMe)
 
 - Streams JSON payloads directly to files beneath the store root, hashing on the fly to produce deterministic ETags.
-- Keeps metadata in per-key protobuf documents; state lives under `state/<encoded-key>/data`.
+- Keeps metadata in per-key protobuf documents; state lives under `<namespace>/state/<encoded-key>/data`, keeping every payload inside its namespace directory (for example `default/state/orders/data`).
 - Optional retention (`--disk-retention`, `LOCKD_DISK_RETENTION`) prunes keys whose metadata `updated_at_unix` is older than the configured duration. Set to `0` (default) to keep data indefinitely.
 - The janitor sweep interval defaults to half the retention window (clamped between 1 minute and 1 hour). Override via `--disk-janitor-interval`.
-- Configure with `--store disk:///var/lib/lockd-data`. All files live beneath the specified root; lockd creates `meta/`, `state/`, and `tmp/` directories automatically.
+- Configure with `--store disk:///var/lib/lockd-data`. All files live beneath the specified root; lockd creates `meta/`, `state/`, and `tmp/` directories automatically, and every metadata/state object is stored with its namespace as part of the key (e.g. `default/q/orders/msg/...`).
 
 ### Azure Blob Storage
 
@@ -289,6 +289,7 @@ export AWS_SECRET_ACCESS_KEY="..."
 lockd \
   --listen :9341 \
   --store "$LOCKD_STORE" \
+  --default-namespace workflows \
   --json-max 100MB \
   --default-ttl 30s \
   --max-ttl 30m \
@@ -316,6 +317,27 @@ lockd --store mem:// --json-util stdlib
 
 The default listen address is `:9341`, chosen from the unassigned IANA space to
 avoid clashes with common cloud-native services.
+
+### Namespaces
+
+Every key, queue, and workflow lease lives inside a namespace. When callers omit
+the field, the server falls back to `--default-namespace` (defaults to
+`"default"`). Use `--default-namespace` / `LOCKD_DEFAULT_NAMESPACE` to set the
+cluster-wide default, or supply `namespace` in API requests to isolate
+workloads.
+
+The Go SDK mirrors this behaviour via `client.WithDefaultNamespace`. CLI
+commands expose `--namespace` / `-n` and honor `LOCKD_CLIENT_NAMESPACE` for
+lease/state operations plus `LOCKD_QUEUE_NAMESPACE` for queue helpers. Queue
+dequeue commands export `LOCKD_QUEUE_NAMESPACE` (along with message metadata)
+so follow-up ack/nack/extend calls can reuse the value without repeating
+`--namespace`. Set these environment variables in your shell to avoid passing
+the flag on every invocation.
+
+Namespaces cascade to storage: metadata and payload objects are prefixed with
+`<namespace>/...` regardless of backend. When adding new features or tests,
+ensure we exercise at least one non-default namespace to avoid regressions in
+prefix handling.
 
 #### Queue dispatcher tuning
 

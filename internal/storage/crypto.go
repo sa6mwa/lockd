@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"strings"
 
 	"pkt.systems/kryptograf"
 	"pkt.systems/kryptograf/keymgmt"
@@ -136,14 +137,22 @@ func StateObjectContext(key string) string {
 	return "state:" + key
 }
 
+func queueObjectContext(prefix, namespace, relPath string) string {
+	rel := strings.TrimPrefix(relPath, "/")
+	if namespace == "" {
+		return prefix + rel
+	}
+	return prefix + namespace + "/" + rel
+}
+
 // QueueMetaContext returns the encryption context for queue metadata objects.
-func QueueMetaContext(objectKey string) string {
-	return "queue-meta:" + objectKey
+func QueueMetaContext(namespace, relPath string) string {
+	return queueObjectContext("queue-meta:", namespace, relPath)
 }
 
 // QueuePayloadContext returns the encryption context for queue payload objects.
-func QueuePayloadContext(objectKey string) string {
-	return "queue-payload:" + objectKey
+func QueuePayloadContext(namespace, relPath string) string {
+	return queueObjectContext("queue-payload:", namespace, relPath)
 }
 
 // EncryptWriterForMaterial wraps dst with an encrypting writer using the provided material.

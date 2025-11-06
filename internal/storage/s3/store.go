@@ -160,11 +160,15 @@ func (s *Store) loggers(ctx context.Context) (pslog.Logger, pslog.Logger) {
 }
 
 // LoadMeta downloads the metadata object for key and returns its ETag.
-func (s *Store) LoadMeta(ctx context.Context, key string) (*storage.Meta, string, error) {
+func (s *Store) LoadMeta(ctx context.Context, namespace, key string) (*storage.Meta, string, error) {
 	logger, verbose := s.loggers(ctx)
 	start := time.Now()
-	object := s.metaObject(key)
-	verbose.Trace("s3.load_meta.begin", "key", key, "object", object)
+	object, err := s.metaObject(namespace, key)
+	if err != nil {
+		logger.Debug("s3.load_meta.resolve_error", "namespace", namespace, "key", key, "error", err)
+		return nil, "", err
+	}
+	verbose.Trace("s3.load_meta.begin", "namespace", namespace, "key", key, "object", object)
 
 	obj, err := s.client.GetObject(ctx, s.cfg.Bucket, object, minio.GetObjectOptions{})
 	if err != nil {
@@ -230,10 +234,14 @@ func (s *Store) LoadMeta(ctx context.Context, key string) (*storage.Meta, string
 }
 
 // StoreMeta uploads the metadata protobuf, applying conditional copy semantics via expectedETag.
-func (s *Store) StoreMeta(ctx context.Context, key string, meta *storage.Meta, expectedETag string) (string, error) {
+func (s *Store) StoreMeta(ctx context.Context, namespace, key string, meta *storage.Meta, expectedETag string) (string, error) {
 	logger, verbose := s.loggers(ctx)
 	start := time.Now()
-	object := s.metaObject(key)
+	object, err := s.metaObject(namespace, key)
+	if err != nil {
+		logger.Debug("s3.store_meta.resolve_error", "namespace", namespace, "key", key, "error", err)
+		return "", err
+	}
 	leaseOwner := ""
 	leaseExpires := int64(0)
 	if meta != nil && meta.Lease != nil {
@@ -241,17 +249,16 @@ func (s *Store) StoreMeta(ctx context.Context, key string, meta *storage.Meta, e
 		leaseExpires = meta.Lease.ExpiresAtUnix
 	}
 	verbose.Trace("s3.store_meta.begin",
+		"namespace", namespace,
 		"key", key,
 		"object", object,
 		"expected_etag", expectedETag,
-		"version", meta.Version,
-		"state_etag", meta.StateETag,
 		"lease_owner", leaseOwner,
 		"lease_expires_at", leaseExpires,
 	)
 	payload, err := storage.MarshalMeta(meta, s.crypto)
 	if err != nil {
-		logger.Debug("s3.store_meta.marshal_error", "key", key, "object", object, "error", err)
+		logger.Debug("s3.store_meta.marshal_error", "namespace", namespace, "key", key, "object", object, "error", err)
 		return "", err
 	}
 	options := minio.PutObjectOptions{ContentType: s.metaContentType()}
@@ -261,21 +268,22 @@ func (s *Store) StoreMeta(ctx context.Context, key string, meta *storage.Meta, e
 	} else {
 		options.SetMatchETagExcept("*")
 	}
-	info, err := s.client.PutObject(ctx, s.cfg.Bucket, s.metaObject(key), bytes.NewReader(payload), int64(len(payload)), options)
+	info, err := s.client.PutObject(ctx, s.cfg.Bucket, object, bytes.NewReader(payload), int64(len(payload)), options)
 	if err != nil {
 		if isPreconditionFailed(err) {
-			logger.Debug("s3.store_meta.cas_mismatch", "key", key, "object", object, "expected_etag", expectedETag)
+			logger.Debug("s3.store_meta.cas_mismatch", "namespace", namespace, "key", key, "object", object, "expected_etag", expectedETag)
 			return "", storage.ErrCASMismatch
 		}
 		if isNotFound(err) {
-			logger.Debug("s3.store_meta.not_found", "key", key, "object", object, "expected_etag", expectedETag)
+			logger.Debug("s3.store_meta.not_found", "namespace", namespace, "key", key, "object", object, "expected_etag", expectedETag)
 			return "", storage.ErrNotFound
 		}
-		logger.Debug("s3.store_meta.put_error", "key", key, "object", object, "error", err)
+		logger.Debug("s3.store_meta.put_error", "namespace", namespace, "key", key, "object", object, "error", err)
 		return "", s.wrapError(err, "s3: put meta")
 	}
 	newETag := stripETag(info.ETag)
 	verbose.Debug("s3.store_meta.success",
+		"namespace", namespace,
 		"key", key,
 		"object", object,
 		"new_etag", newETag,
@@ -285,81 +293,95 @@ func (s *Store) StoreMeta(ctx context.Context, key string, meta *storage.Meta, e
 }
 
 // DeleteMeta removes the metadata object, enforcing CAS when expectedETag is supplied.
-func (s *Store) DeleteMeta(ctx context.Context, key string, expectedETag string) error {
-	object := s.metaObject(key)
+func (s *Store) DeleteMeta(ctx context.Context, namespace, key string, expectedETag string) error {
 	logger, verbose := s.loggers(ctx)
 	start := time.Now()
-	verbose.Trace("s3.delete_meta.begin", "key", key, "object", object, "expected_etag", expectedETag)
+	object, err := s.metaObject(namespace, key)
+	if err != nil {
+		logger.Debug("s3.delete_meta.resolve_error", "namespace", namespace, "key", key, "error", err)
+		return err
+	}
+	verbose.Trace("s3.delete_meta.begin", "namespace", namespace, "key", key, "object", object, "expected_etag", expectedETag)
 
 	if expectedETag != "" {
 		info, err := s.client.StatObject(ctx, s.cfg.Bucket, object, minio.StatObjectOptions{})
 		if err != nil {
 			if isNotFound(err) {
-				verbose.Debug("s3.delete_meta.not_found", "key", key, "object", object, "elapsed", time.Since(start))
+				verbose.Debug("s3.delete_meta.not_found", "namespace", namespace, "key", key, "object", object, "elapsed", time.Since(start))
 				return storage.ErrNotFound
 			}
-			logger.Debug("s3.delete_meta.stat_error", "key", key, "object", object, "error", err)
+			logger.Debug("s3.delete_meta.stat_error", "namespace", namespace, "key", key, "object", object, "error", err)
 			return fmt.Errorf("s3: stat meta: %w", err)
 		}
 		if stripETag(info.ETag) != expectedETag {
-			logger.Debug("s3.delete_meta.cas_mismatch", "key", key, "object", object, "expected_etag", expectedETag, "current_etag", stripETag(info.ETag))
+			logger.Debug("s3.delete_meta.cas_mismatch", "namespace", namespace, "key", key, "object", object, "expected_etag", expectedETag, "current_etag", stripETag(info.ETag))
 			return storage.ErrCASMismatch
 		}
 	}
 	if err := s.client.RemoveObject(ctx, s.cfg.Bucket, object, minio.RemoveObjectOptions{}); err != nil {
-		logger.Debug("s3.delete_meta.remove_error", "key", key, "object", object, "error", err)
+		logger.Debug("s3.delete_meta.remove_error", "namespace", namespace, "key", key, "object", object, "error", err)
 		return s.wrapError(err, "s3: remove meta")
 	}
-	verbose.Debug("s3.delete_meta.success", "key", key, "object", object, "elapsed", time.Since(start))
+	verbose.Debug("s3.delete_meta.success", "namespace", namespace, "key", key, "object", object, "elapsed", time.Since(start))
 	return nil
 }
 
-// ListMetaKeys lists every key that currently has metadata stored in the bucket prefix.
-func (s *Store) ListMetaKeys(ctx context.Context) ([]string, error) {
+// ListMetaKeys enumerates metadata documents within the provided namespace.
+func (s *Store) ListMetaKeys(ctx context.Context, namespace string) ([]string, error) {
 	logger, verbose := s.loggers(ctx)
 	start := time.Now()
-	metaPrefix := path.Join(strings.Trim(s.cfg.Prefix, "/"), "meta")
-	if metaPrefix == "." || metaPrefix == "" {
-		metaPrefix = "meta"
-	}
-	metaPrefix += "/"
-	verbose.Trace("s3.list_meta_keys.begin", "prefix", metaPrefix)
-	opts := minio.ListObjectsOptions{Prefix: metaPrefix, Recursive: true}
+	prefixPath := path.Join(namespace, "meta") + "/"
+	fullPrefix := s.withPrefix(prefixPath)
+	verbose.Trace("s3.list_meta_keys.begin", "namespace", namespace, "prefix", fullPrefix)
+	opts := minio.ListObjectsOptions{Prefix: fullPrefix, Recursive: true}
 	var keys []string
 	for object := range s.client.ListObjects(ctx, s.cfg.Bucket, opts) {
 		if object.Err != nil {
-			logger.Debug("s3.list_meta_keys.error", "error", object.Err)
+			logger.Debug("s3.list_meta_keys.error", "namespace", namespace, "error", object.Err)
 			return nil, s.wrapError(object.Err, "s3: list meta")
 		}
-		key := strings.TrimPrefix(object.Key, metaPrefix)
-		key = strings.TrimSuffix(key, ".pb")
-		if key == "" {
+		rel := strings.TrimPrefix(object.Key, fullPrefix)
+		if rel == "" || strings.HasSuffix(rel, "/") {
 			continue
 		}
-		keys = append(keys, key)
+		if strings.HasPrefix(rel, "tmp/") {
+			continue
+		}
+		if !strings.HasSuffix(rel, ".pb") {
+			continue
+		}
+		entry := strings.TrimSuffix(rel, ".pb")
+		if entry == "" {
+			continue
+		}
+		keys = append(keys, entry)
 	}
-	verbose.Debug("s3.list_meta_keys.success", "count", len(keys), "elapsed", time.Since(start))
+	verbose.Debug("s3.list_meta_keys.success", "namespace", namespace, "count", len(keys), "elapsed", time.Since(start))
 	return keys, nil
 }
 
-// ReadState streams the state object for key and returns basic metadata.
-func (s *Store) ReadState(ctx context.Context, key string) (io.ReadCloser, *storage.StateInfo, error) {
-	object := s.stateObject(key)
+// ReadState streams the state object for key within the namespace and returns metadata.
+func (s *Store) ReadState(ctx context.Context, namespace, key string) (io.ReadCloser, *storage.StateInfo, error) {
 	logger, verbose := s.loggers(ctx)
 	start := time.Now()
-	verbose.Trace("s3.read_state.begin", "key", key, "object", object)
+	object, err := s.stateObject(namespace, key)
+	if err != nil {
+		logger.Debug("s3.read_state.resolve_error", "namespace", namespace, "key", key, "error", err)
+		return nil, nil, err
+	}
+	verbose.Trace("s3.read_state.begin", "namespace", namespace, "key", key, "object", object)
 	info, err := s.client.StatObject(ctx, s.cfg.Bucket, object, minio.StatObjectOptions{})
 	if err != nil {
 		if isNotFound(err) {
-			verbose.Debug("s3.read_state.not_found", "key", key, "object", object, "elapsed", time.Since(start))
+			verbose.Debug("s3.read_state.not_found", "namespace", namespace, "key", key, "object", object, "elapsed", time.Since(start))
 			return nil, nil, storage.ErrNotFound
 		}
-		logger.Debug("s3.read_state.stat_error", "key", key, "object", object, "error", err)
+		logger.Debug("s3.read_state.stat_error", "namespace", namespace, "key", key, "object", object, "error", err)
 		return nil, nil, s.wrapError(err, "s3: stat state")
 	}
 	obj, err := s.client.GetObject(ctx, s.cfg.Bucket, object, minio.GetObjectOptions{})
 	if err != nil {
-		logger.Debug("s3.read_state.get_error", "key", key, "object", object, "error", err)
+		logger.Debug("s3.read_state.get_error", "namespace", namespace, "key", key, "object", object, "error", err)
 		return nil, nil, s.wrapError(err, "s3: get state")
 	}
 	etag := stripETag(info.ETag)
@@ -389,25 +411,27 @@ func (s *Store) ReadState(ctx context.Context, key string) (io.ReadCloser, *stor
 	if plain, ok := storage.StatePlaintextSizeFromContext(ctx); ok && plain > 0 {
 		infoOut.Size = plain
 	}
+	objectCtx := storage.StateObjectContext(path.Join(namespace, key))
 	if encrypted {
 		if len(descriptor) == 0 {
 			obj.Close()
-			logger.Debug("s3.read_state.missing_descriptor", "key", key)
+			logger.Debug("s3.read_state.missing_descriptor", "namespace", namespace, "key", key)
 			return nil, nil, fmt.Errorf("s3: missing state descriptor for %q", key)
 		}
-		mat, err := s.crypto.MaterialFromDescriptor(storage.StateObjectContext(key), descriptor)
+		mat, err := s.crypto.MaterialFromDescriptor(objectCtx, descriptor)
 		if err != nil {
 			obj.Close()
-			logger.Debug("s3.read_state.material_error", "key", key, "error", err)
+			logger.Debug("s3.read_state.material_error", "namespace", namespace, "key", key, "error", err)
 			return nil, nil, err
 		}
 		decReader, err := s.crypto.DecryptReaderForMaterial(obj, mat)
 		if err != nil {
 			obj.Close()
-			logger.Debug("s3.read_state.decrypt_error", "key", key, "error", err)
+			logger.Debug("s3.read_state.decrypt_error", "namespace", namespace, "key", key, "error", err)
 			return nil, nil, err
 		}
 		verbose.Debug("s3.read_state.success",
+			"namespace", namespace,
 			"key", key,
 			"object", object,
 			"etag", etag,
@@ -418,6 +442,7 @@ func (s *Store) ReadState(ctx context.Context, key string) (io.ReadCloser, *stor
 		return decReader, infoOut, nil
 	}
 	verbose.Debug("s3.read_state.success",
+		"namespace", namespace,
 		"key", key,
 		"object", object,
 		"etag", etag,
@@ -429,11 +454,15 @@ func (s *Store) ReadState(ctx context.Context, key string) (io.ReadCloser, *stor
 }
 
 // WriteState uploads a new state object, optionally guarding against stale ETags.
-func (s *Store) WriteState(ctx context.Context, key string, body io.Reader, opts storage.PutStateOptions) (*storage.PutStateResult, error) {
-	object := s.stateObject(key)
+func (s *Store) WriteState(ctx context.Context, namespace, key string, body io.Reader, opts storage.PutStateOptions) (*storage.PutStateResult, error) {
 	logger, verbose := s.loggers(ctx)
 	start := time.Now()
-	verbose.Trace("s3.write_state.begin", "key", key, "object", object, "expected_etag", opts.ExpectedETag)
+	object, err := s.stateObject(namespace, key)
+	if err != nil {
+		logger.Debug("s3.write_state.resolve_error", "namespace", namespace, "key", key, "error", err)
+		return nil, err
+	}
+	verbose.Trace("s3.write_state.begin", "namespace", namespace, "key", key, "object", object, "expected_etag", opts.ExpectedETag)
 	putOpts := minio.PutObjectOptions{ContentType: storage.ContentTypeJSON}
 	if s.cfg.PartSize > 0 {
 		putOpts.PartSize = uint64(s.cfg.PartSize)
@@ -447,6 +476,7 @@ func (s *Store) WriteState(ctx context.Context, key string, body io.Reader, opts
 	var descriptor []byte
 	var plainBytes atomic.Int64
 	reader := body
+	objectCtx := storage.StateObjectContext(path.Join(namespace, key))
 	if encrypted {
 		putOpts.ContentType = storage.ContentTypeJSONEncrypted
 		descFromCtx, ok := storage.StateDescriptorFromContext(ctx)
@@ -454,16 +484,16 @@ func (s *Store) WriteState(ctx context.Context, key string, body io.Reader, opts
 		var err error
 		if ok && len(descFromCtx) > 0 {
 			descriptor = append([]byte(nil), descFromCtx...)
-			mat, err = s.crypto.MaterialFromDescriptor(storage.StateObjectContext(key), descriptor)
+			mat, err = s.crypto.MaterialFromDescriptor(objectCtx, descriptor)
 			if err != nil {
-				logger.Debug("s3.write_state.material_error", "key", key, "object", object, "error", err)
+				logger.Debug("s3.write_state.material_error", "namespace", namespace, "key", key, "object", object, "error", err)
 				return nil, err
 			}
 		} else {
 			var descBytes []byte
-			mat, descBytes, err = s.crypto.MintMaterial(storage.StateObjectContext(key))
+			mat, descBytes, err = s.crypto.MintMaterial(objectCtx)
 			if err != nil {
-				logger.Debug("s3.write_state.mint_descriptor_error", "key", key, "object", object, "error", err)
+				logger.Debug("s3.write_state.mint_descriptor_error", "namespace", namespace, "key", key, "object", object, "error", err)
 				return nil, err
 			}
 			descriptor = append([]byte(nil), descBytes...)
@@ -478,7 +508,7 @@ func (s *Store) WriteState(ctx context.Context, key string, body io.Reader, opts
 		encWriter, err := s.crypto.EncryptWriterForMaterial(pw, mat)
 		if err != nil {
 			pw.Close()
-			logger.Debug("s3.write_state.encrypt_writer_error", "key", key, "object", object, "error", err)
+			logger.Debug("s3.write_state.encrypt_writer_error", "namespace", namespace, "key", key, "object", object, "error", err)
 			return nil, err
 		}
 		go func() {
@@ -508,10 +538,10 @@ func (s *Store) WriteState(ctx context.Context, key string, body io.Reader, opts
 	info, err := s.client.PutObject(ctx, s.cfg.Bucket, object, reader, length, putOpts)
 	if err != nil {
 		if isPreconditionFailed(err) {
-			logger.Debug("s3.write_state.cas_mismatch", "key", key, "object", object, "expected_etag", opts.ExpectedETag)
+			logger.Debug("s3.write_state.cas_mismatch", "namespace", namespace, "key", key, "object", object, "expected_etag", opts.ExpectedETag)
 			return nil, storage.ErrCASMismatch
 		}
-		logger.Debug("s3.write_state.put_error", "key", key, "object", object, "error", err)
+		logger.Debug("s3.write_state.put_error", "namespace", namespace, "key", key, "object", object, "error", err)
 		return nil, s.wrapError(err, "s3: put state")
 	}
 	bytesWritten := info.Size
@@ -528,6 +558,7 @@ func (s *Store) WriteState(ctx context.Context, key string, body io.Reader, opts
 		result.Descriptor = append([]byte(nil), descriptor...)
 	}
 	verbose.Debug("s3.write_state.success",
+		"namespace", namespace,
 		"key", key,
 		"object", object,
 		"bytes", bytesWritten,
@@ -538,55 +569,60 @@ func (s *Store) WriteState(ctx context.Context, key string, body io.Reader, opts
 }
 
 // Remove deletes the state object, applying CAS when expectedETag is provided.
-func (s *Store) Remove(ctx context.Context, key string, expectedETag string) error {
-	object := s.stateObject(key)
+func (s *Store) Remove(ctx context.Context, namespace, key string, expectedETag string) error {
 	logger, verbose := s.loggers(ctx)
 	start := time.Now()
-	verbose.Trace("s3.remove_state.begin", "key", key, "object", object, "expected_etag", expectedETag)
+	object, err := s.stateObject(namespace, key)
+	if err != nil {
+		logger.Debug("s3.remove_state.resolve_error", "namespace", namespace, "key", key, "error", err)
+		return err
+	}
+	verbose.Trace("s3.remove_state.begin", "namespace", namespace, "key", key, "object", object, "expected_etag", expectedETag)
 	if expectedETag != "" {
 		info, err := s.client.StatObject(ctx, s.cfg.Bucket, object, minio.StatObjectOptions{})
 		if err != nil {
 			if isNotFound(err) {
-				verbose.Debug("s3.remove_state.not_found", "key", key, "object", object, "elapsed", time.Since(start))
+				verbose.Debug("s3.remove_state.not_found", "namespace", namespace, "key", key, "object", object, "elapsed", time.Since(start))
 				return storage.ErrNotFound
 			}
-			logger.Debug("s3.remove_state.stat_error", "key", key, "object", object, "error", err)
+			logger.Debug("s3.remove_state.stat_error", "namespace", namespace, "key", key, "object", object, "error", err)
 			return fmt.Errorf("s3: stat state: %w", err)
 		}
 		if stripETag(info.ETag) != expectedETag {
-			logger.Debug("s3.remove_state.cas_mismatch", "key", key, "object", object, "expected_etag", expectedETag, "current_etag", stripETag(info.ETag))
+			logger.Debug("s3.remove_state.cas_mismatch", "namespace", namespace, "key", key, "object", object, "expected_etag", expectedETag, "current_etag", stripETag(info.ETag))
 			return storage.ErrCASMismatch
 		}
 	}
 	if err := s.client.RemoveObject(ctx, s.cfg.Bucket, object, minio.RemoveObjectOptions{}); err != nil {
-		logger.Debug("s3.remove_state.remove_error", "key", key, "object", object, "error", err)
+		logger.Debug("s3.remove_state.remove_error", "namespace", namespace, "key", key, "object", object, "error", err)
 		return s.wrapError(err, "s3: remove state")
 	}
-	verbose.Debug("s3.remove_state.success", "key", key, "object", object, "elapsed", time.Since(start))
+	verbose.Debug("s3.remove_state.success", "namespace", namespace, "key", key, "object", object, "elapsed", time.Since(start))
 	return nil
 }
 
-// ListObjects enumerates raw objects matching opts.Prefix.
-func (s *Store) ListObjects(ctx context.Context, opts storage.ListOptions) (*storage.ListResult, error) {
+// ListObjects enumerates raw objects within the namespace matching opts.Prefix.
+func (s *Store) ListObjects(ctx context.Context, namespace string, opts storage.ListOptions) (*storage.ListResult, error) {
 	logger, verbose := s.loggers(ctx)
 	start := time.Now()
 	verbose.Trace("s3.list_objects.begin",
+		"namespace", namespace,
 		"prefix", opts.Prefix,
 		"start_after", opts.StartAfter,
 		"limit", opts.Limit,
 	)
 
-	actualPrefix := s.objectKey(strings.TrimPrefix(opts.Prefix, "/"))
-	actualStartAfter := ""
-	if opts.StartAfter != "" {
-		actualStartAfter = s.objectKey(strings.TrimPrefix(opts.StartAfter, "/"))
+	nsRoot := strings.TrimSuffix(s.objectKey(namespace, ""), "/")
+	if nsRoot != "" {
+		nsRoot += "/"
 	}
+	actualPrefix := nsRoot + strings.TrimPrefix(opts.Prefix, "/")
 	listOpts := minio.ListObjectsOptions{
 		Prefix:    actualPrefix,
 		Recursive: true,
 	}
-	if actualStartAfter != "" {
-		listOpts.StartAfter = actualStartAfter
+	if opts.StartAfter != "" {
+		listOpts.StartAfter = nsRoot + strings.TrimPrefix(opts.StartAfter, "/")
 	}
 	if opts.Limit > 0 {
 		listOpts.MaxKeys = opts.Limit + 1
@@ -598,11 +634,11 @@ func (s *Store) ListObjects(ctx context.Context, opts storage.ListOptions) (*sto
 	exceeded := false
 	for object := range s.client.ListObjects(ctx, s.cfg.Bucket, listOpts) {
 		if object.Err != nil {
-			logger.Debug("s3.list_objects.error", "error", object.Err)
+			logger.Debug("s3.list_objects.error", "namespace", namespace, "error", object.Err)
 			return nil, s.wrapError(object.Err, "s3: list objects")
 		}
-		logicalKey := s.trimObjectPrefix(object.Key)
-		if opts.Prefix != "" && !strings.HasPrefix(logicalKey, opts.Prefix) {
+		logicalKey := strings.TrimPrefix(object.Key, nsRoot)
+		if logicalKey == object.Key {
 			continue
 		}
 		info := storage.ObjectInfo{
@@ -626,6 +662,7 @@ func (s *Store) ListObjects(ctx context.Context, opts storage.ListOptions) (*sto
 		result.NextStartAfter = lastKey
 	}
 	verbose.Debug("s3.list_objects.success",
+		"namespace", namespace,
 		"prefix", opts.Prefix,
 		"count", len(result.Objects),
 		"truncated", result.Truncated,
@@ -634,23 +671,23 @@ func (s *Store) ListObjects(ctx context.Context, opts storage.ListOptions) (*sto
 	return result, nil
 }
 
-// GetObject downloads the raw payload for key.
-func (s *Store) GetObject(ctx context.Context, key string) (io.ReadCloser, *storage.ObjectInfo, error) {
+// GetObject downloads the raw payload for key within the namespace.
+func (s *Store) GetObject(ctx context.Context, namespace, key string) (io.ReadCloser, *storage.ObjectInfo, error) {
 	logger, verbose := s.loggers(ctx)
-	object := s.objectKey(strings.TrimPrefix(key, "/"))
-	verbose.Trace("s3.get_object.begin", "key", key, "object", object)
+	object := s.objectKey(namespace, key)
+	verbose.Trace("s3.get_object.begin", "namespace", namespace, "key", key, "object", object)
 	info, err := s.client.StatObject(ctx, s.cfg.Bucket, object, minio.StatObjectOptions{})
 	if err != nil {
 		if isNotFound(err) {
-			verbose.Debug("s3.get_object.not_found", "key", key, "object", object)
+			verbose.Debug("s3.get_object.not_found", "namespace", namespace, "key", key, "object", object)
 			return nil, nil, storage.ErrNotFound
 		}
-		logger.Debug("s3.get_object.stat_error", "key", key, "object", object, "error", err)
+		logger.Debug("s3.get_object.stat_error", "namespace", namespace, "key", key, "object", object, "error", err)
 		return nil, nil, s.wrapError(err, "s3: stat object")
 	}
 	obj, err := s.client.GetObject(ctx, s.cfg.Bucket, object, minio.GetObjectOptions{})
 	if err != nil {
-		logger.Debug("s3.get_object.get_error", "key", key, "object", object, "error", err)
+		logger.Debug("s3.get_object.get_error", "namespace", namespace, "key", key, "object", object, "error", err)
 		return nil, nil, s.wrapError(err, "s3: get object")
 	}
 	reader := &notFoundAwareObject{object: obj}
@@ -670,20 +707,16 @@ func (s *Store) GetObject(ctx context.Context, key string) (io.ReadCloser, *stor
 	if plain, ok := storage.ObjectPlaintextSizeFromContext(ctx); ok && plain > 0 {
 		meta.Size = plain
 	}
-	verbose.Debug("s3.get_object.success",
-		"key", key,
-		"object", object,
-		"etag", meta.ETag,
-		"size", meta.Size,
-	)
+	verbose.Debug("s3.get_object.success", "namespace", namespace, "key", key, "object", object, "etag", meta.ETag, "size", meta.Size)
 	return reader, meta, nil
 }
 
-// PutObject uploads raw object bytes with conditional guards.
-func (s *Store) PutObject(ctx context.Context, key string, body io.Reader, opts storage.PutObjectOptions) (*storage.ObjectInfo, error) {
+// PutObject uploads raw object bytes with conditional guards within the namespace.
+func (s *Store) PutObject(ctx context.Context, namespace, key string, body io.Reader, opts storage.PutObjectOptions) (*storage.ObjectInfo, error) {
 	logger, verbose := s.loggers(ctx)
-	object := s.objectKey(strings.TrimPrefix(key, "/"))
+	object := s.objectKey(namespace, key)
 	verbose.Trace("s3.put_object.begin",
+		"namespace", namespace,
 		"key", key,
 		"object", object,
 		"expected_etag", opts.ExpectedETag,
@@ -691,7 +724,7 @@ func (s *Store) PutObject(ctx context.Context, key string, body io.Reader, opts 
 	)
 	putOpts := minio.PutObjectOptions{ContentType: opts.ContentType}
 	if putOpts.ContentType == "" {
-		putOpts.ContentType = "application/octet-stream"
+		putOpts.ContentType = storage.ContentTypeOctetStream
 	}
 	s.applySSE(&putOpts)
 	if len(opts.Descriptor) > 0 {
@@ -717,13 +750,10 @@ func (s *Store) PutObject(ctx context.Context, key string, body io.Reader, opts 
 	info, err := s.client.PutObject(ctx, s.cfg.Bucket, object, body, length, putOpts)
 	if err != nil {
 		if isPreconditionFailed(err) {
-			logger.Debug("s3.put_object.cas_mismatch", "key", key, "object", object, "expected_etag", opts.ExpectedETag)
-			if opts.ExpectedETag != "" {
-				return nil, storage.ErrCASMismatch
-			}
+			logger.Debug("s3.put_object.cas_mismatch", "namespace", namespace, "key", key, "object", object, "expected_etag", opts.ExpectedETag)
 			return nil, storage.ErrCASMismatch
 		}
-		logger.Debug("s3.put_object.put_error", "key", key, "object", object, "error", err)
+		logger.Debug("s3.put_object.put_error", "namespace", namespace, "key", key, "object", object, "error", err)
 		return nil, s.wrapError(err, "s3: put object")
 	}
 	meta := &storage.ObjectInfo{
@@ -734,20 +764,15 @@ func (s *Store) PutObject(ctx context.Context, key string, body io.Reader, opts 
 		ContentType:  putOpts.ContentType,
 		Descriptor:   append([]byte(nil), opts.Descriptor...),
 	}
-	verbose.Debug("s3.put_object.success",
-		"key", key,
-		"object", object,
-		"etag", meta.ETag,
-		"size", meta.Size,
-	)
+	verbose.Debug("s3.put_object.success", "namespace", namespace, "key", key, "object", object, "etag", meta.ETag, "size", meta.Size)
 	return meta, nil
 }
 
-// DeleteObject removes an object with optional CAS.
-func (s *Store) DeleteObject(ctx context.Context, key string, opts storage.DeleteObjectOptions) error {
+// DeleteObject removes an object with optional CAS within the namespace.
+func (s *Store) DeleteObject(ctx context.Context, namespace, key string, opts storage.DeleteObjectOptions) error {
 	logger, verbose := s.loggers(ctx)
-	object := s.objectKey(strings.TrimPrefix(key, "/"))
-	verbose.Trace("s3.delete_object.begin", "key", key, "object", object, "expected_etag", opts.ExpectedETag, "ignore_not_found", opts.IgnoreNotFound)
+	object := s.objectKey(namespace, key)
+	verbose.Trace("s3.delete_object.begin", "namespace", namespace, "key", key, "object", object, "expected_etag", opts.ExpectedETag, "ignore_not_found", opts.IgnoreNotFound)
 	if opts.ExpectedETag != "" {
 		info, err := s.client.StatObject(ctx, s.cfg.Bucket, object, minio.StatObjectOptions{})
 		if err != nil {
@@ -757,11 +782,11 @@ func (s *Store) DeleteObject(ctx context.Context, key string, opts storage.Delet
 				}
 				return storage.ErrNotFound
 			}
-			logger.Debug("s3.delete_object.stat_error", "key", key, "object", object, "error", err)
+			logger.Debug("s3.delete_object.stat_error", "namespace", namespace, "key", key, "object", object, "error", err)
 			return fmt.Errorf("s3: stat object: %w", err)
 		}
 		if stripETag(info.ETag) != opts.ExpectedETag {
-			logger.Debug("s3.delete_object.cas_mismatch", "key", key, "object", object, "expected_etag", opts.ExpectedETag, "current_etag", stripETag(info.ETag))
+			logger.Debug("s3.delete_object.cas_mismatch", "namespace", namespace, "key", key, "object", object, "expected_etag", opts.ExpectedETag, "current_etag", stripETag(info.ETag))
 			return storage.ErrCASMismatch
 		}
 	}
@@ -769,10 +794,10 @@ func (s *Store) DeleteObject(ctx context.Context, key string, opts storage.Delet
 		if isNotFound(err) && opts.IgnoreNotFound {
 			return nil
 		}
-		logger.Debug("s3.delete_object.remove_error", "key", key, "object", object, "error", err)
+		logger.Debug("s3.delete_object.remove_error", "namespace", namespace, "key", key, "object", object, "error", err)
 		return s.wrapError(err, "s3: delete object")
 	}
-	verbose.Debug("s3.delete_object.success", "key", key, "object", object)
+	verbose.Debug("s3.delete_object.success", "namespace", namespace, "key", key, "object", object)
 	return nil
 }
 
@@ -781,12 +806,20 @@ const (
 	metaContentTypeEncrypted = "application/vnd.lockd+protobuf-encrypted"
 )
 
-func (s *Store) metaObject(key string) string {
-	return s.withPrefix(path.Join("meta", key+".pb"))
+func (s *Store) metaObject(namespace, key string) (string, error) {
+	object, err := storage.NamespacedMetaObject(namespace, key)
+	if err != nil {
+		return "", err
+	}
+	return s.withPrefix(object), nil
 }
 
-func (s *Store) stateObject(key string) string {
-	return s.withPrefix(path.Join("state", key+".json"))
+func (s *Store) stateObject(namespace, key string) (string, error) {
+	object, err := storage.NamespacedStateObject(namespace, key)
+	if err != nil {
+		return "", err
+	}
+	return s.withPrefix(object), nil
 }
 
 func (s *Store) metaContentType() string {
@@ -796,8 +829,9 @@ func (s *Store) metaContentType() string {
 	return metaContentTypePlain
 }
 
-func (s *Store) objectKey(key string) string {
-	return s.withPrefix(strings.TrimPrefix(key, "/"))
+func (s *Store) objectKey(namespace, key string) string {
+	combined := path.Join(namespace, strings.TrimPrefix(key, "/"))
+	return s.withPrefix(strings.TrimPrefix(combined, "/"))
 }
 
 func (s *Store) trimObjectPrefix(object string) string {

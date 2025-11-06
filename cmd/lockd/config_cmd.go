@@ -85,6 +85,7 @@ type configDefaults struct {
 	Listen                   string  `yaml:"listen"`
 	ListenProto              string  `yaml:"listen-proto"`
 	Store                    string  `yaml:"store"`
+	DefaultNamespace         string  `yaml:"default-namespace"`
 	JSONMax                  string  `yaml:"json-max"`
 	JSONUtil                 string  `yaml:"json-util"`
 	PayloadSpoolMem          string  `yaml:"payload-spool-mem"`
@@ -120,6 +121,7 @@ func defaultConfigYAML() ([]byte, error) {
 		Listen:                   lockd.DefaultListen,
 		ListenProto:              lockd.DefaultListenProto,
 		Store:                    lockd.DefaultStore,
+		DefaultNamespace:         lockd.DefaultNamespace,
 		JSONMax:                  configHumanizeBytes(lockd.DefaultJSONMaxBytes),
 		JSONUtil:                 lockd.JSONUtilLockd,
 		PayloadSpoolMem:          configHumanizeBytes(lockd.DefaultPayloadSpoolMemoryThreshold),

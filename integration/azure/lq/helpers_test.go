@@ -17,6 +17,7 @@ import (
 	"pkt.systems/lockd/integration/internal/cryptotest"
 	queuetestutil "pkt.systems/lockd/integration/queue/testutil"
 	"pkt.systems/lockd/internal/diagnostics/storagecheck"
+	"pkt.systems/lockd/namespaces"
 	"pkt.systems/pslog"
 )
 
@@ -126,4 +127,18 @@ func startAzureQueueServerWithLogger(t testing.TB, cfg lockd.Config, logger pslo
 	options = append(options, cryptotest.SharedMTLSOptions(t)...)
 	options = append(options, extra...)
 	return lockd.StartTestServer(t, options...)
+}
+
+func scheduleAzureQueueCleanup(t *testing.T, cfg lockd.Config, queue string) {
+	t.Helper()
+	t.Cleanup(func() {
+		azuretest.CleanupQueue(t, cfg, namespaces.Default, queue)
+	})
+}
+
+func scheduleAzureLockCleanup(t *testing.T, cfg lockd.Config, key string) {
+	t.Helper()
+	t.Cleanup(func() {
+		azuretest.CleanupKey(t, cfg, namespaces.Default, key)
+	})
 }

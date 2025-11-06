@@ -8,11 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"strings"
 	"testing"
 	"time"
-
-	minio "github.com/minio/minio-go/v7"
 
 	"pkt.systems/lockd"
 	api "pkt.systems/lockd/api"
@@ -23,6 +22,7 @@ import (
 	"pkt.systems/lockd/internal/diagnostics/storagecheck"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/s3"
+	"pkt.systems/lockd/namespaces"
 	"pkt.systems/pslog"
 )
 
@@ -201,10 +201,10 @@ func cleanupAWSLock(tb testing.TB, cfg lockd.Config, key string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := store.Remove(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+	if err := store.Remove(ctx, namespaces.Default, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 		tb.Fatalf("cleanup state %s: %v", key, err)
 	}
-	if err := store.DeleteMeta(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+	if err := store.DeleteMeta(ctx, namespaces.Default, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 		tb.Fatalf("cleanup meta %s: %v", key, err)
 	}
 }
@@ -219,20 +219,48 @@ func cleanupAWSQueue(tb testing.TB, cfg lockd.Config, queue string) {
 	if err != nil {
 		tb.Fatalf("new aws store: %v", err)
 	}
-	client := store.Client()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	prefix := strings.Trim(awsCfg.Prefix, "/")
-	if prefix != "" {
-		prefix += "/"
-	}
-	prefix = prefix + "q/" + queue + "/"
-	opts := minio.ListObjectsOptions{Prefix: prefix, Recursive: true}
-	for obj := range client.ListObjects(ctx, awsCfg.Bucket, opts) {
-		if obj.Err != nil {
-			tb.Fatalf("list queue objects: %v", obj.Err)
+	cleanupQueueObjects(tb, store, ctx, queue)
+	cleanupQueueMeta(tb, store, ctx, queue)
+}
+
+func cleanupQueueObjects(tb testing.TB, store storage.Backend, ctx context.Context, queue string) {
+	prefix := fmt.Sprintf("q/%s/", queue)
+	opts := storage.ListOptions{Prefix: prefix, Limit: 1000}
+	for {
+		objs, err := store.ListObjects(ctx, namespaces.Default, opts)
+		if err != nil {
+			tb.Fatalf("list queue objects: %v", err)
 		}
-		_ = client.RemoveObject(ctx, awsCfg.Bucket, obj.Key, minio.RemoveObjectOptions{})
+		for _, obj := range objs.Objects {
+			if err := store.DeleteObject(ctx, namespaces.Default, obj.Key, storage.DeleteObjectOptions{}); err != nil && !errors.Is(err, storage.ErrNotFound) {
+				tb.Fatalf("delete queue object %s: %v", obj.Key, err)
+			}
+		}
+		if !objs.Truncated || objs.NextStartAfter == "" {
+			break
+		}
+		opts.StartAfter = objs.NextStartAfter
+	}
+}
+
+func cleanupQueueMeta(tb testing.TB, store storage.Backend, ctx context.Context, queue string) {
+	metaPrefix := path.Join("q", queue)
+	keys, err := store.ListMetaKeys(ctx, namespaces.Default)
+	if err != nil {
+		tb.Fatalf("list queue meta keys: %v", err)
+	}
+	for _, key := range keys {
+		if !strings.HasPrefix(key, metaPrefix) {
+			continue
+		}
+		if err := store.Remove(ctx, namespaces.Default, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			tb.Fatalf("cleanup queue state %s: %v", key, err)
+		}
+		if err := store.DeleteMeta(ctx, namespaces.Default, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			tb.Fatalf("cleanup queue meta %s: %v", key, err)
+		}
 	}
 }
 

@@ -26,9 +26,8 @@ import (
 	shutdowntest "pkt.systems/lockd/integration/internal/shutdowntest"
 	testlog "pkt.systems/lockd/integration/internal/testlog"
 	"pkt.systems/lockd/internal/diagnostics/storagecheck"
-	"pkt.systems/lockd/internal/storage"
-	azurestore "pkt.systems/lockd/internal/storage/azure"
 	"pkt.systems/lockd/internal/uuidv7"
+	"pkt.systems/lockd/namespaces"
 	"pkt.systems/pslog"
 )
 
@@ -53,6 +52,8 @@ func TestAzureShutdownDrainingBlocksAcquire(t *testing.T) {
 	}
 	ctx := context.Background()
 	key := "azure-drain-" + uuidv7.NewString()
+	t.Cleanup(func() { azuretest.CleanupKey(t, cfg, namespaces.Default, key) })
+	t.Cleanup(func() { azuretest.CleanupKey(t, cfg, namespaces.Default, "azure-drain-wait") })
 	lease := acquireWithRetry(t, ctx, cli, key, "holder", 45, lockdclient.BlockWaitForever)
 	stopCh := make(chan error, 1)
 	go func() {
@@ -1152,20 +1153,5 @@ func directClient(t testing.TB, ts *lockd.TestServer) *lockdclient.Client {
 }
 
 func cleanupAzure(t *testing.T, cfg lockd.Config, key string) {
-	azureCfg, err := lockd.BuildAzureConfig(cfg)
-	if err != nil {
-		t.Fatalf("build azure config: %v", err)
-	}
-	store, err := azurestore.New(azureCfg)
-	if err != nil {
-		t.Fatalf("new azure store: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if err := store.Remove(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
-		t.Logf("remove state failed: %v", err)
-	}
-	if err := store.DeleteMeta(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
-		t.Logf("delete meta failed: %v", err)
-	}
+	azuretest.CleanupKey(t, cfg, namespaces.Default, key)
 }

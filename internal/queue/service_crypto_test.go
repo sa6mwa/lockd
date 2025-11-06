@@ -12,6 +12,7 @@ import (
 	"pkt.systems/lockd/internal/clock"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/memory"
+	"pkt.systems/lockd/namespaces"
 )
 
 func TestQueueEnqueueEncryptsMetadataAndPayload(t *testing.T) {
@@ -44,12 +45,12 @@ func TestQueueEnqueueEncryptsMetadataAndPayload(t *testing.T) {
 	}
 
 	payload := []byte(`{"hello":"world"}`)
-	msg, err := svc.Enqueue(ctx, "orders", bytes.NewReader(payload), EnqueueOptions{})
+	msg, err := svc.Enqueue(ctx, namespaces.Default, "orders", bytes.NewReader(payload), EnqueueOptions{})
 	if err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
-	metaReader, metaInfo, err := store.GetObject(ctx, msg.MetadataObject)
+	metaReader, metaInfo, err := store.GetObject(ctx, msg.Namespace, msg.MetadataObject)
 	if err != nil {
 		t.Fatalf("get metadata object: %v", err)
 	}
@@ -62,7 +63,7 @@ func TestQueueEnqueueEncryptsMetadataAndPayload(t *testing.T) {
 	if len(metaInfo.Descriptor) == 0 {
 		t.Fatalf("expected metadata descriptor to be populated")
 	}
-	metaMat, err := crypto.MaterialFromDescriptor(storage.QueueMetaContext(msg.MetadataObject), metaInfo.Descriptor)
+	metaMat, err := crypto.MaterialFromDescriptor(storage.QueueMetaContext(msg.Namespace, msg.MetadataObject), metaInfo.Descriptor)
 	if err != nil {
 		metaReader.Close()
 		t.Fatalf("reconstruct metadata material: %v", err)
@@ -88,7 +89,7 @@ func TestQueueEnqueueEncryptsMetadataAndPayload(t *testing.T) {
 		t.Fatalf("decoded document mismatch: got id=%s queue=%s want id=%s queue=%s", doc.ID, doc.Queue, msg.ID, msg.Queue)
 	}
 
-	payloadReader, payloadInfo, err := store.GetObject(ctx, msg.PayloadObject)
+	payloadReader, payloadInfo, err := store.GetObject(ctx, msg.Namespace, msg.PayloadObject)
 	if err != nil {
 		t.Fatalf("get payload object: %v", err)
 	}
@@ -101,7 +102,7 @@ func TestQueueEnqueueEncryptsMetadataAndPayload(t *testing.T) {
 	if len(payloadInfo.Descriptor) == 0 {
 		t.Fatalf("expected payload descriptor")
 	}
-	payloadMat, err := crypto.MaterialFromDescriptor(storage.QueuePayloadContext(msg.PayloadObject), payloadInfo.Descriptor)
+	payloadMat, err := crypto.MaterialFromDescriptor(storage.QueuePayloadContext(msg.Namespace, msg.PayloadObject), payloadInfo.Descriptor)
 	if err != nil {
 		payloadReader.Close()
 		t.Fatalf("reconstruct payload material: %v", err)
@@ -135,12 +136,12 @@ func TestQueueEnqueueWithoutCryptoStoresPlaintext(t *testing.T) {
 	}
 
 	payload := []byte("plain payload")
-	msg, err := svc.Enqueue(ctx, "orders", bytes.NewReader(payload), EnqueueOptions{})
+	msg, err := svc.Enqueue(ctx, namespaces.Default, "orders", bytes.NewReader(payload), EnqueueOptions{})
 	if err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
-	metaReader, metaInfo, err := store.GetObject(ctx, msg.MetadataObject)
+	metaReader, metaInfo, err := store.GetObject(ctx, msg.Namespace, msg.MetadataObject)
 	if err != nil {
 		t.Fatalf("get metadata object: %v", err)
 	}
@@ -169,7 +170,7 @@ func TestQueueEnqueueWithoutCryptoStoresPlaintext(t *testing.T) {
 		t.Fatalf("decoded doc id = %s want %s", doc.ID, msg.ID)
 	}
 
-	payloadReader, payloadInfo, err := store.GetObject(ctx, msg.PayloadObject)
+	payloadReader, payloadInfo, err := store.GetObject(ctx, msg.Namespace, msg.PayloadObject)
 	if err != nil {
 		t.Fatalf("get payload object: %v", err)
 	}
@@ -199,7 +200,7 @@ func TestQueueGetMessageMissingDescriptor(t *testing.T) {
 	ctx := context.Background()
 	store, svc := newEncryptedQueueService(t)
 
-	result, err := svc.Enqueue(ctx, "orders", bytes.NewReader([]byte("payload")), EnqueueOptions{})
+	result, err := svc.Enqueue(ctx, namespaces.Default, "orders", bytes.NewReader([]byte("payload")), EnqueueOptions{})
 	if err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
@@ -207,8 +208,8 @@ func TestQueueGetMessageMissingDescriptor(t *testing.T) {
 	var tampered bool
 	svc.store = &tamperBackend{
 		Backend: svc.store,
-		getObjectHook: func(ctx context.Context, key string, reader io.ReadCloser, info *storage.ObjectInfo) (io.ReadCloser, *storage.ObjectInfo, error) {
-			if !tampered && strings.HasSuffix(key, ".pb") && strings.Contains(key, "/msg/") {
+		getObjectHook: func(ctx context.Context, namespace, key string, reader io.ReadCloser, info *storage.ObjectInfo) (io.ReadCloser, *storage.ObjectInfo, error) {
+			if !tampered && namespace == result.Namespace && strings.HasSuffix(key, ".pb") && strings.Contains(key, "/msg/") {
 				tampered = true
 				infoCopy := *info
 				infoCopy.Descriptor = nil
@@ -218,7 +219,7 @@ func TestQueueGetMessageMissingDescriptor(t *testing.T) {
 		},
 	}
 
-	if _, _, err := svc.GetMessage(ctx, result.Queue, result.ID); err == nil || !strings.Contains(err.Error(), "missing metadata descriptor") {
+	if _, _, err := svc.GetMessage(ctx, namespaces.Default, result.Queue, result.ID); err == nil || !strings.Contains(err.Error(), "missing metadata descriptor") {
 		if err == nil {
 			t.Fatalf("expected missing descriptor error")
 		}
@@ -232,7 +233,7 @@ func TestQueueGetPayloadMissingDescriptor(t *testing.T) {
 	ctx := context.Background()
 	store, svc := newEncryptedQueueService(t)
 
-	result, err := svc.Enqueue(ctx, "orders", bytes.NewReader([]byte("payload-two")), EnqueueOptions{})
+	result, err := svc.Enqueue(ctx, namespaces.Default, "orders", bytes.NewReader([]byte("payload-two")), EnqueueOptions{})
 	if err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
@@ -240,8 +241,8 @@ func TestQueueGetPayloadMissingDescriptor(t *testing.T) {
 	var tampered bool
 	svc.store = &tamperBackend{
 		Backend: svc.store,
-		getObjectHook: func(ctx context.Context, key string, reader io.ReadCloser, info *storage.ObjectInfo) (io.ReadCloser, *storage.ObjectInfo, error) {
-			if !tampered && strings.HasSuffix(key, ".bin") && strings.Contains(key, "/msg/") {
+		getObjectHook: func(ctx context.Context, namespace, key string, reader io.ReadCloser, info *storage.ObjectInfo) (io.ReadCloser, *storage.ObjectInfo, error) {
+			if !tampered && namespace == result.Namespace && strings.HasSuffix(key, ".bin") && strings.Contains(key, "/msg/") {
 				tampered = true
 				infoCopy := *info
 				infoCopy.Descriptor = nil
@@ -251,7 +252,7 @@ func TestQueueGetPayloadMissingDescriptor(t *testing.T) {
 		},
 	}
 
-	if _, _, err := svc.GetPayload(ctx, result.Queue, result.ID); err == nil || !strings.Contains(err.Error(), "missing payload descriptor") {
+	if _, _, err := svc.GetPayload(ctx, namespaces.Default, result.Queue, result.ID); err == nil || !strings.Contains(err.Error(), "missing payload descriptor") {
 		if err == nil {
 			t.Fatalf("expected missing descriptor error")
 		}
@@ -265,7 +266,7 @@ func TestQueueCopyObjectMissingDescriptor(t *testing.T) {
 	ctx := context.Background()
 	store, svc := newEncryptedQueueService(t)
 
-	result, err := svc.Enqueue(ctx, "orders", bytes.NewReader([]byte("payload-three")), EnqueueOptions{})
+	result, err := svc.Enqueue(ctx, namespaces.Default, "orders", bytes.NewReader([]byte("payload-three")), EnqueueOptions{})
 	if err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
@@ -276,8 +277,8 @@ func TestQueueCopyObjectMissingDescriptor(t *testing.T) {
 	var tampered bool
 	svc.store = &tamperBackend{
 		Backend: svc.store,
-		getObjectHook: func(ctx context.Context, key string, reader io.ReadCloser, info *storage.ObjectInfo) (io.ReadCloser, *storage.ObjectInfo, error) {
-			if !tampered && key == payloadKey {
+		getObjectHook: func(ctx context.Context, namespace, key string, reader io.ReadCloser, info *storage.ObjectInfo) (io.ReadCloser, *storage.ObjectInfo, error) {
+			if !tampered && namespace == result.Namespace && key == payloadKey {
 				tampered = true
 				infoCopy := *info
 				infoCopy.Descriptor = nil
@@ -287,7 +288,7 @@ func TestQueueCopyObjectMissingDescriptor(t *testing.T) {
 		},
 	}
 
-	err = svc.copyObject(ctx, payloadKey, dlqKey, true, storage.QueuePayloadContext(payloadKey), storage.QueuePayloadContext(dlqKey))
+	err = svc.copyObject(ctx, result.Namespace, payloadKey, dlqKey, true, storage.QueuePayloadContext(result.Namespace, payloadKey), storage.QueuePayloadContext(result.Namespace, dlqKey))
 	if err == nil || !strings.Contains(err.Error(), "missing descriptor") {
 		t.Fatalf("expected descriptor error, got %v", err)
 	}
@@ -297,18 +298,18 @@ func TestQueueCopyObjectMissingDescriptor(t *testing.T) {
 
 type tamperBackend struct {
 	storage.Backend
-	getObjectHook func(context.Context, string, io.ReadCloser, *storage.ObjectInfo) (io.ReadCloser, *storage.ObjectInfo, error)
+	getObjectHook func(context.Context, string, string, io.ReadCloser, *storage.ObjectInfo) (io.ReadCloser, *storage.ObjectInfo, error)
 }
 
-func (t *tamperBackend) GetObject(ctx context.Context, key string) (io.ReadCloser, *storage.ObjectInfo, error) {
-	reader, info, err := t.Backend.GetObject(ctx, key)
+func (t *tamperBackend) GetObject(ctx context.Context, namespace, key string) (io.ReadCloser, *storage.ObjectInfo, error) {
+	reader, info, err := t.Backend.GetObject(ctx, namespace, key)
 	if err != nil {
 		return reader, info, err
 	}
 	if t.getObjectHook == nil {
 		return reader, info, nil
 	}
-	return t.getObjectHook(ctx, key, reader, info)
+	return t.getObjectHook(ctx, namespace, key, reader, info)
 }
 
 func newEncryptedQueueService(t *testing.T) (*memory.Store, *Service) {

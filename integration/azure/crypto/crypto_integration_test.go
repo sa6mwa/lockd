@@ -15,11 +15,13 @@ import (
 	"pkt.systems/lockd"
 	api "pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
+	"pkt.systems/lockd/integration/azuretest"
 	"pkt.systems/lockd/integration/internal/cryptotest"
 	queuetestutil "pkt.systems/lockd/integration/queue/testutil"
 	"pkt.systems/lockd/internal/diagnostics/storagecheck"
 	"pkt.systems/lockd/internal/storage"
 	azurestore "pkt.systems/lockd/internal/storage/azure"
+	"pkt.systems/lockd/namespaces"
 	"pkt.systems/pslog"
 )
 
@@ -222,7 +224,7 @@ func cleanupAzureKeys(tb testing.TB, cfg lockd.Config, prefixes ...string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	keys, err := store.ListMetaKeys(ctx)
+	keys, err := store.ListMetaKeys(ctx, namespaces.Default)
 	if err != nil {
 		tb.Fatalf("list meta: %v", err)
 	}
@@ -231,10 +233,10 @@ func cleanupAzureKeys(tb testing.TB, cfg lockd.Config, prefixes ...string) {
 			if !strings.HasPrefix(key, prefix) {
 				continue
 			}
-			if err := store.Remove(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			if err := store.Remove(ctx, namespaces.Default, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 				tb.Fatalf("cleanup azure state %s: %v", key, err)
 			}
-			if err := store.DeleteMeta(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			if err := store.DeleteMeta(ctx, namespaces.Default, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 				tb.Fatalf("cleanup azure meta %s: %v", key, err)
 			}
 			break
@@ -244,26 +246,7 @@ func cleanupAzureKeys(tb testing.TB, cfg lockd.Config, prefixes ...string) {
 
 func cleanupAzureQueue(tb testing.TB, cfg lockd.Config, queue string) {
 	tb.Helper()
-	azureCfg, err := lockd.BuildAzureConfig(cfg)
-	if err != nil {
-		tb.Fatalf("build azure config: %v", err)
-	}
-	store, err := azurestore.New(azureCfg)
-	if err != nil {
-		tb.Fatalf("new azure store: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	prefix := fmt.Sprintf("q/%s/", queue)
-	objs, err := store.ListObjects(ctx, storage.ListOptions{Prefix: prefix, Limit: 1000})
-	if err != nil {
-		tb.Fatalf("list azure queue objects: %v", err)
-	}
-	for _, obj := range objs.Objects {
-		if err := store.DeleteObject(ctx, obj.Key, storage.DeleteObjectOptions{}); err != nil && !errors.Is(err, storage.ErrNotFound) {
-			tb.Fatalf("delete azure queue object %s: %v", obj.Key, err)
-		}
-	}
+	azuretest.CleanupQueue(tb, cfg, namespaces.Default, queue)
 }
 
 func mustDequeueMessage(t testing.TB, cli *lockdclient.Client, queue, owner string) *lockdclient.QueueMessage {

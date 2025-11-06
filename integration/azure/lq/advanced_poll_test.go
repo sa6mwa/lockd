@@ -40,9 +40,10 @@ func runAzureQueueMultiConsumerContention(t *testing.T) {
 
 	ts := startAzureQueueServer(t, cfg)
 	cli := ts.Client
-	ensureAzureQueueWritableOrSkip(t, cli)
+	ensureAzureQueueWritableOrSkip(t, cfg, cli)
 
 	queue := queuetestutil.QueueName("azure-contention")
+	scheduleAzureQueueCleanup(t, cfg, queue)
 	queuetestutil.MustEnqueueBytes(t, cli, queue, []byte("only-once"))
 
 	const workers = 4
@@ -128,9 +129,10 @@ func runAzureQueueNackVisibilityDelay(t *testing.T) {
 
 	ts := startAzureQueueServer(t, cfg)
 	cli := ts.Client
-	ensureAzureQueueWritableOrSkip(t, cli)
+	ensureAzureQueueWritableOrSkip(t, cfg, cli)
 
 	queue := queuetestutil.QueueName("azure-nack-delay")
+	scheduleAzureQueueCleanup(t, cfg, queue)
 	queuetestutil.MustEnqueueBytes(t, cli, queue, []byte("azure-nack-delay"))
 
 	owner := queuetestutil.QueueOwner("consumer")
@@ -174,9 +176,10 @@ func runAzureQueueLeaseTimeoutHandoff(t *testing.T) {
 
 	ts := startAzureQueueServer(t, cfg)
 	cli := ts.Client
-	ensureAzureQueueWritableOrSkip(t, cli)
+	ensureAzureQueueWritableOrSkip(t, cfg, cli)
 
 	queue := queuetestutil.QueueName("azure-lease-handoff")
+	scheduleAzureQueueCleanup(t, cfg, queue)
 	queuetestutil.MustEnqueueBytes(t, cli, queue, []byte("lease-me"))
 
 	ownerA := queuetestutil.QueueOwner("consumer-a")
@@ -240,9 +243,10 @@ func runAzureQueueMultiServerRouting(t *testing.T) {
 
 	serverA := startAzureQueueServer(t, cfg)
 	serverB := startAzureQueueServer(t, cfg)
-	ensureAzureQueueWritableOrSkip(t, serverA.Client)
+	ensureAzureQueueWritableOrSkip(t, cfg, serverA.Client)
 
 	queue := queuetestutil.QueueName("azure-routing")
+	scheduleAzureQueueCleanup(t, cfg, queue)
 	payload := []byte("shared-azure-backend")
 	queuetestutil.MustEnqueueBytes(t, serverA.Client, queue, payload)
 
@@ -273,9 +277,10 @@ func runAzureQueueMultiServerFailoverClient(t *testing.T) {
 
 	serverA := startAzureQueueServer(t, cfg)
 	serverB := startAzureQueueServer(t, cfg)
-	ensureAzureQueueWritableOrSkip(t, serverA.Client)
+	ensureAzureQueueWritableOrSkip(t, cfg, serverA.Client)
 
 	queue := queuetestutil.QueueName("azure-failover")
+	scheduleAzureQueueCleanup(t, cfg, queue)
 	queuetestutil.MustEnqueueBytes(t, serverA.Client, queue, []byte("failover-payload"))
 
 	endpoints := []string{serverA.URL(), serverB.URL()}
@@ -350,9 +355,10 @@ func runAzureQueuePollingIntervalRespected(t *testing.T) {
 	})
 	ts := startAzureQueueServerWithLogger(t, cfg, capture.Logger())
 	cli := ts.Client
-	ensureAzureQueueWritableOrSkip(t, cli)
+	ensureAzureQueueWritableOrSkip(t, cfg, cli)
 
 	queue := queuetestutil.QueueName("azure-poll-interval")
+	scheduleAzureQueueCleanup(t, cfg, queue)
 	owner := queuetestutil.QueueOwner("consumer")
 
 	queuetestutil.VerifyPollIntervalRespect(t, capture, cli, queue, owner, 3*time.Second)
@@ -381,9 +387,10 @@ func runAzureQueueQRFThrottling(t *testing.T) {
 
 	ts, capture := startAzureQueueServerWithCapture(t, cfg)
 	cli := ts.Client
-	ensureAzureQueueWritableOrSkip(t, cli)
+	ensureAzureQueueWritableOrSkip(t, cfg, cli)
 
 	queue := queuetestutil.QueueName("azure-qrf")
+	scheduleAzureQueueCleanup(t, cfg, queue)
 	var checklist queuetestutil.QRFChecklist
 
 	assertThrottled := func(expectState string) {

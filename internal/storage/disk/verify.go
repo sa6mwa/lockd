@@ -1,15 +1,16 @@
 package disk
 
 import (
-	"context"
-	"errors"
-	"fmt"
-	"strings"
-	"sync"
-	"time"
+    "context"
+    "errors"
+    "fmt"
+    "strings"
+    "sync"
+    "time"
 
-	"pkt.systems/lockd/internal/storage"
-	"pkt.systems/lockd/internal/uuidv7"
+    "pkt.systems/lockd/internal/storage"
+    "pkt.systems/lockd/internal/uuidv7"
+    "pkt.systems/lockd/namespaces"
 )
 
 // Check represents a verification step outcome.
@@ -35,7 +36,8 @@ func Verify(ctx context.Context, cfg Config) []Check {
 	}
 	defer store2.Close()
 
-	key := "lockd-verify-" + uuidv7.NewString()
+    key := "lockd-verify-" + uuidv7.NewString()
+    namespace := namespaces.Default
 
 	var baseMetaETag string
 
@@ -47,7 +49,7 @@ func Verify(ctx context.Context, cfg Config) []Check {
 			name: "CreateMeta",
 			fn: func() error {
 				meta := storage.Meta{Version: 1, UpdatedAtUnix: time.Now().Unix()}
-				tag, err := store1.StoreMeta(ctx, key, &meta, "")
+                tag, err := store1.StoreMeta(ctx, namespace, key, &meta, "")
 				if err != nil {
 					return err
 				}
@@ -65,12 +67,12 @@ func Verify(ctx context.Context, cfg Config) []Check {
 				errs := make(chan error, 2)
 				go func() {
 					defer wg.Done()
-					_, err := store1.StoreMeta(ctx, key, &metaA, baseMetaETag)
+                    _, err := store1.StoreMeta(ctx, namespace, key, &metaA, baseMetaETag)
 					errs <- err
 				}()
 				go func() {
 					defer wg.Done()
-					_, err := store2.StoreMeta(ctx, key, &metaB, baseMetaETag)
+                    _, err := store2.StoreMeta(ctx, namespace, key, &metaB, baseMetaETag)
 					errs <- err
 				}()
 				wg.Wait()
@@ -92,7 +94,7 @@ func Verify(ctx context.Context, cfg Config) []Check {
 		{
 			name: "ConcurrentStateCAS",
 			fn: func() error {
-				res, err := store1.WriteState(ctx, key, strings.NewReader("one"), storage.PutStateOptions{})
+                res, err := store1.WriteState(ctx, namespace, key, strings.NewReader("one"), storage.PutStateOptions{})
 				if err != nil {
 					return err
 				}
@@ -101,12 +103,12 @@ func Verify(ctx context.Context, cfg Config) []Check {
 				errs := make(chan error, 2)
 				go func() {
 					defer wg.Done()
-					_, err := store1.WriteState(ctx, key, strings.NewReader("alpha"), storage.PutStateOptions{ExpectedETag: res.NewETag})
+                    _, err := store1.WriteState(ctx, namespace, key, strings.NewReader("alpha"), storage.PutStateOptions{ExpectedETag: res.NewETag})
 					errs <- err
 				}()
 				go func() {
 					defer wg.Done()
-					_, err := store2.WriteState(ctx, key, strings.NewReader("beta"), storage.PutStateOptions{ExpectedETag: res.NewETag})
+                    _, err := store2.WriteState(ctx, namespace, key, strings.NewReader("beta"), storage.PutStateOptions{ExpectedETag: res.NewETag})
 					errs <- err
 				}()
 				wg.Wait()
@@ -128,12 +130,12 @@ func Verify(ctx context.Context, cfg Config) []Check {
 		{
 			name: "Cleanup",
 			fn: func() error {
-				if err := store1.Remove(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
-					return err
-				}
-				if err := store1.DeleteMeta(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
-					return err
-				}
+                if err := store1.Remove(ctx, namespace, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+                    return err
+                }
+                if err := store1.DeleteMeta(ctx, namespace, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+                    return err
+                }
 				return nil
 			},
 		},

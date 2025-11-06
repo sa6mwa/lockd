@@ -12,6 +12,8 @@ definitions:
         type: string
       meta_etag:
         type: string
+      namespace:
+        type: string
       queue:
         type: string
       state_etag:
@@ -34,6 +36,8 @@ definitions:
         type: integer
       key:
         type: string
+      namespace:
+        type: string
       owner:
         type: string
       ttl_seconds:
@@ -51,6 +55,8 @@ definitions:
         type: string
       lease_id:
         type: string
+      namespace:
+        type: string
       owner:
         type: string
       retry_after_seconds:
@@ -62,6 +68,8 @@ definitions:
     type: object
   api.DequeueRequest:
     properties:
+      namespace:
+        type: string
       owner:
         type: string
       page_size:
@@ -83,6 +91,8 @@ definitions:
         type: string
       lease_id:
         type: string
+      namespace:
+        type: string
       owner:
         type: string
       state_etag:
@@ -101,6 +111,8 @@ definitions:
       max_attempts:
         type: integer
       message_id:
+        type: string
+      namespace:
         type: string
       not_visible_until_unix:
         type: integer
@@ -136,6 +148,8 @@ definitions:
         type: string
       meta_etag:
         type: string
+      namespace:
+        type: string
       queue:
         type: string
       state_fencing_token:
@@ -162,6 +176,8 @@ definitions:
         type: string
       lease_id:
         type: string
+      namespace:
+        type: string
       ttl_seconds:
         type: integer
     type: object
@@ -182,6 +198,8 @@ definitions:
       message_id:
         type: string
       meta_etag:
+        type: string
+      namespace:
         type: string
       queue:
         type: string
@@ -204,6 +222,8 @@ definitions:
       key:
         type: string
       lease_id:
+        type: string
+      namespace:
         type: string
     type: object
   api.ReleaseResponse:
@@ -272,6 +292,14 @@ paths:
         > 0 the request will long-poll until a lease becomes available or the timeout
         elapses.
       parameters:
+      - description: Namespace override when the request body omits it
+        in: query
+        name: namespace
+        type: string
+      - description: Key to acquire when the request body omits it
+        in: query
+        name: key
+        type: string
       - description: Lease acquisition parameters
         in: body
         name: request
@@ -306,6 +334,10 @@ paths:
     get:
       description: Returns lease and state metadata without streaming the state payload.
       parameters:
+      - description: Namespace override (defaults to server setting)
+        in: query
+        name: namespace
+        type: string
       - description: Lease key
         in: query
         name: key
@@ -334,6 +366,10 @@ paths:
       description: Streams the currently committed JSON state for the key owned by
         the caller's lease. Returns 204 when no state is present.
       parameters:
+      - description: Namespace override (defaults to server setting)
+        in: query
+        name: namespace
+        type: string
       - description: Lease key
         in: query
         name: key
@@ -384,6 +420,14 @@ paths:
       description: Refresh an existing lease before it expires. Returns the new expiration
         timestamp.
       parameters:
+      - description: Namespace override when the request body omits it
+        in: query
+        name: namespace
+        type: string
+      - description: Key override when the request body omits it
+        in: query
+        name: key
+        type: string
       - description: Lease keepalive parameters
         in: body
         name: request
@@ -425,6 +469,10 @@ paths:
       description: Confirms processing of a delivery and deletes the message or its
         retry lease.
       parameters:
+      - description: Namespace override when the request body omits it
+        in: query
+        name: namespace
+        type: string
       - description: Acknowledgement payload
         in: body
         name: request
@@ -463,6 +511,18 @@ paths:
         Responses stream as multipart/related parts containing message metadata and
         payload.
       parameters:
+      - description: Namespace override when the request body omits it
+        in: query
+        name: namespace
+        type: string
+      - description: Queue name override when the request body omits it
+        in: query
+        name: queue
+        type: string
+      - description: Owner override when the request body omits it
+        in: query
+        name: owner
+        type: string
       - description: Dequeue parameters
         in: body
         name: request
@@ -504,6 +564,18 @@ paths:
       description: Dequeues messages and includes their associated state blobs in
         the multipart response when available.
       parameters:
+      - description: Namespace override when the request body omits it
+        in: query
+        name: namespace
+        type: string
+      - description: Queue name override when the request body omits it
+        in: query
+        name: queue
+        type: string
+      - description: Owner override when the request body omits it
+        in: query
+        name: owner
+        type: string
       - description: Dequeue parameters
         in: body
         name: request
@@ -546,6 +618,14 @@ paths:
       description: Writes a message into the durable queue. The payload is streamed
         directly and may include optional attributes.
       parameters:
+      - description: Namespace override when the metadata omits it
+        in: query
+        name: namespace
+        type: string
+      - description: Queue override when the metadata omits it
+        in: query
+        name: queue
+        type: string
       - description: JSON encoded api.EnqueueRequest metadata
         in: formData
         name: meta
@@ -590,6 +670,10 @@ paths:
       description: Extends the visibility timeout and lease window for an in-flight
         message.
       parameters:
+      - description: Namespace override when the request body omits it
+        in: query
+        name: namespace
+        type: string
       - description: Extend payload
         in: body
         name: request
@@ -626,6 +710,10 @@ paths:
       - application/json
       description: Requeues the delivery with optional delay and last error metadata.
       parameters:
+      - description: Namespace override when the request body omits it
+        in: query
+        name: namespace
+        type: string
       - description: Negative acknowledgement payload
         in: body
         name: request
@@ -663,6 +751,18 @@ paths:
       description: Opens a long-lived multipart stream of deliveries for the specified
         queue owner. Each part contains message metadata and payload.
       parameters:
+      - description: Namespace override when the request body omits it
+        in: query
+        name: namespace
+        type: string
+      - description: Queue name override when the request body omits it
+        in: query
+        name: queue
+        type: string
+      - description: Owner override when the request body omits it
+        in: query
+        name: owner
+        type: string
       - description: Subscription parameters (queue, owner, wait_seconds, visibility)
         in: body
         name: request
@@ -704,6 +804,18 @@ paths:
       description: Opens a long-lived multipart stream where each part contains message
         metadata, payload, and state snapshot when available.
       parameters:
+      - description: Namespace override when the request body omits it
+        in: query
+        name: namespace
+        type: string
+      - description: Queue name override when the request body omits it
+        in: query
+        name: queue
+        type: string
+      - description: Owner override when the request body omits it
+        in: query
+        name: owner
+        type: string
       - description: Subscription parameters (queue, owner, wait_seconds, visibility)
         in: body
         name: request
@@ -744,6 +856,14 @@ paths:
       - application/json
       description: Releases the lease associated with the provided key and lease identifier.
       parameters:
+      - description: Namespace override when the request body omits it
+        in: query
+        name: namespace
+        type: string
+      - description: Key override when the request body omits it
+        in: query
+        name: key
+        type: string
       - description: Lease release parameters
         in: body
         name: request
@@ -781,6 +901,10 @@ paths:
       description: Removes the stored state blob if the caller holds the lease. Optional
         CAS headers guard against concurrent updates.
       parameters:
+      - description: Namespace override (defaults to server setting)
+        in: query
+        name: namespace
+        type: string
       - description: Lease key
         in: query
         name: key
@@ -835,6 +959,10 @@ paths:
         if the caller holds the lease. Optional CAS headers guard against concurrent
         updates.
       parameters:
+      - description: Namespace override (defaults to server setting)
+        in: query
+        name: namespace
+        type: string
       - description: Lease key
         in: query
         name: key

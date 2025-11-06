@@ -26,6 +26,7 @@
 //	defer cli.Close()
 //
 //	req := api.AcquireRequest{
+//	    Namespace: "workflows", // omit to use the server's default namespace
 //	    Key:        "orders",
 //	    Owner:      "worker-1",
 //	    TTLSeconds: 30,
@@ -46,6 +47,12 @@
 //	    log.Fatal(err)
 //	}
 //
+// When most operations live in a single namespace, wrap the client with
+// client.WithDefaultNamespace("workflows") so explicit Namespace fields can be
+// omitted without relying on the server fallback. The CLI mirrors this via
+// --namespace / LOCKD_CLIENT_NAMESPACE for leases and LOCKD_QUEUE_NAMESPACE for
+// queue flows.
+
 // The lease session tracks fencing tokens automatically; the same `Client`
 // instance should be reused for subsequent operations so KeepAlive, Get, Update,
 // Release, and Remove calls carry the correct `X-Fencing-Token`. When the
@@ -61,6 +68,7 @@
 // and keeps the lease alive in the background while your handler runs:
 //
 //	err := cli.AcquireForUpdate(ctx, api.AcquireRequest{
+//	    Namespace: "workflows",
 //	    Key:        "orders",
 //	    Owner:      "worker-1",
 //	    TTLSeconds: 45,
@@ -118,7 +126,10 @@
 // leased message, exposes a streaming payload reader, and tracks the fencing
 // tokens required for Ack/Nack/Extend:
 //
-//	msg, err := cli.Dequeue(ctx, "orders", client.DequeueOptions{Owner: "worker-1"})
+//	msg, err := cli.Dequeue(ctx, "orders", client.DequeueOptions{
+//	    Namespace: "workflows",
+//	    Owner:      "worker-1",
+//	})
 //	if err != nil {
 //		log.Fatal(err)
 //	}

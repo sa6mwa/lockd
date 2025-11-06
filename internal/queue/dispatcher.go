@@ -15,15 +15,15 @@ import (
 )
 
 type candidateProvider interface {
-	NextCandidate(ctx context.Context, queue string, startAfter string, pageSize int) (*MessageDescriptor, string, error)
+	NextCandidate(ctx context.Context, namespace, queue string, startAfter string, pageSize int) (*MessageDescriptor, string, error)
 }
 
 type messageReadiness interface {
-	EnsureMessageReady(ctx context.Context, queue, id string) error
+	EnsureMessageReady(ctx context.Context, namespace, queue, id string) error
 }
 
 type readyCacheRefresher interface {
-	RefreshReadyCache(ctx context.Context, queue string) error
+	RefreshReadyCache(ctx context.Context, namespace, queue string) error
 }
 
 const defaultQueuePageSize = 32
@@ -39,6 +39,7 @@ type Candidate struct {
 
 // Stats captures dispatcher-level metrics for a specific queue.
 type Stats struct {
+	Namespace         string
 	Queue             string
 	WaitingConsumers  int
 	PendingCandidates int
@@ -53,13 +54,13 @@ type WatchSubscription interface {
 
 // WatchFactory constructs WatchSubscriptions for queue names.
 type WatchFactory interface {
-	Subscribe(queue string) (WatchSubscription, error)
+	Subscribe(namespace, queue string) (WatchSubscription, error)
 }
 
-type watchFactoryFunc func(string) (WatchSubscription, error)
+type watchFactoryFunc func(namespace, queue string) (WatchSubscription, error)
 
-func (f watchFactoryFunc) Subscribe(queue string) (WatchSubscription, error) {
-	return f(queue)
+func (f watchFactoryFunc) Subscribe(namespace, queue string) (WatchSubscription, error) {
+	return f(namespace, queue)
 }
 
 // Dispatcher centralises queue polling so storage is only listed once per queue
@@ -139,8 +140,8 @@ func WatchFactoryFromStorage(feed storage.QueueChangeFeed) WatchFactory {
 	if feed == nil {
 		return nil
 	}
-	return watchFactoryFunc(func(queue string) (WatchSubscription, error) {
-		sub, err := feed.SubscribeQueueChanges(queue)
+	return watchFactoryFunc(func(namespace, queue string) (WatchSubscription, error) {
+		sub, err := feed.SubscribeQueueChanges(namespace, queue)
 		if err != nil {
 			return nil, err
 		}
@@ -158,6 +159,10 @@ func (a storageWatchAdapter) Events() <-chan struct{} {
 
 func (a storageWatchAdapter) Close() error {
 	return a.sub.Close()
+}
+
+func dispatcherQueueKey(namespace, queue string) string {
+	return namespace + "/" + queue
 }
 
 // NewDispatcher builds a dispatcher.
@@ -183,9 +188,9 @@ func NewDispatcher(svc candidateProvider, opts ...DispatcherOption) *Dispatcher 
 }
 
 // Wait blocks until a candidate is available for the queue or the context is cancelled.
-func (d *Dispatcher) Wait(ctx context.Context, queue string) (*Candidate, error) {
+func (d *Dispatcher) Wait(ctx context.Context, namespace, queue string) (*Candidate, error) {
 	ctx = contextWithDefault(ctx)
-	qs, err := d.queueState(queue)
+	qs, err := d.queueState(namespace, queue)
 	if err != nil {
 		return nil, err
 	}
@@ -242,9 +247,9 @@ func (d *Dispatcher) Wait(ctx context.Context, queue string) (*Candidate, error)
 
 // Try performs a non-blocking fetch for an immediately available candidate.
 // It returns nil when no message is ready.
-func (d *Dispatcher) Try(ctx context.Context, queue string) (*Candidate, error) {
+func (d *Dispatcher) Try(ctx context.Context, namespace, queue string) (*Candidate, error) {
 	ctx = contextWithDefault(ctx)
-	qs, err := d.queueState(queue)
+	qs, err := d.queueState(namespace, queue)
 	if err != nil {
 		return nil, err
 	}
@@ -291,12 +296,12 @@ func (d *Dispatcher) Try(ctx context.Context, queue string) (*Candidate, error) 
 }
 
 // Notify nudges the dispatcher to poll the queue immediately (typically after enqueue).
-func (d *Dispatcher) Notify(queue string) {
+func (d *Dispatcher) Notify(namespace, queue string) {
 	wake := false
-	if qs, err := d.queueState(queue); err == nil {
+	if qs, err := d.queueState(namespace, queue); err == nil {
 		wake = qs.markNeedsPollIfDemand("notify")
 	} else if d.logger != nil {
-		d.logger.Warn("queue.dispatcher.notify.error", "queue", queue, "error", err)
+		d.logger.Warn("queue.dispatcher.notify.error", "namespace", namespace, "queue", queue, "error", err)
 	}
 	if !wake {
 		return
@@ -306,16 +311,22 @@ func (d *Dispatcher) Notify(queue string) {
 }
 
 // QueueStats returns a snapshot of dispatcher metrics for the given queue.
-func (d *Dispatcher) QueueStats(queue string) Stats {
+func (d *Dispatcher) QueueStats(namespace, queue string) Stats {
 	stats := Stats{}
 	name, err := sanitizeQueueName(queue)
 	if err != nil {
 		return stats
 	}
+	ns, err := sanitizeNamespace(namespace)
+	if err != nil {
+		return stats
+	}
+	stats.Namespace = ns
 	stats.Queue = name
 	d.mu.Lock()
 	stats.TotalConsumers = d.totalConsumers
-	qs, ok := d.queues[name]
+	key := dispatcherQueueKey(ns, name)
+	qs, ok := d.queues[key]
 	d.mu.Unlock()
 	if !ok {
 		return stats
@@ -328,35 +339,41 @@ func (d *Dispatcher) QueueStats(queue string) Stats {
 
 // HasActiveWatcher reports whether the dispatcher currently maintains an active watch
 // subscription for the provided queue.
-func (d *Dispatcher) HasActiveWatcher(queue string) bool {
-	qs, err := d.queueState(queue)
+func (d *Dispatcher) HasActiveWatcher(namespace, queue string) bool {
+	qs, err := d.queueState(namespace, queue)
 	if err != nil {
 		return false
 	}
 	return qs.hasActiveWatcher()
 }
 
-func (d *Dispatcher) queueState(queue string) (*queueState, error) {
+func (d *Dispatcher) queueState(namespace, queue string) (*queueState, error) {
 	name, err := sanitizeQueueName(queue)
 	if err != nil {
 		return nil, err
 	}
+	ns, err := sanitizeNamespace(namespace)
+	if err != nil {
+		return nil, err
+	}
+	key := dispatcherQueueKey(ns, name)
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if qs, ok := d.queues[name]; ok {
+	if qs, ok := d.queues[key]; ok {
 		return qs, nil
 	}
 	qs := &queueState{
 		dispatcher:       d,
+		namespace:        ns,
 		name:             name,
 		pageSize:         defaultQueuePageSize,
-		logger:           d.logger.With("queue", name),
+		logger:           d.logger.With("namespace", ns, "queue", name),
 		needsPoll:        true,
 		fallbackInterval: d.resilientPollInterval,
 		pollReasons:      []string{"initial"},
 	}
-	d.queues[name] = qs
-	d.logger.Trace("queue.dispatcher.register", "queue", name)
+	d.queues[key] = qs
+	d.logger.Trace("queue.dispatcher.register", "namespace", ns, "queue", name)
 	return qs, nil
 }
 
@@ -555,6 +572,7 @@ func (d *Dispatcher) nextInterval() time.Duration {
 
 type queueState struct {
 	dispatcher *Dispatcher
+	namespace  string
 	name       string
 
 	mu                  sync.Mutex
@@ -748,7 +766,7 @@ func (qs *queueState) ensureWatcher() {
 	if disabled || !need {
 		return
 	}
-	sub, err := factory.Subscribe(qs.name)
+	sub, err := factory.Subscribe(qs.namespace, qs.name)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotImplemented) {
 			qs.disableWatcher("not_implemented")
@@ -849,7 +867,7 @@ func (qs *queueState) triggerCacheRefresh() {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
-		if err := refresher.RefreshReadyCache(ctx, qs.name); err != nil && err != context.Canceled && err != context.DeadlineExceeded {
+		if err := refresher.RefreshReadyCache(ctx, qs.namespace, qs.name); err != nil && err != context.Canceled && err != context.DeadlineExceeded {
 			qs.logger.Trace("queue.dispatcher.cache.refresh_error", "error", err)
 		}
 	}()
@@ -961,7 +979,7 @@ func (qs *queueState) fetch() (*Candidate, error) {
 	qs.mu.Unlock()
 	qs.logger.Trace("queue.dispatcher.fetch.start", "cursor", cursor, "page_size", pageSize)
 
-	desc, next, err := qs.dispatcher.svc.NextCandidate(context.Background(), qs.name, cursor, pageSize)
+	desc, next, err := qs.dispatcher.svc.NextCandidate(context.Background(), qs.namespace, qs.name, cursor, pageSize)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			qs.logger.Trace("queue.dispatcher.fetch.empty", "cursor", cursor)
@@ -978,7 +996,7 @@ func (qs *queueState) fetch() (*Candidate, error) {
 		qs.logger.Trace("queue.dispatcher.fetch.success", "cursor", cursor, "next", next, "mid", desc.Document.ID)
 	}
 	if checker, ok := qs.dispatcher.svc.(messageReadiness); ok {
-		if err := checker.EnsureMessageReady(context.Background(), desc.Document.Queue, desc.Document.ID); err != nil {
+		if err := checker.EnsureMessageReady(context.Background(), qs.namespace, desc.Document.Queue, desc.Document.ID); err != nil {
 			return nil, err
 		}
 	}
@@ -996,7 +1014,7 @@ func (qs *queueState) fetchWithContext(ctx context.Context) (*Candidate, error) 
 	qs.mu.Unlock()
 
 	start := time.Now()
-	desc, next, err := qs.dispatcher.svc.NextCandidate(contextWithDefault(ctx), qs.name, cursor, pageSize)
+	desc, next, err := qs.dispatcher.svc.NextCandidate(contextWithDefault(ctx), qs.namespace, qs.name, cursor, pageSize)
 	elapsed := time.Since(start)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
@@ -1013,7 +1031,7 @@ func (qs *queueState) fetchWithContext(ctx context.Context) (*Candidate, error) 
 	qs.cursor = next
 	qs.mu.Unlock()
 	if checker, ok := qs.dispatcher.svc.(messageReadiness); ok {
-		if err := checker.EnsureMessageReady(ctx, desc.Document.Queue, desc.Document.ID); err != nil {
+		if err := checker.EnsureMessageReady(ctx, qs.namespace, desc.Document.Queue, desc.Document.ID); err != nil {
 			return nil, err
 		}
 	}

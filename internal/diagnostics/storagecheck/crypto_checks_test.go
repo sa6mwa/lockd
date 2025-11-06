@@ -25,23 +25,24 @@ func TestVerifyMetaStateDecryptionDetectsCorruption(t *testing.T) {
 	const metaKey = "verify-meta-state"
 	stateObjectKey := metaKey
 
+	const namespace = diagnosticsNamespace
 	meta := &storage.Meta{Version: 1}
-	metaETag, err := base.StoreMeta(ctx, metaKey, meta, "")
+	metaETag, err := base.StoreMeta(ctx, namespace, metaKey, meta, "")
 	if err != nil {
 		t.Fatalf("store meta: %v", err)
 	}
-	stateRes, err := base.WriteState(ctx, metaKey, bytes.NewReader([]byte("{}")), storage.PutStateOptions{})
+	stateRes, err := base.WriteState(ctx, namespace, metaKey, bytes.NewReader([]byte("{}")), storage.PutStateOptions{})
 	if err != nil {
 		t.Fatalf("write state: %v", err)
 	}
 	if stateRes != nil && len(stateRes.Descriptor) > 0 {
 		meta.StateDescriptor = append([]byte(nil), stateRes.Descriptor...)
 		meta.Version++
-		if _, err := base.StoreMeta(ctx, metaKey, meta, metaETag); err != nil {
+		if _, err := base.StoreMeta(ctx, namespace, metaKey, meta, metaETag); err != nil {
 			t.Fatalf("update meta with descriptor: %v", err)
 		}
 	}
-	reader, _, err := base.ReadState(ctx, metaKey)
+	reader, _, err := base.ReadState(ctx, namespace, metaKey)
 	if err != nil {
 		t.Fatalf("baseline read state: %v", err)
 	}
@@ -60,11 +61,11 @@ func TestVerifyMetaStateDecryptionDetectsCorruption(t *testing.T) {
 	var tampered bool
 	wrapper := &backendWrapper{
 		Backend: base,
-		readStateHook: func(ctx context.Context, key string, reader io.ReadCloser, info *storage.StateInfo) (io.ReadCloser, *storage.StateInfo, error) {
+		readStateHook: func(ctx context.Context, namespace, key string, reader io.ReadCloser, info *storage.StateInfo) (io.ReadCloser, *storage.StateInfo, error) {
 			if tampered {
 				return reader, info, nil
 			}
-			if key == stateObjectKey {
+			if namespace == diagnosticsNamespace && key == stateObjectKey {
 				tampered = true
 				infoCopy := *info
 				infoCopy.Descriptor = []byte{0xFF}
@@ -93,11 +94,11 @@ func TestVerifyQueueEncryptionDetectsMissingDescriptor(t *testing.T) {
 	var tampered bool
 	wrapper := &backendWrapper{
 		Backend: base,
-		getObjectHook: func(ctx context.Context, key string, reader io.ReadCloser, info *storage.ObjectInfo) (io.ReadCloser, *storage.ObjectInfo, error) {
+		getObjectHook: func(ctx context.Context, namespace, key string, reader io.ReadCloser, info *storage.ObjectInfo) (io.ReadCloser, *storage.ObjectInfo, error) {
 			if tampered {
 				return reader, info, nil
 			}
-			if strings.Contains(key, "/msg/") && strings.HasSuffix(key, ".bin") {
+			if namespace == diagnosticsNamespace && strings.Contains(key, "/msg/") && strings.HasSuffix(key, ".bin") {
 				tampered = true
 				infoCopy := *info
 				infoCopy.Descriptor = nil
@@ -105,13 +106,13 @@ func TestVerifyQueueEncryptionDetectsMissingDescriptor(t *testing.T) {
 			}
 			return reader, info, nil
 		},
-		putObjectHook: func(ctx context.Context, key string, body io.Reader, opts storage.PutObjectOptions) (io.Reader, storage.PutObjectOptions, error) {
+		putObjectHook: func(ctx context.Context, namespace, key string, body io.Reader, opts storage.PutObjectOptions) (io.Reader, storage.PutObjectOptions, error) {
 			data, err := io.ReadAll(body)
 			if err != nil {
 				return nil, opts, err
 			}
 			switch {
-			case strings.Contains(key, "/msg/") && strings.HasSuffix(key, ".pb"):
+			case namespace == diagnosticsNamespace && strings.Contains(key, "/msg/") && strings.HasSuffix(key, ".pb"):
 				var meta lockdproto.QueueMessageMeta
 				if err := proto.Unmarshal(data, &meta); err != nil {
 					return nil, opts, err
@@ -124,7 +125,7 @@ func TestVerifyQueueEncryptionDetectsMissingDescriptor(t *testing.T) {
 				}
 				opts.Descriptor = nil
 				return bytes.NewReader(encoded), opts, nil
-			case strings.Contains(key, "/msg/") && strings.HasSuffix(key, ".bin"):
+			case namespace == diagnosticsNamespace && strings.Contains(key, "/msg/") && strings.HasSuffix(key, ".bin"):
 				opts.Descriptor = nil
 				return bytes.NewReader(data), opts, nil
 			default:
@@ -139,42 +140,42 @@ func TestVerifyQueueEncryptionDetectsMissingDescriptor(t *testing.T) {
 
 type backendWrapper struct {
 	storage.Backend
-	readStateHook func(context.Context, string, io.ReadCloser, *storage.StateInfo) (io.ReadCloser, *storage.StateInfo, error)
-	getObjectHook func(context.Context, string, io.ReadCloser, *storage.ObjectInfo) (io.ReadCloser, *storage.ObjectInfo, error)
-	putObjectHook func(context.Context, string, io.Reader, storage.PutObjectOptions) (io.Reader, storage.PutObjectOptions, error)
+	readStateHook func(context.Context, string, string, io.ReadCloser, *storage.StateInfo) (io.ReadCloser, *storage.StateInfo, error)
+	getObjectHook func(context.Context, string, string, io.ReadCloser, *storage.ObjectInfo) (io.ReadCloser, *storage.ObjectInfo, error)
+	putObjectHook func(context.Context, string, string, io.Reader, storage.PutObjectOptions) (io.Reader, storage.PutObjectOptions, error)
 }
 
-func (b *backendWrapper) ReadState(ctx context.Context, key string) (io.ReadCloser, *storage.StateInfo, error) {
-	reader, info, err := b.Backend.ReadState(ctx, key)
+func (b *backendWrapper) ReadState(ctx context.Context, namespace, key string) (io.ReadCloser, *storage.StateInfo, error) {
+	reader, info, err := b.Backend.ReadState(ctx, namespace, key)
 	if err != nil {
 		return reader, info, err
 	}
 	if b.readStateHook == nil {
 		return reader, info, nil
 	}
-	return b.readStateHook(ctx, key, reader, info)
+	return b.readStateHook(ctx, namespace, key, reader, info)
 }
 
-func (b *backendWrapper) GetObject(ctx context.Context, key string) (io.ReadCloser, *storage.ObjectInfo, error) {
-	reader, info, err := b.Backend.GetObject(ctx, key)
+func (b *backendWrapper) GetObject(ctx context.Context, namespace, key string) (io.ReadCloser, *storage.ObjectInfo, error) {
+	reader, info, err := b.Backend.GetObject(ctx, namespace, key)
 	if err != nil {
 		return reader, info, err
 	}
 	if b.getObjectHook == nil {
 		return reader, info, nil
 	}
-	return b.getObjectHook(ctx, key, reader, info)
+	return b.getObjectHook(ctx, namespace, key, reader, info)
 }
 
-func (b *backendWrapper) PutObject(ctx context.Context, key string, body io.Reader, opts storage.PutObjectOptions) (*storage.ObjectInfo, error) {
+func (b *backendWrapper) PutObject(ctx context.Context, namespace, key string, body io.Reader, opts storage.PutObjectOptions) (*storage.ObjectInfo, error) {
 	if b.putObjectHook != nil {
 		var err error
-		body, opts, err = b.putObjectHook(ctx, key, body, opts)
+		body, opts, err = b.putObjectHook(ctx, namespace, key, body, opts)
 		if err != nil {
 			return nil, err
 		}
 	}
-	return b.Backend.PutObject(ctx, key, body, opts)
+	return b.Backend.PutObject(ctx, namespace, key, body, opts)
 }
 
 func mustNewDiagnosticsCrypto(t *testing.T, snappy bool) *storage.Crypto {

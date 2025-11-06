@@ -27,10 +27,12 @@ func TestAzureQueueDrainUsesProductionDefaults(t *testing.T) {
 	logger := lockd.NewTestingLogger(t, pslog.TraceLevel)
 	ts := startAzureQueueServerWithLogger(t, cfg, logger, productionClose)
 	cli := ts.Client
-	ensureAzureQueueWritableOrSkip(t, cli)
+	ensureAzureQueueWritableOrSkip(t, cfg, cli)
 
 	ctx := context.Background()
 	key := fmt.Sprintf("azure-queue-drain-%d", time.Now().UnixNano())
+	scheduleAzureLockCleanup(t, cfg, key)
+	scheduleAzureLockCleanup(t, cfg, key+"-wait")
 	lease, err := cli.Acquire(ctx, api.AcquireRequest{
 		Key:        key,
 		Owner:      "azure-queue-drain-holder",

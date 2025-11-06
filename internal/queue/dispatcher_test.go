@@ -21,7 +21,7 @@ type stubService struct {
 	calls     int
 }
 
-func (s *stubService) NextCandidate(ctx context.Context, queue string, startAfter string, pageSize int) (*MessageDescriptor, string, error) {
+func (s *stubService) NextCandidate(ctx context.Context, namespace, queue string, startAfter string, pageSize int) (*MessageDescriptor, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
@@ -39,7 +39,7 @@ func (s *stubService) NextCandidate(ctx context.Context, queue string, startAfte
 	return &resp.candidate.Descriptor, resp.candidate.NextCursor, nil
 }
 
-func (s *stubService) EnsureMessageReady(ctx context.Context, queue, id string) error {
+func (s *stubService) EnsureMessageReady(ctx context.Context, namespace, queue, id string) error {
 	return nil
 }
 
@@ -58,13 +58,14 @@ type stubWatchFactory struct {
 	sub *stubWatchSubscription
 }
 
-func (f *stubWatchFactory) Subscribe(queue string) (WatchSubscription, error) {
+func (f *stubWatchFactory) Subscribe(namespace, queue string) (WatchSubscription, error) {
 	return f.sub, nil
 }
 
 func makeCandidate(queueName, id string) *Candidate {
 	doc := messageDocument{
 		Type:              "queue_msg",
+		Namespace:         "default",
 		Queue:             queueName,
 		ID:                id,
 		NotVisibleUntil:   time.Unix(0, 0),
@@ -84,6 +85,7 @@ func makeCandidate(queueName, id string) *Candidate {
 }
 
 func TestDispatcherTryWatcherDiscrepancy(t *testing.T) {
+	const namespace = "default"
 	svc := &stubService{
 		responses: []nextResponse{
 			{err: storage.ErrNotFound},
@@ -94,13 +96,13 @@ func TestDispatcherTryWatcherDiscrepancy(t *testing.T) {
 		WithResilientPollInterval(5*time.Minute),
 	)
 
-	qs, err := disp.queueState("orders")
+	qs, err := disp.queueState(namespace, "orders")
 	if err != nil {
 		t.Fatalf("queueState: %v", err)
 	}
 	qs.markNeedsPoll("watch_event")
 
-	cand, err := disp.Try(context.Background(), "orders")
+	cand, err := disp.Try(context.Background(), namespace, "orders")
 	if err != nil {
 		t.Fatalf("Try returned error: %v", err)
 	}

@@ -72,35 +72,35 @@ type PutStateResult struct {
 // Backend defines the storage contract expected by the server.
 type Backend interface {
 	// LoadMeta returns the current meta document and its opaque ETag.
-	LoadMeta(ctx context.Context, key string) (*Meta, string, error)
+	LoadMeta(ctx context.Context, namespace, key string) (*Meta, string, error)
 	// StoreMeta atomically writes meta if the existing ETag matches. Use empty
 	// expectedETag to create brand new entries.
-	StoreMeta(ctx context.Context, key string, meta *Meta, expectedETag string) (newETag string, err error)
+	StoreMeta(ctx context.Context, namespace, key string, meta *Meta, expectedETag string) (newETag string, err error)
 	// DeleteMeta removes metadata entirely, used when cleaning keys.
-	DeleteMeta(ctx context.Context, key string, expectedETag string) error
+	DeleteMeta(ctx context.Context, namespace, key string, expectedETag string) error
 	// ListMetaKeys enumerates all known metadata keys.
-	ListMetaKeys(ctx context.Context) ([]string, error)
+	ListMetaKeys(ctx context.Context, namespace string) ([]string, error)
 
 	// ReadState streams the JSON state blob with metadata.
-	ReadState(ctx context.Context, key string) (io.ReadCloser, *StateInfo, error)
+	ReadState(ctx context.Context, namespace, key string) (io.ReadCloser, *StateInfo, error)
 	// WriteState uploads a new state blob with optional CAS on the previous ETag.
-	WriteState(ctx context.Context, key string, body io.Reader, opts PutStateOptions) (*PutStateResult, error)
+	WriteState(ctx context.Context, namespace, key string, body io.Reader, opts PutStateOptions) (*PutStateResult, error)
 	// Remove deletes stored state if present.
-	Remove(ctx context.Context, key string, expectedETag string) error
+	Remove(ctx context.Context, namespace, key string, expectedETag string) error
 
 	// ListObjects enumerates objects under the supplied prefix in ascending
-	// lexical order. Results are limited by opts.Limit when >0 and resume from
+	// lexical order within the namespace. Results are limited by opts.Limit when >0 and resume from
 	// opts.StartAfter when provided.
-	ListObjects(ctx context.Context, opts ListOptions) (*ListResult, error)
+	ListObjects(ctx context.Context, namespace string, opts ListOptions) (*ListResult, error)
 	// GetObject fetches the raw bytes for key and returns a reader alongside
 	// metadata. Callers must close the returned reader.
-	GetObject(ctx context.Context, key string) (io.ReadCloser, *ObjectInfo, error)
+	GetObject(ctx context.Context, namespace, key string) (io.ReadCloser, *ObjectInfo, error)
 	// PutObject writes a blob to the provided key, applying conditional
 	// semantics when opts.ExpectedETag or opts.IfNotExists are set.
-	PutObject(ctx context.Context, key string, body io.Reader, opts PutObjectOptions) (*ObjectInfo, error)
+	PutObject(ctx context.Context, namespace, key string, body io.Reader, opts PutObjectOptions) (*ObjectInfo, error)
 	// DeleteObject removes the object identified by key, optionally enforcing a
 	// matching ETag when opts.ExpectedETag is set.
-	DeleteObject(ctx context.Context, key string, opts DeleteObjectOptions) error
+	DeleteObject(ctx context.Context, namespace, key string, opts DeleteObjectOptions) error
 
 	// Close releases backend resources.
 	Close() error
@@ -173,7 +173,7 @@ type QueueChangeSubscription interface {
 
 // QueueChangeFeed indicates the backend can emit change notifications for queue prefixes.
 type QueueChangeFeed interface {
-	SubscribeQueueChanges(queue string) (QueueChangeSubscription, error)
+	SubscribeQueueChanges(namespace, queue string) (QueueChangeSubscription, error)
 }
 
 // QueueWatchStatusProvider reports whether filesystem-level queue change

@@ -17,6 +17,7 @@ import (
 	"pkt.systems/lockd/integration/internal/cryptotest"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/s3"
+	"pkt.systems/lockd/namespaces"
 )
 
 var minioStorageMu sync.Mutex
@@ -60,20 +61,69 @@ func ResetMinioBucketForCrypto(tb testing.TB, cfg lockd.Config) {
 			tb.Logf("minio cleanup list objects error: %v", obj.Err)
 			continue
 		}
+		logicalKey := obj.Key
+		if listPrefix != "" {
+			logicalKey = strings.TrimPrefix(logicalKey, listPrefix+"/")
+		}
+		if !shouldCleanupMinioObject(logicalKey) {
+			continue
+		}
 		if err := client.RemoveObject(ctx, minioCfg.Bucket, obj.Key, minio.RemoveObjectOptions{}); err != nil {
 			tb.Logf("minio cleanup remove object %q: %v", obj.Key, err)
 		}
 	}
-	if keys, err := store.ListMetaKeys(ctx); err == nil {
+	if keys, err := store.ListMetaKeys(ctx, namespaces.Default); err == nil {
 		for _, key := range keys {
-			if err := store.Remove(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			if err := store.Remove(ctx, namespaces.Default, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 				tb.Logf("minio cleanup state %q: %v", key, err)
 			}
-			if err := store.DeleteMeta(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			if err := store.DeleteMeta(ctx, namespaces.Default, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 				tb.Logf("minio cleanup meta %q: %v", key, err)
 			}
 		}
 	} else {
 		tb.Logf("minio cleanup list meta keys: %v", err)
 	}
+}
+
+func shouldCleanupMinioObject(key string) bool {
+	key = strings.TrimPrefix(key, "/")
+	if key == "" {
+		return false
+	}
+
+	namespaceAwarePrefixes := []string{
+		"lockd-diagnostics/",
+		"meta/minio-",
+		"meta/crypto-minio-",
+		"state/minio-",
+		"state/crypto-minio-",
+		"q/minio-",
+		"q/crypto-minio-",
+	}
+	namespaceAgnosticPrefixes := []string{
+		"minio-",
+		"crypto-minio-",
+	}
+
+	parts := strings.SplitN(key, "/", 2)
+	rest := key
+	if len(parts) == 2 {
+		rest = parts[1]
+	}
+
+	for _, prefix := range namespaceAwarePrefixes {
+		if strings.HasPrefix(key, prefix) {
+			return true
+		}
+		if strings.HasPrefix(rest, prefix) {
+			return true
+		}
+	}
+	for _, prefix := range namespaceAgnosticPrefixes {
+		if strings.HasPrefix(key, prefix) {
+			return true
+		}
+	}
+	return false
 }

@@ -51,108 +51,108 @@ type backend struct {
 	cfg    Config
 }
 
-func (b *backend) LoadMeta(ctx context.Context, key string) (*storage.Meta, string, error) {
+func (b *backend) LoadMeta(ctx context.Context, namespace, key string) (*storage.Meta, string, error) {
 	var meta *storage.Meta
 	var etag string
-	err := b.withRetry(ctx, "load_meta", key, func(ctx context.Context) error {
+	err := b.withRetry(ctx, "load_meta", namespace, key, func(ctx context.Context) error {
 		var err error
-		meta, etag, err = b.inner.LoadMeta(ctx, key)
+		meta, etag, err = b.inner.LoadMeta(ctx, namespace, key)
 		return err
 	})
 	return meta, etag, err
 }
 
-func (b *backend) StoreMeta(ctx context.Context, key string, meta *storage.Meta, expectedETag string) (string, error) {
+func (b *backend) StoreMeta(ctx context.Context, namespace, key string, meta *storage.Meta, expectedETag string) (string, error) {
 	var newETag string
-	err := b.withRetry(ctx, "store_meta", key, func(ctx context.Context) error {
+	err := b.withRetry(ctx, "store_meta", namespace, key, func(ctx context.Context) error {
 		var err error
-		newETag, err = b.inner.StoreMeta(ctx, key, meta, expectedETag)
+		newETag, err = b.inner.StoreMeta(ctx, namespace, key, meta, expectedETag)
 		return err
 	})
 	return newETag, err
 }
 
-func (b *backend) DeleteMeta(ctx context.Context, key string, expectedETag string) error {
-	return b.withRetry(ctx, "delete_meta", key, func(ctx context.Context) error {
-		return b.inner.DeleteMeta(ctx, key, expectedETag)
+func (b *backend) DeleteMeta(ctx context.Context, namespace, key string, expectedETag string) error {
+	return b.withRetry(ctx, "delete_meta", namespace, key, func(ctx context.Context) error {
+		return b.inner.DeleteMeta(ctx, namespace, key, expectedETag)
 	})
 }
 
-func (b *backend) ListMetaKeys(ctx context.Context) ([]string, error) {
+func (b *backend) ListMetaKeys(ctx context.Context, namespace string) ([]string, error) {
 	var keys []string
-	err := b.withRetry(ctx, "list_meta_keys", "", func(ctx context.Context) error {
+	err := b.withRetry(ctx, "list_meta_keys", namespace, "", func(ctx context.Context) error {
 		var err error
-		keys, err = b.inner.ListMetaKeys(ctx)
+		keys, err = b.inner.ListMetaKeys(ctx, namespace)
 		return err
 	})
 	return keys, err
 }
 
-func (b *backend) ReadState(ctx context.Context, key string) (io.ReadCloser, *storage.StateInfo, error) {
+func (b *backend) ReadState(ctx context.Context, namespace, key string) (io.ReadCloser, *storage.StateInfo, error) {
 	var (
 		r    io.ReadCloser
 		info *storage.StateInfo
 	)
-	err := b.withRetry(ctx, "read_state", key, func(ctx context.Context) error {
+	err := b.withRetry(ctx, "read_state", namespace, key, func(ctx context.Context) error {
 		var err error
-		r, info, err = b.inner.ReadState(ctx, key)
+		r, info, err = b.inner.ReadState(ctx, namespace, key)
 		return err
 	})
 	return r, info, err
 }
 
-func (b *backend) WriteState(ctx context.Context, key string, body io.Reader, opts storage.PutStateOptions) (*storage.PutStateResult, error) {
+func (b *backend) WriteState(ctx context.Context, namespace, key string, body io.Reader, opts storage.PutStateOptions) (*storage.PutStateResult, error) {
 	var res *storage.PutStateResult
-	err := b.withRetry(ctx, "write_state", key, func(ctx context.Context) error {
+	err := b.withRetry(ctx, "write_state", namespace, key, func(ctx context.Context) error {
 		var err error
-		res, err = b.inner.WriteState(ctx, key, body, opts)
+		res, err = b.inner.WriteState(ctx, namespace, key, body, opts)
 		return err
 	})
 	return res, err
 }
 
-func (b *backend) Remove(ctx context.Context, key string, expectedETag string) error {
-	return b.withRetry(ctx, "remove_state", key, func(ctx context.Context) error {
-		return b.inner.Remove(ctx, key, expectedETag)
+func (b *backend) Remove(ctx context.Context, namespace, key string, expectedETag string) error {
+	return b.withRetry(ctx, "remove_state", namespace, key, func(ctx context.Context) error {
+		return b.inner.Remove(ctx, namespace, key, expectedETag)
 	})
 }
 
-func (b *backend) ListObjects(ctx context.Context, opts storage.ListOptions) (*storage.ListResult, error) {
+func (b *backend) ListObjects(ctx context.Context, namespace string, opts storage.ListOptions) (*storage.ListResult, error) {
 	var res *storage.ListResult
-	err := b.withRetry(ctx, "list_objects", opts.Prefix, func(ctx context.Context) error {
+	err := b.withRetry(ctx, "list_objects", namespace, opts.Prefix, func(ctx context.Context) error {
 		var err error
-		res, err = b.inner.ListObjects(ctx, opts)
+		res, err = b.inner.ListObjects(ctx, namespace, opts)
 		return err
 	})
 	return res, err
 }
 
-func (b *backend) GetObject(ctx context.Context, key string) (io.ReadCloser, *storage.ObjectInfo, error) {
+func (b *backend) GetObject(ctx context.Context, namespace, key string) (io.ReadCloser, *storage.ObjectInfo, error) {
 	var (
 		r    io.ReadCloser
 		info *storage.ObjectInfo
 	)
-	err := b.withRetry(ctx, "get_object", key, func(ctx context.Context) error {
+	err := b.withRetry(ctx, "get_object", namespace, key, func(ctx context.Context) error {
 		var err error
-		r, info, err = b.inner.GetObject(ctx, key)
+		r, info, err = b.inner.GetObject(ctx, namespace, key)
 		return err
 	})
 	return r, info, err
 }
 
-func (b *backend) PutObject(ctx context.Context, key string, body io.Reader, opts storage.PutObjectOptions) (*storage.ObjectInfo, error) {
+func (b *backend) PutObject(ctx context.Context, namespace, key string, body io.Reader, opts storage.PutObjectOptions) (*storage.ObjectInfo, error) {
 	var info *storage.ObjectInfo
-	err := b.withRetry(ctx, "put_object", key, func(ctx context.Context) error {
+	err := b.withRetry(ctx, "put_object", namespace, key, func(ctx context.Context) error {
 		var err error
-		info, err = b.inner.PutObject(ctx, key, body, opts)
+		info, err = b.inner.PutObject(ctx, namespace, key, body, opts)
 		return err
 	})
 	return info, err
 }
 
-func (b *backend) DeleteObject(ctx context.Context, key string, opts storage.DeleteObjectOptions) error {
-	return b.withRetry(ctx, "delete_object", key, func(ctx context.Context) error {
-		return b.inner.DeleteObject(ctx, key, opts)
+func (b *backend) DeleteObject(ctx context.Context, namespace, key string, opts storage.DeleteObjectOptions) error {
+	return b.withRetry(ctx, "delete_object", namespace, key, func(ctx context.Context) error {
+		return b.inner.DeleteObject(ctx, namespace, key, opts)
 	})
 }
 
@@ -160,9 +160,9 @@ func (b *backend) Close() error {
 	return b.inner.Close()
 }
 
-func (b *backend) SubscribeQueueChanges(queue string) (storage.QueueChangeSubscription, error) {
+func (b *backend) SubscribeQueueChanges(namespace, queue string) (storage.QueueChangeSubscription, error) {
 	if feed, ok := b.inner.(storage.QueueChangeFeed); ok {
-		return feed.SubscribeQueueChanges(queue)
+		return feed.SubscribeQueueChanges(namespace, queue)
 	}
 	return nil, storage.ErrNotImplemented
 }
@@ -174,7 +174,7 @@ func (b *backend) QueueWatchStatus() (bool, string, string) {
 	return false, "unknown", "backend_does_not_report"
 }
 
-func (b *backend) withRetry(ctx context.Context, op, key string, fn func(context.Context) error) error {
+func (b *backend) withRetry(ctx context.Context, op, namespace, key string, fn func(context.Context) error) error {
 	attempts := b.cfg.MaxAttempts
 	delay := b.cfg.BaseDelay
 	if attempts <= 1 {
@@ -192,6 +192,7 @@ func (b *backend) withRetry(ctx context.Context, op, key string, fn func(context
 		}
 		b.logger.Warn("storage transient error",
 			"operation", op,
+			"namespace", namespace,
 			"key", key,
 			"attempt", attempt,
 			"max_attempts", attempts,

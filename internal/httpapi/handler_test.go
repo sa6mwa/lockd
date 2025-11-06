@@ -147,7 +147,7 @@ func TestAcquireAutoGeneratesKey(t *testing.T) {
 		t.Fatal("expected server to generate key")
 	}
 	ctx := context.Background()
-	meta, _, err := store.LoadMeta(ctx, autoResp.Key)
+	meta, _, err := store.LoadMeta(ctx, handler.defaultNamespace, autoResp.Key)
 	if err != nil {
 		t.Fatalf("load meta: %v", err)
 	}

@@ -1,19 +1,22 @@
 package disk
 
 import (
-	"bytes"
-	"context"
-	"errors"
-	"io"
-	"os"
-	"path/filepath"
-	"strings"
-	"sync"
-	"testing"
-	"time"
+    "bytes"
+    "context"
+    "errors"
+    "io"
+    "os"
+    "path/filepath"
+    "strings"
+    "sync"
+    "testing"
+    "time"
 
-	"pkt.systems/lockd/internal/storage"
+    "pkt.systems/lockd/internal/storage"
+    "pkt.systems/lockd/namespaces"
 )
+
+const testNamespace = namespaces.Default
 
 func TestDiskStoreRoundTrip(t *testing.T) {
 	t.Parallel()
@@ -29,7 +32,7 @@ func TestDiskStoreRoundTrip(t *testing.T) {
 	key := "orders/v1"
 
 	meta := storage.Meta{Version: 1, UpdatedAtUnix: 1700000000}
-	etag, err := store.StoreMeta(ctx, key, &meta, "")
+	etag, err := store.StoreMeta(ctx, testNamespace, key, &meta, "")
 	if err != nil {
 		t.Fatalf("store meta: %v", err)
 	}
@@ -38,7 +41,7 @@ func TestDiskStoreRoundTrip(t *testing.T) {
 	}
 
 	payload := []byte(`{"hello":"world"}`)
-	res, err := store.WriteState(ctx, key, bytes.NewReader(payload), storage.PutStateOptions{})
+	res, err := store.WriteState(ctx, testNamespace, key, bytes.NewReader(payload), storage.PutStateOptions{})
 	if err != nil {
 		t.Fatalf("write state: %v", err)
 	}
@@ -49,7 +52,7 @@ func TestDiskStoreRoundTrip(t *testing.T) {
 		t.Fatalf("expected new etag")
 	}
 
-	reader, info, err := store.ReadState(ctx, key)
+	reader, info, err := store.ReadState(ctx, testNamespace, key)
 	if err != nil {
 		t.Fatalf("read state: %v", err)
 	}
@@ -68,7 +71,7 @@ func TestDiskStoreRoundTrip(t *testing.T) {
 		t.Fatalf("etag = %s want %s", info.ETag, res.NewETag)
 	}
 
-	metaLoaded, metaETag, err := store.LoadMeta(ctx, key)
+	metaLoaded, metaETag, err := store.LoadMeta(ctx, testNamespace, key)
 	if err != nil {
 		t.Fatalf("load meta: %v", err)
 	}
@@ -79,11 +82,11 @@ func TestDiskStoreRoundTrip(t *testing.T) {
 		t.Fatalf("version = %d want %d", metaLoaded.Version, meta.Version)
 	}
 
-	if err := store.Remove(ctx, key, res.NewETag); err != nil {
+	if err := store.Remove(ctx, testNamespace, key, res.NewETag); err != nil {
 		t.Fatalf("remove state: %v", err)
 	}
 
-	if _, _, err := store.ReadState(ctx, key); !errors.Is(err, storage.ErrNotFound) {
+	if _, _, err := store.ReadState(ctx, testNamespace, key); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected not found, got %v", err)
 	}
 }
@@ -101,15 +104,15 @@ func TestDiskStoreCAS(t *testing.T) {
 	ctx := context.Background()
 	key := "orders"
 
-	if _, err := store.WriteState(ctx, key, bytes.NewReader([]byte("foo")), storage.PutStateOptions{}); err != nil {
+	if _, err := store.WriteState(ctx, testNamespace, key, bytes.NewReader([]byte("foo")), storage.PutStateOptions{}); err != nil {
 		t.Fatalf("write state: %v", err)
 	}
 
-	if _, err := store.WriteState(ctx, key, bytes.NewReader([]byte("bar")), storage.PutStateOptions{ExpectedETag: "nope"}); !errors.Is(err, storage.ErrCASMismatch) {
+	if _, err := store.WriteState(ctx, testNamespace, key, bytes.NewReader([]byte("bar")), storage.PutStateOptions{ExpectedETag: "nope"}); !errors.Is(err, storage.ErrCASMismatch) {
 		t.Fatalf("expected cas mismatch, got %v", err)
 	}
 
-	if err := store.Remove(ctx, key, "mismatch"); !errors.Is(err, storage.ErrCASMismatch) {
+	if err := store.Remove(ctx, testNamespace, key, "mismatch"); !errors.Is(err, storage.ErrCASMismatch) {
 		t.Fatalf("expected cas mismatch, got %v", err)
 	}
 }
@@ -130,25 +133,25 @@ func TestDiskRetentionSweep(t *testing.T) {
 	key := "old-key"
 
 	meta := storage.Meta{Version: 1, UpdatedAtUnix: 1}
-	if _, err := store.StoreMeta(ctx, key, &meta, ""); err != nil {
+	if _, err := store.StoreMeta(ctx, testNamespace, key, &meta, ""); err != nil {
 		t.Fatalf("store meta: %v", err)
 	}
 
-	if _, err := store.WriteState(ctx, key, bytes.NewReader([]byte("data")), storage.PutStateOptions{}); err != nil {
+	if _, err := store.WriteState(ctx, testNamespace, key, bytes.NewReader([]byte("data")), storage.PutStateOptions{}); err != nil {
 		t.Fatalf("write state: %v", err)
 	}
 
 	store.sweepOnce()
 
-	if _, _, err := store.LoadMeta(ctx, key); !errors.Is(err, storage.ErrNotFound) {
+	if _, _, err := store.LoadMeta(ctx, testNamespace, key); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected meta cleanup, got %v", err)
 	}
 
-	if _, _, err := store.ReadState(ctx, key); !errors.Is(err, storage.ErrNotFound) {
+	if _, _, err := store.ReadState(ctx, testNamespace, key); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected state cleanup, got %v", err)
 	}
 
-	if _, err := os.Stat(filepath.Join(root, "state")); err != nil {
+	if _, err := os.Stat(filepath.Join(root, testNamespace, "state")); err != nil {
 		t.Fatalf("state dir: %v", err)
 	}
 }
@@ -169,18 +172,18 @@ func TestDiskStoreConcurrentMeta(t *testing.T) {
 	ctx := context.Background()
 	key := "concurrent-meta"
 	initial := storage.Meta{Version: 1, UpdatedAtUnix: time.Now().Unix()}
-	etag, err := store1.StoreMeta(ctx, key, &initial, "")
+	etag, err := store1.StoreMeta(ctx, testNamespace, key, &initial, "")
 	if err != nil {
 		t.Fatalf("store meta: %v", err)
 	}
 
 	initial.Version = 2
-	newEtag, err := store1.StoreMeta(ctx, key, &initial, etag)
+	newEtag, err := store1.StoreMeta(ctx, testNamespace, key, &initial, etag)
 	if err != nil {
 		t.Fatalf("sequential update failed: %v", err)
 	}
 	initial.Version = 3
-	if _, err := store1.StoreMeta(ctx, key, &initial, etag); !errors.Is(err, storage.ErrCASMismatch) {
+	if _, err := store1.StoreMeta(ctx, testNamespace, key, &initial, etag); !errors.Is(err, storage.ErrCASMismatch) {
 		t.Fatalf("expected cas mismatch on stale etag, got %v", err)
 	}
 	etag = newEtag
@@ -194,13 +197,13 @@ func TestDiskStoreConcurrentMeta(t *testing.T) {
 
 	go func() {
 		defer wg.Done()
-		_, err := store1.StoreMeta(ctx, key, &updated1, etag)
+		_, err := store1.StoreMeta(ctx, testNamespace, key, &updated1, etag)
 		results <- err
 	}()
 
 	go func() {
 		defer wg.Done()
-		_, err := store2.StoreMeta(ctx, key, &updated2, etag)
+		_, err := store2.StoreMeta(ctx, testNamespace, key, &updated2, etag)
 		results <- err
 	}()
 
@@ -219,7 +222,7 @@ func TestDiskStoreConcurrentMeta(t *testing.T) {
 		t.Fatalf("expected exactly one successful meta update, got %d", success)
 	}
 
-	meta, _, err := store1.LoadMeta(ctx, key)
+	meta, _, err := store1.LoadMeta(ctx, testNamespace, key)
 	if err != nil {
 		t.Fatalf("load meta: %v", err)
 	}
@@ -244,7 +247,7 @@ func TestDiskStoreConcurrentState(t *testing.T) {
 	ctx := context.Background()
 	key := "concurrent-state"
 
-	res, err := store1.WriteState(ctx, key, strings.NewReader("initial"), storage.PutStateOptions{})
+	res, err := store1.WriteState(ctx, testNamespace, key, strings.NewReader("initial"), storage.PutStateOptions{})
 	if err != nil {
 		t.Fatalf("write initial state: %v", err)
 	}
@@ -255,13 +258,13 @@ func TestDiskStoreConcurrentState(t *testing.T) {
 
 	go func() {
 		defer wg.Done()
-		_, err := store1.WriteState(ctx, key, strings.NewReader("alpha"), storage.PutStateOptions{ExpectedETag: res.NewETag})
+		_, err := store1.WriteState(ctx, testNamespace, key, strings.NewReader("alpha"), storage.PutStateOptions{ExpectedETag: res.NewETag})
 		results <- err
 	}()
 
 	go func() {
 		defer wg.Done()
-		_, err := store2.WriteState(ctx, key, strings.NewReader("beta"), storage.PutStateOptions{ExpectedETag: res.NewETag})
+		_, err := store2.WriteState(ctx, testNamespace, key, strings.NewReader("beta"), storage.PutStateOptions{ExpectedETag: res.NewETag})
 		results <- err
 	}()
 
@@ -280,7 +283,7 @@ func TestDiskStoreConcurrentState(t *testing.T) {
 		t.Fatalf("expected exactly one successful state update, got %d", success)
 	}
 
-	reader, info, err := store1.ReadState(ctx, key)
+	reader, info, err := store1.ReadState(ctx, testNamespace, key)
 	if err != nil {
 		t.Fatalf("read state: %v", err)
 	}

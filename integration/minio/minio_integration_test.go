@@ -33,6 +33,7 @@ import (
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/s3"
 	"pkt.systems/lockd/internal/uuidv7"
+	"pkt.systems/lockd/namespaces"
 	"pkt.systems/pslog"
 )
 
@@ -298,19 +299,61 @@ func TestMinioAcquireForUpdateCallbackSingleServer(t *testing.T) {
 		if v, ok := snapshot["count"].(float64); ok {
 			count = v
 		}
+		targetCount := count + 1
+		expectedOwner := "reader-single"
 		updated := map[string]any{
 			"payload": "single-server",
-			"count":   count + 1,
-			"owner":   "reader-single",
+			"count":   targetCount,
+			"owner":   expectedOwner,
+		}
+		refreshProgress := func() (float64, bool, error) {
+			var latest map[string]any
+			if err := af.Load(handlerCtx, &latest); err != nil {
+				return 0, false, err
+			}
+			if latest == nil {
+				return 0, false, nil
+			}
+			current := 0.0
+			if v, ok := latest["count"].(float64); ok {
+				current = v
+			}
+			owner := fmt.Sprint(latest["owner"])
+			achieved := owner == expectedOwner && current >= targetCount
+			return current, achieved, nil
 		}
 		var saveErr error
-		for attempt := 0; attempt < 3; attempt++ {
+		for attempt := 0; attempt < 4; attempt++ {
 			if saveErr = af.Save(handlerCtx, updated); saveErr == nil {
 				return nil
 			}
+
+			var apiErr *lockdclient.APIError
+			if errors.As(saveErr, &apiErr) && apiErr.Response.ErrorCode == "version_conflict" {
+				current, achieved, refreshErr := refreshProgress()
+				if refreshErr != nil {
+					return fmt.Errorf("save snapshot: %w (refresh: %v)", saveErr, refreshErr)
+				}
+				if achieved {
+					return nil
+				}
+				targetCount = current + 1
+				updated["count"] = targetCount
+				continue
+			}
+
 			if !retryableTransportError(saveErr) {
 				return fmt.Errorf("save snapshot: %w", saveErr)
 			}
+			current, achieved, refreshErr := refreshProgress()
+			if refreshErr != nil {
+				return fmt.Errorf("save snapshot: %w (refresh: %v)", saveErr, refreshErr)
+			}
+			if achieved {
+				return nil
+			}
+			targetCount = current + 1
+			updated["count"] = targetCount
 			time.Sleep(50 * time.Millisecond * time.Duration(attempt+1))
 		}
 		return fmt.Errorf("save snapshot: %w", saveErr)
@@ -1250,10 +1293,10 @@ func cleanupMinio(tb testing.TB, cfg lockd.Config, key string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if err := store.Remove(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+	if err := store.Remove(ctx, namespaces.Default, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 		tb.Logf("remove state failed: %v", err)
 	}
-	if err := store.DeleteMeta(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+	if err := store.DeleteMeta(ctx, namespaces.Default, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 		tb.Logf("delete meta failed: %v", err)
 	}
 }

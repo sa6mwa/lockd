@@ -571,6 +571,7 @@ func NewTestServer(ctx context.Context, opts ...TestServerOption) (*TestServer, 
 			return nil, err
 		}
 	}
+	cfg = srv.cfg
 
 	ts := &TestServer{
 		Server:         srv,

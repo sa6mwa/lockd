@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -131,6 +132,7 @@ func TestHandlerRemoveClearsMeta(t *testing.T) {
 		t.Fatalf("decode acquire: %v", err)
 	}
 	fence := strconv.FormatInt(acq.FencingToken, 10)
+	nsKey := h.defaultNamespace + "/orders"
 
 	updateBody := bytes.NewBufferString(`{"value":42}`)
 	upReq := httptest.NewRequest(http.MethodPost, "/v1/update?key=orders", updateBody)
@@ -145,10 +147,10 @@ func TestHandlerRemoveClearsMeta(t *testing.T) {
 	}
 
 	store.mu.Lock()
-	entry, ok := store.meta["orders"]
+	entry, ok := store.meta[nsKey]
 	store.mu.Unlock()
 	if !ok {
-		t.Fatalf("expected meta entry for orders")
+		t.Fatalf("expected meta entry for %s", nsKey)
 	}
 	if entry.meta.StateETag == "" {
 		t.Fatalf("expected state etag after update")
@@ -178,8 +180,8 @@ func TestHandlerRemoveClearsMeta(t *testing.T) {
 	}
 
 	store.mu.Lock()
-	entry = store.meta["orders"]
-	_, statePresent := store.state["orders"]
+	entry = store.meta[nsKey]
+	_, statePresent := store.state[nsKey]
 	removeCount := store.removeStateCount
 	store.mu.Unlock()
 
@@ -221,6 +223,13 @@ func newStubStore() *stubStore {
 	}
 }
 
+func stubNamespaced(namespace, key string) string {
+	if strings.TrimSpace(namespace) == "" {
+		return key
+	}
+	return namespace + "/" + strings.TrimPrefix(key, "/")
+}
+
 func (s *stubStore) resetCounters() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -237,22 +246,24 @@ func (s *stubStore) nextMetaETag() string {
 	return "meta-etag-" + strconv.Itoa(s.nextETag)
 }
 
-func (s *stubStore) LoadMeta(ctx context.Context, key string) (*storage.Meta, string, error) {
+func (s *stubStore) LoadMeta(ctx context.Context, namespace, key string) (*storage.Meta, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.loadMetaCount++
-	if entry, ok := s.meta[key]; ok {
+	fullKey := stubNamespaced(namespace, key)
+	if entry, ok := s.meta[fullKey]; ok {
 		metaCopy := entry.meta
 		return &metaCopy, entry.etag, nil
 	}
 	return nil, "", storage.ErrNotFound
 }
 
-func (s *stubStore) StoreMeta(ctx context.Context, key string, meta *storage.Meta, expectedETag string) (string, error) {
+func (s *stubStore) StoreMeta(ctx context.Context, namespace, key string, meta *storage.Meta, expectedETag string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.storeMetaCount++
-	entry, exists := s.meta[key]
+	fullKey := stubNamespaced(namespace, key)
+	entry, exists := s.meta[fullKey]
 	if expectedETag != "" {
 		if !exists {
 			return "", storage.ErrNotFound
@@ -265,26 +276,27 @@ func (s *stubStore) StoreMeta(ctx context.Context, key string, meta *storage.Met
 	}
 	newETag := s.nextMetaETag()
 	metaCopy := *meta
-	s.meta[key] = stubEntry{meta: metaCopy, etag: newETag}
+	s.meta[fullKey] = stubEntry{meta: metaCopy, etag: newETag}
 	return newETag, nil
 }
 
-func (s *stubStore) DeleteMeta(ctx context.Context, key string, expectedETag string) error {
+func (s *stubStore) DeleteMeta(ctx context.Context, namespace, key string, expectedETag string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.meta, key)
+	fullKey := stubNamespaced(namespace, key)
+	delete(s.meta, fullKey)
 	return nil
 }
 
-func (s *stubStore) ListMetaKeys(ctx context.Context) ([]string, error) {
+func (s *stubStore) ListMetaKeys(ctx context.Context, namespace string) ([]string, error) {
 	return nil, storage.ErrNotImplemented
 }
 
-func (s *stubStore) ReadState(ctx context.Context, key string) (io.ReadCloser, *storage.StateInfo, error) {
+func (s *stubStore) ReadState(ctx context.Context, namespace, key string) (io.ReadCloser, *storage.StateInfo, error) {
 	return nil, nil, storage.ErrNotFound
 }
 
-func (s *stubStore) WriteState(ctx context.Context, key string, body io.Reader, opts storage.PutStateOptions) (*storage.PutStateResult, error) {
+func (s *stubStore) WriteState(ctx context.Context, namespace, key string, body io.Reader, opts storage.PutStateOptions) (*storage.PutStateResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.writeStateCount++
@@ -298,38 +310,40 @@ func (s *stubStore) WriteState(ctx context.Context, key string, body io.Reader, 
 		BytesWritten: int64(len(data)),
 		NewETag:      "state-etag-" + strconv.Itoa(s.nextETag),
 	}
-	s.state[key] = result.NewETag
+	fullKey := stubNamespaced(namespace, key)
+	s.state[fullKey] = result.NewETag
 	return result, nil
 }
 
-func (s *stubStore) Remove(ctx context.Context, key string, expectedETag string) error {
+func (s *stubStore) Remove(ctx context.Context, namespace, key string, expectedETag string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.removeStateCount++
-	current, ok := s.state[key]
+	fullKey := stubNamespaced(namespace, key)
+	current, ok := s.state[fullKey]
 	if !ok {
 		return storage.ErrNotFound
 	}
 	if expectedETag != "" && expectedETag != current {
 		return storage.ErrCASMismatch
 	}
-	delete(s.state, key)
+	delete(s.state, fullKey)
 	return nil
 }
 
-func (s *stubStore) ListObjects(context.Context, storage.ListOptions) (*storage.ListResult, error) {
+func (s *stubStore) ListObjects(context.Context, string, storage.ListOptions) (*storage.ListResult, error) {
 	return nil, storage.ErrNotImplemented
 }
 
-func (s *stubStore) GetObject(context.Context, string) (io.ReadCloser, *storage.ObjectInfo, error) {
+func (s *stubStore) GetObject(context.Context, string, string) (io.ReadCloser, *storage.ObjectInfo, error) {
 	return nil, nil, storage.ErrNotImplemented
 }
 
-func (s *stubStore) PutObject(context.Context, string, io.Reader, storage.PutObjectOptions) (*storage.ObjectInfo, error) {
+func (s *stubStore) PutObject(context.Context, string, string, io.Reader, storage.PutObjectOptions) (*storage.ObjectInfo, error) {
 	return nil, storage.ErrNotImplemented
 }
 
-func (s *stubStore) DeleteObject(context.Context, string, storage.DeleteObjectOptions) error {
+func (s *stubStore) DeleteObject(context.Context, string, string, storage.DeleteObjectOptions) error {
 	return storage.ErrNotImplemented
 }
 

@@ -156,7 +156,7 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 				logger = logger.LogLevel(level)
 				cliLogger = loggingutil.WithSubsystem(logger, "cli.root")
 			}
-			cliLogger.Info("starting lockd", "store", cfg.Store, "listen", cfg.Listen, "mtls", !cfg.DisableMTLS)
+			cliLogger.Info("starting lockd", "store", cfg.Store, "listen", cfg.Listen, "mtls", !cfg.DisableMTLS, "default_namespace", cfg.DefaultNamespace)
 
 			server, err := lockd.NewServer(cfg, lockd.WithLogger(logger))
 			if err != nil {
@@ -191,6 +191,7 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 	flags.String("listen", ":9341", "listen address")
 	flags.String("listen-proto", "tcp", "listen network (tcp, tcp4, tcp6)")
 	flags.String("store", "", "storage backend URL (mem://, s3://host[:port]/bucket, aws://bucket, disk:///path)")
+	flags.StringP("default-namespace", "n", lockd.DefaultNamespace, "default namespace applied when callers omit one")
 	jsonMaxDefault := humanizeBytes(lockd.DefaultJSONMaxBytes)
 	spoolDefault := humanizeBytes(lockd.DefaultPayloadSpoolMemoryThreshold)
 	s3PartDefault := humanizeBytes(lockd.DefaultS3MaxPartSize)
@@ -269,7 +270,7 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 
 	names := []string{
 		"config",
-		"listen", "listen-proto", "store", "json-max", "json-util", "payload-spool-mem", "default-ttl", "max-ttl", "acquire-block",
+		"listen", "listen-proto", "store", "default-namespace", "json-max", "json-util", "payload-spool-mem", "default-ttl", "max-ttl", "acquire-block",
 		"sweeper-interval", "drain-grace", "shutdown-timeout", "disk-retention", "disk-janitor-interval", "disable-mtls", "bundle", "denylist-path", "s3-sse",
 		"s3-kms-key-id", "s3-max-part-size", "aws-region", "aws-kms-key-id", "azure-key", "azure-endpoint", "azure-sas-token",
 		"storage-retry-attempts", "storage-retry-base-delay", "storage-retry-max-delay", "storage-retry-multiplier",
@@ -300,6 +301,7 @@ func bindConfig(cfg *lockd.Config) error {
 	cfg.Listen = viper.GetString("listen")
 	cfg.ListenProto = viper.GetString("listen-proto")
 	cfg.Store = viper.GetString("store")
+	cfg.DefaultNamespace = viper.GetString("default-namespace")
 	maxBytes := viper.GetString("json-max")
 	if maxBytes != "" {
 		size, err := humanize.ParseBytes(maxBytes)

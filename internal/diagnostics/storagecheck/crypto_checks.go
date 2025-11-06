@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/tlsutil"
 	"pkt.systems/lockd/internal/uuidv7"
+	"pkt.systems/lockd/namespaces"
 )
 
 // prepareCryptoForVerify ensures kryptograf material is available and constructs
@@ -89,11 +91,19 @@ func prepareCryptoForVerify(cfg lockd.Config) (*storage.Crypto, lockd.Config, er
 	return crypto, out, nil
 }
 
+func joinNamespace(namespace, key string) string {
+	if strings.TrimSpace(namespace) == "" {
+		return key
+	}
+	return namespace + "/" + strings.TrimPrefix(key, "/")
+}
+
 func verifyMetaStateDecryption(ctx context.Context, backend storage.Backend, crypto *storage.Crypto) error {
 	if crypto == nil || !crypto.Enabled() {
 		return nil
 	}
-	keys, err := backend.ListMetaKeys(ctx)
+	namespace := namespaces.Default
+	keys, err := backend.ListMetaKeys(ctx, namespace)
 	if err != nil {
 		return fmt.Errorf("list meta keys: %w", err)
 	}
@@ -104,15 +114,16 @@ func verifyMetaStateDecryption(ctx context.Context, backend storage.Backend, cry
 		if succeeded >= sampleTarget {
 			break
 		}
-		if strings.HasPrefix(key, "q/") {
+		if strings.Contains(key, "/q/") {
 			continue
 		}
-		meta, _, err := backend.LoadMeta(ctx, key)
+		fullKey := joinNamespace(namespace, key)
+		meta, _, err := backend.LoadMeta(ctx, namespace, key)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
 				continue
 			}
-			return fmt.Errorf("load meta %q: %w", key, err)
+			return fmt.Errorf("load meta %q: %w", fullKey, err)
 		}
 		if meta == nil {
 			continue
@@ -128,12 +139,12 @@ func verifyMetaStateDecryption(ctx context.Context, backend storage.Backend, cry
 		if meta.StatePlaintextBytes > 0 {
 			stateCtx = storage.ContextWithStatePlaintextSize(stateCtx, meta.StatePlaintextBytes)
 		}
-		reader, info, err := backend.ReadState(stateCtx, key)
+		reader, info, err := backend.ReadState(stateCtx, namespace, key)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
 				continue
 			}
-			return fmt.Errorf("read state %q: %w", key, err)
+			return fmt.Errorf("read state %q: %w", fullKey, err)
 		}
 		var descriptor []byte
 		if info != nil && len(info.Descriptor) > 0 {
@@ -146,18 +157,18 @@ func verifyMetaStateDecryption(ctx context.Context, backend storage.Backend, cry
 			continue
 		}
 		withDescriptors++
-		mat, err := crypto.MaterialFromDescriptor(storage.StateObjectContext(key), descriptor)
+		mat, err := crypto.MaterialFromDescriptor(storage.StateObjectContext(fullKey), descriptor)
 		if err != nil {
 			_ = reader.Close()
-			return fmt.Errorf("reconstruct state material %q: %w", key, err)
+			return fmt.Errorf("reconstruct state material %q: %w", fullKey, err)
 		}
 		mat.Zero()
 		if _, err := io.Copy(io.Discard, reader); err != nil {
 			_ = reader.Close()
-			return fmt.Errorf("consume state %q: %w", key, err)
+			return fmt.Errorf("consume state %q: %w", fullKey, err)
 		}
 		if err := reader.Close(); err != nil {
-			return fmt.Errorf("close state %q: %w", key, err)
+			return fmt.Errorf("close state %q: %w", fullKey, err)
 		}
 		succeeded++
 	}
@@ -171,22 +182,23 @@ func verifyMetaStateDecryption(ctx context.Context, backend storage.Backend, cry
 }
 
 func syntheticStateRoundTrip(ctx context.Context, backend storage.Backend, crypto *storage.Crypto) error {
-	key := "lockd-diagnostics/" + uuidv7.NewString()
+	namespace := namespaces.Default
+	key := path.Join(diagnosticsKeyPrefix, uuidv7.NewString())
 	meta := &storage.Meta{
 		Version:       1,
 		UpdatedAtUnix: time.Now().Unix(),
 	}
-	etag, err := backend.StoreMeta(ctx, key, meta, "")
+	etag, err := backend.StoreMeta(ctx, namespace, key, meta, "")
 	if err != nil {
 		return fmt.Errorf("store diagnostics meta %q: %w", key, err)
 	}
 	defer func() {
-		_ = backend.Remove(ctx, key, "")
-		_ = backend.DeleteMeta(ctx, key, "")
+		_ = backend.Remove(ctx, namespace, key, "")
+		_ = backend.DeleteMeta(ctx, namespace, key, "")
 	}()
-	stateRes, err := backend.WriteState(ctx, key, strings.NewReader("{}"), storage.PutStateOptions{})
+	stateRes, err := backend.WriteState(ctx, namespace, key, strings.NewReader("{}"), storage.PutStateOptions{})
 	if err != nil {
-		return fmt.Errorf("write diagnostics state %q: %w", key, err)
+		return fmt.Errorf("write diagnostics state %q: %w", joinNamespace(namespace, key), err)
 	}
 	if stateRes != nil && len(stateRes.Descriptor) > 0 {
 		meta.StateDescriptor = append([]byte(nil), stateRes.Descriptor...)
@@ -196,15 +208,15 @@ func syntheticStateRoundTrip(ctx context.Context, backend storage.Backend, crypt
 	}
 	meta.Version++
 	meta.UpdatedAtUnix = time.Now().Unix()
-	if _, err := backend.StoreMeta(ctx, key, meta, etag); err != nil {
-		return fmt.Errorf("update diagnostics meta %q: %w", key, err)
+	if _, err := backend.StoreMeta(ctx, namespace, key, meta, etag); err != nil {
+		return fmt.Errorf("update diagnostics meta %q: %w", joinNamespace(namespace, key), err)
 	}
-	metaLoaded, _, err := backend.LoadMeta(ctx, key)
+	metaLoaded, _, err := backend.LoadMeta(ctx, namespace, key)
 	if err != nil {
-		return fmt.Errorf("reload diagnostics meta %q: %w", key, err)
+		return fmt.Errorf("reload diagnostics meta %q: %w", joinNamespace(namespace, key), err)
 	}
 	if metaLoaded == nil || len(metaLoaded.StateDescriptor) == 0 {
-		return fmt.Errorf("diagnostics meta %q missing state descriptor", key)
+		return fmt.Errorf("diagnostics meta %q missing state descriptor", joinNamespace(namespace, key))
 	}
 	stateCtx := ctx
 	if len(metaLoaded.StateDescriptor) > 0 {
@@ -213,9 +225,9 @@ func syntheticStateRoundTrip(ctx context.Context, backend storage.Backend, crypt
 	if metaLoaded.StatePlaintextBytes > 0 {
 		stateCtx = storage.ContextWithStatePlaintextSize(stateCtx, metaLoaded.StatePlaintextBytes)
 	}
-	reader, info, err := backend.ReadState(stateCtx, key)
+	reader, info, err := backend.ReadState(stateCtx, namespace, key)
 	if err != nil {
-		return fmt.Errorf("read diagnostics state %q: %w", key, err)
+		return fmt.Errorf("read diagnostics state %q: %w", joinNamespace(namespace, key), err)
 	}
 	var descriptor []byte
 	if info != nil && len(info.Descriptor) > 0 {
@@ -224,16 +236,17 @@ func syntheticStateRoundTrip(ctx context.Context, backend storage.Backend, crypt
 		descriptor = append([]byte(nil), metaLoaded.StateDescriptor...)
 	}
 	if crypto != nil && crypto.Enabled() {
-		mat, err := crypto.MaterialFromDescriptor(storage.StateObjectContext(key), descriptor)
+		contextID := storage.StateObjectContext(joinNamespace(namespace, key))
+		mat, err := crypto.MaterialFromDescriptor(contextID, descriptor)
 		if err != nil {
 			_ = reader.Close()
-			return fmt.Errorf("reconstruct diagnostics state material %q: %w", key, err)
+			return fmt.Errorf("reconstruct diagnostics state material %q: %w", joinNamespace(namespace, key), err)
 		}
 		mat.Zero()
 	}
 	if _, err := io.Copy(io.Discard, reader); err != nil {
 		_ = reader.Close()
-		return fmt.Errorf("consume diagnostics state %q: %w", key, err)
+		return fmt.Errorf("consume diagnostics state %q: %w", joinNamespace(namespace, key), err)
 	}
 	return reader.Close()
 }
@@ -247,30 +260,30 @@ func verifyQueueEncryption(ctx context.Context, backend storage.Backend, crypto 
 		return fmt.Errorf("queue diagnostics: init service: %w", err)
 	}
 	queueName := "lockd-diagnostics-" + uuidv7.NewString()
-	msg, err := svc.Enqueue(ctx, queueName, strings.NewReader(`{"diagnostic":true}`), queue.EnqueueOptions{})
+	msg, err := svc.Enqueue(ctx, diagnosticsNamespace, queueName, strings.NewReader(`{"diagnostic":true}`), queue.EnqueueOptions{})
 	if err != nil {
 		return fmt.Errorf("queue diagnostics: enqueue: %w", err)
 	}
-	doc, etag, err := svc.GetMessage(ctx, queueName, msg.ID)
+	doc, etag, err := svc.GetMessage(ctx, diagnosticsNamespace, queueName, msg.ID)
 	if err != nil {
 		return fmt.Errorf("queue diagnostics: load message: %w", err)
 	}
 
-	if err := decryptQueueObject(ctx, backend, crypto, msg.MetadataObject, storage.QueueMetaContext(msg.MetadataObject), doc.MetaDescriptor); err != nil {
+	if err := decryptQueueObject(ctx, backend, crypto, msg.Namespace, msg.MetadataObject, storage.QueueMetaContext(msg.Namespace, msg.MetadataObject), doc.MetaDescriptor); err != nil {
 		return fmt.Errorf("queue diagnostics: decrypt metadata: %w", err)
 	}
-	if err := decryptQueueObject(ctx, backend, crypto, msg.PayloadObject, storage.QueuePayloadContext(msg.PayloadObject), doc.PayloadDescriptor); err != nil {
+	if err := decryptQueueObject(ctx, backend, crypto, msg.Namespace, msg.PayloadObject, storage.QueuePayloadContext(msg.Namespace, msg.PayloadObject), doc.PayloadDescriptor); err != nil {
 		return fmt.Errorf("queue diagnostics: decrypt payload: %w", err)
 	}
 
-	if err := svc.DeleteMessage(ctx, queueName, msg.ID, etag); err != nil && !errors.Is(err, storage.ErrNotFound) {
+	if err := svc.DeleteMessage(ctx, diagnosticsNamespace, queueName, msg.ID, etag); err != nil && !errors.Is(err, storage.ErrNotFound) {
 		return fmt.Errorf("queue diagnostics: cleanup message: %w", err)
 	}
 	return nil
 }
 
-func decryptQueueObject(ctx context.Context, backend storage.Backend, crypto *storage.Crypto, key string, context string, fallbackDescriptor []byte) error {
-	reader, info, err := backend.GetObject(ctx, key)
+func decryptQueueObject(ctx context.Context, backend storage.Backend, crypto *storage.Crypto, namespace, relKey, context string, fallbackDescriptor []byte) error {
+	reader, info, err := backend.GetObject(ctx, namespace, relKey)
 	if err != nil {
 		return err
 	}
@@ -282,7 +295,7 @@ func decryptQueueObject(ctx context.Context, backend storage.Backend, crypto *st
 	}
 	if len(descriptor) == 0 {
 		_ = reader.Close()
-		return fmt.Errorf("missing descriptor for %s", key)
+		return fmt.Errorf("missing descriptor for %s", joinNamespace(namespace, relKey))
 	}
 	mat, err := crypto.MaterialFromDescriptor(context, descriptor)
 	if err != nil {
@@ -292,30 +305,35 @@ func decryptQueueObject(ctx context.Context, backend storage.Backend, crypto *st
 	mat.Zero()
 	if _, err := io.Copy(io.Discard, reader); err != nil {
 		_ = reader.Close()
-		return fmt.Errorf("consume %s: %w", key, err)
+		return fmt.Errorf("consume %s: %w", joinNamespace(namespace, relKey), err)
 	}
 	return reader.Close()
 }
 
-const diagnosticsCleanupGuard = 30 * time.Second
+const (
+	diagnosticsCleanupGuard = 30 * time.Second
+	diagnosticsNamespace    = namespaces.Default
+	diagnosticsKeyPrefix    = "lockd-diagnostics"
+)
 
 func cleanupSyntheticDiagnostics(ctx context.Context, backend storage.Backend) error {
-	keys, err := backend.ListMetaKeys(ctx)
+	keys, err := backend.ListMetaKeys(ctx, diagnosticsNamespace)
 	if err != nil {
 		return fmt.Errorf("list meta keys: %w", err)
 	}
 	now := time.Now()
 	for _, key := range keys {
-		if !strings.HasPrefix(key, "lockd-diagnostics/") {
+		if !strings.HasPrefix(key, diagnosticsKeyPrefix+"/") {
 			continue
 		}
-		if shouldDeferDiagnosticsCleanup(key, now) {
+		fullKey := joinNamespace(diagnosticsNamespace, key)
+		if shouldDeferDiagnosticsCleanup(fullKey, now) {
 			continue
 		}
-		if err := backend.Remove(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+		if err := backend.Remove(ctx, diagnosticsNamespace, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 			return fmt.Errorf("remove diagnostics state %q: %w", key, err)
 		}
-		if err := backend.DeleteMeta(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+		if err := backend.DeleteMeta(ctx, diagnosticsNamespace, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 			return fmt.Errorf("remove diagnostics meta %q: %w", key, err)
 		}
 	}

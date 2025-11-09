@@ -188,6 +188,7 @@ func syntheticStateRoundTrip(ctx context.Context, backend storage.Backend, crypt
 		Version:       1,
 		UpdatedAtUnix: time.Now().Unix(),
 	}
+	meta.MarkQueryExcluded()
 	etag, err := backend.StoreMeta(ctx, namespace, key, meta, "")
 	if err != nil {
 		return fmt.Errorf("store diagnostics meta %q: %w", key, err)

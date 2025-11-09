@@ -33,18 +33,25 @@ import (
 	"pkt.systems/lockd/internal/lsf"
 	"pkt.systems/lockd/internal/qrf"
 	"pkt.systems/lockd/internal/queue"
+	"pkt.systems/lockd/internal/search"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/uuidv7"
+	"pkt.systems/lockd/lql"
 	"pkt.systems/lockd/namespaces"
 	"pkt.systems/pslog"
 )
 
 const defaultPayloadSpoolMemoryThreshold = 4 << 20 // 4 MiB in-memory, then spill to disk
-const headerFencingToken = "X-Fencing-Token"
+const (
+	headerFencingToken        = "X-Fencing-Token"
+	headerMetadataQueryHidden = "X-Lockd-Meta-Query-Hidden"
+)
 const headerCorrelationID = "X-Correlation-Id"
 const headerShutdownImminent = "Shutdown-Imminent"
 const maxQueueDequeueBatch = 64
 const queueEnsureTimeoutGrace = 2 * time.Second
+const defaultQueryLimit = 100
+const maxQueryLimit = 1000
 
 const (
 	acquireBackoffStart      = 500 * time.Millisecond
@@ -89,6 +96,7 @@ type Handler struct {
 	crypto                *storage.Crypto
 	queueSvc              *queue.Service
 	queueDisp             *queue.Dispatcher
+	searchAdapter         search.Adapter
 	logger                pslog.Logger
 	clock                 clock.Clock
 	lsfObserver           *lsf.Observer
@@ -168,6 +176,70 @@ func logQueueDeliveryInfo(logger pslog.Logger, delivery *queueDelivery) {
 		fields = append(fields, "cursor", delivery.nextCursor)
 	}
 	logger.Info("queue.delivery.sent", fields...)
+}
+
+type metadataMutation struct {
+	QueryHidden *bool `json:"query_hidden,omitempty"`
+}
+
+func (m metadataMutation) empty() bool {
+	return m.QueryHidden == nil
+}
+
+func (m metadataMutation) apply(meta *storage.Meta) {
+	if meta == nil {
+		return
+	}
+	if m.QueryHidden != nil {
+		meta.SetQueryHidden(*m.QueryHidden)
+	}
+}
+
+func (m *metadataMutation) merge(other metadataMutation) {
+	if other.QueryHidden != nil {
+		m.QueryHidden = other.QueryHidden
+	}
+}
+
+func metadataAttributesFromMeta(meta *storage.Meta) api.MetadataAttributes {
+	attr := api.MetadataAttributes{}
+	if meta == nil {
+		return attr
+	}
+	if meta.QueryExcluded() {
+		val := true
+		attr.QueryHidden = &val
+	}
+	return attr
+}
+
+func parseMetadataHeaders(r *http.Request) (metadataMutation, error) {
+	value := strings.TrimSpace(r.Header.Get(headerMetadataQueryHidden))
+	if value == "" {
+		return metadataMutation{}, nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return metadataMutation{}, fmt.Errorf("invalid %s header: %w", headerMetadataQueryHidden, err)
+	}
+	return metadataMutation{QueryHidden: &parsed}, nil
+}
+
+func decodeMetadataMutation(body io.Reader) (metadataMutation, error) {
+	if body == nil {
+		return metadataMutation{}, nil
+	}
+	limited := io.LimitReader(body, 4<<10)
+	dec := json.NewDecoder(limited)
+	dec.DisallowUnknownFields()
+	var mut metadataMutation
+	if err := dec.Decode(&mut); err != nil {
+		if errors.Is(err, io.EOF) {
+			return metadataMutation{}, nil
+		}
+		return metadataMutation{}, err
+	}
+	return mut, nil
 }
 
 func (h *Handler) beginQueueProducer() func() {
@@ -354,6 +426,7 @@ type Config struct {
 	Store                      storage.Backend
 	Crypto                     *storage.Crypto
 	QueueService               *queue.Service
+	SearchAdapter              search.Adapter
 	Logger                     pslog.Logger
 	Clock                      clock.Clock
 	DefaultNamespace           string
@@ -444,8 +517,9 @@ func New(cfg Config) *Handler {
 			opts = append(opts, queue.WithResilientPollInterval(cfg.QueueResilientPollInterval))
 		}
 		watchMode := "polling"
-		watchReason := "backend_missing_change_feed"
+		watchReason := "backend_no_change_feed"
 		if feed, ok := cfg.Store.(storage.QueueChangeFeed); ok {
+			watchReason = "backend_missing_change_feed"
 			if factory := queue.WatchFactoryFromStorage(feed); factory != nil {
 				opts = append(opts, queue.WithWatchFactory(factory))
 				watchMode = "change_feed"
@@ -453,8 +527,6 @@ func New(cfg Config) *Handler {
 			} else {
 				watchReason = "change_feed_factory_unavailable"
 			}
-		} else {
-			watchReason = "backend_no_change_feed"
 		}
 		queueDisp = queue.NewDispatcher(queueSvc, opts...)
 		queueLogger.Info("queue.dispatcher.config",
@@ -493,6 +565,7 @@ func New(cfg Config) *Handler {
 		crypto:                crypto,
 		queueSvc:              queueSvc,
 		queueDisp:             queueDisp,
+		searchAdapter:         cfg.SearchAdapter,
 		logger:                logger,
 		clock:                 clk,
 		lsfObserver:           cfg.LSFObserver,
@@ -523,7 +596,9 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle("/v1/keepalive", h.wrap("keepalive", h.handleKeepAlive))
 	mux.Handle("/v1/release", h.wrap("release", h.handleRelease))
 	mux.Handle("/v1/get", h.wrap("get", h.handleGet))
+	mux.Handle("/v1/query", h.wrap("query", h.handleQuery))
 	mux.Handle("/v1/update", h.wrap("update", h.handleUpdate))
+	mux.Handle("/v1/metadata", h.wrap("update_metadata", h.handleMetadata))
 	mux.Handle("/v1/remove", h.wrap("remove", h.handleRemove))
 	mux.Handle("/v1/describe", h.wrap("describe", h.handleDescribe))
 	mux.Handle("/v1/queue/enqueue", h.wrap("queue.enqueue", h.handleQueueEnqueue))
@@ -1211,14 +1286,15 @@ func (h *Handler) handleRelease(w http.ResponseWriter, r *http.Request) error {
 
 // handleGet godoc
 // @Summary      Read the JSON checkpoint for a key
-// @Description  Streams the currently committed JSON state for the key owned by the caller's lease. Returns 204 when no state is present.
+// @Description  Streams the currently committed JSON state for the key owned by the caller's lease (or, when public=1, the latest published snapshot). Returns 204 when no state is present.
 // @Tags         lease
 // @Accept       json
 // @Produce      json
 // @Param        namespace        query   string  false  "Namespace override (defaults to server setting)"
 // @Param        key              query   string  true   "Lease key"
-// @Param        X-Lease-ID       header  string  true   "Lease identifier"
-// @Param        X-Fencing-Token  header  string  false  "Optional fencing token proof"
+// @Param        public           query   bool    false  "Set to true to read without a lease (served from published data)"
+// @Param        X-Lease-ID       header  string  false  "Lease identifier (required unless public=1)"
+// @Param        X-Fencing-Token  header  string  false  "Optional fencing token proof (lease requests only)"
 // @Success      200              {object}  map[string]interface{}  "Streamed JSON state"
 // @Success      204              {string}  string          "No state stored for this key"
 // @Failure      400              {object}  api.ErrorResponse
@@ -1233,11 +1309,12 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request) error {
 	}
 	finish := h.beginLockOp()
 	defer finish()
-	key := r.URL.Query().Get("key")
-	leaseID := r.Header.Get("X-Lease-ID")
-	if key == "" || leaseID == "" {
-		return httpError{Status: http.StatusBadRequest, Code: "missing_params", Detail: "key query and X-Lease-ID required"}
+	key := strings.TrimSpace(r.URL.Query().Get("key"))
+	if key == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_params", Detail: "key query required"}
 	}
+	leaseID := strings.TrimSpace(r.Header.Get("X-Lease-ID"))
+	publicRequested := parseBoolQuery(r.URL.Query().Get("public"))
 	namespace, err := h.resolveNamespace(r.URL.Query().Get("namespace"))
 	if err != nil {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
@@ -1247,14 +1324,33 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_key", Detail: err.Error()}
 	}
-	key = relativeKey(namespace, storageKey)
-	fencingToken, err := parseFencingToken(r)
-	if err != nil {
-		return err
+	keyComponent := relativeKey(namespace, storageKey)
+	key = keyComponent
+	publicRead := publicRequested && leaseID == ""
+	if !publicRead && leaseID == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_params", Detail: "X-Lease-ID required (omit or use public=1 for read-only access)"}
 	}
 	meta, _, err := h.ensureMeta(ctx, namespace, storageKey)
 	if err != nil {
 		return err
+	}
+	publishedVersion := meta.PublishedVersion
+	if publishedVersion == 0 {
+		publishedVersion = meta.Version
+	}
+	expectState := meta.StateETag != ""
+	if publicRead {
+		if !expectState || publishedVersion == 0 {
+			w.WriteHeader(http.StatusNoContent)
+			return nil
+		}
+		if publishedVersion < meta.Version {
+			return httpError{
+				Status: http.StatusServiceUnavailable,
+				Code:   "state_not_published",
+				Detail: "state update not published yet",
+			}
+		}
 	}
 	logger := pslog.LoggerFromContext(ctx)
 	if logger == nil {
@@ -1262,14 +1358,29 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request) error {
 	}
 	verbose := logger
 	remoteAddr := h.clientKeyFromRequest(r)
-	infoLogger := logger.With("namespace", namespace, "key", key, "lease_id", leaseID, "remote_addr", remoteAddr)
-	infoLogger.Debug("lease.acquire_for_update.load.begin", "fencing_token", fencingToken)
-	verbose.Debug("get.begin", "namespace", namespace, "key", key, "lease_id", leaseID)
-	if err := validateLease(meta, leaseID, fencingToken, h.clock.Now()); err != nil {
-		verbose.Warn("get.validate_failed", "namespace", namespace, "key", key, "lease_id", leaseID, "error", err)
-		return err
+	infoFields := []any{"namespace", namespace, "key", key, "remote_addr", remoteAddr}
+	if leaseID != "" {
+		infoFields = append(infoFields, "lease_id", leaseID)
 	}
-	expectState := meta.StateETag != ""
+	if publicRead {
+		infoFields = append(infoFields, "public", true)
+	}
+	infoLogger := logger.With(infoFields...)
+	fencingToken := int64(0)
+	if publicRead {
+		verbose.Debug("get.begin", "namespace", namespace, "key", key, "public", true)
+	} else {
+		fencingToken, err = parseFencingToken(r)
+		if err != nil {
+			return err
+		}
+		infoLogger.Debug("lease.acquire_for_update.load.begin", "fencing_token", fencingToken)
+		verbose.Debug("get.begin", "namespace", namespace, "key", key, "lease_id", leaseID)
+		if err := validateLease(meta, leaseID, fencingToken, h.clock.Now()); err != nil {
+			verbose.Warn("get.validate_failed", "namespace", namespace, "key", key, "lease_id", leaseID, "error", err)
+			return err
+		}
+	}
 	stateCtx := ctx
 	if len(meta.StateDescriptor) > 0 {
 		stateCtx = storage.ContextWithStateDescriptor(stateCtx, meta.StateDescriptor)
@@ -1280,8 +1391,12 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request) error {
 	reader, info, err := h.readStateWithWarmup(stateCtx, namespace, storageKey, expectState, verbose)
 	if errors.Is(err, storage.ErrNotFound) {
 		w.WriteHeader(http.StatusNoContent)
-		verbose.Debug("get.empty", "namespace", namespace, "key", key, "lease_id", leaseID)
-		infoLogger.Debug("lease.acquire_for_update.load.empty")
+		if publicRead {
+			verbose.Debug("get.empty", "namespace", namespace, "key", key, "public", true)
+		} else {
+			verbose.Debug("get.empty", "namespace", namespace, "key", key, "lease_id", leaseID)
+			infoLogger.Debug("lease.acquire_for_update.load.empty")
+		}
 		return nil
 	}
 	if err != nil {
@@ -1293,23 +1408,28 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request) error {
 		if info.Version > 0 {
 			w.Header().Set("X-Key-Version", strconv.FormatInt(info.Version, 10))
 		} else {
-			w.Header().Set("X-Key-Version", strconv.FormatInt(meta.Version, 10))
+			versionHeader := meta.Version
+			if publicRead {
+				versionHeader = publishedVersion
+			}
+			w.Header().Set("X-Key-Version", strconv.FormatInt(versionHeader, 10))
 		}
 	}
-	w.Header().Set(headerFencingToken, strconv.FormatInt(meta.Lease.FencingToken, 10))
+	if !publicRead && meta.Lease != nil {
+		w.Header().Set(headerFencingToken, strconv.FormatInt(meta.Lease.FencingToken, 10))
+	}
 	w.WriteHeader(http.StatusOK)
 	size := int64(-1)
 	if info != nil {
 		size = info.Size
 	}
 	written, err := io.Copy(w, reader)
-	verbose.Debug("get.success",
-		"namespace", namespace,
-		"key", key,
-		"lease_id", leaseID,
-		"bytes", size,
-	)
-	if err == nil {
+	if publicRead {
+		verbose.Debug("get.success", "namespace", namespace, "key", key, "public", true, "bytes", size)
+	} else {
+		verbose.Debug("get.success", "namespace", namespace, "key", key, "lease_id", leaseID, "bytes", size)
+	}
+	if err == nil && !publicRead {
 		infoLogger.Debug("lease.acquire_for_update.load.success",
 			"bytes", written,
 			"state_etag", func() string {
@@ -1322,6 +1442,134 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request) error {
 		)
 	}
 	return err
+}
+
+// handleQuery godoc
+// @Summary      Query keys within a namespace
+// @Description  Executes a selector-based search within a namespace and returns matching keys plus a cursor for pagination.
+// @Tags         lease
+// @Accept       json
+// @Produce      json
+// @Param        namespace  query    string  false  "Namespace override (defaults to server setting)"
+// @Param        limit      query    integer false  "Maximum number of keys to return (1-1000, defaults to 100)"
+// @Param        cursor     query    string  false  "Opaque pagination cursor"
+// @Param        selector   query    string  false  "Selector JSON (optional when providing a JSON body)"
+// @Param        request    body     api.QueryRequest  false  "Query request (selector, limit, cursor)"
+// @Success      200        {object} api.QueryResponse
+// @Failure      400        {object} api.ErrorResponse
+// @Failure      404        {object} api.ErrorResponse
+// @Failure      409        {object} api.ErrorResponse
+// @Failure      503        {object} api.ErrorResponse
+// @Router       /v1/query [post]
+func (h *Handler) handleQuery(w http.ResponseWriter, r *http.Request) error {
+	if err := h.maybeThrottleLock(); err != nil {
+		return err
+	}
+	if h.searchAdapter == nil {
+		return httpError{
+			Status: http.StatusNotImplemented,
+			Code:   "query_disabled",
+			Detail: "query service not configured",
+		}
+	}
+	var req api.QueryRequest
+	if r.Body != nil && r.Body != http.NoBody {
+		reader := http.MaxBytesReader(w, r.Body, h.jsonMaxBytes)
+		defer reader.Close()
+		if err := json.NewDecoder(reader).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			return httpError{
+				Status: http.StatusBadRequest,
+				Code:   "invalid_body",
+				Detail: fmt.Sprintf("failed to parse request: %v", err),
+			}
+		}
+	} else if r.Body != nil {
+		_ = r.Body.Close()
+	}
+	query := r.URL.Query()
+	if ns := strings.TrimSpace(query.Get("namespace")); ns != "" {
+		req.Namespace = ns
+	}
+	if cursor := strings.TrimSpace(query.Get("cursor")); cursor != "" {
+		req.Cursor = cursor
+	}
+	if limitStr := strings.TrimSpace(query.Get("limit")); limitStr != "" {
+		if parsed, err := strconv.Atoi(limitStr); err == nil {
+			req.Limit = parsed
+		}
+	}
+	if selectorParam := strings.TrimSpace(query.Get("selector")); selectorParam != "" {
+		var selector api.Selector
+		if err := json.Unmarshal([]byte(selectorParam), &selector); err != nil {
+			return httpError{
+				Status: http.StatusBadRequest,
+				Code:   "invalid_selector",
+				Detail: fmt.Sprintf("failed to parse selector: %v", err),
+			}
+		}
+		req.Selector = selector
+	} else if zeroSelector(req.Selector) {
+		if selector, found, err := lql.ParseSelectorValues(query); err != nil {
+			return httpError{
+				Status: http.StatusBadRequest,
+				Code:   "invalid_selector",
+				Detail: err.Error(),
+			}
+		} else if found {
+			req.Selector = selector
+		}
+	}
+	namespace, err := h.resolveNamespace(req.Namespace)
+	if err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
+	}
+	h.observeNamespace(namespace)
+	limit := req.Limit
+	if limit <= 0 {
+		limit = defaultQueryLimit
+	}
+	if limit > maxQueryLimit {
+		limit = maxQueryLimit
+	}
+	fields := req.Fields
+	if rawFields := strings.TrimSpace(query.Get("fields")); rawFields != "" {
+		var parsed map[string]any
+		if err := json.Unmarshal([]byte(rawFields), &parsed); err != nil {
+			return httpError{
+				Status: http.StatusBadRequest,
+				Code:   "invalid_fields",
+				Detail: fmt.Sprintf("failed to parse fields: %v", err),
+			}
+		}
+		fields = parsed
+	}
+	internalReq := search.Request{
+		Namespace: namespace,
+		Selector:  req.Selector,
+		Limit:     limit,
+		Cursor:    req.Cursor,
+		Fields:    fields,
+	}
+	result, err := h.searchAdapter.Query(r.Context(), internalReq)
+	if err != nil {
+		if errors.Is(err, search.ErrInvalidCursor) {
+			return httpError{
+				Status: http.StatusBadRequest,
+				Code:   "invalid_cursor",
+				Detail: err.Error(),
+			}
+		}
+		return fmt.Errorf("query: %w", err)
+	}
+	resp := api.QueryResponse{
+		Namespace: namespace,
+		Keys:      result.Keys,
+		Cursor:    result.Cursor,
+		IndexSeq:  result.IndexSeq,
+		Metadata:  result.Metadata,
+	}
+	h.writeJSON(w, http.StatusOK, resp, nil)
+	return nil
 }
 
 // handleUpdate godoc
@@ -1395,6 +1643,11 @@ func (h *Handler) handleUpdate(w http.ResponseWriter, r *http.Request) error {
 		"if_version", ifVersion,
 	)
 
+	metadataPatch, err := parseMetadataHeaders(r)
+	if err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_metadata", Detail: err.Error()}
+	}
+
 	body := http.MaxBytesReader(w, r.Body, h.jsonMaxBytes)
 	defer body.Close()
 
@@ -1416,6 +1669,9 @@ func (h *Handler) handleUpdate(w http.ResponseWriter, r *http.Request) error {
 	if err := validateLease(&meta, leaseID, fencingToken, now); err != nil {
 		verbose.Warn("update.validate_failed", "namespace", namespace, "key", key, "lease_id", leaseID, "error", err)
 		return err
+	}
+	if !metadataPatch.empty() {
+		metadataPatch.apply(&meta)
 	}
 	if ifVersion != "" {
 		want, parseErr := strconv.ParseInt(ifVersion, 10, 64)
@@ -1481,6 +1737,7 @@ func (h *Handler) handleUpdate(w http.ResponseWriter, r *http.Request) error {
 	meta.Version++
 	meta.StateETag = putRes.NewETag
 	meta.UpdatedAtUnix = h.clock.Now().Unix()
+	meta.PublishedVersion = meta.Version
 	newMetaETag, err := h.store.StoreMeta(ctx, namespace, keyComponent, &meta, metaETag)
 	if err != nil {
 		if errors.Is(err, storage.ErrCASMismatch) {
@@ -1512,11 +1769,138 @@ func (h *Handler) handleUpdate(w http.ResponseWriter, r *http.Request) error {
 		NewVersion:   meta.Version,
 		NewStateETag: meta.StateETag,
 		Bytes:        putRes.BytesWritten,
+		Metadata:     metadataAttributesFromMeta(&meta),
 	}
 	headers := map[string]string{
 		"X-Key-Version":    strconv.FormatInt(meta.Version, 10),
 		"ETag":             meta.StateETag,
 		headerFencingToken: strconv.FormatInt(meta.Lease.FencingToken, 10),
+	}
+	h.writeJSON(w, http.StatusOK, resp, headers)
+	return nil
+}
+
+// handleMetadata godoc
+// @Summary      Update lock metadata
+// @Description  Mutates lock metadata (e.g. query visibility) while holding the lease. Optional CAS headers guard against concurrent updates.
+// @Tags         lease
+// @Accept       json
+// @Produce      json
+// @Param        namespace          query   string  false  "Namespace override (defaults to server setting)"
+// @Param        key                query   string  true   "Lease key"
+// @Param        X-Lease-ID         header  string  true   "Lease identifier"
+// @Param        X-Fencing-Token    header  string  false  "Optional fencing token proof"
+// @Param        X-If-Version       header  string  false  "Conditionally update when the current version matches"
+// @Param        metadata           body    metadataMutation  true  "Metadata payload"
+// @Success      200                {object}  api.MetadataUpdateResponse
+// @Failure      400                {object}  api.ErrorResponse
+// @Failure      404                {object}  api.ErrorResponse
+// @Failure      409                {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/metadata [post]
+func (h *Handler) handleMetadata(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
+	if err := h.maybeThrottleLock(); err != nil {
+		return err
+	}
+	finish := h.beginLockOp()
+	defer finish()
+	defer r.Body.Close()
+	key := r.URL.Query().Get("key")
+	if key == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_key", Detail: "key query required"}
+	}
+	namespace, err := h.resolveNamespace(r.URL.Query().Get("namespace"))
+	if err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
+	}
+	h.observeNamespace(namespace)
+	storageKey, err := h.namespacedKey(namespace, key)
+	if err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_key", Detail: err.Error()}
+	}
+	leaseID := r.Header.Get("X-Lease-ID")
+	if leaseID == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_lease", Detail: "X-Lease-ID required"}
+	}
+	fencingToken, err := parseFencingToken(r)
+	if err != nil {
+		return err
+	}
+	ifVersion := strings.TrimSpace(r.Header.Get("X-If-Version"))
+	headerPatch, err := parseMetadataHeaders(r)
+	if err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_metadata", Detail: err.Error()}
+	}
+	bodyPatch, err := decodeMetadataMutation(r.Body)
+	if err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_metadata", Detail: err.Error()}
+	}
+	patch := metadataMutation{}
+	patch.merge(bodyPatch)
+	patch.merge(headerPatch)
+	if patch.empty() {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_metadata", Detail: "no metadata fields provided"}
+	}
+
+	logger := pslog.LoggerFromContext(ctx)
+	if logger == nil {
+		logger = h.logger
+	}
+	verbose := logger
+	verbose.Debug("metadata.begin", "namespace", namespace, "key", key, "lease_id", leaseID)
+
+	now := h.clock.Now()
+	meta, metaETag, err := h.ensureMeta(ctx, namespace, storageKey)
+	if err != nil {
+		return err
+	}
+	if err := validateLease(meta, leaseID, fencingToken, now); err != nil {
+		return err
+	}
+	if ifVersion != "" {
+		want, parseErr := strconv.ParseInt(ifVersion, 10, 64)
+		if parseErr != nil {
+			return httpError{Status: http.StatusBadRequest, Code: "invalid_version", Detail: parseErr.Error()}
+		}
+		if meta.Version != want {
+			return httpError{
+				Status:  http.StatusConflict,
+				Code:    "version_conflict",
+				Detail:  "state version mismatch",
+				Version: meta.Version,
+				ETag:    meta.StateETag,
+			}
+		}
+	}
+
+	patch.apply(meta)
+	meta.UpdatedAtUnix = h.clock.Now().Unix()
+
+	keyComponent := relativeKey(namespace, storageKey)
+	newMetaETag, err := h.store.StoreMeta(ctx, namespace, keyComponent, meta, metaETag)
+	if err != nil {
+		if errors.Is(err, storage.ErrCASMismatch) {
+			return httpError{
+				Status:  http.StatusConflict,
+				Code:    "meta_conflict",
+				Detail:  "state metadata changed concurrently",
+				Version: meta.Version,
+				ETag:    meta.StateETag,
+			}
+		}
+		return fmt.Errorf("store meta: %w", err)
+	}
+	h.cacheLease(leaseID, storageKey, *meta, newMetaETag)
+
+	resp := api.MetadataUpdateResponse{
+		Namespace: namespace,
+		Key:       key,
+		Version:   meta.Version,
+		Metadata:  metadataAttributesFromMeta(meta),
+	}
+	headers := map[string]string{
+		"X-Key-Version": strconv.FormatInt(meta.Version, 10),
 	}
 	h.writeJSON(w, http.StatusOK, resp, headers)
 	return nil
@@ -1642,18 +2026,16 @@ func (h *Handler) handleRemove(w http.ResponseWriter, r *http.Request) error {
 
 	changed := false
 	if removed || hadMetaState {
-		if meta.StateETag != "" {
-			changed = true
-		}
 		meta.StateETag = ""
 		meta.Version++
-		changed = true
 		meta.UpdatedAtUnix = now.Unix()
+		changed = true
 	}
 
 	if changed {
 		meta.StateDescriptor = nil
 		meta.StatePlaintextBytes = 0
+		meta.PublishedVersion = meta.Version
 		newMetaETag, err := h.store.StoreMeta(ctx, namespace, keyComponent, &meta, metaETag)
 		if err != nil {
 			if errors.Is(err, storage.ErrCASMismatch) {
@@ -1732,6 +2114,7 @@ func (h *Handler) handleDescribe(w http.ResponseWriter, r *http.Request) error {
 		Version:   meta.Version,
 		StateETag: meta.StateETag,
 		UpdatedAt: meta.UpdatedAtUnix,
+		Metadata:  metadataAttributesFromMeta(meta),
 	}
 	if meta.Lease != nil {
 		resp.LeaseID = meta.Lease.ID
@@ -2498,7 +2881,6 @@ func (h *Handler) handleQueueSubscribeInternal(w http.ResponseWriter, r *http.Re
 	const subscribeHotWindow = 2 * time.Second
 	var hotUntil time.Time
 
-	now := time.Now()
 	for {
 		if err := ctx.Err(); err != nil {
 			disconnectStatus = "context"
@@ -2511,7 +2893,7 @@ func (h *Handler) handleQueueSubscribeInternal(w http.ResponseWriter, r *http.Re
 
 		loopBlock := blockSeconds
 		if deliveredCount > 0 {
-			now = time.Now()
+			now := time.Now()
 			if hotUntil.After(now) {
 				loopBlock = api.BlockNoWait
 			} else if blockSeconds > 1 {
@@ -2527,12 +2909,16 @@ func (h *Handler) handleQueueSubscribeInternal(w http.ResponseWriter, r *http.Re
 			waitDuration := time.Duration(loopBlock) * time.Second
 			iterCtx, cancel = context.WithTimeout(ctx, waitDuration)
 		}
+		cleanup := func() {
+			if cancel != nil {
+				cancel()
+				cancel = nil
+			}
+		}
 
 		deliveries, nextCursor, err := h.consumeQueueBatch(iterCtx, queueLogger, qsvc, resolvedNamespace, queueName, owner, visibility, stateful, loopBlock, pageSize)
 		if err != nil {
-			if cancel != nil {
-				cancel()
-			}
+			cleanup()
 			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, errQueueEmpty) {
 				hotUntil = time.Time{}
 				if deliveredCount == 0 && !headersWritten {
@@ -2568,6 +2954,7 @@ func (h *Handler) handleQueueSubscribeInternal(w http.ResponseWriter, r *http.Re
 					delivery.abort()
 				}
 			}
+			cleanup()
 			return err
 		}
 
@@ -2583,6 +2970,7 @@ func (h *Handler) handleQueueSubscribeInternal(w http.ResponseWriter, r *http.Re
 					if ctxErr := ctx.Err(); ctxErr != nil {
 						return ctxErr
 					}
+					cleanup()
 					return err
 				}
 				if queueLogger != nil {
@@ -2647,6 +3035,7 @@ func (h *Handler) handleQueueSubscribeInternal(w http.ResponseWriter, r *http.Re
 				}
 				delivery.abort()
 				disconnectStatus = "error"
+				cleanup()
 				return writeErr
 			}
 			if debugQueueTiming {
@@ -2658,9 +3047,7 @@ func (h *Handler) handleQueueSubscribeInternal(w http.ResponseWriter, r *http.Re
 			deliveredCount++
 			queueLogger.Trace("queue.subscribe.delivered", "mid", delivery.message.MessageID, "cursor", delivery.nextCursor, "delivered", deliveredCount)
 		}
-		if cancel != nil {
-			cancel()
-		}
+		cleanup()
 	}
 
 	if disconnectStatus == "unknown" {
@@ -4343,19 +4730,6 @@ func writeQueueDeliveriesToWriter(mw *multipart.Writer, deliveries []*queueDeliv
 	return firstCID, nil
 }
 
-func writeQueueDeliveryResponse(w http.ResponseWriter, delivery *queueDelivery, nextCursor string) error {
-	if delivery == nil {
-		return writeQueueDeliveryBatch(w, nil, nextCursor)
-	}
-	if err := delivery.ensure(context.Background()); err != nil {
-		return err
-	}
-	if delivery.nextCursor == "" {
-		delivery.nextCursor = nextCursor
-	}
-	return writeQueueDeliveryBatch(w, []*queueDelivery{delivery}, nextCursor)
-}
-
 type acquireBackoff struct {
 	next time.Duration
 	rand func(int64) int64
@@ -4508,6 +4882,26 @@ func parseFencingToken(r *http.Request) (int64, error) {
 		return 0, httpError{Status: http.StatusBadRequest, Code: "invalid_fencing_token", Detail: "invalid fencing token"}
 	}
 	return token, nil
+}
+
+func parseBoolQuery(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "on", "yes":
+		return true
+	default:
+		return false
+	}
+}
+
+func zeroSelector(sel api.Selector) bool {
+	return len(sel.And) == 0 &&
+		len(sel.Or) == 0 &&
+		sel.Not == nil &&
+		sel.Eq == nil &&
+		sel.Prefix == nil &&
+		sel.Range == nil &&
+		sel.In == nil &&
+		sel.Exists == ""
 }
 
 type payloadSpool struct {
@@ -4675,6 +5069,7 @@ func (h *Handler) observeNamespace(ns string) {
 	}
 }
 
+// ObservedNamespaces returns the namespaces seen by this handler since startup.
 func (h *Handler) ObservedNamespaces() []string {
 	if h == nil || h.namespaceTracker == nil {
 		return nil
@@ -4772,13 +5167,6 @@ func (h httpError) Error() string {
 		return fmt.Sprintf("%s: %s", h.Code, h.Detail)
 	}
 	return h.Code
-}
-
-func minDuration(a, b time.Duration) time.Duration {
-	if a <= b {
-		return a
-	}
-	return b
 }
 
 func minInt(a, b int) int {

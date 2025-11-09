@@ -254,7 +254,6 @@ func (s *Store) metaContentType() string {
 }
 
 // LoadMeta fetches the protobuf metadata document for key and returns its ETag.
-
 func (s *Store) LoadMeta(ctx context.Context, namespace, key string) (*storage.Meta, string, error) {
 	blobName, err := s.metaBlob(namespace, key)
 	if err != nil {
@@ -486,7 +485,7 @@ func (s *Store) WriteState(ctx context.Context, namespace, key string, body io.R
 	encrypted := s.crypto != nil && s.crypto.Enabled()
 	var descriptor []byte
 	var plainBytes atomic.Int64
-	reader := body
+	var reader io.Reader
 	objectCtx := storage.StateObjectContext(path.Join(namespace, key))
 	if encrypted {
 		uploadOpts.HTTPHeaders.BlobContentType = to.Ptr(storage.ContentTypeJSONEncrypted)

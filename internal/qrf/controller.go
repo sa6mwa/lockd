@@ -210,10 +210,8 @@ func (c *Controller) Observe(snapshot Snapshot) {
 				c.consecutiveHealthy = 0
 				c.lastReason = "metrics stabilised"
 			}
-		default: // Disengaged
-			if healthy {
-				// nothing to do
-			}
+		default:
+			// Disengaged stays idle until soft/hard trigger arrives.
 		}
 	}
 
@@ -262,11 +260,9 @@ func (c *Controller) Decide(kind Kind) Decision {
 			}
 		case KindQueueConsumer, KindQueueAck:
 			if consumerHardExceeded || (consumerLimitExceeded && !needsMoreConsumers) {
-				limitReason := reason
+				limitReason := "queue_consumer_soft"
 				if consumerHardExceeded {
 					limitReason = "queue_consumer_hard"
-				} else {
-					limitReason = "queue_consumer_soft"
 				}
 				return Decision{
 					Throttle:   true,
@@ -295,11 +291,9 @@ func (c *Controller) Decide(kind Kind) Decision {
 			}
 		case KindQueueConsumer, KindQueueAck:
 			if consumerHardExceeded || (consumerLimitExceeded && !needsMoreConsumers) {
-				limitReason := reason
+				limitReason := "queue_consumer_soft"
 				if consumerHardExceeded {
 					limitReason = "queue_consumer_hard"
-				} else {
-					limitReason = "queue_consumer_soft"
 				}
 				return Decision{
 					Throttle:   true,

@@ -283,9 +283,7 @@ func (s *Service) Enqueue(ctx context.Context, namespace, queue string, payload 
 	}
 	metaInfo, err := s.store.PutObject(ctx, ns, metaKey, bytes.NewReader(metaPayload), metaOpts)
 	if err != nil {
-		if rmErr := s.store.DeleteObject(ctx, ns, payloadKey, storage.DeleteObjectOptions{}); rmErr != nil {
-			// best-effort clean-up, log via wrapped backend if available
-		}
+		_ = s.store.DeleteObject(ctx, ns, payloadKey, storage.DeleteObjectOptions{})
 		return nil, err
 	}
 	if metaInfo != nil && metaInfo.ETag != "" {
@@ -838,6 +836,9 @@ func (s *Service) deleteMessageInternal(ctx context.Context, namespace, queue, i
 
 // IncrementAttempts updates attempts and visibility after a successful lease acquire.
 func (s *Service) IncrementAttempts(ctx context.Context, namespace, queue string, doc *messageDocument, expectedETag string, visibility time.Duration) (string, error) {
+	if doc == nil {
+		return "", fmt.Errorf("queue: nil message document")
+	}
 	if visibility <= 0 {
 		visibility = time.Duration(doc.VisibilityTimeout) * time.Second
 		if visibility <= 0 {
@@ -858,6 +859,9 @@ func (s *Service) IncrementAttempts(ctx context.Context, namespace, queue string
 
 // Reschedule moves message visibility forward without incrementing attempts (used for nack).
 func (s *Service) Reschedule(ctx context.Context, namespace, queue string, doc *messageDocument, expectedETag string, delay time.Duration) (string, error) {
+	if doc == nil {
+		return "", fmt.Errorf("queue: nil message document")
+	}
 	if delay < 0 {
 		delay = 0
 	}
@@ -872,6 +876,9 @@ func (s *Service) Reschedule(ctx context.Context, namespace, queue string, doc *
 
 // ExtendVisibility pushes not_visible_until forward relative to now.
 func (s *Service) ExtendVisibility(ctx context.Context, namespace, queue string, doc *messageDocument, expectedETag string, extension time.Duration) (string, error) {
+	if doc == nil {
+		return "", fmt.Errorf("queue: nil message document")
+	}
 	if extension <= 0 {
 		extension = time.Duration(doc.VisibilityTimeout) * time.Second
 		if extension <= 0 {

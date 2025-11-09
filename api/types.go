@@ -34,6 +34,7 @@ type UpdateResponse struct {
 	NewVersion   int64  `json:"new_version"`
 	NewStateETag string `json:"new_state_etag"`
 	Bytes        int64  `json:"bytes"`
+	Metadata     MetadataAttributes `json:"metadata,omitempty"`
 }
 
 // KeepAliveRequest represents POST /v1/keepalive.
@@ -77,6 +78,7 @@ type DescribeResponse struct {
 	Version   int64  `json:"version"`
 	StateETag string `json:"state_etag,omitempty"`
 	UpdatedAt int64  `json:"updated_at_unix,omitempty"`
+	Metadata  MetadataAttributes `json:"metadata,omitempty"`
 }
 
 // ErrorResponse is the canonical error envelope for API errors.
@@ -86,6 +88,19 @@ type ErrorResponse struct {
 	CurrentVersion    int64  `json:"current_version,omitempty"`
 	CurrentETag       string `json:"current_etag,omitempty"`
 	RetryAfterSeconds int64  `json:"retry_after_seconds,omitempty"`
+}
+
+// MetadataAttributes captures lock metadata exposed to clients.
+type MetadataAttributes struct {
+	QueryHidden *bool `json:"query_hidden,omitempty"`
+}
+
+// MetadataUpdateResponse acknowledges metadata mutations.
+type MetadataUpdateResponse struct {
+	Namespace string              `json:"namespace,omitempty"`
+	Key       string              `json:"key,omitempty"`
+	Version   int64               `json:"version"`
+	Metadata  MetadataAttributes  `json:"metadata,omitempty"`
 }
 
 // EnqueueRequest represents POST /v1/queue/enqueue.

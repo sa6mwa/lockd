@@ -1045,13 +1045,13 @@ func releaseLease(t *testing.T, ctx context.Context, cli *lockdclient.Client, ke
 	return resp.Released
 }
 
-func loadAzureConfig(t *testing.T) lockd.Config {
+func loadAzureConfig(tb testing.TB) lockd.Config {
 	store := strings.TrimSpace(os.Getenv("LOCKD_STORE"))
 	if store == "" {
-		t.Skip("LOCKD_STORE must reference an azure:// URI for Azure integration tests")
+		tb.Skip("LOCKD_STORE must reference an azure:// URI for Azure integration tests")
 	}
 	if !strings.HasPrefix(store, "azure://") {
-		t.Fatalf("LOCKD_STORE must reference an azure:// URI, got %q", store)
+		tb.Fatalf("LOCKD_STORE must reference an azure:// URI, got %q", store)
 	}
 	cfg := lockd.Config{
 		Store:         store,
@@ -1059,12 +1059,12 @@ func loadAzureConfig(t *testing.T) lockd.Config {
 		AzureSASToken: os.Getenv("LOCKD_AZURE_SAS_TOKEN"),
 	}
 	cfg.AzureAccountKey = os.Getenv("LOCKD_AZURE_ACCOUNT_KEY")
-	cryptotest.MaybeEnableStorageEncryption(t, &cfg)
+	cryptotest.MaybeEnableStorageEncryption(tb, &cfg)
 	return cfg
 }
 
-func ensureAzureStoreReady(t *testing.T, ctx context.Context, cfg lockd.Config) {
-	azuretest.ResetContainerForCrypto(t, cfg)
+func ensureAzureStoreReady(tb testing.TB, ctx context.Context, cfg lockd.Config) {
+	azuretest.ResetContainerForCrypto(tb, cfg)
 	azureStoreVerifyOnce.Do(func() {
 		res, err := storagecheck.VerifyStore(ctx, cfg)
 		if err != nil {
@@ -1076,7 +1076,7 @@ func ensureAzureStoreReady(t *testing.T, ctx context.Context, cfg lockd.Config) 
 		}
 	})
 	if azureStoreVerifyErr != nil {
-		t.Fatalf("store verification failed: %v", azureStoreVerifyErr)
+		tb.Fatalf("store verification failed: %v", azureStoreVerifyErr)
 	}
 }
 

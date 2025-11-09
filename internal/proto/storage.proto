@@ -21,6 +21,8 @@ message LockMeta {
   int64 fencing_token = 5;
   bytes state_descriptor = 6;
   int64 state_plaintext_bytes = 7;
+  int64 published_version = 8;
+  google.protobuf.Struct attributes = 9;
 }
 
 message MetaRecord {

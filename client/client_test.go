@@ -21,6 +21,7 @@ import (
 	"pkt.systems/lockd"
 	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/client"
+	"pkt.systems/pslog"
 )
 
 func TestUnixSocketClientLifecycle(t *testing.T) {
@@ -513,6 +514,46 @@ func TestAcquireForUpdateImmediateUpdate(t *testing.T) {
 	}
 	if string(data) != `{"value":2}` {
 		t.Fatalf("unexpected state: %s", data)
+	}
+}
+
+func TestClientLoadPublic(t *testing.T) {
+	ts := lockd.StartTestServer(t, lockd.WithTestLoggerFromTB(t, pslog.TraceLevel))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cli := ts.Client
+	if cli == nil {
+		var err error
+		cli, err = ts.NewClient()
+		if err != nil {
+			t.Fatalf("new client: %v", err)
+		}
+	}
+
+	key := "public-load"
+	lease, err := cli.Acquire(ctx, api.AcquireRequest{
+		Key:        key,
+		Owner:      "writer",
+		TTLSeconds: 10,
+		BlockSecs:  client.BlockWaitForever,
+	})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if _, err := lease.UpdateBytes(ctx, []byte(`{"value":42}`)); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+	if err := lease.Release(ctx); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	var snapshot map[string]int
+	if err := cli.LoadPublic(ctx, key, &snapshot); err != nil {
+		t.Fatalf("load public: %v", err)
+	}
+	if snapshot["value"] != 42 {
+		t.Fatalf("unexpected snapshot %+v", snapshot)
 	}
 }
 
@@ -1118,6 +1159,152 @@ func TestClientDequeueHandlesLifecycle(t *testing.T) {
 	}
 	if err := msg.Ack(context.Background()); err == nil {
 		t.Fatalf("expected double ack error")
+	}
+}
+
+func TestClientUpdateWithMetadataHeader(t *testing.T) {
+	t.Parallel()
+
+	var (
+		capturedHeader string
+		capturedLease  string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/update" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		capturedHeader = r.Header.Get("X-Lockd-Meta-Query-Hidden")
+		capturedLease = r.Header.Get("X-Lease-ID")
+		hidden := true
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(api.UpdateResponse{
+			NewVersion:   2,
+			NewStateETag: "etag-2",
+			Metadata:     api.MetadataAttributes{QueryHidden: &hidden},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	cli, err := client.New(srv.URL,
+		client.WithDisableMTLS(true),
+		client.WithEndpointShuffle(false),
+		client.WithHTTPClient(srv.Client()),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	opts := client.UpdateOptions{
+		FencingToken: "token-9",
+		Metadata:     client.MetadataOptions{QueryHidden: client.Bool(true)},
+	}
+	res, err := cli.Update(context.Background(), "orders", "lease-1", bytes.NewReader([]byte(`{"status":"open"}`)), opts)
+	if err != nil {
+		t.Fatalf("update call: %v", err)
+	}
+	if capturedHeader != "true" {
+		t.Fatalf("expected metadata header true, got %q", capturedHeader)
+	}
+	if capturedLease != "lease-1" {
+		t.Fatalf("expected lease header, got %q", capturedLease)
+	}
+	if res.Metadata.QueryHidden == nil || !*res.Metadata.QueryHidden {
+		t.Fatalf("expected metadata in response, got %+v", res.Metadata)
+	}
+}
+
+func TestClientUpdateMetadataSendsJSONPayload(t *testing.T) {
+	t.Parallel()
+
+	var (
+		capturedBody      []byte
+		capturedIfVersion string
+		capturedToken     string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/metadata" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		var err error
+		capturedBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		capturedIfVersion = r.Header.Get("X-If-Version")
+		capturedToken = r.Header.Get("X-Fencing-Token")
+		hidden := true
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(api.MetadataUpdateResponse{
+			Namespace: "default",
+			Key:       "orders",
+			Version:   3,
+			Metadata:  api.MetadataAttributes{QueryHidden: &hidden},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	cli, err := client.New(srv.URL,
+		client.WithDisableMTLS(true),
+		client.WithEndpointShuffle(false),
+		client.WithHTTPClient(srv.Client()),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	opts := client.UpdateOptions{
+		FencingToken: "tok-1",
+		IfVersion:    "3",
+		Metadata:     client.MetadataOptions{QueryHidden: client.Bool(true)},
+	}
+	res, err := cli.UpdateMetadata(context.Background(), "orders", "lease-7", opts)
+	if err != nil {
+		t.Fatalf("update metadata: %v", err)
+	}
+	if capturedIfVersion != "3" {
+		t.Fatalf("expected X-If-Version header, got %q", capturedIfVersion)
+	}
+	if capturedToken != "tok-1" {
+		t.Fatalf("expected fencing token header, got %q", capturedToken)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(capturedBody, &payload); err != nil {
+		t.Fatalf("decode metadata payload: %v", err)
+	}
+	val, ok := payload["query_hidden"].(bool)
+	if !ok || !val {
+		t.Fatalf("expected query_hidden=true payload, got %+v", payload)
+	}
+	if res.Metadata.QueryHidden == nil || !*res.Metadata.QueryHidden {
+		t.Fatalf("expected metadata in response, got %+v", res.Metadata)
+	}
+}
+
+func TestClientUpdateMetadataRequiresFields(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	cli, err := client.New(srv.URL,
+		client.WithDisableMTLS(true),
+		client.WithEndpointShuffle(false),
+		client.WithHTTPClient(srv.Client()),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	_, err = cli.UpdateMetadata(context.Background(), "orders", "lease-9", client.UpdateOptions{})
+	if err == nil {
+		t.Fatal("expected error for empty metadata options")
+	}
+	if called {
+		t.Fatal("server should not have been called when metadata options missing")
 	}
 }
 

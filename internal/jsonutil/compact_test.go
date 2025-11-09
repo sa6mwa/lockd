@@ -4,10 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
-	"math/rand"
 	"strings"
 	"testing"
-	"time"
 )
 
 func compactReference(input string) (string, error) {
@@ -100,7 +98,6 @@ func FuzzCompactWriter(f *testing.F) {
 	for _, seed := range corpus {
 		f.Add(seed)
 	}
-	rand.Seed(time.Now().UnixNano())
 	f.Fuzz(func(t *testing.T, input string) {
 		var out bytes.Buffer
 		err := CompactWriter(&out, strings.NewReader(input), 0)

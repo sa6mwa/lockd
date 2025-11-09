@@ -858,7 +858,10 @@ func (s *QueueStateHandle) CorrelationID() string {
 
 const headerFencingToken = "X-Fencing-Token"
 const headerShutdownImminent = "Shutdown-Imminent"
-const headerCorrelationID = "X-Correlation-Id"
+const (
+	headerCorrelationID       = "X-Correlation-Id"
+	headerMetadataQueryHidden = "X-Lockd-Meta-Query-Hidden"
+)
 
 // ErrMissingFencingToken is returned when an operation needs a fencing token but none was found.
 var ErrMissingFencingToken = errors.New("lockd: fencing token required")
@@ -1026,23 +1029,15 @@ func (c *Client) logErrorCtx(ctx context.Context, msg string, keyvals ...any) {
 }
 
 func (c *Client) logTrace(msg string, keyvals ...any) {
-	c.logTraceCtx(nil, msg, keyvals...)
+	c.logTraceCtx(context.Background(), msg, keyvals...)
 }
 
 func (c *Client) logDebug(msg string, keyvals ...any) {
-	c.logDebugCtx(nil, msg, keyvals...)
+	c.logDebugCtx(context.Background(), msg, keyvals...)
 }
 
 func (c *Client) logInfo(msg string, keyvals ...any) {
-	c.logInfoCtx(nil, msg, keyvals...)
-}
-
-func (c *Client) logWarn(msg string, keyvals ...any) {
-	c.logWarnCtx(nil, msg, keyvals...)
-}
-
-func (c *Client) logError(msg string, keyvals ...any) {
-	c.logErrorCtx(nil, msg, keyvals...)
+	c.logInfoCtx(context.Background(), msg, keyvals...)
 }
 func prepareHTTPResources(endpoints []string) (*http.Client, []string, error) {
 	if len(endpoints) == 0 {
@@ -1181,7 +1176,6 @@ type LeaseSession struct {
 	lastSnapshot   *StateSnapshot
 	correlationID  string
 	endpoint       string
-	drainOnce      sync.Once
 	drainTriggered atomic.Bool
 }
 
@@ -1204,21 +1198,21 @@ func (a *AcquireForUpdateContext) session() (*LeaseSession, error) {
 }
 
 // Update streams a new JSON document via Update, preserving the lease.
-func (a *AcquireForUpdateContext) Update(ctx context.Context, body io.Reader) (*UpdateResult, error) {
+func (a *AcquireForUpdateContext) Update(ctx context.Context, body io.Reader, opts ...UpdateOption) (*UpdateResult, error) {
 	sess, err := a.session()
 	if err != nil {
 		return nil, err
 	}
-	return sess.Update(ctx, body)
+	return sess.Update(ctx, body, opts...)
 }
 
 // UpdateBytes is a convenience wrapper over Update that accepts a byte slice.
-func (a *AcquireForUpdateContext) UpdateBytes(ctx context.Context, body []byte) (*UpdateResult, error) {
+func (a *AcquireForUpdateContext) UpdateBytes(ctx context.Context, body []byte, opts ...UpdateOption) (*UpdateResult, error) {
 	sess, err := a.session()
 	if err != nil {
 		return nil, err
 	}
-	return sess.UpdateBytes(ctx, body)
+	return sess.UpdateBytes(ctx, body, opts...)
 }
 
 // UpdateWithOptions allows callers to override conditional headers for the update.
@@ -1249,12 +1243,21 @@ func (a *AcquireForUpdateContext) Load(ctx context.Context, v any) error {
 }
 
 // Save marshals and updates the state with the supplied value.
-func (a *AcquireForUpdateContext) Save(ctx context.Context, v any) error {
+func (a *AcquireForUpdateContext) Save(ctx context.Context, v any, opts ...UpdateOption) error {
 	sess, err := a.session()
 	if err != nil {
 		return err
 	}
-	return sess.Save(ctx, v)
+	return sess.Save(ctx, v, opts...)
+}
+
+// UpdateMetadata mutates metadata for the active key.
+func (a *AcquireForUpdateContext) UpdateMetadata(ctx context.Context, meta MetadataOptions) (*MetadataResult, error) {
+	sess, err := a.session()
+	if err != nil {
+		return nil, err
+	}
+	return sess.UpdateMetadata(ctx, meta)
 }
 
 // Remove deletes the current state while the handler holds the lease.
@@ -1332,15 +1335,6 @@ func (s *LeaseSession) fencing() string {
 	return ""
 }
 
-func (s *LeaseSession) setFencing(token string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.fencingToken = token
-	if v, err := strconv.ParseInt(token, 10, 64); err == nil {
-		s.FencingToken = v
-	}
-}
-
 func (s *LeaseSession) correlation() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1385,7 +1379,7 @@ func (s *LeaseSession) FencingTokenString() string {
 }
 
 // Update streams new JSON state for the session's key while preserving the lease.
-func (s *LeaseSession) Update(ctx context.Context, body io.Reader) (*UpdateResult, error) {
+func (s *LeaseSession) Update(ctx context.Context, body io.Reader, options ...UpdateOption) (*UpdateResult, error) {
 	ctx = WithCorrelationID(ctx, s.correlation())
 	opts := UpdateOptions{
 		IfETag: s.StateETag,
@@ -1394,12 +1388,15 @@ func (s *LeaseSession) Update(ctx context.Context, body io.Reader) (*UpdateResul
 		opts.IfVersion = strconv.FormatInt(s.Version, 10)
 	}
 	opts.FencingToken = s.fencing()
+	if len(options) > 0 {
+		opts = applyUpdateOptions(opts, options)
+	}
 	return s.applyUpdate(ctx, body, opts)
 }
 
 // UpdateBytes is a convenience wrapper around Update that accepts an in-memory payload.
-func (s *LeaseSession) UpdateBytes(ctx context.Context, body []byte) (*UpdateResult, error) {
-	return s.Update(ctx, bytes.NewReader(body))
+func (s *LeaseSession) UpdateBytes(ctx context.Context, body []byte, options ...UpdateOption) (*UpdateResult, error) {
+	return s.Update(ctx, bytes.NewReader(body), options...)
 }
 
 // UpdateWithOptions allows callers to override conditional metadata.
@@ -1557,13 +1554,30 @@ func (s *LeaseSession) Load(ctx context.Context, v any) error {
 }
 
 // Save serialises v as JSON and updates the state.
-func (s *LeaseSession) Save(ctx context.Context, v any) error {
+func (s *LeaseSession) Save(ctx context.Context, v any, opts ...UpdateOption) error {
 	data, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
-	_, err = s.UpdateBytes(ctx, data)
+	_, err = s.UpdateBytes(ctx, data, opts...)
 	return err
+}
+
+// UpdateMetadata toggles metadata flags without mutating the JSON state.
+func (s *LeaseSession) UpdateMetadata(ctx context.Context, meta MetadataOptions) (*MetadataResult, error) {
+	if meta.empty() {
+		return nil, fmt.Errorf("lockd: metadata options required")
+	}
+	ctx = WithCorrelationID(ctx, s.correlation())
+	opts := UpdateOptions{
+		Namespace: s.Namespace,
+		Metadata:  meta,
+	}
+	if s.Version > 0 {
+		opts.IfVersion = strconv.FormatInt(s.Version, 10)
+	}
+	opts.FencingToken = s.fencing()
+	return s.client.UpdateMetadata(ctx, s.Key, s.LeaseID, opts)
 }
 
 // KeepAlive extends the lease TTL without altering the stored state.
@@ -1675,9 +1689,16 @@ func (c *cancelReadCloser) Close() error {
 
 // UpdateResult captures the response from Update.
 type UpdateResult struct {
-	NewVersion   int64  `json:"new_version"`
-	NewStateETag string `json:"new_state_etag"`
-	BytesWritten int64  `json:"bytes"`
+	NewVersion   int64                  `json:"new_version"`
+	NewStateETag string                 `json:"new_state_etag"`
+	BytesWritten int64                  `json:"bytes"`
+	Metadata     api.MetadataAttributes `json:"metadata,omitempty"`
+}
+
+// MetadataResult captures metadata-only mutation outcomes.
+type MetadataResult struct {
+	Version  int64
+	Metadata api.MetadataAttributes
 }
 
 // UpdateOptions controls conditional update semantics.
@@ -1686,6 +1707,71 @@ type UpdateOptions struct {
 	IfVersion    string
 	FencingToken string
 	Namespace    string
+	Metadata     MetadataOptions
+}
+
+// UpdateOption customizes update behaviour.
+type UpdateOption interface {
+	apply(*UpdateOptions)
+}
+
+type updateOptionFunc func(*UpdateOptions)
+
+func (f updateOptionFunc) apply(opts *UpdateOptions) {
+	f(opts)
+}
+
+// WithMetadata attaches metadata mutations to an update.
+func WithMetadata(meta MetadataOptions) UpdateOption {
+	return updateOptionFunc(func(opts *UpdateOptions) {
+		opts.Metadata = meta
+	})
+}
+
+// WithQueryHidden marks the key as hidden from /v1/query after the update.
+func WithQueryHidden() UpdateOption {
+	return WithMetadata(MetadataOptions{QueryHidden: Bool(true)})
+}
+
+// WithQueryVisible clears the hidden flag on the key after the update.
+func WithQueryVisible() UpdateOption {
+	val := Bool(false)
+	return WithMetadata(MetadataOptions{QueryHidden: val})
+}
+
+// MetadataOptions captures metadata mutations attached to updates.
+type MetadataOptions struct {
+	QueryHidden *bool
+}
+
+type metadataMutationPayload struct {
+	QueryHidden *bool `json:"query_hidden,omitempty"`
+}
+
+// Bool returns a pointer to v.
+func Bool(v bool) *bool {
+	b := v
+	return &b
+}
+
+func (o MetadataOptions) empty() bool {
+	return o.QueryHidden == nil
+}
+
+func (o MetadataOptions) applyHeaders(req *http.Request) {
+	if o.QueryHidden != nil {
+		req.Header.Set(headerMetadataQueryHidden, strconv.FormatBool(*o.QueryHidden))
+	}
+}
+
+func applyUpdateOptions(base UpdateOptions, opts []UpdateOption) UpdateOptions {
+	for _, opt := range opts {
+		if opt == nil {
+			continue
+		}
+		opt.apply(&base)
+	}
+	return base
 }
 
 // RemoveOptions controls conditional delete semantics.
@@ -1837,13 +1923,6 @@ func (c *Client) applyCorrelationHeader(ctx context.Context, req *http.Request, 
 			req.Header.Set(headerCorrelationID, normalized)
 		}
 	}
-}
-
-func (c *Client) allowFailure(count int) bool {
-	if c.failureRetries < 0 {
-		return true
-	}
-	return count <= c.failureRetries
 }
 
 func (c *Client) requestContext(parent context.Context) (context.Context, context.CancelFunc) {
@@ -2281,14 +2360,6 @@ func WithAcquireFailureRetries(n int) AcquireOption {
 	}
 }
 
-func withAcquireRand(fn func(int64) int64) AcquireOption {
-	return func(c *AcquireConfig) {
-		if fn != nil {
-			c.randInt63n = fn
-		}
-	}
-}
-
 func defaultAcquireConfig() AcquireConfig {
 	return AcquireConfig{
 		BaseDelay:      DefaultAcquireBaseDelay,
@@ -2376,7 +2447,6 @@ func (c *Client) Acquire(ctx context.Context, req api.AcquireRequest, opts ...Ac
 
 		resp, endpoint, err := c.acquireOnce(ctx, currentReq)
 		if err == nil {
-			failureCount = 0
 			if req.Key == "" {
 				req.Key = resp.Key
 			}
@@ -2830,20 +2900,20 @@ func (c *Client) releaseInternal(ctx context.Context, req api.ReleaseRequest, pr
 					continue
 				}
 				altCtx := ctx
+				var cancel context.CancelFunc
 				if deadline, ok := ctx.Deadline(); ok {
 					remaining := time.Until(deadline)
 					if remaining <= 0 {
 						break
 					}
-					var cancel context.CancelFunc
 					altCtx, cancel = context.WithTimeout(context.Background(), remaining)
-					defer cancel()
-				} else {
-					var cancel context.CancelFunc
+				} else if c.closeTimeout > 0 {
 					altCtx, cancel = context.WithTimeout(context.Background(), c.closeTimeout)
-					defer cancel()
 				}
 				altResp, altErr := c.postJSON(altCtx, "/v1/release", req, &resp, headers, base)
+				if cancel != nil {
+					cancel()
+				}
 				if altErr == nil {
 					endpoint = altResp
 					err = nil
@@ -2919,55 +2989,98 @@ func (c *Client) Describe(ctx context.Context, key string) (*api.DescribeRespons
 
 // Get streams the JSON state for a key. Caller must close the returned reader.
 // When the key has no state the returned reader is nil.
-func (c *Client) getWithNamespace(ctx context.Context, key, leaseID, namespace string) (io.ReadCloser, string, string, error) {
-	token, err := c.fencingToken(leaseID, "")
-	if err != nil {
-		return nil, "", "", err
+func (c *Client) getWithNamespaceInternal(ctx context.Context, key, leaseID, namespace string, public bool) (io.ReadCloser, string, string, error) {
+	logFields := []any{"key", key, "endpoint", c.lastEndpoint}
+	token := ""
+	var err error
+	if !public {
+		token, err = c.fencingToken(leaseID, "")
+		if err != nil {
+			return nil, "", "", err
+		}
+		logFields = append(logFields, "lease_id", leaseID, "fencing_token", token)
 	}
-	c.logTraceCtx(ctx, "client.get.start", "key", key, "lease_id", leaseID, "endpoint", c.lastEndpoint, "fencing_token", token)
+	logKey := "client.get.start"
+	if public {
+		logKey = "client.get_public.start"
+	}
+	c.logTraceCtx(ctx, logKey, logFields...)
 	builder := func(base string) (*http.Request, context.CancelFunc, error) {
-		// Use the caller's context without the per-request HTTP timeout so that
-		// AcquireForUpdate handlers can continue reading the snapshot while the
-		// server is draining. Callers are expected to bound ctx themselves.
 		reqCtx, cancel := c.requestContextNoTimeout(ctx)
 		full := fmt.Sprintf("%s/v1/get?key=%s&namespace=%s", base, url.QueryEscape(key), url.QueryEscape(namespace))
+		if public {
+			full += "&public=1"
+		}
 		req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, full, http.NoBody)
 		if err != nil {
 			cancel()
 			return nil, nil, err
 		}
-		req.Header.Set("X-Lease-ID", leaseID)
-		req.Header.Set(headerFencingToken, token)
+		if !public {
+			req.Header.Set("X-Lease-ID", leaseID)
+			req.Header.Set(headerFencingToken, token)
+		}
 		c.applyCorrelationHeader(ctx, req, "")
 		return req, cancel, nil
 	}
 	resp, cancel, endpoint, err := c.attemptEndpoints(builder, "")
 	if err != nil {
-		c.logErrorCtx(ctx, "client.get.transport_error", "key", key, "lease_id", leaseID, "fencing_token", token, "error", err)
+		errorFields := []any{"key", key, "endpoint", endpoint, "error", err}
+		if !public {
+			errorFields = append(errorFields, "lease_id", leaseID, "fencing_token", token)
+		} else {
+			errorFields = append(errorFields, "public", true)
+		}
+		c.logErrorCtx(ctx, "client.get.transport_error", errorFields...)
 		return nil, "", "", err
 	}
 	if resp.StatusCode == http.StatusNoContent {
 		resp.Body.Close()
 		cancel()
-		c.logDebugCtx(ctx, "client.get.empty", "key", key, "lease_id", leaseID, "endpoint", endpoint, "fencing_token", token)
+		emptyFields := []any{"key", key, "endpoint", endpoint}
+		if public {
+			emptyFields = append(emptyFields, "public", true)
+		} else {
+			emptyFields = append(emptyFields, "lease_id", leaseID, "fencing_token", token)
+		}
+		c.logDebugCtx(ctx, "client.get.empty", emptyFields...)
 		return nil, "", "", nil
 	}
 	if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
 		cancel()
-		c.logWarnCtx(ctx, "client.get.error", "key", key, "lease_id", leaseID, "endpoint", endpoint, "fencing_token", token, "status", resp.StatusCode)
+		errorFields := []any{"key", key, "endpoint", endpoint, "status", resp.StatusCode}
+		if public {
+			errorFields = append(errorFields, "public", true)
+		} else {
+			errorFields = append(errorFields, "lease_id", leaseID, "fencing_token", token)
+		}
+		c.logWarnCtx(ctx, "client.get.error", errorFields...)
 		return nil, "", "", c.decodeError(resp)
 	}
-	if newToken := resp.Header.Get(headerFencingToken); newToken != "" {
-		c.RegisterLeaseToken(leaseID, newToken)
+	if !public {
+		if newToken := resp.Header.Get(headerFencingToken); newToken != "" {
+			c.RegisterLeaseToken(leaseID, newToken)
+		}
 	}
 	reader := &cancelReadCloser{ReadCloser: resp.Body, cancel: cancel}
 	etag := resp.Header.Get("ETag")
 	version := resp.Header.Get("X-Key-Version")
-	c.logTraceCtx(ctx, "client.get.success", "key", key, "lease_id", leaseID, "endpoint", endpoint, "fencing_token", token, "etag", etag, "version", version)
+	successFields := []any{"key", key, "endpoint", endpoint, "etag", etag, "version", version}
+	if public {
+		successFields = append(successFields, "public", true)
+	} else {
+		successFields = append(successFields, "lease_id", leaseID, "fencing_token", token)
+	}
+	c.logTraceCtx(ctx, "client.get.success", successFields...)
 	return reader, etag, version, nil
 }
 
+func (c *Client) getWithNamespace(ctx context.Context, key, leaseID, namespace string) (io.ReadCloser, string, string, error) {
+	return c.getWithNamespaceInternal(ctx, key, leaseID, namespace, false)
+}
+
+// GetWithNamespace streams the JSON state for key within namespace using the provided lease.
 func (c *Client) GetWithNamespace(ctx context.Context, namespace, key, leaseID string) (io.ReadCloser, string, string, error) {
 	norm, err := c.namespaceFor(namespace)
 	if err != nil {
@@ -2976,8 +3089,23 @@ func (c *Client) GetWithNamespace(ctx context.Context, namespace, key, leaseID s
 	return c.getWithNamespace(ctx, key, leaseID, norm)
 }
 
+// Get streams the JSON state for key in the client's default namespace using the provided lease.
 func (c *Client) Get(ctx context.Context, key, leaseID string) (io.ReadCloser, string, string, error) {
 	return c.GetWithNamespace(ctx, "", key, leaseID)
+}
+
+// GetPublicWithNamespace streams the latest published JSON state for namespace/key without a lease.
+func (c *Client) GetPublicWithNamespace(ctx context.Context, namespace, key string) (io.ReadCloser, string, string, error) {
+	norm, err := c.namespaceFor(namespace)
+	if err != nil {
+		return nil, "", "", err
+	}
+	return c.getWithNamespaceInternal(ctx, key, "", norm, true)
+}
+
+// GetPublic streams the latest published JSON for key in the client's default namespace.
+func (c *Client) GetPublic(ctx context.Context, key string) (io.ReadCloser, string, string, error) {
+	return c.GetPublicWithNamespace(ctx, "", key)
 }
 
 // Load delegates to sess.Load.
@@ -2990,7 +3118,7 @@ func (c *Client) Save(ctx context.Context, sess *LeaseSession, v any) error {
 	return sess.Save(ctx, v)
 }
 
-// GetBytes fetches the JSON state into memory and returns it along with metadata.
+// GetBytesWithNamespace loads the JSON state into memory and returns bytes + headers for namespace/key.
 func (c *Client) GetBytesWithNamespace(ctx context.Context, namespace, key, leaseID string) ([]byte, string, string, error) {
 	reader, etag, version, err := c.GetWithNamespace(ctx, namespace, key, leaseID)
 	if err != nil {
@@ -3007,8 +3135,53 @@ func (c *Client) GetBytesWithNamespace(ctx context.Context, namespace, key, leas
 	return data, etag, version, nil
 }
 
+// GetBytes loads the JSON state for key in the default namespace into memory.
 func (c *Client) GetBytes(ctx context.Context, key, leaseID string) ([]byte, string, string, error) {
 	return c.GetBytesWithNamespace(ctx, "", key, leaseID)
+}
+
+// GetPublicBytesWithNamespace returns the published JSON bytes plus etag/version for namespace/key.
+func (c *Client) GetPublicBytesWithNamespace(ctx context.Context, namespace, key string) ([]byte, string, string, error) {
+	reader, etag, version, err := c.GetPublicWithNamespace(ctx, namespace, key)
+	if err != nil {
+		return nil, "", "", err
+	}
+	if reader == nil {
+		return nil, etag, version, nil
+	}
+	defer reader.Close()
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, "", "", err
+	}
+	return data, etag, version, nil
+}
+
+// GetPublicBytes returns the published JSON bytes for key in the default namespace.
+func (c *Client) GetPublicBytes(ctx context.Context, key string) ([]byte, string, string, error) {
+	return c.GetPublicBytesWithNamespace(ctx, "", key)
+}
+
+// LoadPublicWithNamespace reads the latest published JSON state for key into v
+// without acquiring a lease. When no state exists, v is left untouched.
+func (c *Client) LoadPublicWithNamespace(ctx context.Context, namespace, key string, v any) error {
+	if v == nil {
+		return nil
+	}
+	data, _, _, err := c.GetPublicBytesWithNamespace(ctx, namespace, key)
+	if err != nil {
+		return err
+	}
+	if len(data) == 0 {
+		return nil
+	}
+	return json.Unmarshal(data, v)
+}
+
+// LoadPublic reads the latest published JSON state for key into v using the
+// client's default namespace.
+func (c *Client) LoadPublic(ctx context.Context, key string, v any) error {
+	return c.LoadPublicWithNamespace(ctx, "", key, v)
 }
 
 // Update uploads new JSON state from the provided reader.
@@ -3048,6 +3221,7 @@ func (c *Client) Update(ctx context.Context, key, leaseID string, body io.Reader
 			req.Header.Set("X-If-Version", opts.IfVersion)
 		}
 		req.Header.Set(headerFencingToken, token)
+		opts.Metadata.applyHeaders(req)
 		c.applyCorrelationHeader(ctx, req, "")
 		return req, cancel, nil
 	}
@@ -3076,6 +3250,70 @@ func (c *Client) Update(ctx context.Context, key, leaseID string, body io.Reader
 // UpdateBytes uploads new JSON state from the provided byte slice.
 func (c *Client) UpdateBytes(ctx context.Context, key, leaseID string, body []byte, opts UpdateOptions) (*UpdateResult, error) {
 	return c.Update(ctx, key, leaseID, bytes.NewReader(body), opts)
+}
+
+// UpdateMetadata mutates lock metadata without modifying the JSON state.
+func (c *Client) UpdateMetadata(ctx context.Context, key, leaseID string, opts UpdateOptions) (*MetadataResult, error) {
+	if opts.Metadata.empty() {
+		return nil, fmt.Errorf("lockd: metadata options required")
+	}
+	namespace, err := c.namespaceFor(opts.Namespace)
+	if err != nil {
+		return nil, err
+	}
+	opts.Namespace = namespace
+	token, err := c.fencingToken(leaseID, opts.FencingToken)
+	if err != nil {
+		return nil, err
+	}
+	payload := metadataMutationPayload{
+		QueryHidden: opts.Metadata.QueryHidden,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	path := fmt.Sprintf("/v1/metadata?key=%s&namespace=%s", url.QueryEscape(key), url.QueryEscape(namespace))
+	c.logTraceCtx(ctx, "client.metadata.start", "key", key, "lease_id", leaseID, "namespace", namespace)
+	builder := func(base string) (*http.Request, context.CancelFunc, error) {
+		reqCtx, cancel := c.requestContext(ctx)
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, base+path, bytes.NewReader(body))
+		if err != nil {
+			cancel()
+			return nil, nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Lease-ID", leaseID)
+		if opts.IfVersion != "" {
+			req.Header.Set("X-If-Version", opts.IfVersion)
+		}
+		req.Header.Set(headerFencingToken, token)
+		c.applyCorrelationHeader(ctx, req, "")
+		return req, cancel, nil
+	}
+	resp, cancel, endpoint, err := c.attemptEndpoints(builder, "")
+	if err != nil {
+		c.logErrorCtx(ctx, "client.metadata.transport_error", "key", key, "lease_id", leaseID, "namespace", namespace, "endpoint", endpoint, "error", err)
+		return nil, err
+	}
+	defer cancel()
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		c.logWarnCtx(ctx, "client.metadata.error", "key", key, "lease_id", leaseID, "namespace", namespace, "endpoint", endpoint, "status", resp.StatusCode)
+		return nil, c.decodeError(resp)
+	}
+	var apiResp api.MetadataUpdateResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return nil, err
+	}
+	if newToken := resp.Header.Get(headerFencingToken); newToken != "" {
+		c.RegisterLeaseToken(leaseID, newToken)
+	}
+	c.logTraceCtx(ctx, "client.metadata.success", "key", key, "lease_id", leaseID, "namespace", namespace, "endpoint", endpoint, "version", apiResp.Version)
+	return &MetadataResult{
+		Version:  apiResp.Version,
+		Metadata: apiResp.Metadata,
+	}, nil
 }
 
 // Remove deletes the JSON state for key while ensuring the lease and
@@ -3184,11 +3422,9 @@ func (c *Client) postJSON(ctx context.Context, path string, payload any, out any
 			return nil, nil, err
 		}
 		req.Header.Set("Content-Type", "application/json")
-		if headers != nil {
-			for k, vals := range headers {
-				for _, v := range vals {
-					req.Header.Add(k, v)
-				}
+		for k, vals := range headers {
+			for _, v := range vals {
+				req.Header.Add(k, v)
 			}
 		}
 		if req.Header.Get(headerCorrelationID) == "" {

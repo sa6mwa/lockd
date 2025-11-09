@@ -72,13 +72,6 @@ func cleanAzureContainer(cfg lockd.Config) error {
 				if item.Name == nil {
 					continue
 				}
-				logical := *item.Name
-				if trimmed != "" {
-					logical = strings.TrimPrefix(logical, trimmed+"/")
-				}
-				if !shouldCleanupAzureObject(logical) {
-					continue
-				}
 				if _, err := client.DeleteBlob(ctx, azureCfg.Container, *item.Name, &deleteOpts); err != nil {
 					return err
 				}
@@ -87,9 +80,6 @@ func cleanAzureContainer(cfg lockd.Config) error {
 	}
 	if keys, err := store.ListMetaKeys(ctx, namespaces.Default); err == nil {
 		for _, key := range keys {
-			if !shouldCleanupAzureObject(key) {
-				continue
-			}
 			if err := store.Remove(ctx, namespaces.Default, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 				return err
 			}
@@ -101,48 +91,6 @@ func cleanAzureContainer(cfg lockd.Config) error {
 		return err
 	}
 	return nil
-}
-
-func shouldCleanupAzureObject(name string) bool {
-	name = strings.TrimPrefix(name, "/")
-	if name == "" {
-		return false
-	}
-
-	namespaceAwarePrefixes := []string{
-		"lockd-diagnostics/",
-		"meta/azure-",
-		"meta/crypto-azure-",
-		"state/azure-",
-		"state/crypto-azure-",
-		"q/azure-",
-		"q/crypto-azure-",
-	}
-	namespaceAgnosticPrefixes := []string{
-		"azure-",
-		"crypto-azure-",
-	}
-
-	segments := strings.SplitN(name, "/", 2)
-	rest := name
-	if len(segments) == 2 {
-		rest = segments[1]
-	}
-
-	for _, prefix := range namespaceAwarePrefixes {
-		if strings.HasPrefix(name, prefix) {
-			return true
-		}
-		if strings.HasPrefix(rest, prefix) {
-			return true
-		}
-	}
-	for _, prefix := range namespaceAgnosticPrefixes {
-		if strings.HasPrefix(name, prefix) {
-			return true
-		}
-	}
-	return false
 }
 
 // CleanupQueue removes objects and metadata for the given queue within the namespace.

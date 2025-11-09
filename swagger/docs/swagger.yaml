@@ -91,6 +91,8 @@ definitions:
         type: string
       lease_id:
         type: string
+      metadata:
+        $ref: '#/definitions/api.MetadataAttributes'
       namespace:
         type: string
       owner:
@@ -170,6 +172,15 @@ definitions:
       visibility_timeout_seconds:
         type: integer
     type: object
+  api.InTerm:
+    properties:
+      any:
+        items:
+          type: string
+        type: array
+      field:
+        type: string
+    type: object
   api.KeepAliveRequest:
     properties:
       key:
@@ -184,6 +195,22 @@ definitions:
   api.KeepAliveResponse:
     properties:
       expires_at_unix:
+        type: integer
+    type: object
+  api.MetadataAttributes:
+    properties:
+      query_hidden:
+        type: boolean
+    type: object
+  api.MetadataUpdateResponse:
+    properties:
+      key:
+        type: string
+      metadata:
+        $ref: '#/definitions/api.MetadataAttributes'
+      namespace:
+        type: string
+      version:
         type: integer
     type: object
   api.NackRequest:
@@ -217,6 +244,50 @@ definitions:
       requeued:
         type: boolean
     type: object
+  api.QueryRequest:
+    properties:
+      cursor:
+        type: string
+      fields:
+        additionalProperties: {}
+        type: object
+      limit:
+        type: integer
+      namespace:
+        type: string
+      selector:
+        $ref: '#/definitions/api.Selector'
+    type: object
+  api.QueryResponse:
+    properties:
+      cursor:
+        type: string
+      index_seq:
+        type: integer
+      keys:
+        items:
+          type: string
+        type: array
+      metadata:
+        additionalProperties:
+          type: string
+        type: object
+      namespace:
+        type: string
+    type: object
+  api.RangeTerm:
+    properties:
+      field:
+        type: string
+      gt:
+        type: number
+      gte:
+        type: number
+      lt:
+        type: number
+      lte:
+        type: number
+    type: object
   api.ReleaseRequest:
     properties:
       key:
@@ -238,14 +309,51 @@ definitions:
       removed:
         type: boolean
     type: object
+  api.Selector:
+    properties:
+      and:
+        items:
+          $ref: '#/definitions/api.Selector'
+        type: array
+      eq:
+        $ref: '#/definitions/api.Term'
+      exists:
+        type: string
+      in:
+        $ref: '#/definitions/api.InTerm'
+      not:
+        $ref: '#/definitions/api.Selector'
+      or:
+        items:
+          $ref: '#/definitions/api.Selector'
+        type: array
+      prefix:
+        $ref: '#/definitions/api.Term'
+      range:
+        $ref: '#/definitions/api.RangeTerm'
+    type: object
+  api.Term:
+    properties:
+      field:
+        type: string
+      value:
+        type: string
+    type: object
   api.UpdateResponse:
     properties:
       bytes:
         type: integer
+      metadata:
+        $ref: '#/definitions/api.MetadataAttributes'
       new_state_etag:
         type: string
       new_version:
         type: integer
+    type: object
+  httpapi.metadataMutation:
+    properties:
+      query_hidden:
+        type: boolean
     type: object
 info:
   contact:
@@ -364,7 +472,8 @@ paths:
       consumes:
       - application/json
       description: Streams the currently committed JSON state for the key owned by
-        the caller's lease. Returns 204 when no state is present.
+        the caller's lease (or, when public=1, the latest published snapshot). Returns
+        204 when no state is present.
       parameters:
       - description: Namespace override (defaults to server setting)
         in: query
@@ -375,12 +484,15 @@ paths:
         name: key
         required: true
         type: string
-      - description: Lease identifier
+      - description: Set to true to read without a lease (served from published data)
+        in: query
+        name: public
+        type: boolean
+      - description: Lease identifier (required unless public=1)
         in: header
         name: X-Lease-ID
-        required: true
         type: string
-      - description: Optional fencing token proof
+      - description: Optional fencing token proof (lease requests only)
         in: header
         name: X-Fencing-Token
         type: string
@@ -460,6 +572,119 @@ paths:
       security:
       - mTLS: []
       summary: Extend an active lease TTL
+      tags:
+      - lease
+  /v1/metadata:
+    post:
+      consumes:
+      - application/json
+      description: Mutates lock metadata (e.g. query visibility) while holding the
+        lease. Optional CAS headers guard against concurrent updates.
+      parameters:
+      - description: Namespace override (defaults to server setting)
+        in: query
+        name: namespace
+        type: string
+      - description: Lease key
+        in: query
+        name: key
+        required: true
+        type: string
+      - description: Lease identifier
+        in: header
+        name: X-Lease-ID
+        required: true
+        type: string
+      - description: Optional fencing token proof
+        in: header
+        name: X-Fencing-Token
+        type: string
+      - description: Conditionally update when the current version matches
+        in: header
+        name: X-If-Version
+        type: string
+      - description: Metadata payload
+        in: body
+        name: metadata
+        required: true
+        schema:
+          $ref: '#/definitions/httpapi.metadataMutation'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.MetadataUpdateResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - mTLS: []
+      summary: Update lock metadata
+      tags:
+      - lease
+  /v1/query:
+    post:
+      consumes:
+      - application/json
+      description: Executes a selector-based search within a namespace and returns
+        matching keys plus a cursor for pagination.
+      parameters:
+      - description: Namespace override (defaults to server setting)
+        in: query
+        name: namespace
+        type: string
+      - description: Maximum number of keys to return (1-1000, defaults to 100)
+        in: query
+        name: limit
+        type: integer
+      - description: Opaque pagination cursor
+        in: query
+        name: cursor
+        type: string
+      - description: Selector JSON (optional when providing a JSON body)
+        in: query
+        name: selector
+        type: string
+      - description: Query request (selector, limit, cursor)
+        in: body
+        name: request
+        schema:
+          $ref: '#/definitions/api.QueryRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.QueryResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      summary: Query keys within a namespace
       tags:
       - lease
   /v1/queue/ack:

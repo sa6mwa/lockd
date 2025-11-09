@@ -1028,13 +1028,13 @@ func TestAWSRemoveKeepAlive(t *testing.T) {
 	releaseLease(t, ctx, cli, key, verify.LeaseID)
 }
 
-func loadAWSConfig(t *testing.T) lockd.Config {
+func loadAWSConfig(tb testing.TB) lockd.Config {
 	store := os.Getenv("LOCKD_STORE")
 	if store == "" {
-		t.Fatalf("LOCKD_STORE must be set to an aws:// URI for AWS integration tests")
+		tb.Fatalf("LOCKD_STORE must be set to an aws:// URI for AWS integration tests")
 	}
 	if !strings.HasPrefix(store, "aws://") {
-		t.Fatalf("LOCKD_STORE must reference an aws:// URI, got %q", store)
+		tb.Fatalf("LOCKD_STORE must reference an aws:// URI, got %q", store)
 	}
 	cfg := lockd.Config{
 		Store:         store,
@@ -1050,15 +1050,15 @@ func loadAWSConfig(t *testing.T) lockd.Config {
 	if cfg.AWSRegion == "" {
 		cfg.AWSRegion = os.Getenv("AWS_DEFAULT_REGION")
 	}
-	cryptotest.MaybeEnableStorageEncryption(t, &cfg)
+	cryptotest.MaybeEnableStorageEncryption(tb, &cfg)
 	if err := cfg.Validate(); err != nil {
-		t.Fatalf("config validation: %v", err)
+		tb.Fatalf("config validation: %v", err)
 	}
 	return cfg
 }
 
-func ensureStoreReady(t *testing.T, ctx context.Context, cfg lockd.Config) {
-	ResetAWSBucketForCrypto(t, cfg)
+func ensureStoreReady(tb testing.TB, ctx context.Context, cfg lockd.Config) {
+	ResetAWSBucketForCrypto(tb, cfg)
 	awsStoreVerifyOnce.Do(func() {
 		res, err := storagecheck.VerifyStore(ctx, cfg)
 		if err != nil {
@@ -1070,7 +1070,7 @@ func ensureStoreReady(t *testing.T, ctx context.Context, cfg lockd.Config) {
 		}
 	})
 	if awsStoreVerifyErr != nil {
-		t.Fatalf("store verification failed: %v", awsStoreVerifyErr)
+		tb.Fatalf("store verification failed: %v", awsStoreVerifyErr)
 	}
 }
 

@@ -23,6 +23,8 @@ import (
 	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/lsf"
 	"pkt.systems/lockd/internal/qrf"
+	"pkt.systems/lockd/internal/search"
+	"pkt.systems/lockd/internal/search/scan"
 	"pkt.systems/lockd/internal/storage"
 	loggingbackend "pkt.systems/lockd/internal/storage/logging"
 	"pkt.systems/lockd/internal/storage/retry"
@@ -405,12 +407,25 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 			LogInterval:    cfg.LSFLogInterval,
 		}, qrfCtrl, logger)
 	}
+	var searchAdapter search.Adapter
+	if backend != nil {
+		adapter, err := scan.New(scan.Config{
+			Backend:          backend,
+			Logger:           loggingutil.WithSubsystem(logger, "search.scan"),
+			MaxDocumentBytes: cfg.JSONMaxBytes,
+		})
+		if err != nil {
+			return nil, err
+		}
+		searchAdapter = adapter
+	}
 	var srvRef *Server
 	handler := httpapi.New(httpapi.Config{
 		Store:                      backend,
 		Crypto:                     crypto,
 		Logger:                     logger,
 		Clock:                      serverClock,
+		SearchAdapter:              searchAdapter,
 		DefaultNamespace:           cfg.DefaultNamespace,
 		JSONMaxBytes:               cfg.JSONMaxBytes,
 		CompactWriter:              jsonUtil.compactWriter,

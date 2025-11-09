@@ -27,6 +27,7 @@ if err != nil {
 defer cli.Close()
 
 req := api.AcquireRequest{
+    Namespace: "workflows", // omit to use the server's default namespace
     Key:        "orders",
     Owner:      "worker-1",
     TTLSeconds: 30,
@@ -48,6 +49,12 @@ if err := lease.Save(ctx, checkpoint); err != nil {
 }
 
 ```
+When most operations live in a single namespace, wrap the client with
+client.WithDefaultNamespace("workflows") so explicit Namespace fields can be
+omitted without relying on the server fallback. The CLI mirrors this via
+--namespace / LOCKD_CLIENT_NAMESPACE for leases and LOCKD_QUEUE_NAMESPACE for
+queue flows.
+
 The lease session tracks fencing tokens automatically; the same `Client`
 instance should be reused for subsequent operations so KeepAlive, Get, Update,
 Release, and Remove calls carry the correct `X-Fencing-Token`. When the
@@ -64,6 +71,7 @@ and keeps the lease alive in the background while your handler runs:
 
 ```go
 err := cli.AcquireForUpdate(ctx, api.AcquireRequest{
+    Namespace: "workflows",
     Key:        "orders",
     Owner:      "worker-1",
     TTLSeconds: 45,
@@ -125,7 +133,10 @@ leased message, exposes a streaming payload reader, and tracks the fencing
 tokens required for Ack/Nack/Extend:
 
 ```go
-msg, err := cli.Dequeue(ctx, "orders", client.DequeueOptions{Owner: "worker-1"})
+msg, err := cli.Dequeue(ctx, "orders", client.DequeueOptions{
+    Namespace: "workflows",
+    Owner:      "worker-1",
+})
 if err != nil {
 	log.Fatal(err)
 }
@@ -168,6 +179,40 @@ Lease holders can delete JSON state explicitly via
 If-Version) are supported to guard against concurrent, stale deletes. When the
 state is deleted the server also clears the metadata entry so a subsequent
 acquire sees a clean slate.
+
+# Metadata attributes and query visibility
+
+Every key has a metadata document that stores lease details, versions, and
+user-controlled attributes. The server exposes `POST /v1/metadata` so callers
+can toggle attributes—such as hiding a key from `/v1/query`—without uploading
+a new JSON blob. The Go SDK layers ergonomic helpers on top:
+
+```go
+lease, err := cli.Acquire(ctx, api.AcquireRequest{Key: "orders", TTLSeconds: 30})
+// ...
+if _, err := lease.UpdateMetadata(ctx, client.MetadataOptions{
+    QueryHidden: client.Bool(true),
+}); err != nil {
+    log.Fatal(err)
+}
+
+```
+The variadic `Update`/`Save` helpers accept `client.WithQueryHidden()` /
+`client.WithQueryVisible()` options when you want metadata mutations to ride
+along with a state write:
+
+```go
+if err := lease.Save(ctx, checkpoint, client.WithQueryHidden()); err != nil {
+    log.Fatal(err)
+}
+
+```
+Advanced workflows can pass `client.WithMetadata(...)` directly to `Update`
+for multiple attributes or for forward compatibility with future metadata
+fields. Low-level access lives on `Client.UpdateMetadata` which returns a
+`MetadataResult` so tools can inspect the server’s synthesized attributes.
+All metadata mutations honor CAS headers (`X-If-Version`) and the handler
+echoes the effective attributes in the JSON response.
 
 # Multi-endpoint failover
 

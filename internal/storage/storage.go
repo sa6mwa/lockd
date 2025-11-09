@@ -26,13 +26,15 @@ var (
 
 // Meta encapsulates per-key metadata persisted by backends.
 type Meta struct {
-	Lease               *Lease `json:"lease,omitempty"`
-	Version             int64  `json:"version"`
-	StateETag           string `json:"state_etag,omitempty"`
-	UpdatedAtUnix       int64  `json:"updated_at_unix,omitempty"`
-	FencingToken        int64  `json:"fencing_token,omitempty"`
-	StateDescriptor     []byte `json:"state_descriptor,omitempty"`
-	StatePlaintextBytes int64  `json:"state_plaintext_bytes,omitempty"`
+	Lease               *Lease            `json:"lease,omitempty"`
+	Version             int64             `json:"version"`
+	PublishedVersion    int64             `json:"published_version,omitempty"`
+	StateETag           string            `json:"state_etag,omitempty"`
+	UpdatedAtUnix       int64             `json:"updated_at_unix,omitempty"`
+	FencingToken        int64             `json:"fencing_token,omitempty"`
+	StateDescriptor     []byte            `json:"state_descriptor,omitempty"`
+	StatePlaintextBytes int64             `json:"state_plaintext_bytes,omitempty"`
+	Attributes          map[string]string `json:"attributes,omitempty"`
 }
 
 // Lease captures the server-side view of an active lease.

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
-	"sort"
 	"strings"
 	"time"
 
@@ -242,33 +241,7 @@ func buildAWSPolicy(bucket, prefix string) string {
 	if trim != "" {
 		basePrefix = fmt.Sprintf("arn:aws:s3:::%s/%s/*", bucket, trim)
 	}
-	metaRes := fmt.Sprintf("arn:aws:s3:::%s/*/meta/*", bucket)
-	stateRes := fmt.Sprintf("arn:aws:s3:::%s/*/state/*", bucket)
-	queueRes := fmt.Sprintf("arn:aws:s3:::%s/*/q/*", bucket)
-	diagPrefix := path.Join(trim, namespaces.Default, "lockd-diagnostics")
-	diagMeta := fmt.Sprintf("arn:aws:s3:::%s/%s/meta/*", bucket, diagPrefix)
-	diagState := fmt.Sprintf("arn:aws:s3:::%s/%s/state/*", bucket, diagPrefix)
-	diagQueue := fmt.Sprintf("arn:aws:s3:::%s/%s/q/*", bucket, diagPrefix)
-	if trim != "" {
-		metaRes = fmt.Sprintf("arn:aws:s3:::%s/%s/*/meta/*", bucket, trim)
-		stateRes = fmt.Sprintf("arn:aws:s3:::%s/%s/*/state/*", bucket, trim)
-		queueRes = fmt.Sprintf("arn:aws:s3:::%s/%s/*/q/*", bucket, trim)
-	}
-
-	objectSet := map[string]struct{}{
-		basePrefix: {},
-		metaRes:    {},
-		stateRes:   {},
-		queueRes:   {},
-		diagMeta:   {},
-		diagState:  {},
-		diagQueue:  {},
-	}
-	objectResources := make([]string, 0, len(objectSet))
-	for res := range objectSet {
-		objectResources = append(objectResources, res)
-	}
-	sort.Strings(objectResources)
+	objectResources := []string{basePrefix}
 	policy := map[string]any{
 		"Version": "2012-10-17",
 		"Statement": []any{

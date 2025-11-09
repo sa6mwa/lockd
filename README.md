@@ -39,6 +39,11 @@ worker to resume from the last committed state.
   keeps the lease alive while your function reads the snapshot and posts an
   update. The helper releases the lease automatically when the function
   returns.
+- **Public reads** via `/v1/get?public=1` (and `lockd client get --public`) let dashboards
+  or other observers stream the latest published snapshot without acquiring a
+  lease; writers continue to use the standard lease-bound flow. The Go SDK
+  exposes `Client.GetPublic*` / `Client.LoadPublic*` helpers for the same
+  purpose.
 - **Remove-state API** lets lease holders delete the JSON blob with the same CAS
   semantics (`X-If-Version` / `X-If-State-ETag`) used by updates.
 - **Queue primitives** built atop the same storage backend offering enqueue,
@@ -338,6 +343,30 @@ Namespaces cascade to storage: metadata and payload objects are prefixed with
 `<namespace>/...` regardless of backend. When adding new features or tests,
 ensure we exercise at least one non-default namespace to avoid regressions in
 prefix handling.
+
+### Metadata attributes & hidden keys
+
+Each key’s metadata protobuf stores lease info plus user-controlled attributes.
+The server exposes `POST /v1/metadata` so callers can mutate attributes without
+rewriting the JSON state. Today the flag `query_hidden` (persisted as the
+`lockd.query.exclude` attribute) hides a key from `/v1/query` results while
+keeping it readable via the lease or `public=1` GET helpers. Toggle it by
+holding the lease and calling:
+
+```sh
+curl -sS -X POST "https://host:9341/v1/metadata?key=orders&namespace=default" \
+  -H "X-Lease-ID: $LEASE_ID" \
+  -H "X-Fencing-Token: $FENCING" \
+  -d '{"query_hidden":true}'
+```
+
+The same attribute can ride along with state uploads by setting the
+`X-Lockd-Meta-Query-Hidden` header; the Go SDK exposes
+`client.WithQueryHidden()` / `client.WithQueryVisible()` helpers and
+`LeaseSession.UpdateMetadata` / `Client.UpdateMetadata` for direct control.
+Server-side diagnostics (e.g. `lockd-diagnostics/*`) are automatically hidden so
+queries never leak internal housekeeping blobs. Future metadata attributes will
+use the same endpoint and response envelope (`api.MetadataUpdateResponse`).
 
 #### Queue dispatcher tuning
 
@@ -929,9 +958,20 @@ lockd client remove --key orders
 # Atomic JSON mutations (mutate using an existing lease)
 lockd client set --key orders progress.step=fetch progress.count++ time:progress.updated=NOW
 
+# Rich mutations with brace/quoted syntax (LQL)
+lockd client set --key ledger \
+  'data{"hello key"="mars traveler",count++}' \
+  meta.previous=world \
+  time:meta.processed=NOW
+
 # Local JSON helper (no server interaction)
 lockd client edit checkpoint.json progress.step="done" progress.count=+5
 ```
+
+Pass `--public` to `lockd client get` when you only need the last published
+state and don’t want to hold a lease (the CLI calls `/v1/get?public=1` under the
+hood). The default mode still enforces lease ownership and fencing tokens so
+writers remain serialized.
 
 Every `lockd client` subcommand accepts an optional `--key` (`-k`) flag. When
 you omit `--key`, the command falls back to `LOCKD_CLIENT_KEY` (typically set
@@ -971,9 +1011,12 @@ tools without buffering in memory.
 
 The CLI auto-discovers `client*.pem` bundles under `$HOME/.lockd/` (or use
 `--bundle`) and performs the same host-agnostic mTLS verification as the SDK.
-`set` operates on an existing lease and accepts simple `path=value`
-expressions, arithmetic updates (`++`, `--`, `=+3`), `rm:`/`delete:` prefixes to
-remove keys, and `time:` prefixes for RFC3339 timestamps.
+`set` and `edit` consume the shared LQL mutation DSL. Mutations accept dotted
+paths (`progress.counter++`), brace blocks that fan out to nested fields
+(`data{"hello key"="mars traveler",count++}`), quoted segments, increments
+(`=+3`/`--`), removals (`rm:`/`delete:`), and `time:` prefixes for RFC3339
+timestamps. Commas and newlines can be mixed freely, e.g.
+`lockd client set --key ledger 'meta{owner="alice",previous="world"}'`.
 
 Timeout knobs mirror the Go client: `--timeout` (HTTP dial+request),
 `--close-timeout` (release window), and `--keepalive-timeout`
@@ -1013,7 +1056,7 @@ go test -tags "integration <backend> [feature ...]" ./integration/...
 For everyday development, `./run-integration-suites.sh` wraps these invocations,
 sources the required `.env.<backend>` files, and stores logs under
 `integration-logs/`. Use `list` to see available suites (mem, disk, nfs, aws,
-azure, minio, plus `/lq` and `/crypto` variants), pass specific suites such as
+azure, minio, plus `/lq`, `/query`, and `/crypto` variants), pass specific suites such as
 `disk disk/lq` or `nfs nfs/lq`, or run the full matrix with `all`. The helper
 honors `LOCKD_GO_TEST_TIMEOUT`, exports `LOCKD_TEST_STORAGE_ENCRYPTION=1` so
 disk/nfs/etc. suites run with envelope crypto by default, and exposes
@@ -1023,14 +1066,17 @@ Current backends:
 
 | Backend | Notes | Examples |
 |---------|-------|----------|
-| `mem`   | Uses the in-memory store; no environment needed. | `go test -tags "integration mem" ./integration/...` (all mem suites) / `go test -tags "integration mem lq" ./integration/...` (queue scenarios only). |
+| `mem`   | Uses the in-memory store; no environment needed. | `go test -tags "integration mem" ./integration/...` (all mem suites) / `go test -tags "integration mem lq" ./integration/...` (queue scenarios only) / `go test -tags "integration mem query" ./integration/...` (query-only scenarios). |
 | `disk`  | Local disk backend. Requires `.env.disk` (see `integration/disk`). | `set -a && source .env.disk && set +a && go test -tags "integration disk" ./integration/...` / `... -tags "integration disk lq" ...` for queue-only coverage. |
 | `nfs`   | Disk backend mounted on NFS. Source `.env.nfs` so `LOCKD_NFS_ROOT` is set. | `set -a && source .env.nfs && set +a && go test -tags "integration nfs lq" ./integration/...`. |
 | `aws`   | Real S3 credentials via `.env`. | `set -a && source .env && set +a && go test -tags "integration aws" ./integration/...`. |
 | `minio`, `azure` | S3-compatible / Azure Blob suites. | e.g. `go test -tags "integration minio" ./integration/...` (requires appropriate env). |
 
-The queue-specific feature tag is `lq`. A suite built with `integration && mem
-&& lq`, for example, only compiles the queue wrappers in `integration/mem/lq`.
+The queue-specific feature tag is `lq`, and query-specific coverage uses the
+`query` tag. A suite built with `integration && mem && lq`, for example, only
+compiles the queue wrappers in `integration/mem/lq`, while `integration && mem
+&& query` targets the `integration/mem/query` tests without running the rest of
+the mem suite.
 We’ll extend the same layout to the AWS, Azure, and MinIO queue suites next so
 `go test -tags "integration aws lq" ./integration/...` (and similar) will target
 their queue scenarios without running unrelated tests.

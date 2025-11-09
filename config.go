@@ -390,12 +390,6 @@ func (c *Config) Validate() error {
 	if c.QRFLockHardLimit > 0 && (c.QRFLockSoftLimit == 0 || c.QRFLockSoftLimit > c.QRFLockHardLimit) {
 		c.QRFLockSoftLimit = c.QRFLockHardLimit
 	}
-	if c.QRFMemorySoftLimitBytes < 0 {
-		return fmt.Errorf("config: qrf memory soft limit bytes must be >= 0")
-	}
-	if c.QRFMemoryHardLimitBytes < 0 {
-		return fmt.Errorf("config: qrf memory hard limit bytes must be >= 0")
-	}
 	if c.QRFMemoryHardLimitPercent <= 0 {
 		c.QRFMemoryHardLimitPercent = DefaultQRFMemoryHardLimitPercent
 	}

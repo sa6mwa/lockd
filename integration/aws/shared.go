@@ -46,22 +46,12 @@ func ResetAWSBucketForCrypto(tb testing.TB, cfg lockd.Config) {
 			tb.Logf("aws cleanup list error: %v", obj.Err)
 			continue
 		}
-		logicalKey := obj.Key
-		if listPrefix != "" {
-			logicalKey = strings.TrimPrefix(logicalKey, listPrefix+"/")
-		}
-		if !shouldCleanupAWSObject(logicalKey) {
-			continue
-		}
 		if err := client.RemoveObject(ctx, s3cfg.Bucket, obj.Key, minio.RemoveObjectOptions{}); err != nil {
 			tb.Logf("aws cleanup remove %q: %v", obj.Key, err)
 		}
 	}
 	if keys, err := store.ListMetaKeys(ctx, namespaces.Default); err == nil {
 		for _, key := range keys {
-			if !shouldCleanupAWSObject(key) {
-				continue
-			}
 			if err := store.Remove(ctx, namespaces.Default, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 				tb.Logf("aws cleanup state %q: %v", key, err)
 			}
@@ -72,48 +62,6 @@ func ResetAWSBucketForCrypto(tb testing.TB, cfg lockd.Config) {
 	} else {
 		tb.Logf("aws cleanup list meta: %v", err)
 	}
-}
-
-func shouldCleanupAWSObject(key string) bool {
-	key = strings.TrimPrefix(key, "/")
-	if key == "" {
-		return false
-	}
-
-	namespaceAwarePrefixes := []string{
-		"lockd-diagnostics/",
-		"meta/aws-",
-		"meta/crypto-aws-",
-		"state/aws-",
-		"state/crypto-aws-",
-		"q/aws-",
-		"q/crypto-aws-",
-	}
-	namespaceAgnosticPrefixes := []string{
-		"aws-",
-		"crypto-aws-",
-	}
-
-	segments := strings.SplitN(key, "/", 2)
-	rest := key
-	if len(segments) == 2 {
-		rest = segments[1]
-	}
-
-	for _, prefix := range namespaceAwarePrefixes {
-		if strings.HasPrefix(key, prefix) {
-			return true
-		}
-		if strings.HasPrefix(rest, prefix) {
-			return true
-		}
-	}
-	for _, prefix := range namespaceAgnosticPrefixes {
-		if strings.HasPrefix(key, prefix) {
-			return true
-		}
-	}
-	return false
 }
 
 // CleanupQueue removes queue blobs and metadata for the given queue.

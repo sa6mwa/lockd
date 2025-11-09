@@ -189,7 +189,7 @@ const docTemplate = `{
                         "mTLS": []
                     }
                 ],
-                "description": "Streams the currently committed JSON state for the key owned by the caller's lease. Returns 204 when no state is present.",
+                "description": "Streams the currently committed JSON state for the key owned by the caller's lease (or, when public=1, the latest published snapshot). Returns 204 when no state is present.",
                 "consumes": [
                     "application/json"
                 ],
@@ -215,15 +215,20 @@ const docTemplate = `{
                         "required": true
                     },
                     {
-                        "type": "string",
-                        "description": "Lease identifier",
-                        "name": "X-Lease-ID",
-                        "in": "header",
-                        "required": true
+                        "type": "boolean",
+                        "description": "Set to true to read without a lease (served from published data)",
+                        "name": "public",
+                        "in": "query"
                     },
                     {
                         "type": "string",
-                        "description": "Optional fencing token proof",
+                        "description": "Lease identifier (required unless public=1)",
+                        "name": "X-Lease-ID",
+                        "in": "header"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Optional fencing token proof (lease requests only)",
                         "name": "X-Fencing-Token",
                         "in": "header"
                     }
@@ -309,6 +314,176 @@ const docTemplate = `{
                         "description": "OK",
                         "schema": {
                             "$ref": "#/definitions/api.KeepAliveResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/metadata": {
+            "post": {
+                "security": [
+                    {
+                        "mTLS": []
+                    }
+                ],
+                "description": "Mutates lock metadata (e.g. query visibility) while holding the lease. Optional CAS headers guard against concurrent updates.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "lease"
+                ],
+                "summary": "Update lock metadata",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Namespace override (defaults to server setting)",
+                        "name": "namespace",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Lease key",
+                        "name": "key",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Lease identifier",
+                        "name": "X-Lease-ID",
+                        "in": "header",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Optional fencing token proof",
+                        "name": "X-Fencing-Token",
+                        "in": "header"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Conditionally update when the current version matches",
+                        "name": "X-If-Version",
+                        "in": "header"
+                    },
+                    {
+                        "description": "Metadata payload",
+                        "name": "metadata",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.metadataMutation"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.MetadataUpdateResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/query": {
+            "post": {
+                "description": "Executes a selector-based search within a namespace and returns matching keys plus a cursor for pagination.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "lease"
+                ],
+                "summary": "Query keys within a namespace",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Namespace override (defaults to server setting)",
+                        "name": "namespace",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Maximum number of keys to return (1-1000, defaults to 100)",
+                        "name": "limit",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Opaque pagination cursor",
+                        "name": "cursor",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Selector JSON (optional when providing a JSON body)",
+                        "name": "selector",
+                        "in": "query"
+                    },
+                    {
+                        "description": "Query request (selector, limit, cursor)",
+                        "name": "request",
+                        "in": "body",
+                        "schema": {
+                            "$ref": "#/definitions/api.QueryRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.QueryResponse"
                         }
                     },
                     "400": {
@@ -1324,6 +1499,9 @@ const docTemplate = `{
                 "lease_id": {
                     "type": "string"
                 },
+                "metadata": {
+                    "$ref": "#/definitions/api.MetadataAttributes"
+                },
                 "namespace": {
                     "type": "string"
                 },
@@ -1445,6 +1623,20 @@ const docTemplate = `{
                 }
             }
         },
+        "api.InTerm": {
+            "type": "object",
+            "properties": {
+                "any": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "field": {
+                    "type": "string"
+                }
+            }
+        },
         "api.KeepAliveRequest": {
             "type": "object",
             "properties": {
@@ -1466,6 +1658,31 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "expires_at_unix": {
+                    "type": "integer"
+                }
+            }
+        },
+        "api.MetadataAttributes": {
+            "type": "object",
+            "properties": {
+                "query_hidden": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "api.MetadataUpdateResponse": {
+            "type": "object",
+            "properties": {
+                "key": {
+                    "type": "string"
+                },
+                "metadata": {
+                    "$ref": "#/definitions/api.MetadataAttributes"
+                },
+                "namespace": {
+                    "type": "string"
+                },
+                "version": {
                     "type": "integer"
                 }
             }
@@ -1517,6 +1734,73 @@ const docTemplate = `{
                 }
             }
         },
+        "api.QueryRequest": {
+            "type": "object",
+            "properties": {
+                "cursor": {
+                    "type": "string"
+                },
+                "fields": {
+                    "type": "object",
+                    "additionalProperties": {}
+                },
+                "limit": {
+                    "type": "integer"
+                },
+                "namespace": {
+                    "type": "string"
+                },
+                "selector": {
+                    "$ref": "#/definitions/api.Selector"
+                }
+            }
+        },
+        "api.QueryResponse": {
+            "type": "object",
+            "properties": {
+                "cursor": {
+                    "type": "string"
+                },
+                "index_seq": {
+                    "type": "integer"
+                },
+                "keys": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "metadata": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                },
+                "namespace": {
+                    "type": "string"
+                }
+            }
+        },
+        "api.RangeTerm": {
+            "type": "object",
+            "properties": {
+                "field": {
+                    "type": "string"
+                },
+                "gt": {
+                    "type": "number"
+                },
+                "gte": {
+                    "type": "number"
+                },
+                "lt": {
+                    "type": "number"
+                },
+                "lte": {
+                    "type": "number"
+                }
+            }
+        },
         "api.ReleaseRequest": {
             "type": "object",
             "properties": {
@@ -1550,17 +1834,74 @@ const docTemplate = `{
                 }
             }
         },
+        "api.Selector": {
+            "type": "object",
+            "properties": {
+                "and": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/api.Selector"
+                    }
+                },
+                "eq": {
+                    "$ref": "#/definitions/api.Term"
+                },
+                "exists": {
+                    "type": "string"
+                },
+                "in": {
+                    "$ref": "#/definitions/api.InTerm"
+                },
+                "not": {
+                    "$ref": "#/definitions/api.Selector"
+                },
+                "or": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/api.Selector"
+                    }
+                },
+                "prefix": {
+                    "$ref": "#/definitions/api.Term"
+                },
+                "range": {
+                    "$ref": "#/definitions/api.RangeTerm"
+                }
+            }
+        },
+        "api.Term": {
+            "type": "object",
+            "properties": {
+                "field": {
+                    "type": "string"
+                },
+                "value": {
+                    "type": "string"
+                }
+            }
+        },
         "api.UpdateResponse": {
             "type": "object",
             "properties": {
                 "bytes": {
                     "type": "integer"
                 },
+                "metadata": {
+                    "$ref": "#/definitions/api.MetadataAttributes"
+                },
                 "new_state_etag": {
                     "type": "string"
                 },
                 "new_version": {
                     "type": "integer"
+                }
+            }
+        },
+        "httpapi.metadataMutation": {
+            "type": "object",
+            "properties": {
+                "query_hidden": {
+                    "type": "boolean"
                 }
             }
         }

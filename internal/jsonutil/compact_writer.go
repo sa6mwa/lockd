@@ -49,6 +49,7 @@ func CompactWriter(w io.Writer, r io.Reader, maxBytes int64) error {
 		asciiBuf: make([]byte, 0, 256),
 		numBuf:   make([]byte, 0, 64),
 	}
+	c.stack = c.stackBuf[:0]
 	if err := c.run(); err != nil {
 		return err
 	}
@@ -137,10 +138,6 @@ func (c *compactor) run() error {
 				}
 				// valueComplete adjusts objPhase when primitive; containers
 				// will update it when they close.
-				if frame.objPhase == objExpectValue {
-					// if valueComplete already set phase, skip.
-					// Otherwise we're entering a container; keep phase until completion.
-				}
 			case objExpectComma:
 				if b == ',' {
 					if err := c.writeByte(','); err != nil {
@@ -411,8 +408,6 @@ func (c *compactor) writeNumber(first byte) error {
 	buf := c.numBuf[:0]
 	buf = append(buf, first)
 
-	state := numStart
-
 	nextDigit := func() (byte, error) {
 		b, err := c.readByte()
 		if err != nil {
@@ -421,7 +416,10 @@ func (c *compactor) writeNumber(first byte) error {
 		return b, nil
 	}
 
-	var b byte
+	var (
+		b     byte
+		state numState
+	)
 	var err error
 
 	if first == '-' {
@@ -587,8 +585,10 @@ func (c *compactor) emitASCII() error {
 	}
 }
 
+type numState int
+
 const (
-	numStart = iota
+	numStart numState = iota
 	numAfterZero
 	numInteger
 	numFracStart

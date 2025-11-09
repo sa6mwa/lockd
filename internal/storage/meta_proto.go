@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/structpb"
 
 	lockdproto "pkt.systems/lockd/internal/proto"
 )
@@ -85,6 +86,7 @@ func metaToProto(meta *Meta) *lockdproto.LockMeta {
 	}
 	pm := &lockdproto.LockMeta{
 		Version:             meta.Version,
+		PublishedVersion:    meta.PublishedVersion,
 		StateEtag:           meta.StateETag,
 		UpdatedAtUnix:       meta.UpdatedAtUnix,
 		FencingToken:        meta.FencingToken,
@@ -101,6 +103,15 @@ func metaToProto(meta *Meta) *lockdproto.LockMeta {
 	if len(meta.StateDescriptor) > 0 {
 		pm.StateDescriptor = append([]byte(nil), meta.StateDescriptor...)
 	}
+	if len(meta.Attributes) > 0 {
+		attrs := make(map[string]interface{}, len(meta.Attributes))
+		for k, v := range meta.Attributes {
+			attrs[k] = v
+		}
+		if s, err := structpb.NewStruct(attrs); err == nil {
+			pm.Attributes = s
+		}
+	}
 	return pm
 }
 
@@ -109,10 +120,11 @@ func metaFromProto(pm *lockdproto.LockMeta) *Meta {
 		return &Meta{}
 	}
 	meta := &Meta{
-		Version:       pm.GetVersion(),
-		StateETag:     pm.GetStateEtag(),
-		UpdatedAtUnix: pm.GetUpdatedAtUnix(),
-		FencingToken:  pm.GetFencingToken(),
+		Version:          pm.GetVersion(),
+		PublishedVersion: pm.GetPublishedVersion(),
+		StateETag:        pm.GetStateEtag(),
+		UpdatedAtUnix:    pm.GetUpdatedAtUnix(),
+		FencingToken:     pm.GetFencingToken(),
 	}
 	if lease := pm.GetLease(); lease != nil {
 		meta.Lease = &Lease{
@@ -126,5 +138,11 @@ func metaFromProto(pm *lockdproto.LockMeta) *Meta {
 		meta.StateDescriptor = append([]byte(nil), desc...)
 	}
 	meta.StatePlaintextBytes = pm.GetStatePlaintextBytes()
+	if attrs := pm.GetAttributes(); attrs != nil {
+		meta.Attributes = make(map[string]string, len(attrs.Fields))
+		for k, v := range attrs.Fields {
+			meta.Attributes[k] = v.GetStringValue()
+		}
+	}
 	return meta
 }

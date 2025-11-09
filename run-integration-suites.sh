@@ -71,11 +71,17 @@ add_backend() {
 }
 
 add_backend mem 1 0 0
+add_suite "mem/query" "mem" "integration mem query" ""
 add_backend disk 1 1 1
+add_suite "disk/query" "disk" "integration disk query" ".env.disk"
 add_backend nfs 1 0 1
+add_suite "nfs/query" "nfs" "integration nfs query" ".env.nfs"
 add_backend aws 1 1 1
+add_suite "aws/query" "aws" "integration aws query" ".env.aws"
 add_backend azure 1 1 1
+add_suite "azure/query" "azure" "integration azure query" ".env.azure"
 add_backend minio 1 1 1
+add_suite "minio/query" "minio" "integration minio query" ".env.minio"
 
 list_suites() {
   echo "Available suites:"

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	"pkt.systems/lockd/lql"
 )
 
 func TestParseMutations(t *testing.T) {
@@ -24,13 +26,13 @@ func TestParseMutations(t *testing.T) {
 	if len(muts) != 7 {
 		t.Fatalf("expected 7 mutations, got %d", len(muts))
 	}
-	if muts[0].Kind != mutationSet || muts[0].Value != int64(42) {
+	if muts[0].Kind != lql.MutationSet || muts[0].Value != int64(42) {
 		t.Fatalf("unexpected mutation[0]: %+v", muts[0])
 	}
-	if muts[3].Kind != mutationIncrement || muts[3].Delta != 1 {
+	if muts[3].Kind != lql.MutationIncrement || muts[3].Delta != 1 {
 		t.Fatalf("unexpected mutation[3]: %+v", muts[3])
 	}
-	if muts[4].Kind != mutationIncrement || muts[4].Delta != -3 {
+	if muts[4].Kind != lql.MutationIncrement || muts[4].Delta != -3 {
 		t.Fatalf("unexpected mutation[4]: %+v", muts[4])
 	}
 	timeMut := muts[5]
@@ -39,7 +41,7 @@ func TestParseMutations(t *testing.T) {
 	}
 	hasRemove := false
 	for _, mut := range muts {
-		if mut.Kind == mutationRemove {
+		if mut.Kind == lql.MutationRemove {
 			hasRemove = true
 			if len(mut.Path) == 0 {
 				t.Fatalf("remove mutation missing path: %+v", mut)

@@ -201,9 +201,27 @@
 //   - `aws://bucket/prefix` – AWS S3 (uses standard AWS credential sources, requires region)
 //   - `s3://host:port/bucket` – MinIO or other S3-compatible stores (TLS on unless `?insecure=1`)
 //
-// JSON uploads are compacted using the selected compactor
-// (see `Config.JSONUtil`), and large payloads spill to disk after
+// JSON uploads are compacted using the selected compactor (see
+// `Config.JSONUtil`), and large payloads spill to disk after
 // `Config.SpoolMemoryThreshold`.
+//
+// # LQL query & mutation language
+//
+// Both the CLI and HTTP APIs share a common selector/mutation DSL implemented
+// by `pkt.systems/lockd/lql`. Selectors accept dotted or brace forms
+// (`and.eq{field=status,value=open}`, `or.1.range{field=progress.percent,gte=50}`),
+// while mutations cover assignments, arithmetic (`++`, `--`, `=+5`), removals
+// (`rm:`/`delete:`), `time:` aliases for RFC3339 timestamps, and brace
+// shorthand that fans out to nested keys. Examples:
+//
+//	lockd client set --key ledger \
+//	    'data{"hello key"="mars traveler",count++}' \
+//	    meta.previous=world \
+//	    time:meta.processed=NOW
+//
+// Keys wrapped in quotes preserve spaces or punctuation, and commas/newlines
+// can be mixed freely—making it practical to paste production-style JSON paths
+// into CLI tests, Go unit tests, or query strings (`/v1/query?and.eq{...}`).
 //
 // Consult README.md for detailed guidance, additional examples, and operational
 // considerations (TLS, auth bundles, environment variables).

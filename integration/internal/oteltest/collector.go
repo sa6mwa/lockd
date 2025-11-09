@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"sync"
 	"time"
@@ -43,7 +44,7 @@ func Start() (*Collector, string, error) {
 
 	go func() {
 		if serveErr := srv.Serve(lis); serveErr != nil && !errors.Is(serveErr, grpc.ErrServerStopped) {
-			// Silence unexpected shutdowns; WaitForSpans will time out the test if exporter fails.
+			log.Printf("oteltest collector stopped unexpectedly: %v", serveErr)
 		}
 	}()
 

@@ -122,8 +122,12 @@ func consumeStringResumable(flags *valueFlags, b []byte, resume int, validateUTF
 						flags.Join(stringNonCanonical)
 						return n - 6, newInvalidEscapeSequenceError(b[n-6:])
 					}
+					if b[n] != '\\' || b[n+1] != 'u' {
+						flags.Join(stringNonCanonical)
+						return n - 6, newInvalidEscapeSequenceError(b[n-6 : n+6])
+					}
 					v2, ok := parseHexUint16(b[n+2 : n+6])
-					if !(b[n] == '\\' && b[n+1] == 'u' && ok) {
+					if !ok {
 						flags.Join(stringNonCanonical)
 						return n - 6, newInvalidEscapeSequenceError(b[n-6 : n+6])
 					}
@@ -324,7 +328,7 @@ func hasEscapedUTF16Prefix(b []byte, lowerSurrogate bool) bool {
 			return false
 		case i == 2 && lowerSurrogate && c != 'd' && c != 'D':
 			return false
-		case i == 3 && lowerSurrogate && !('c' <= c && c <= 'f') && !('C' <= c && c <= 'F'):
+		case i == 3 && lowerSurrogate && !(('c' <= c && c <= 'f') || ('C' <= c && c <= 'F')):
 			return false
 		case i >= 6:
 			return true

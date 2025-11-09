@@ -834,18 +834,6 @@ func (s *Store) objectKey(namespace, key string) string {
 	return s.withPrefix(strings.TrimPrefix(combined, "/"))
 }
 
-func (s *Store) trimObjectPrefix(object string) string {
-	if s.cfg.Prefix == "" {
-		return strings.TrimPrefix(object, "/")
-	}
-	prefix := strings.Trim(s.cfg.Prefix, "/")
-	if prefix == "" {
-		return strings.TrimPrefix(object, "/")
-	}
-	object = strings.TrimPrefix(object, prefix+"/")
-	return strings.TrimPrefix(object, "/")
-}
-
 func (s *Store) withPrefix(p string) string {
 	if s.cfg.Prefix == "" {
 		return p

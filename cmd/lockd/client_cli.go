@@ -1403,6 +1403,7 @@ func newClientGetCommand(cfg *clientCLIConfig) *cobra.Command {
 	var fencing string
 	var keyFlag string
 	var namespace string
+	var public bool
 	cmd := &cobra.Command{
 		Use:   "get",
 		Short: "Fetch state JSON for a key",
@@ -1416,10 +1417,6 @@ func newClientGetCommand(cfg *clientCLIConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			lease, err := resolveLease(leaseID)
-			if err != nil {
-				return err
-			}
 			if err := cfg.load(); err != nil {
 				return err
 			}
@@ -1428,14 +1425,27 @@ func newClientGetCommand(cfg *clientCLIConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			token, err := resolveFencing(fencing)
-			if err != nil {
-				return err
+			var lease string
+			if !public {
+				lease, err = resolveLease(leaseID)
+				if err != nil {
+					return err
+				}
+				token, err := resolveFencing(fencing)
+				if err != nil {
+					return err
+				}
+				cli.RegisterLeaseToken(lease, token)
 			}
-			cli.RegisterLeaseToken(lease, token)
 			ns := resolveNamespaceInput(namespace)
 			ctx, _ := commandContextWithCorrelation(cmd)
-			reader, etag, version, err := cli.GetWithNamespace(ctx, ns, key, lease)
+			var reader io.ReadCloser
+			var etag, version string
+			if public {
+				reader, etag, version, err = cli.GetPublicWithNamespace(ctx, ns, key)
+			} else {
+				reader, etag, version, err = cli.GetWithNamespace(ctx, ns, key, lease)
+			}
 			if err != nil {
 				return err
 			}
@@ -1482,6 +1492,7 @@ func newClientGetCommand(cfg *clientCLIConfig) *cobra.Command {
 	cmd.Flags().BoolVar(&showMeta, "show-meta", false, "print version/etag metadata to stderr")
 	cmd.Flags().StringVar(&fencing, "fencing-token", "", "fencing token (default from "+envFencingToken+")")
 	cmd.Flags().StringVarP(&namespace, "namespace", "n", "", "namespace for the key (defaults to server configuration)")
+	cmd.Flags().BoolVar(&public, "public", false, "read the latest published snapshot without acquiring a lease")
 	return cmd
 }
 
@@ -1652,7 +1663,10 @@ func newClientSetCommand(cfg *clientCLIConfig) *cobra.Command {
 		Use:   "set mutation [mutation...]",
 		Short: "Mutate JSON state fields for an active lease",
 		Example: `  # Increment a counter and stamp the current time
-  lockd client set --key orders progress.counter++ time:progress.updated=NOW`,
+  lockd client set --key orders progress.counter++ time:progress.updated=NOW
+
+  # Mutate multiple fields with brace shorthand + quoted keys
+  lockd client set --key ledger 'data{"hello key"="mars traveler",count++}' meta.previous=world`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Args:          cobra.MinimumNArgs(1),

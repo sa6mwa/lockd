@@ -2,18 +2,17 @@
 // versions:
 // 	protoc-gen-go v1.36.10
 // 	protoc        v3.21.12
-// source: internal/proto/storage.proto
+// source: storage.proto
 
 package proto
 
 import (
-	reflect "reflect"
-	sync "sync"
-	unsafe "unsafe"
-
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	structpb "google.golang.org/protobuf/types/known/structpb"
+	reflect "reflect"
+	sync "sync"
+	unsafe "unsafe"
 )
 
 const (
@@ -35,7 +34,7 @@ type Lease struct {
 
 func (x *Lease) Reset() {
 	*x = Lease{}
-	mi := &file_internal_proto_storage_proto_msgTypes[0]
+	mi := &file_storage_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -47,7 +46,7 @@ func (x *Lease) String() string {
 func (*Lease) ProtoMessage() {}
 
 func (x *Lease) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_proto_storage_proto_msgTypes[0]
+	mi := &file_storage_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -60,7 +59,7 @@ func (x *Lease) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Lease.ProtoReflect.Descriptor instead.
 func (*Lease) Descriptor() ([]byte, []int) {
-	return file_internal_proto_storage_proto_rawDescGZIP(), []int{0}
+	return file_storage_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *Lease) GetLeaseId() string {
@@ -100,13 +99,15 @@ type LockMeta struct {
 	FencingToken        int64                  `protobuf:"varint,5,opt,name=fencing_token,json=fencingToken,proto3" json:"fencing_token,omitempty"`
 	StateDescriptor     []byte                 `protobuf:"bytes,6,opt,name=state_descriptor,json=stateDescriptor,proto3" json:"state_descriptor,omitempty"`
 	StatePlaintextBytes int64                  `protobuf:"varint,7,opt,name=state_plaintext_bytes,json=statePlaintextBytes,proto3" json:"state_plaintext_bytes,omitempty"`
+	PublishedVersion    int64                  `protobuf:"varint,8,opt,name=published_version,json=publishedVersion,proto3" json:"published_version,omitempty"`
+	Attributes          *structpb.Struct       `protobuf:"bytes,9,opt,name=attributes,proto3" json:"attributes,omitempty"`
 	unknownFields       protoimpl.UnknownFields
 	sizeCache           protoimpl.SizeCache
 }
 
 func (x *LockMeta) Reset() {
 	*x = LockMeta{}
-	mi := &file_internal_proto_storage_proto_msgTypes[1]
+	mi := &file_storage_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -118,7 +119,7 @@ func (x *LockMeta) String() string {
 func (*LockMeta) ProtoMessage() {}
 
 func (x *LockMeta) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_proto_storage_proto_msgTypes[1]
+	mi := &file_storage_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -131,7 +132,7 @@ func (x *LockMeta) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LockMeta.ProtoReflect.Descriptor instead.
 func (*LockMeta) Descriptor() ([]byte, []int) {
-	return file_internal_proto_storage_proto_rawDescGZIP(), []int{1}
+	return file_storage_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *LockMeta) GetLease() *Lease {
@@ -183,6 +184,20 @@ func (x *LockMeta) GetStatePlaintextBytes() int64 {
 	return 0
 }
 
+func (x *LockMeta) GetPublishedVersion() int64 {
+	if x != nil {
+		return x.PublishedVersion
+	}
+	return 0
+}
+
+func (x *LockMeta) GetAttributes() *structpb.Struct {
+	if x != nil {
+		return x.Attributes
+	}
+	return nil
+}
+
 type MetaRecord struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Etag          string                 `protobuf:"bytes,1,opt,name=etag,proto3" json:"etag,omitempty"`
@@ -193,7 +208,7 @@ type MetaRecord struct {
 
 func (x *MetaRecord) Reset() {
 	*x = MetaRecord{}
-	mi := &file_internal_proto_storage_proto_msgTypes[2]
+	mi := &file_storage_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -205,7 +220,7 @@ func (x *MetaRecord) String() string {
 func (*MetaRecord) ProtoMessage() {}
 
 func (x *MetaRecord) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_proto_storage_proto_msgTypes[2]
+	mi := &file_storage_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -218,7 +233,7 @@ func (x *MetaRecord) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MetaRecord.ProtoReflect.Descriptor instead.
 func (*MetaRecord) Descriptor() ([]byte, []int) {
-	return file_internal_proto_storage_proto_rawDescGZIP(), []int{2}
+	return file_storage_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *MetaRecord) GetEtag() string {
@@ -260,7 +275,7 @@ type QueueMessageMeta struct {
 
 func (x *QueueMessageMeta) Reset() {
 	*x = QueueMessageMeta{}
-	mi := &file_internal_proto_storage_proto_msgTypes[3]
+	mi := &file_storage_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -272,7 +287,7 @@ func (x *QueueMessageMeta) String() string {
 func (*QueueMessageMeta) ProtoMessage() {}
 
 func (x *QueueMessageMeta) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_proto_storage_proto_msgTypes[3]
+	mi := &file_storage_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -285,7 +300,7 @@ func (x *QueueMessageMeta) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueueMessageMeta.ProtoReflect.Descriptor instead.
 func (*QueueMessageMeta) Descriptor() ([]byte, []int) {
-	return file_internal_proto_storage_proto_rawDescGZIP(), []int{3}
+	return file_storage_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *QueueMessageMeta) GetType() string {
@@ -407,16 +422,16 @@ func (x *QueueMessageMeta) GetMetaDescriptor() []byte {
 	return nil
 }
 
-var File_internal_proto_storage_proto protoreflect.FileDescriptor
+var File_storage_proto protoreflect.FileDescriptor
 
-const file_internal_proto_storage_proto_rawDesc = "" +
+const file_storage_proto_rawDesc = "" +
 	"\n" +
-	"\x1cinternal/proto/storage.proto\x12\x0elockd.internal\x1a\x1cgoogle/protobuf/struct.proto\"\x85\x01\n" +
+	"\rstorage.proto\x12\x0elockd.internal\x1a\x1cgoogle/protobuf/struct.proto\"\x85\x01\n" +
 	"\x05Lease\x12\x19\n" +
 	"\blease_id\x18\x01 \x01(\tR\aleaseId\x12\x14\n" +
 	"\x05owner\x18\x02 \x01(\tR\x05owner\x12&\n" +
 	"\x0fexpires_at_unix\x18\x03 \x01(\x03R\rexpiresAtUnix\x12#\n" +
-	"\rfencing_token\x18\x04 \x01(\x03R\ffencingToken\"\x9c\x02\n" +
+	"\rfencing_token\x18\x04 \x01(\x03R\ffencingToken\"\x82\x03\n" +
 	"\bLockMeta\x12+\n" +
 	"\x05lease\x18\x01 \x01(\v2\x15.lockd.internal.LeaseR\x05lease\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\x03R\aversion\x12\x1d\n" +
@@ -425,7 +440,11 @@ const file_internal_proto_storage_proto_rawDesc = "" +
 	"\x0fupdated_at_unix\x18\x04 \x01(\x03R\rupdatedAtUnix\x12#\n" +
 	"\rfencing_token\x18\x05 \x01(\x03R\ffencingToken\x12)\n" +
 	"\x10state_descriptor\x18\x06 \x01(\fR\x0fstateDescriptor\x122\n" +
-	"\x15state_plaintext_bytes\x18\a \x01(\x03R\x13statePlaintextBytes\"N\n" +
+	"\x15state_plaintext_bytes\x18\a \x01(\x03R\x13statePlaintextBytes\x12+\n" +
+	"\x11published_version\x18\b \x01(\x03R\x10publishedVersion\x127\n" +
+	"\n" +
+	"attributes\x18\t \x01(\v2\x17.google.protobuf.StructR\n" +
+	"attributes\"N\n" +
 	"\n" +
 	"MetaRecord\x12\x12\n" +
 	"\x04etag\x18\x01 \x01(\tR\x04etag\x12,\n" +
@@ -455,19 +474,19 @@ const file_internal_proto_storage_proto_rawDesc = "" +
 	"\x10_expires_at_unixB(Z&pkt.systems/lockd/internal/proto;protob\x06proto3"
 
 var (
-	file_internal_proto_storage_proto_rawDescOnce sync.Once
-	file_internal_proto_storage_proto_rawDescData []byte
+	file_storage_proto_rawDescOnce sync.Once
+	file_storage_proto_rawDescData []byte
 )
 
-func file_internal_proto_storage_proto_rawDescGZIP() []byte {
-	file_internal_proto_storage_proto_rawDescOnce.Do(func() {
-		file_internal_proto_storage_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_internal_proto_storage_proto_rawDesc), len(file_internal_proto_storage_proto_rawDesc)))
+func file_storage_proto_rawDescGZIP() []byte {
+	file_storage_proto_rawDescOnce.Do(func() {
+		file_storage_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_storage_proto_rawDesc), len(file_storage_proto_rawDesc)))
 	})
-	return file_internal_proto_storage_proto_rawDescData
+	return file_storage_proto_rawDescData
 }
 
-var file_internal_proto_storage_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
-var file_internal_proto_storage_proto_goTypes = []any{
+var file_storage_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_storage_proto_goTypes = []any{
 	(*Lease)(nil),            // 0: lockd.internal.Lease
 	(*LockMeta)(nil),         // 1: lockd.internal.LockMeta
 	(*MetaRecord)(nil),       // 2: lockd.internal.MetaRecord
@@ -475,39 +494,40 @@ var file_internal_proto_storage_proto_goTypes = []any{
 	(*structpb.Struct)(nil),  // 4: google.protobuf.Struct
 	(*structpb.Value)(nil),   // 5: google.protobuf.Value
 }
-var file_internal_proto_storage_proto_depIdxs = []int32{
+var file_storage_proto_depIdxs = []int32{
 	0, // 0: lockd.internal.LockMeta.lease:type_name -> lockd.internal.Lease
-	1, // 1: lockd.internal.MetaRecord.meta:type_name -> lockd.internal.LockMeta
-	4, // 2: lockd.internal.QueueMessageMeta.attributes:type_name -> google.protobuf.Struct
-	5, // 3: lockd.internal.QueueMessageMeta.last_error:type_name -> google.protobuf.Value
-	4, // [4:4] is the sub-list for method output_type
-	4, // [4:4] is the sub-list for method input_type
-	4, // [4:4] is the sub-list for extension type_name
-	4, // [4:4] is the sub-list for extension extendee
-	0, // [0:4] is the sub-list for field type_name
+	4, // 1: lockd.internal.LockMeta.attributes:type_name -> google.protobuf.Struct
+	1, // 2: lockd.internal.MetaRecord.meta:type_name -> lockd.internal.LockMeta
+	4, // 3: lockd.internal.QueueMessageMeta.attributes:type_name -> google.protobuf.Struct
+	5, // 4: lockd.internal.QueueMessageMeta.last_error:type_name -> google.protobuf.Value
+	5, // [5:5] is the sub-list for method output_type
+	5, // [5:5] is the sub-list for method input_type
+	5, // [5:5] is the sub-list for extension type_name
+	5, // [5:5] is the sub-list for extension extendee
+	0, // [0:5] is the sub-list for field type_name
 }
 
-func init() { file_internal_proto_storage_proto_init() }
-func file_internal_proto_storage_proto_init() {
-	if File_internal_proto_storage_proto != nil {
+func init() { file_storage_proto_init() }
+func file_storage_proto_init() {
+	if File_storage_proto != nil {
 		return
 	}
-	file_internal_proto_storage_proto_msgTypes[3].OneofWrappers = []any{}
+	file_storage_proto_msgTypes[3].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_internal_proto_storage_proto_rawDesc), len(file_internal_proto_storage_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_storage_proto_rawDesc), len(file_storage_proto_rawDesc)),
 			NumEnums:      0,
 			NumMessages:   4,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
-		GoTypes:           file_internal_proto_storage_proto_goTypes,
-		DependencyIndexes: file_internal_proto_storage_proto_depIdxs,
-		MessageInfos:      file_internal_proto_storage_proto_msgTypes,
+		GoTypes:           file_storage_proto_goTypes,
+		DependencyIndexes: file_storage_proto_depIdxs,
+		MessageInfos:      file_storage_proto_msgTypes,
 	}.Build()
-	File_internal_proto_storage_proto = out.File
-	file_internal_proto_storage_proto_goTypes = nil
-	file_internal_proto_storage_proto_depIdxs = nil
+	File_storage_proto = out.File
+	file_storage_proto_goTypes = nil
+	file_storage_proto_depIdxs = nil
 }

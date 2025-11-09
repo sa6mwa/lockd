@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,7 +19,9 @@ import (
 	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/internal/correlation"
 	"pkt.systems/lockd/internal/loggingutil"
+	"pkt.systems/lockd/internal/search"
 	"pkt.systems/lockd/internal/storage/memory"
+	"pkt.systems/lockd/namespaces"
 )
 
 func TestAcquireLifecycle(t *testing.T) {
@@ -112,6 +115,199 @@ func TestAcquireLifecycle(t *testing.T) {
 	}
 	if !releaseResp.Released {
 		t.Fatal("expected release to succeed")
+	}
+}
+
+func TestQueryDisabled(t *testing.T) {
+	store := memory.New()
+	handler := New(Config{
+		Store:        store,
+		Logger:       pslog.NewStructured(io.Discard),
+		Clock:        newStubClock(time.Unix(1_700_000_000, 0)),
+		JSONMaxBytes: 1 << 20,
+	})
+	mux := http.NewServeMux()
+	handler.Register(mux)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/query?namespace=default", http.NoBody)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("query request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotImplemented {
+		t.Fatalf("expected 501, got %d", resp.StatusCode)
+	}
+	var errResp api.ErrorResponse
+	if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if errResp.ErrorCode != "query_disabled" {
+		t.Fatalf("expected query_disabled, got %s", errResp.ErrorCode)
+	}
+}
+
+func TestQuerySuccess(t *testing.T) {
+	store := memory.New()
+	adapter := &stubSearchAdapter{
+		result: search.Result{
+			Keys:     []string{"orders/1", "orders/2"},
+			Cursor:   "next-cursor",
+			IndexSeq: 42,
+			Metadata: map[string]string{"hits": "2"},
+		},
+	}
+	handler := New(Config{
+		Store:         store,
+		Logger:        pslog.NewStructured(io.Discard),
+		Clock:         newStubClock(time.Unix(1_700_000_000, 0)),
+		SearchAdapter: adapter,
+		JSONMaxBytes:  1 << 20,
+	})
+	mux := http.NewServeMux()
+	handler.Register(mux)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	reqBody := api.QueryRequest{
+		Namespace: "custom",
+		Selector: api.Selector{
+			Eq: &api.Term{Field: "status", Value: "open"},
+		},
+		Limit: 5,
+	}
+	payload, _ := json.Marshal(reqBody)
+	resp, err := http.Post(server.URL+"/v1/query", "application/json", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("query request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, data)
+	}
+	var out api.QueryResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if out.Cursor != "next-cursor" || out.IndexSeq != 42 {
+		t.Fatalf("unexpected response %+v", out)
+	}
+	if len(out.Keys) != 2 {
+		t.Fatalf("expected 2 keys, got %d", len(out.Keys))
+	}
+	if adapter.last.Namespace != "custom" {
+		t.Fatalf("adapter namespace mismatch: %s", adapter.last.Namespace)
+	}
+	if adapter.last.Limit != 5 {
+		t.Fatalf("expected limit 5, got %d", adapter.last.Limit)
+	}
+	if adapter.last.Selector.Eq == nil || adapter.last.Selector.Eq.Field != "status" {
+		t.Fatalf("selector not forwarded: %+v", adapter.last.Selector)
+	}
+}
+
+func TestQueryInvalidCursor(t *testing.T) {
+	store := memory.New()
+	adapter := &stubSearchAdapter{
+		err: fmt.Errorf("%w: bad cursor", search.ErrInvalidCursor),
+	}
+	handler := New(Config{
+		Store:         store,
+		Logger:        pslog.NewStructured(io.Discard),
+		Clock:         newStubClock(time.Unix(1_700_000_000, 0)),
+		SearchAdapter: adapter,
+		JSONMaxBytes:  1 << 20,
+	})
+	mux := http.NewServeMux()
+	handler.Register(mux)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	resp, err := http.Post(server.URL+"/v1/query", "application/json", bytes.NewReader([]byte(`{"namespace":"default","cursor":"opaque"}`)))
+	if err != nil {
+		t.Fatalf("query request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		data, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 400, got %d: %s", resp.StatusCode, data)
+	}
+	var errResp api.ErrorResponse
+	if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if errResp.ErrorCode != "invalid_cursor" {
+		t.Fatalf("expected invalid_cursor, got %s", errResp.ErrorCode)
+	}
+}
+
+func TestGetPublicWithoutLease(t *testing.T) {
+	store := memory.New()
+	clk := newStubClock(time.Unix(1_700_000_000, 0))
+	logger := pslog.NewStructured(io.Discard)
+
+	handler := New(Config{
+		Store:        store,
+		Logger:       logger,
+		Clock:        clk,
+		JSONMaxBytes: 1 << 20,
+		DefaultTTL:   15 * time.Second,
+		MaxTTL:       1 * time.Minute,
+		AcquireBlock: 10 * time.Second,
+	})
+	mux := http.NewServeMux()
+	handler.Register(mux)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	acquireReq := api.AcquireRequest{
+		Key:        "orders",
+		Owner:      "worker-public",
+		TTLSeconds: 10,
+	}
+	var acquireResp api.AcquireResponse
+	status := doJSON(t, server, http.MethodPost, "/v1/acquire", nil, acquireReq, &acquireResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected acquire 200, got %d", status)
+	}
+	stateHeaders := map[string]string{
+		"X-Lease-ID":      acquireResp.LeaseID,
+		"X-Fencing-Token": strconv.FormatInt(acquireResp.FencingToken, 10),
+	}
+	updateBody := map[string]any{"cursor": 99}
+	status = doJSON(t, server, http.MethodPost, "/v1/update?key=orders", stateHeaders, updateBody, nil)
+	if status != http.StatusOK {
+		t.Fatalf("expected update state 200, got %d", status)
+	}
+
+	publicReq, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/get?key=orders&public=1", http.NoBody)
+	publicResp, err := http.DefaultClient.Do(publicReq)
+	if err != nil {
+		t.Fatalf("public get request failed: %v", err)
+	}
+	defer publicResp.Body.Close()
+	if publicResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected public get 200, got %d", publicResp.StatusCode)
+	}
+	var state map[string]any
+	if err := json.NewDecoder(publicResp.Body).Decode(&state); err != nil {
+		t.Fatalf("decode public state: %v", err)
+	}
+	if v := state["cursor"].(float64); v != 99 {
+		t.Fatalf("expected cursor 99, got %v", v)
+	}
+
+	emptyReq, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/get?key=missing&public=1", http.NoBody)
+	emptyResp, err := http.DefaultClient.Do(emptyReq)
+	if err != nil {
+		t.Fatalf("empty public get request failed: %v", err)
+	}
+	defer emptyResp.Body.Close()
+	if emptyResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected missing public get 204, got %d", emptyResp.StatusCode)
 	}
 }
 
@@ -389,6 +585,141 @@ func TestGetRequiresLease(t *testing.T) {
 	}
 }
 
+func TestMetadataUpdateTogglesQueryHidden(t *testing.T) {
+	store := memory.New()
+	handler := New(Config{
+		Store:        store,
+		Logger:       loggingutil.NoopLogger(),
+		Clock:        newStubClock(time.Unix(1_700_000_000, 0)),
+		JSONMaxBytes: 1 << 20,
+		DefaultTTL:   10 * time.Second,
+		MaxTTL:       time.Minute,
+		AcquireBlock: 2 * time.Second,
+	})
+	mux := http.NewServeMux()
+	handler.Register(mux)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	acquireReq := api.AcquireRequest{Key: "orders", Owner: "worker", TTLSeconds: 15}
+	var acquireResp api.AcquireResponse
+	doJSON(t, server, http.MethodPost, "/v1/acquire", nil, acquireReq, &acquireResp)
+	token := strconv.FormatInt(acquireResp.FencingToken, 10)
+
+	headers := map[string]string{
+		"X-Lease-ID":      acquireResp.LeaseID,
+		"X-Fencing-Token": token,
+	}
+	doJSON(t, server, http.MethodPost, "/v1/update?key=orders", headers, map[string]any{"cursor": 1}, nil)
+
+	var metaResp api.MetadataUpdateResponse
+	status := doJSON(t, server, http.MethodPost, "/v1/metadata?key=orders", headers, map[string]any{"query_hidden": true}, &metaResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected metadata update 200, got %d", status)
+	}
+	if metaResp.Metadata.QueryHidden == nil || !*metaResp.Metadata.QueryHidden {
+		t.Fatalf("expected query_hidden metadata, got %+v", metaResp.Metadata)
+	}
+	meta, _, err := store.LoadMeta(context.Background(), namespaces.Default, "orders")
+	if err != nil {
+		t.Fatalf("load meta: %v", err)
+	}
+	if !meta.QueryExcluded() {
+		t.Fatalf("expected meta to be query excluded")
+	}
+
+	clearHeaders := map[string]string{
+		"X-Lease-ID":               acquireResp.LeaseID,
+		"X-Fencing-Token":          token,
+		headerMetadataQueryHidden: "false",
+	}
+	metaResp = api.MetadataUpdateResponse{}
+	status = doJSON(t, server, http.MethodPost, "/v1/metadata?key=orders", clearHeaders, nil, &metaResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected metadata clear 200, got %d", status)
+	}
+	if metaResp.Metadata.QueryHidden != nil {
+		t.Fatalf("expected metadata to omit query_hidden, got %+v", metaResp.Metadata)
+	}
+	meta, _, err = store.LoadMeta(context.Background(), namespaces.Default, "orders")
+	if err != nil {
+		t.Fatalf("load meta: %v", err)
+	}
+	if meta.QueryExcluded() {
+		t.Fatalf("expected query exclusion cleared")
+	}
+}
+
+func TestMetadataUpdateValidations(t *testing.T) {
+	store := memory.New()
+	handler := New(Config{
+		Store:        store,
+		Logger:       loggingutil.NoopLogger(),
+		Clock:        newStubClock(time.Unix(1_700_000_000, 0)),
+		JSONMaxBytes: 1 << 20,
+		DefaultTTL:   15 * time.Second,
+		MaxTTL:       time.Minute,
+	})
+	mux := http.NewServeMux()
+	handler.Register(mux)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	acquireReq := api.AcquireRequest{Key: "alpha", Owner: "worker", TTLSeconds: 10}
+	var acquireResp api.AcquireResponse
+	doJSON(t, server, http.MethodPost, "/v1/acquire", nil, acquireReq, &acquireResp)
+	token := strconv.FormatInt(acquireResp.FencingToken, 10)
+	headers := map[string]string{
+		"X-Lease-ID":      acquireResp.LeaseID,
+		"X-Fencing-Token": token,
+	}
+	// Seed metadata via update so version is >0.
+	doJSON(t, server, http.MethodPost, "/v1/update?key=alpha", headers, map[string]int{"cursor": 5}, nil)
+
+	t.Run("invalid header value", func(t *testing.T) {
+		badHeaders := map[string]string{
+			"X-Lease-ID":               acquireResp.LeaseID,
+			"X-Fencing-Token":          token,
+			headerMetadataQueryHidden: "definitely-not-bool",
+		}
+		var errResp api.ErrorResponse
+		status := doJSON(t, server, http.MethodPost, "/v1/metadata?key=alpha", badHeaders, nil, &errResp)
+		if status != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d", status)
+		}
+		if errResp.ErrorCode != "invalid_metadata" {
+			t.Fatalf("expected invalid_metadata, got %s", errResp.ErrorCode)
+		}
+	})
+
+	t.Run("missing fields", func(t *testing.T) {
+		var errResp api.ErrorResponse
+		status := doJSON(t, server, http.MethodPost, "/v1/metadata?key=alpha", headers, nil, &errResp)
+		if status != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d", status)
+		}
+		if errResp.ErrorCode != "invalid_metadata" {
+			t.Fatalf("expected invalid_metadata, got %s", errResp.ErrorCode)
+		}
+	})
+
+	t.Run("version conflict", func(t *testing.T) {
+		conflictHeaders := map[string]string{
+			"X-Lease-ID":      acquireResp.LeaseID,
+			"X-Fencing-Token": token,
+			"X-If-Version":    "999",
+		}
+		var errResp api.ErrorResponse
+		status := doJSON(t, server, http.MethodPost, "/v1/metadata?key=alpha", conflictHeaders, map[string]any{"query_hidden": true}, &errResp)
+		if status != http.StatusConflict {
+			t.Fatalf("expected 409, got %d", status)
+		}
+		if errResp.ErrorCode != "version_conflict" {
+			t.Fatalf("expected version_conflict, got %s", errResp.ErrorCode)
+		}
+	})
+}
+
 func doJSON(t *testing.T, server *httptest.Server, method, path string, headers map[string]string, body any, out any) int {
 	t.Helper()
 	var payload io.Reader
@@ -513,4 +844,18 @@ func TestWaitBackoffRespectsLimit(t *testing.T) {
 	if sleep < 0 {
 		t.Fatalf("sleep negative: %s", sleep)
 	}
+}
+
+type stubSearchAdapter struct {
+	last   search.Request
+	result search.Result
+	err    error
+}
+
+func (s *stubSearchAdapter) Query(ctx context.Context, req search.Request) (search.Result, error) {
+	s.last = req
+	if s.err != nil {
+		return search.Result{}, s.err
+	}
+	return s.result, nil
 }

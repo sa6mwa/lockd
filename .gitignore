@@ -1,3 +1,4 @@
+testdata/
 /lockd
 /lockc
 /cmd/lockd/lockd

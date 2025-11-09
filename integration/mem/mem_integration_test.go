@@ -147,6 +147,59 @@ func TestMemAutoKeyAcquire(t *testing.T) {
 	runMemAutoKeyAcquireScenario(t, "mem-auto")
 }
 
+func TestMemPublicGetAfterRelease(t *testing.T) {
+	cfg := buildMemConfig(t)
+	cli := startMemServer(t, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	key := "mem-public-" + uuidv7.NewString()
+	lease := acquireWithRetry(t, ctx, cli, key, "public-reader", 30, lockdclient.BlockWaitForever)
+	stateBody, _ := json.Marshal(map[string]any{"payload": "public", "count": 1})
+	if _, err := lease.UpdateBytes(ctx, stateBody); err != nil {
+		t.Fatalf("update state: %v", err)
+	}
+
+	// Release the lease so the key has no active holder.
+	if err := lease.Release(ctx); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	// Attempt a normal leased GET using the old lease id/token – expect lease_required.
+	token := strconv.FormatInt(lease.FencingToken, 10)
+	cli.RegisterLeaseToken(lease.LeaseID, token)
+	_, _, _, err := cli.GetWithNamespace(ctx, "", key, lease.LeaseID)
+	var apiErr *lockdclient.APIError
+	if err == nil || !errors.As(err, &apiErr) || apiErr.Response.ErrorCode != "lease_required" {
+		t.Fatalf("expected lease_required from stale lease get, got %v", err)
+	}
+
+	// Public GET should succeed without a lease.
+	reader, etag, version, err := cli.GetPublicWithNamespace(ctx, "", key)
+	if err != nil {
+		t.Fatalf("public get failed: %v", err)
+	}
+	if reader == nil {
+		t.Fatalf("expected public payload")
+	}
+	defer reader.Close()
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read public body: %v", err)
+	}
+	if len(etag) == 0 || len(version) == 0 {
+		t.Fatalf("expected etag and version, got etag=%q version=%q", etag, version)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("decode public payload: %v", err)
+	}
+	if payload["payload"] != "public" {
+		t.Fatalf("unexpected public payload: %+v", payload)
+	}
+}
+
 func TestMemShutdownDrainingBlocksAcquire(t *testing.T) {
 	ctx := context.Background()
 	cfg := buildMemConfig(t)

@@ -1,5 +1,3 @@
-//go:generate go run ./cmd/doc2md
-
 // Package client provides the Go SDK for talking to a lockd cluster over HTTP.
 // It mirrors the CLI behaviour while exposing a type-safe API that is easy to
 // embed in workers, controllers, and administrative tools.
@@ -52,7 +50,7 @@
 // omitted without relying on the server fallback. The CLI mirrors this via
 // --namespace / LOCKD_CLIENT_NAMESPACE for leases and LOCKD_QUEUE_NAMESPACE for
 // queue flows.
-
+//
 // The lease session tracks fencing tokens automatically; the same `Client`
 // instance should be reused for subsequent operations so KeepAlive, Get, Update,
 // Release, and Remove calls carry the correct `X-Fencing-Token`. When the
@@ -171,6 +169,36 @@
 // If-Version) are supported to guard against concurrent, stale deletes. When the
 // state is deleted the server also clears the metadata entry so a subsequent
 // acquire sees a clean slate.
+//
+// # Metadata attributes and query visibility
+//
+// Every key has a metadata document that stores lease details, versions, and
+// user-controlled attributes. The server exposes `POST /v1/metadata` so callers
+// can toggle attributes—such as hiding a key from `/v1/query`—without uploading
+// a new JSON blob. The Go SDK layers ergonomic helpers on top:
+//
+//	lease, err := cli.Acquire(ctx, api.AcquireRequest{Key: "orders", TTLSeconds: 30})
+//	// ...
+//	if _, err := lease.UpdateMetadata(ctx, client.MetadataOptions{
+//	    QueryHidden: client.Bool(true),
+//	}); err != nil {
+//	    log.Fatal(err)
+//	}
+//
+// The variadic `Update`/`Save` helpers accept `client.WithQueryHidden()` /
+// `client.WithQueryVisible()` options when you want metadata mutations to ride
+// along with a state write:
+//
+//	if err := lease.Save(ctx, checkpoint, client.WithQueryHidden()); err != nil {
+//	    log.Fatal(err)
+//	}
+//
+// Advanced workflows can pass `client.WithMetadata(...)` directly to `Update`
+// for multiple attributes or for forward compatibility with future metadata
+// fields. Low-level access lives on `Client.UpdateMetadata` which returns a
+// `MetadataResult` so tools can inspect the server’s synthesized attributes.
+// All metadata mutations honor CAS headers (`X-If-Version`) and the handler
+// echoes the effective attributes in the JSON response.
 //
 // # Multi-endpoint failover
 //

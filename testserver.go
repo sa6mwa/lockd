@@ -526,6 +526,7 @@ func NewTestServer(ctx context.Context, opts ...TestServerOption) (*TestServer, 
 		}
 	}
 	if res.err != nil {
+		cancel()
 		return nil, res.err
 	}
 	srv := res.srv

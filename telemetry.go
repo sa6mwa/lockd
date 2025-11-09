@@ -146,12 +146,10 @@ func setupGRPCTelemetry(ctx context.Context, target otlpTarget, res *resource.Re
 	traceOpts := []otlptracegrpc.Option{
 		otlptracegrpc.WithEndpoint(target.endpoint),
 		otlptracegrpc.WithTimeout(10 * time.Second),
-		otlptracegrpc.WithDialOption(grpc.WithBlock()),
 	}
 	metricOpts := []otlpmetricgrpc.Option{
 		otlpmetricgrpc.WithEndpoint(target.endpoint),
 		otlpmetricgrpc.WithTimeout(10 * time.Second),
-		otlpmetricgrpc.WithDialOption(grpc.WithBlock()),
 	}
 	if target.insecure {
 		traceOpts = append(traceOpts, otlptracegrpc.WithInsecure())

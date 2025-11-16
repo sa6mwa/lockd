@@ -118,13 +118,8 @@ func (c *Client) Describe(ctx context.Context, key string) (*api.DescribeRespons
 }
 
 // Get streams the current JSON state for key.
-func (c *Client) Get(ctx context.Context, key, leaseID string) (io.ReadCloser, string, string, error) {
-	return c.inner.Get(ctx, key, leaseID)
-}
-
-// GetBytes loads the current JSON state into memory for convenience.
-func (c *Client) GetBytes(ctx context.Context, key, leaseID string) ([]byte, string, string, error) {
-	return c.inner.GetBytes(ctx, key, leaseID)
+func (c *Client) Get(ctx context.Context, key string, optFns ...lockdclient.GetOption) (*lockdclient.GetResponse, error) {
+	return c.inner.Get(ctx, key, optFns...)
 }
 
 // Update uploads a new JSON state body for key.

@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"pkt.systems/lockd/internal/cryptoutil"
-	"pkt.systems/lockd/internal/tlsutil"
+	"pkt.systems/lockd/tlsutil"
 	"pkt.systems/pslog"
 )
 

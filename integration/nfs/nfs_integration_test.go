@@ -1,4 +1,4 @@
-//go:build integration && nfs && !lq
+//go:build integration && nfs && !lq && !query && !crypto
 
 package nfsintegration
 

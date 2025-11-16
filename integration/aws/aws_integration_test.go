@@ -1,4 +1,4 @@
-//go:build integration && aws && !lq
+//go:build integration && aws && !lq && !query && !crypto
 
 package awsintegration
 
@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -23,17 +22,8 @@ import (
 	"pkt.systems/lockd/integration/internal/cryptotest"
 	shutdowntest "pkt.systems/lockd/integration/internal/shutdowntest"
 	testlog "pkt.systems/lockd/integration/internal/testlog"
-	"pkt.systems/lockd/internal/diagnostics/storagecheck"
-	"pkt.systems/lockd/internal/storage"
-	"pkt.systems/lockd/internal/storage/s3"
 	"pkt.systems/lockd/internal/uuidv7"
-	"pkt.systems/lockd/namespaces"
 	"pkt.systems/pslog"
-)
-
-var (
-	awsStoreVerifyOnce sync.Once
-	awsStoreVerifyErr  error
 )
 
 func TestAWSStoreVerification(t *testing.T) {
@@ -1026,177 +1016,4 @@ func TestAWSRemoveKeepAlive(t *testing.T) {
 		t.Fatalf("expected version %d, got %d", finalVersion, verify.Version)
 	}
 	releaseLease(t, ctx, cli, key, verify.LeaseID)
-}
-
-func loadAWSConfig(tb testing.TB) lockd.Config {
-	store := os.Getenv("LOCKD_STORE")
-	if store == "" {
-		tb.Fatalf("LOCKD_STORE must be set to an aws:// URI for AWS integration tests")
-	}
-	if !strings.HasPrefix(store, "aws://") {
-		tb.Fatalf("LOCKD_STORE must reference an aws:// URI, got %q", store)
-	}
-	cfg := lockd.Config{
-		Store:         store,
-		AWSRegion:     os.Getenv("LOCKD_AWS_REGION"),
-		AWSKMSKeyID:   os.Getenv("LOCKD_AWS_KMS_KEY_ID"),
-		S3SSE:         os.Getenv("LOCKD_S3_SSE"),
-		S3KMSKeyID:    os.Getenv("LOCKD_S3_KMS_KEY_ID"),
-		S3MaxPartSize: 16 << 20,
-	}
-	if cfg.AWSRegion == "" {
-		cfg.AWSRegion = os.Getenv("AWS_REGION")
-	}
-	if cfg.AWSRegion == "" {
-		cfg.AWSRegion = os.Getenv("AWS_DEFAULT_REGION")
-	}
-	cryptotest.MaybeEnableStorageEncryption(tb, &cfg)
-	if err := cfg.Validate(); err != nil {
-		tb.Fatalf("config validation: %v", err)
-	}
-	return cfg
-}
-
-func ensureStoreReady(tb testing.TB, ctx context.Context, cfg lockd.Config) {
-	ResetAWSBucketForCrypto(tb, cfg)
-	awsStoreVerifyOnce.Do(func() {
-		res, err := storagecheck.VerifyStore(ctx, cfg)
-		if err != nil {
-			awsStoreVerifyErr = err
-			return
-		}
-		if !res.Passed() {
-			awsStoreVerifyErr = fmt.Errorf("store verification failed: %+v", res)
-		}
-	})
-	if awsStoreVerifyErr != nil {
-		tb.Fatalf("store verification failed: %v", awsStoreVerifyErr)
-	}
-}
-
-func startLockdServer(t *testing.T, cfg lockd.Config) *lockdclient.Client {
-	ts := startAWSTestServer(t, cfg)
-	cli := ts.Client
-	if cli == nil {
-		var err error
-		cli, err = ts.NewClient()
-		if err != nil {
-			t.Fatalf("new client: %v", err)
-		}
-	}
-	return cli
-}
-
-func startAWSTestServer(t testing.TB, cfg lockd.Config, opts ...lockd.TestServerOption) *lockd.TestServer {
-	t.Helper()
-	cfgCopy := cfg
-	if cfgCopy.JSONMaxBytes == 0 {
-		cfgCopy.JSONMaxBytes = 100 << 20
-	}
-	if cfgCopy.DefaultTTL == 0 {
-		cfgCopy.DefaultTTL = 30 * time.Second
-	}
-	if cfgCopy.MaxTTL == 0 {
-		cfgCopy.MaxTTL = 2 * time.Minute
-	}
-	if cfgCopy.AcquireBlock == 0 {
-		cfgCopy.AcquireBlock = 5 * time.Second
-	}
-	if cfgCopy.SweeperInterval == 0 {
-		cfgCopy.SweeperInterval = 5 * time.Second
-	}
-	if cfgCopy.StorageRetryMaxAttempts < 12 {
-		cfgCopy.StorageRetryMaxAttempts = 12
-	}
-	if cfgCopy.StorageRetryBaseDelay < 500*time.Millisecond {
-		cfgCopy.StorageRetryBaseDelay = 500 * time.Millisecond
-	}
-	if cfgCopy.StorageRetryMaxDelay < 15*time.Second {
-		cfgCopy.StorageRetryMaxDelay = 15 * time.Second
-	}
-
-	options := []lockd.TestServerOption{
-		lockd.WithTestConfig(cfgCopy),
-		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
-		lockd.WithTestListener("tcp", "127.0.0.1:0"),
-		lockd.WithTestClientOptions(
-			lockdclient.WithHTTPTimeout(2*time.Minute),
-			lockdclient.WithCloseTimeout(2*time.Minute),
-			lockdclient.WithKeepAliveTimeout(2*time.Minute),
-			lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
-		),
-		lockd.WithTestCloseDefaults(
-			lockd.WithDrainLeases(-1),
-			lockd.WithShutdownTimeout(10*time.Second),
-		),
-	}
-	options = append(options, opts...)
-	options = append(options, cryptotest.SharedMTLSOptions(t)...)
-	return lockd.StartTestServer(t, options...)
-}
-
-func acquireWithRetry(t *testing.T, ctx context.Context, cli *lockdclient.Client, key, owner string, ttl, block int64) *lockdclient.LeaseSession {
-	for attempt := 0; attempt < 60; attempt++ {
-		resp, err := cli.Acquire(ctx, api.AcquireRequest{Key: key, Owner: owner, TTLSeconds: ttl, BlockSecs: block})
-		if err == nil {
-			return resp
-		}
-		if apiErr := (*lockdclient.APIError)(nil); errors.As(err, &apiErr) {
-			if apiErr.Status == http.StatusConflict {
-				time.Sleep(200 * time.Millisecond)
-				continue
-			}
-		}
-		t.Fatalf("acquire failed: %v", err)
-	}
-	t.Fatal("acquire retry limit exceeded")
-	return nil
-}
-
-func getStateJSON(ctx context.Context, cli *lockdclient.Client, key, leaseID string) (map[string]any, string, string, error) {
-	data, etag, version, err := cli.GetBytes(ctx, key, leaseID)
-	if err != nil {
-		if apiErr := (*lockdclient.APIError)(nil); errors.As(err, &apiErr) && apiErr.Status == http.StatusNoContent {
-			return nil, "", "", nil
-		}
-		return nil, "", "", err
-	}
-	if len(data) == 0 {
-		return nil, etag, version, nil
-	}
-	var payload map[string]any
-	if err := json.Unmarshal(data, &payload); err != nil {
-		return nil, "", "", err
-	}
-	return payload, etag, version, nil
-}
-
-func releaseLease(t *testing.T, ctx context.Context, cli *lockdclient.Client, key, leaseID string) bool {
-	resp, err := cli.Release(ctx, api.ReleaseRequest{Key: key, LeaseID: leaseID})
-	if err != nil {
-		t.Fatalf("release: %v", err)
-	}
-	if !resp.Released {
-		return false
-	}
-	return true
-}
-
-func cleanupS3(t *testing.T, cfg lockd.Config, key string) {
-	s3cfg, _, err := lockd.BuildAWSConfig(cfg)
-	if err != nil {
-		t.Fatalf("build s3 config: %v", err)
-	}
-	store, err := s3.New(s3cfg)
-	if err != nil {
-		t.Fatalf("new s3 store: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	if err := store.Remove(ctx, namespaces.Default, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
-		t.Logf("remove state failed: %v", err)
-	}
-	if err := store.DeleteMeta(ctx, namespaces.Default, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
-		t.Logf("delete meta failed: %v", err)
-	}
 }

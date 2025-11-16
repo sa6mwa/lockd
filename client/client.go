@@ -17,6 +17,7 @@ import (
 	"net/textproto"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,6 +26,7 @@ import (
 
 	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/internal/loggingutil"
+	"pkt.systems/lockd/lql"
 	"pkt.systems/lockd/namespaces"
 	"pkt.systems/pslog"
 )
@@ -857,6 +859,11 @@ func (s *QueueStateHandle) CorrelationID() string {
 }
 
 const headerFencingToken = "X-Fencing-Token"
+const headerQueryCursor = "X-Lockd-Query-Cursor"
+const headerQueryIndexSeq = "X-Lockd-Query-Index-Seq"
+const headerQueryMetadata = "X-Lockd-Query-Metadata"
+const headerQueryReturn = "X-Lockd-Query-Return"
+const contentTypeNDJSON = "application/x-ndjson"
 const headerShutdownImminent = "Shutdown-Imminent"
 const (
 	headerCorrelationID       = "X-Correlation-Id"
@@ -1105,13 +1112,17 @@ func (c *Client) initialize(endpoints []string) error {
 		}
 	}
 	if c.defaultNamespace == "" {
+		c.defaultsMu.Lock()
 		c.defaultNamespace = namespaces.Default
+		c.defaultsMu.Unlock()
 	} else {
 		normalized, err := namespaces.Normalize(c.defaultNamespace, namespaces.Default)
 		if err != nil {
 			return fmt.Errorf("lockd: client default namespace: %w", err)
 		}
+		c.defaultsMu.Lock()
 		c.defaultNamespace = normalized
+		c.defaultsMu.Unlock()
 	}
 	c.endpoints = normalized
 	c.lastEndpoint = normalized[0]
@@ -1120,11 +1131,7 @@ func (c *Client) initialize(endpoints []string) error {
 }
 
 func (c *Client) namespaceFor(ns string) (string, error) {
-	base := c.defaultNamespace
-	if base == "" {
-		base = namespaces.Default
-	}
-	return namespaces.Normalize(ns, base)
+	return namespaces.Normalize(ns, c.Namespace())
 }
 
 // Default client tuning knobs exposed for callers that want to mirror lockd's defaults.
@@ -1493,13 +1500,23 @@ func (s *LeaseSession) applyRemove(ctx context.Context, opts RemoveOptions) (*ap
 // Get refreshes the current state snapshot using the active lease.
 func (s *LeaseSession) Get(ctx context.Context) (*StateSnapshot, error) {
 	ctx = WithCorrelationID(ctx, s.correlation())
-	reader, etag, version, err := s.client.getWithNamespace(ctx, s.Key, s.LeaseID, s.Namespace)
+	resp, err := s.client.Get(ctx, s.Key,
+		WithGetNamespace(s.Namespace),
+		WithGetLeaseID(s.LeaseID),
+		WithGetPublicDisabled(true),
+	)
 	if err != nil {
 		return nil, err
 	}
-	snap := &StateSnapshot{Reader: reader, ETag: etag, HasState: reader != nil || etag != ""}
-	if version != "" {
-		if v, parseErr := strconv.ParseInt(version, 10, 64); parseErr == nil {
+	if resp == nil {
+		return nil, nil
+	}
+	defer resp.Close()
+	reader := resp.detachReader()
+	etag := resp.ETag
+	snap := &StateSnapshot{Reader: reader, ETag: etag, HasState: resp.HasState || etag != ""}
+	if ver := strings.TrimSpace(resp.Version); ver != "" {
+		if v, parseErr := strconv.ParseInt(ver, 10, 64); parseErr == nil {
 			snap.Version = v
 		}
 		if snap.Version > 0 {
@@ -1555,11 +1572,27 @@ func (s *LeaseSession) Load(ctx context.Context, v any) error {
 
 // Save serialises v as JSON and updates the state.
 func (s *LeaseSession) Save(ctx context.Context, v any, opts ...UpdateOption) error {
-	data, err := json.Marshal(v)
-	if err != nil {
-		return err
+	var body io.Reader
+	switch src := v.(type) {
+	case *Document:
+		if src == nil {
+			return fmt.Errorf("lockd: document nil")
+		}
+		data, err := src.Bytes()
+		if err != nil {
+			return err
+		}
+		body = bytes.NewReader(data)
+	case io.Reader:
+		body = src
+	default:
+		data, err := json.Marshal(v)
+		if err != nil {
+			return err
+		}
+		body = bytes.NewReader(data)
 	}
-	_, err = s.UpdateBytes(ctx, data, opts...)
+	_, err := s.Update(ctx, body, opts...)
 	return err
 }
 
@@ -1632,6 +1665,7 @@ func (s *LeaseSession) Release(ctx context.Context) error {
 	s.closeErr = nil
 	s.mu.Unlock()
 	s.client.unregisterSession(s.LeaseID)
+	s.client.ClearLeaseID(s.LeaseID)
 	return nil
 }
 
@@ -1685,6 +1719,456 @@ func (c *cancelReadCloser) Close() error {
 		}
 	})
 	return err
+}
+
+// GetResponse encapsulates the payload and headers returned by Client.Get.
+type GetResponse struct {
+	Namespace string
+	Key       string
+	ETag      string
+	Version   string
+	HasState  bool
+	reader    io.ReadCloser
+}
+
+// QueryReturn describes the payload mode exposed by /v1/query.
+type QueryReturn string
+
+const (
+	// QueryReturnKeys streams the default keys-only JSON object.
+	QueryReturnKeys QueryReturn = QueryReturn(api.QueryReturnKeys)
+	// QueryReturnDocuments streams newline-delimited documents.
+	QueryReturnDocuments QueryReturn = QueryReturn(api.QueryReturnDocuments)
+)
+
+var errDocumentMissing = errors.New("lockd: document unavailable (keys mode)")
+
+func (mode QueryReturn) normalize() QueryReturn {
+	switch strings.ToLower(strings.TrimSpace(string(mode))) {
+	case "":
+		return ""
+	case string(QueryReturnKeys):
+		return QueryReturnKeys
+	case string(QueryReturnDocuments), "document", "docs":
+		return QueryReturnDocuments
+	default:
+		return ""
+	}
+}
+
+// QueryResponse describes the result set returned by Client.Query.
+type QueryResponse struct {
+	Namespace string
+	Cursor    string
+	IndexSeq  uint64
+	Metadata  map[string]string
+
+	mode    QueryReturn
+	keys    []string
+	keyCopy []string
+	stream  *queryStream
+}
+
+// Mode reports whether the query streamed keys or documents.
+func (qr *QueryResponse) Mode() QueryReturn {
+	if qr == nil {
+		return QueryReturnKeys
+	}
+	if qr.mode == "" {
+		return QueryReturnKeys
+	}
+	return qr.mode
+}
+
+// Keys returns a defensive copy of the key slice. When the response streams
+// documents, Keys drains the stream, collects the keys, and closes the reader.
+func (qr *QueryResponse) Keys() []string {
+	if qr == nil {
+		return nil
+	}
+	if qr.Mode() == QueryReturnDocuments {
+		if len(qr.keys) == 0 && qr.stream != nil {
+			var keys []string
+			for {
+				row, err := qr.stream.Next()
+				if err == io.EOF {
+					qr.Close()
+					break
+				}
+				if err != nil {
+					qr.Close()
+					return nil
+				}
+				keys = append(keys, row.Key)
+				_ = row.doc.closeSilently()
+			}
+			qr.keys = keys
+		}
+		if len(qr.keys) == 0 {
+			return nil
+		}
+		if !slices.Equal(qr.keyCopy, qr.keys) {
+			qr.keyCopy = slices.Clone(qr.keys)
+		}
+		return qr.keyCopy
+	}
+	if len(qr.keys) == 0 {
+		return nil
+	}
+	if !slices.Equal(qr.keyCopy, qr.keys) {
+		qr.keyCopy = slices.Clone(qr.keys)
+	}
+	return qr.keyCopy
+}
+
+// Close releases the underlying reader when the response streams documents.
+func (qr *QueryResponse) Close() error {
+	if qr == nil || qr.stream == nil {
+		return nil
+	}
+	stream := qr.stream
+	qr.stream = nil
+	return stream.Close()
+}
+
+// ForEach invokes fn for every entry in the response. For document streams the
+// handler receives fully populated QueryRow values.
+func (qr *QueryResponse) ForEach(fn func(QueryRow) error) error {
+	if qr == nil || fn == nil {
+		return nil
+	}
+	if qr.Mode() != QueryReturnDocuments {
+		for _, key := range qr.keys {
+			if err := fn(QueryRow{Namespace: qr.Namespace, Key: key}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if qr.stream == nil {
+		return nil
+	}
+	for {
+		row, err := qr.stream.Next()
+		if err == io.EOF {
+			qr.Close()
+			return nil
+		}
+		if err != nil {
+			qr.Close()
+			return err
+		}
+		qRow := QueryRow{
+			Namespace: row.Namespace,
+			Key:       row.Key,
+			Version:   row.Version,
+			doc:       row.doc,
+		}
+		if err := fn(qRow); err != nil {
+			qRow.release()
+			qr.Close()
+			return err
+		}
+		if err := qRow.release(); err != nil {
+			qr.Close()
+			return err
+		}
+	}
+}
+
+func newKeyQueryResponse(resp api.QueryResponse, mode QueryReturn) *QueryResponse {
+	copyKeys := make([]string, len(resp.Keys))
+	copy(copyKeys, resp.Keys)
+	return &QueryResponse{
+		Namespace: resp.Namespace,
+		Cursor:    resp.Cursor,
+		IndexSeq:  resp.IndexSeq,
+		Metadata:  cloneStringMap(resp.Metadata),
+		mode:      mode,
+		keys:      copyKeys,
+	}
+}
+
+func newDocumentQueryResponse(namespace, cursor string, indexSeq uint64, metadata map[string]string, reader io.ReadCloser) *QueryResponse {
+	return &QueryResponse{
+		Namespace: namespace,
+		Cursor:    cursor,
+		IndexSeq:  indexSeq,
+		Metadata:  cloneStringMap(metadata),
+		mode:      QueryReturnDocuments,
+		stream:    newQueryStream(reader),
+	}
+}
+
+func cloneStringMap(source map[string]string) map[string]string {
+	if len(source) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(source))
+	for k, v := range source {
+		out[k] = v
+	}
+	return out
+}
+
+func mergeMetadata(body map[string]string, header map[string]string) map[string]string {
+	if len(header) == 0 {
+		return body
+	}
+	out := make(map[string]string, len(body)+len(header))
+	for k, v := range header {
+		out[k] = v
+	}
+	for k, v := range body {
+		out[k] = v
+	}
+	return out
+}
+
+func detectQueryReturn(headerValue, contentType string) QueryReturn {
+	if mode := QueryReturn(headerValue).normalize(); mode != "" {
+		return mode
+	}
+	if strings.HasPrefix(strings.ToLower(contentType), contentTypeNDJSON) {
+		return QueryReturnDocuments
+	}
+	return QueryReturnKeys
+}
+
+func parseUintHeader(value string) uint64 {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	if parsed, err := strconv.ParseUint(value, 10, 64); err == nil {
+		return parsed
+	}
+	return 0
+}
+
+func parseQueryMetadataHeader(raw string) map[string]string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var out map[string]string
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+// QueryRow represents a single row returned from /v1/query.
+type QueryRow struct {
+	Namespace string
+	Key       string
+	Version   int64
+	doc       *streamDocumentHandle
+}
+
+// HasDocument reports whether the row was populated with a document payload.
+func (row QueryRow) HasDocument() bool {
+	return row.doc != nil
+}
+
+// DocumentReader returns a streaming reader for the row's document.
+// Callers must Close the returned reader when finished.
+func (row QueryRow) DocumentReader() (io.ReadCloser, error) {
+	if row.doc == nil {
+		return nil, errDocumentMissing
+	}
+	return row.doc.acquireReader()
+}
+
+// DocumentInto unmarshals the document payload into target when present.
+func (row QueryRow) DocumentInto(target any) error {
+	if target == nil {
+		return nil
+	}
+	reader, err := row.DocumentReader()
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+	return json.NewDecoder(reader).Decode(target)
+}
+
+// Document loads the payload into a client.Document.
+func (row QueryRow) Document() (*Document, error) {
+	reader, err := row.DocumentReader()
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	doc := NewDocument(row.Namespace, row.Key)
+	if err := doc.LoadFrom(reader); err != nil {
+		return nil, err
+	}
+	if row.Version > 0 {
+		doc.Version = strconv.FormatInt(row.Version, 10)
+	}
+	return doc, nil
+}
+
+func (row QueryRow) release() error {
+	if row.doc == nil {
+		return nil
+	}
+	return row.doc.closeSilently()
+}
+
+// Reader exposes the underlying body stream. Call Close when finished.
+func (gr *GetResponse) Reader() io.ReadCloser {
+	if gr == nil {
+		return nil
+	}
+	return gr.reader
+}
+
+// Bytes loads the state blob into memory and closes the underlying reader.
+func (gr *GetResponse) Bytes() ([]byte, error) {
+	if gr == nil || !gr.HasState {
+		return nil, nil
+	}
+	reader := gr.detachReader()
+	if reader == nil {
+		return nil, nil
+	}
+	defer reader.Close()
+	return io.ReadAll(reader)
+}
+
+// Document hydrates the response body into a Document and consumes the reader.
+func (gr *GetResponse) Document() (*Document, error) {
+	if gr == nil || !gr.HasState {
+		return nil, nil
+	}
+	reader := gr.detachReader()
+	if reader == nil {
+		return nil, nil
+	}
+	defer reader.Close()
+	doc := &Document{
+		Namespace: gr.Namespace,
+		Key:       gr.Key,
+		Version:   gr.Version,
+		ETag:      gr.ETag,
+		Metadata:  map[string]string{},
+	}
+	if err := doc.LoadFrom(reader); err != nil {
+		return nil, err
+	}
+	return doc, nil
+}
+
+// Close releases the underlying HTTP body when streaming isnt required.
+func (gr *GetResponse) Close() error {
+	reader := gr.detachReader()
+	if reader == nil {
+		return nil
+	}
+	return reader.Close()
+}
+
+func (gr *GetResponse) detachReader() io.ReadCloser {
+	if gr == nil {
+		return nil
+	}
+	reader := gr.reader
+	gr.reader = nil
+	return reader
+}
+
+// GetOptions tweaks the behaviour of Client.Get / Client.Load.
+type GetOptions struct {
+	Namespace     string
+	LeaseID       string
+	DisablePublic bool
+}
+
+// GetOption applies custom behaviour to Client.Get.
+type GetOption func(*GetOptions)
+
+// WithGetNamespace overrides the namespace used for the request.
+func WithGetNamespace(ns string) GetOption {
+	return func(opts *GetOptions) {
+		if opts != nil {
+			opts.Namespace = ns
+		}
+	}
+}
+
+// WithGetLeaseID sets the lease identifier to use for the request.
+func WithGetLeaseID(id string) GetOption {
+	return func(opts *GetOptions) {
+		if opts != nil {
+			opts.LeaseID = id
+		}
+	}
+}
+
+// WithGetPublicDisabled forces lease-backed reads even when no lease is provided.
+func WithGetPublicDisabled(disable bool) GetOption {
+	return func(opts *GetOptions) {
+		if opts != nil {
+			opts.DisablePublic = disable
+		}
+	}
+}
+
+// LoadOptions mirrors GetOptions for Client.Load.
+type LoadOptions struct {
+	GetOptions
+}
+
+// LoadOption customises Client.Load.
+type LoadOption func(*LoadOptions)
+
+// WithLoadNamespace overrides the namespace used for Client.Load.
+func WithLoadNamespace(ns string) LoadOption {
+	return func(opts *LoadOptions) {
+		if opts != nil {
+			opts.Namespace = ns
+		}
+	}
+}
+
+// WithLoadLeaseID sets the lease identifier used by Client.Load.
+func WithLoadLeaseID(id string) LoadOption {
+	return func(opts *LoadOptions) {
+		if opts != nil {
+			opts.LeaseID = id
+		}
+	}
+}
+
+// WithLoadPublicDisabled forces lease-backed loads even when no lease is provided.
+func WithLoadPublicDisabled(disable bool) LoadOption {
+	return func(opts *LoadOptions) {
+		if opts != nil {
+			opts.DisablePublic = disable
+		}
+	}
+}
+
+func applyGetOptions(optFns []GetOption) GetOptions {
+	opts := GetOptions{}
+	for _, fn := range optFns {
+		if fn != nil {
+			fn(&opts)
+		}
+	}
+	return opts
+}
+
+func applyLoadOptions(optFns []LoadOption) LoadOptions {
+	opts := LoadOptions{}
+	for _, fn := range optFns {
+		if fn != nil {
+			fn(&opts)
+		}
+	}
+	return opts
 }
 
 // UpdateResult captures the response from Update.
@@ -1742,6 +2226,33 @@ func WithQueryVisible() UpdateOption {
 // MetadataOptions captures metadata mutations attached to updates.
 type MetadataOptions struct {
 	QueryHidden *bool
+}
+
+// NamespaceConfigOptions controls concurrency for namespace configuration mutations.
+type NamespaceConfigOptions struct {
+	IfMatch string
+}
+
+// FlushIndexOptions customises index flush behaviour.
+type FlushIndexOptions struct {
+	Mode string
+}
+
+// FlushOption customises FlushIndex behaviour.
+type FlushOption func(*FlushIndexOptions)
+
+// WithFlushModeWait forces FlushIndex to run synchronously.
+func WithFlushModeWait() FlushOption {
+	return func(opts *FlushIndexOptions) {
+		opts.Mode = "wait"
+	}
+}
+
+// WithFlushModeAsync schedules the flush asynchronously (default).
+func WithFlushModeAsync() FlushOption {
+	return func(opts *FlushIndexOptions) {
+		opts.Mode = "async"
+	}
 }
 
 type metadataMutationPayload struct {
@@ -1852,7 +2363,9 @@ type Client struct {
 	failureRetries     int
 	drainAwareShutdown bool
 	shutdownNotified   atomic.Bool
+	defaultsMu         sync.RWMutex
 	defaultNamespace   string
+	defaultLeaseID     string
 
 	closeOnce sync.Once
 }
@@ -1879,6 +2392,54 @@ func (c *Client) unregisterSession(leaseID string) {
 		return
 	}
 	c.sessions.Delete(leaseID)
+}
+
+// UseNamespace updates the default namespace used when callers omit one.
+func (c *Client) UseNamespace(ns string) error {
+	if c == nil {
+		return fmt.Errorf("lockd: client nil")
+	}
+	normalized, err := namespaces.Normalize(ns, namespaces.Default)
+	if err != nil {
+		return err
+	}
+	c.defaultsMu.Lock()
+	c.defaultNamespace = normalized
+	c.defaultsMu.Unlock()
+	return nil
+}
+
+// Namespace returns the default namespace currently configured on the client.
+func (c *Client) Namespace() string {
+	c.defaultsMu.RLock()
+	defer c.defaultsMu.RUnlock()
+	if c.defaultNamespace == "" {
+		return namespaces.Default
+	}
+	return c.defaultNamespace
+}
+
+// UseLeaseID configures the client to reuse the provided lease for subsequent requests.
+func (c *Client) UseLeaseID(leaseID string) {
+	c.defaultsMu.Lock()
+	c.defaultLeaseID = strings.TrimSpace(leaseID)
+	c.defaultsMu.Unlock()
+}
+
+// ClearLeaseID removes the sticky lease when it matches leaseID.
+func (c *Client) ClearLeaseID(leaseID string) {
+	c.defaultsMu.Lock()
+	if c.defaultLeaseID == leaseID {
+		c.defaultLeaseID = ""
+	}
+	c.defaultsMu.Unlock()
+}
+
+func (c *Client) defaultLease() string {
+	c.defaultsMu.RLock()
+	leaseID := c.defaultLeaseID
+	c.defaultsMu.RUnlock()
+	return leaseID
 }
 
 func (c *Client) fencingToken(leaseID, override string) (string, error) {
@@ -2768,6 +3329,28 @@ func (c *Client) AcquireForUpdate(ctx context.Context, req api.AcquireRequest, h
 			resultErr = errors.Join(resultErr, releaseErr)
 		}
 		if resultErr != nil {
+			if shouldRetryForUpdate(resultErr) {
+				retryCount++
+				if cfg.FailureRetries >= 0 && retryCount > cfg.FailureRetries {
+					c.logErrorCtx(ctx, "client.acquire_for_update.handler_error", "key", keyForLog, "lease_id", sess.LeaseID, "error", resultErr)
+					return resultErr
+				}
+				sleep := acquireRetryDelay(delay, cfg)
+				if sleep <= 0 {
+					sleep = 10 * time.Millisecond
+				}
+				if retryHint := retryAfterFromError(resultErr); retryHint > sleep {
+					sleep = retryHint
+				}
+				delay = sleep
+				c.logDebugCtx(ctx, "client.acquire_for_update.retry_after_handler_error", "key", keyForLog, "lease_id", sess.LeaseID, "retries", retryCount, "delay", sleep, "retry_after", retryAfterFromError(resultErr), "qrf_state", qrfStateFromError(resultErr), "error", resultErr)
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(sleep):
+				}
+				continue
+			}
 			c.logErrorCtx(ctx, "client.acquire_for_update.handler_error", "key", keyForLog, "lease_id", sess.LeaseID, "error", resultErr)
 			return resultErr
 		}
@@ -2811,6 +3394,9 @@ func shouldRetryForUpdate(err error) bool {
 		return true
 	}
 	if isLeaseRequiredError(err) {
+		return true
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
 		return true
 	}
 	var apiErr *APIError
@@ -2987,17 +3573,527 @@ func (c *Client) Describe(ctx context.Context, key string) (*api.DescribeRespons
 	return &describe, nil
 }
 
-// Get streams the JSON state for a key. Caller must close the returned reader.
-// When the key has no state the returned reader is nil.
-func (c *Client) getWithNamespaceInternal(ctx context.Context, key, leaseID, namespace string, public bool) (io.ReadCloser, string, string, error) {
-	logFields := []any{"key", key, "endpoint", c.lastEndpoint}
+// GetNamespaceConfig returns the namespace configuration document and its ETag.
+func (c *Client) GetNamespaceConfig(ctx context.Context, namespace string) (*api.NamespaceConfigResponse, string, error) {
+	ns, err := c.namespaceFor(namespace)
+	if err != nil {
+		return nil, "", err
+	}
+	c.logTraceCtx(ctx, "client.namespace.get.start", "namespace", ns, "endpoint", c.lastEndpoint)
+	builder := func(base string) (*http.Request, context.CancelFunc, error) {
+		reqCtx, cancel := c.requestContext(ctx)
+		full := fmt.Sprintf("%s/v1/namespace?namespace=%s", base, url.QueryEscape(ns))
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, full, http.NoBody)
+		if err != nil {
+			cancel()
+			return nil, nil, err
+		}
+		c.applyCorrelationHeader(ctx, req, "")
+		return req, cancel, nil
+	}
+	resp, cancel, endpoint, err := c.attemptEndpoints(builder, "")
+	if err != nil {
+		c.logErrorCtx(ctx, "client.namespace.get.transport_error", "namespace", ns, "error", err)
+		return nil, "", err
+	}
+	defer cancel()
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		c.logWarnCtx(ctx, "client.namespace.get.error", "namespace", ns, "endpoint", endpoint, "status", resp.StatusCode)
+		return nil, "", c.decodeError(resp)
+	}
+	var out api.NamespaceConfigResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, "", err
+	}
+	etag := strings.Trim(resp.Header.Get("ETag"), "\"")
+	c.logTraceCtx(ctx, "client.namespace.get.success", "namespace", ns, "endpoint", endpoint, "etag", etag)
+	return &out, etag, nil
+}
+
+// UpdateNamespaceConfig mutates namespace-level settings and returns the updated configuration.
+func (c *Client) UpdateNamespaceConfig(ctx context.Context, req api.NamespaceConfigRequest, opts NamespaceConfigOptions) (*api.NamespaceConfigResponse, string, error) {
+	ns, err := c.namespaceFor(req.Namespace)
+	if err != nil {
+		return nil, "", err
+	}
+	req.Namespace = ns
+	if req.Query == nil {
+		return nil, "", fmt.Errorf("lockd: namespace query configuration required")
+	}
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return nil, "", err
+	}
+	path := fmt.Sprintf("/v1/namespace?namespace=%s", url.QueryEscape(ns))
+	c.logTraceCtx(ctx, "client.namespace.set.start", "namespace", ns, "endpoint", c.lastEndpoint)
+	builder := func(base string) (*http.Request, context.CancelFunc, error) {
+		reqCtx, cancel := c.requestContext(ctx)
+		httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, base+path, bytes.NewReader(payload))
+		if err != nil {
+			cancel()
+			return nil, nil, err
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		if strings.TrimSpace(opts.IfMatch) != "" {
+			httpReq.Header.Set("If-Match", opts.IfMatch)
+		}
+		c.applyCorrelationHeader(ctx, httpReq, "")
+		return httpReq, cancel, nil
+	}
+	resp, cancel, endpoint, err := c.attemptEndpoints(builder, "")
+	if err != nil {
+		c.logErrorCtx(ctx, "client.namespace.set.transport_error", "namespace", ns, "error", err)
+		return nil, "", err
+	}
+	defer cancel()
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		c.logWarnCtx(ctx, "client.namespace.set.error", "namespace", ns, "endpoint", endpoint, "status", resp.StatusCode)
+		return nil, "", c.decodeError(resp)
+	}
+	var out api.NamespaceConfigResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, "", err
+	}
+	etag := strings.Trim(resp.Header.Get("ETag"), "\"")
+	c.logTraceCtx(ctx, "client.namespace.set.success", "namespace", ns, "endpoint", endpoint, "etag", etag)
+	return &out, etag, nil
+}
+
+// FlushIndex forces the namespace index writer to flush pending documents.
+func (c *Client) FlushIndex(ctx context.Context, namespace string, optFns ...FlushOption) (*api.IndexFlushResponse, error) {
+	ns, err := c.namespaceFor(namespace)
+	if err != nil {
+		return nil, err
+	}
+	options := FlushIndexOptions{Mode: "async"}
+	for _, fn := range optFns {
+		if fn != nil {
+			fn(&options)
+		}
+	}
+	mode := strings.TrimSpace(options.Mode)
+	if mode == "" {
+		mode = "async"
+	}
+	req := api.IndexFlushRequest{Namespace: ns, Mode: mode}
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	path := "/v1/index/flush"
+	if ns != "" {
+		path += fmt.Sprintf("?namespace=%s", url.QueryEscape(ns))
+	}
+	c.logTraceCtx(ctx, "client.index.flush.start", "namespace", ns, "mode", mode, "endpoint", c.lastEndpoint)
+	builder := func(base string) (*http.Request, context.CancelFunc, error) {
+		reqCtx, cancel := c.requestContext(ctx)
+		httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, base+path, bytes.NewReader(payload))
+		if err != nil {
+			cancel()
+			return nil, nil, err
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		c.applyCorrelationHeader(ctx, httpReq, "")
+		return httpReq, cancel, nil
+	}
+	resp, cancel, endpoint, err := c.attemptEndpoints(builder, "")
+	if err != nil {
+		c.logErrorCtx(ctx, "client.index.flush.transport_error", "namespace", ns, "mode", mode, "error", err)
+		return nil, err
+	}
+	defer cancel()
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		c.logWarnCtx(ctx, "client.index.flush.error", "namespace", ns, "mode", mode, "endpoint", endpoint, "status", resp.StatusCode)
+		return nil, c.decodeError(resp)
+	}
+	var out api.IndexFlushResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	c.logTraceCtx(ctx, "client.index.flush.success", "namespace", ns, "mode", mode, "endpoint", endpoint, "status", resp.StatusCode)
+	return &out, nil
+}
+
+// QueryOptions controls /v1/query execution hints.
+type QueryOptions struct {
+	request  api.QueryRequest
+	Engine   string
+	Refresh  string
+	Return   QueryReturn
+	parseErr error
+}
+
+// QueryOption customizes query execution.
+type QueryOption func(*QueryOptions)
+
+func applyQueryOptions(optFns []QueryOption) QueryOptions {
+	opts := QueryOptions{}
+	for _, fn := range optFns {
+		if fn != nil {
+			fn(&opts)
+		}
+	}
+	return opts
+}
+
+func cloneQueryRequest(req api.QueryRequest) api.QueryRequest {
+	cloned := req
+	if req.Fields != nil {
+		cloned.Fields = make(map[string]any, len(req.Fields))
+		for k, v := range req.Fields {
+			cloned.Fields[k] = v
+		}
+	}
+	return cloned
+}
+
+// WithQueryRequest copies a full QueryRequest into the option set.
+func WithQueryRequest(req *api.QueryRequest) QueryOption {
+	return func(opts *QueryOptions) {
+		if opts == nil || req == nil {
+			return
+		}
+		opts.request = cloneQueryRequest(*req)
+	}
+}
+
+// WithQueryNamespace overrides the namespace used for the query.
+func WithQueryNamespace(ns string) QueryOption {
+	return func(opts *QueryOptions) {
+		if opts == nil {
+			return
+		}
+		opts.request.Namespace = strings.TrimSpace(ns)
+	}
+}
+
+// WithQueryLimit caps the number of results returned by the server.
+func WithQueryLimit(limit int) QueryOption {
+	return func(opts *QueryOptions) {
+		if opts == nil {
+			return
+		}
+		if limit < 0 {
+			limit = 0
+		}
+		opts.request.Limit = limit
+	}
+}
+
+// WithQueryCursor resumes a previous query using the provided cursor token.
+func WithQueryCursor(cursor string) QueryOption {
+	return func(opts *QueryOptions) {
+		if opts == nil {
+			return
+		}
+		opts.request.Cursor = cursor
+	}
+}
+
+// WithQueryFields sets the request field projections.
+func WithQueryFields(fields map[string]any) QueryOption {
+	return func(opts *QueryOptions) {
+		if opts == nil {
+			return
+		}
+		if len(fields) == 0 {
+			opts.request.Fields = nil
+			return
+		}
+		if opts.request.Fields == nil {
+			opts.request.Fields = make(map[string]any, len(fields))
+		}
+		for k, v := range fields {
+			opts.request.Fields[k] = v
+		}
+	}
+}
+
+// WithQuery parses an LQL expression and sets the selector for the request.
+func WithQuery(expr string) QueryOption {
+	return func(opts *QueryOptions) {
+		if opts == nil {
+			return
+		}
+		if opts.parseErr != nil {
+			return
+		}
+		expr = strings.TrimSpace(expr)
+		if expr == "" {
+			opts.request.Selector = api.Selector{}
+			return
+		}
+		sel, err := lql.ParseSelectorString(expr)
+		if err != nil {
+			opts.parseErr = err
+			return
+		}
+		if sel.IsEmpty() {
+			opts.request.Selector = api.Selector{}
+			return
+		}
+		opts.request.Selector = sel
+	}
+}
+
+// WithQuerySelector installs an already-parsed selector (useful when callers build the AST themselves).
+func WithQuerySelector(sel api.Selector) QueryOption {
+	return func(opts *QueryOptions) {
+		if opts == nil {
+			return
+		}
+		opts.request.Selector = sel
+	}
+}
+
+// WithQueryEngine forces a specific query engine (auto, index, or scan).
+func WithQueryEngine(engine string) QueryOption {
+	return func(opts *QueryOptions) {
+		if opts == nil {
+			return
+		}
+		switch strings.ToLower(strings.TrimSpace(engine)) {
+		case "index", "scan", "auto":
+			opts.Engine = strings.ToLower(engine)
+		case "":
+			opts.Engine = ""
+		default:
+			opts.Engine = engine
+		}
+	}
+}
+
+// WithQueryEngineAuto explicitly selects the auto engine.
+func WithQueryEngineAuto() QueryOption {
+	return WithQueryEngine("auto")
+}
+
+// WithQueryEngineIndex selects the secondary index engine.
+func WithQueryEngineIndex() QueryOption {
+	return WithQueryEngine("index")
+}
+
+// WithQueryEngineScan selects the scan engine.
+func WithQueryEngineScan() QueryOption {
+	return WithQueryEngine("scan")
+}
+
+// WithQueryRefresh selects the refresh policy ("wait_for" waits for visible index docs).
+func WithQueryRefresh(mode string) QueryOption {
+	return func(opts *QueryOptions) {
+		if opts == nil {
+			return
+		}
+		switch strings.ToLower(strings.TrimSpace(mode)) {
+		case "wait_for", "wait-for":
+			opts.Refresh = "wait_for"
+		case "":
+			opts.Refresh = ""
+		default:
+			opts.Refresh = mode
+		}
+	}
+}
+
+// WithQueryRefreshWaitFor waits until documents are visible in the selected engine.
+func WithQueryRefreshWaitFor() QueryOption {
+	return WithQueryRefresh("wait_for")
+}
+
+// WithQueryRefreshImmediate clears the refresh hint (default behaviour).
+func WithQueryRefreshImmediate() QueryOption {
+	return WithQueryRefresh("")
+}
+
+// WithQueryBlock waits for the queryable view to observe in-flight documents.
+func WithQueryBlock() QueryOption {
+	return WithQueryRefreshWaitFor()
+}
+
+// WithQueryReturn selects the payload mode for /v1/query ("keys" or "documents").
+func WithQueryReturn(mode QueryReturn) QueryOption {
+	return func(opts *QueryOptions) {
+		if opts == nil {
+			return
+		}
+		mode = mode.normalize()
+		if mode != "" {
+			opts.Return = mode
+			opts.request.Return = api.QueryReturn(mode)
+		} else {
+			opts.Return = ""
+			opts.request.Return = ""
+		}
+	}
+}
+
+// WithQueryReturnKeys forces the default keys-only response mode.
+func WithQueryReturnKeys() QueryOption {
+	return WithQueryReturn(QueryReturnKeys)
+}
+
+// WithQueryReturnDocuments streams documents as NDJSON rows.
+func WithQueryReturnDocuments() QueryOption {
+	return WithQueryReturn(QueryReturnDocuments)
+}
+
+// Query executes a selector search within a namespace. Usage is option-driven:
+//
+//	resp, err := cli.Query(ctx,
+//	    client.WithQueryNamespace("orders"),
+//	    client.WithQuery(`eq{field=/status,value=open}`),
+//	    client.WithQueryLimit(20),
+//	    client.WithQueryReturnDocuments(),
+//	)
+//	if err != nil { /* handle */ }
+//	resp.ForEach(func(row client.QueryRow) error {
+//	    // row.Document is populated in return=documents mode
+//	    return nil
+//	})
+//
+// Callers can combine helpers (namespace, selector, engine hints, cursor,
+// return mode, etc.) without assembling api.QueryRequest manually.
+func (c *Client) Query(ctx context.Context, optFns ...QueryOption) (*QueryResponse, error) {
+	if c == nil {
+		return nil, fmt.Errorf("lockd: client nil")
+	}
+	opts := applyQueryOptions(optFns)
+	if opts.parseErr != nil {
+		return nil, opts.parseErr
+	}
+	ns, err := c.namespaceFor(opts.request.Namespace)
+	if err != nil {
+		return nil, err
+	}
+	opts.request.Namespace = ns
+	returnMode := opts.Return.normalize()
+	if returnMode != "" {
+		opts.request.Return = api.QueryReturn(returnMode)
+	} else {
+		opts.request.Return = ""
+	}
+	payload, err := json.Marshal(opts.request)
+	if err != nil {
+		return nil, err
+	}
+	params := url.Values{}
+	if ns != "" {
+		params.Set("namespace", ns)
+	}
+	if opts.Engine != "" {
+		params.Set("engine", opts.Engine)
+	}
+	if opts.Refresh != "" {
+		params.Set("refresh", opts.Refresh)
+	}
+	if returnMode != "" {
+		params.Set("return", string(returnMode))
+	}
+	path := "/v1/query"
+	if encoded := params.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	c.logTraceCtx(ctx, "client.query.start", "namespace", ns, "engine", opts.Engine, "mode", func() string {
+		if returnMode == "" {
+			return ""
+		}
+		return string(returnMode)
+	}(), "endpoint", c.lastEndpoint)
+	builder := func(base string) (*http.Request, context.CancelFunc, error) {
+		reqCtx, cancel := c.requestContext(ctx)
+		httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, base+path, bytes.NewReader(payload))
+		if err != nil {
+			cancel()
+			return nil, nil, err
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		c.applyCorrelationHeader(ctx, httpReq, "")
+		return httpReq, cancel, nil
+	}
+	resp, cancel, endpoint, err := c.attemptEndpoints(builder, "")
+	if err != nil {
+		c.logErrorCtx(ctx, "client.query.transport_error", "namespace", ns, "engine", opts.Engine, "error", err)
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		defer cancel()
+		defer resp.Body.Close()
+		c.logWarnCtx(ctx, "client.query.error", "namespace", ns, "engine", opts.Engine, "endpoint", endpoint, "status", resp.StatusCode)
+		return nil, c.decodeError(resp)
+	}
+	contentType := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Type")))
+	mode := detectQueryReturn(resp.Header.Get(headerQueryReturn), contentType)
+	cursorHeader := strings.TrimSpace(resp.Header.Get(headerQueryCursor))
+	indexSeq := parseUintHeader(resp.Header.Get(headerQueryIndexSeq))
+	headerMetadata := parseQueryMetadataHeader(resp.Header.Get(headerQueryMetadata))
+	switch mode {
+	case QueryReturnDocuments:
+		reader := &cancelReadCloser{ReadCloser: resp.Body, cancel: cancel}
+		respObj := newDocumentQueryResponse(ns, cursorHeader, indexSeq, headerMetadata, reader)
+		c.logTraceCtx(ctx, "client.query.success", "namespace", ns, "engine", opts.Engine, "mode", "documents", "endpoint", endpoint, "cursor", cursorHeader)
+		return respObj, nil
+	default:
+		defer cancel()
+		defer resp.Body.Close()
+		var out api.QueryResponse
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			return nil, err
+		}
+		if out.Cursor == "" {
+			out.Cursor = cursorHeader
+		}
+		if out.IndexSeq == 0 {
+			out.IndexSeq = indexSeq
+		}
+		if out.Namespace == "" {
+			out.Namespace = ns
+		}
+		out.Metadata = mergeMetadata(out.Metadata, headerMetadata)
+		respObj := newKeyQueryResponse(out, mode)
+		c.logTraceCtx(ctx, "client.query.success", "namespace", ns, "engine", opts.Engine, "mode", "keys", "endpoint", endpoint, "keys", len(respObj.keys))
+		return respObj, nil
+	}
+}
+
+// Get fetches the JSON state for key and returns a streaming response.
+func (c *Client) Get(ctx context.Context, key string, optFns ...GetOption) (*GetResponse, error) {
+	return c.getWithOptions(ctx, key, applyGetOptions(optFns))
+}
+
+func (c *Client) getWithOptions(ctx context.Context, key string, opts GetOptions) (*GetResponse, error) {
+	if c == nil {
+		return nil, fmt.Errorf("lockd: client nil")
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return nil, fmt.Errorf("lockd: key required")
+	}
+	namespace, err := c.namespaceFor(opts.Namespace)
+	if err != nil {
+		return nil, err
+	}
+	leaseID := strings.TrimSpace(opts.LeaseID)
+	if leaseID == "" {
+		leaseID = c.defaultLease()
+	}
+	public := leaseID == "" && !opts.DisablePublic
+	if !public && leaseID == "" {
+		return nil, fmt.Errorf("lockd: lease_id required for key %s", key)
+	}
 	token := ""
-	var err error
-	if !public {
+	if leaseID != "" {
 		token, err = c.fencingToken(leaseID, "")
 		if err != nil {
-			return nil, "", "", err
+			return nil, err
 		}
+	}
+	logFields := []any{"key", key, "namespace", namespace, "endpoint", c.lastEndpoint}
+	if public {
+		logFields = append(logFields, "public", true)
+	} else {
 		logFields = append(logFields, "lease_id", leaseID, "fencing_token", token)
 	}
 	logKey := "client.get.start"
@@ -3025,38 +4121,38 @@ func (c *Client) getWithNamespaceInternal(ctx context.Context, key, leaseID, nam
 	}
 	resp, cancel, endpoint, err := c.attemptEndpoints(builder, "")
 	if err != nil {
-		errorFields := []any{"key", key, "endpoint", endpoint, "error", err}
-		if !public {
-			errorFields = append(errorFields, "lease_id", leaseID, "fencing_token", token)
-		} else {
+		errorFields := []any{"key", key, "namespace", namespace, "endpoint", endpoint, "error", err}
+		if public {
 			errorFields = append(errorFields, "public", true)
+		} else {
+			errorFields = append(errorFields, "lease_id", leaseID, "fencing_token", token)
 		}
 		c.logErrorCtx(ctx, "client.get.transport_error", errorFields...)
-		return nil, "", "", err
+		return nil, err
 	}
 	if resp.StatusCode == http.StatusNoContent {
 		resp.Body.Close()
 		cancel()
-		emptyFields := []any{"key", key, "endpoint", endpoint}
+		emptyFields := []any{"key", key, "namespace", namespace, "endpoint", endpoint}
 		if public {
 			emptyFields = append(emptyFields, "public", true)
 		} else {
 			emptyFields = append(emptyFields, "lease_id", leaseID, "fencing_token", token)
 		}
 		c.logDebugCtx(ctx, "client.get.empty", emptyFields...)
-		return nil, "", "", nil
+		return &GetResponse{Namespace: namespace, Key: key, ETag: strings.Trim(resp.Header.Get("ETag"), "\""), Version: resp.Header.Get("X-Key-Version")}, nil
 	}
 	if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
 		cancel()
-		errorFields := []any{"key", key, "endpoint", endpoint, "status", resp.StatusCode}
+		errorFields := []any{"key", key, "namespace", namespace, "endpoint", endpoint, "status", resp.StatusCode}
 		if public {
 			errorFields = append(errorFields, "public", true)
 		} else {
 			errorFields = append(errorFields, "lease_id", leaseID, "fencing_token", token)
 		}
 		c.logWarnCtx(ctx, "client.get.error", errorFields...)
-		return nil, "", "", c.decodeError(resp)
+		return nil, c.decodeError(resp)
 	}
 	if !public {
 		if newToken := resp.Header.Get(headerFencingToken); newToken != "" {
@@ -3064,124 +4160,65 @@ func (c *Client) getWithNamespaceInternal(ctx context.Context, key, leaseID, nam
 		}
 	}
 	reader := &cancelReadCloser{ReadCloser: resp.Body, cancel: cancel}
-	etag := resp.Header.Get("ETag")
-	version := resp.Header.Get("X-Key-Version")
-	successFields := []any{"key", key, "endpoint", endpoint, "etag", etag, "version", version}
+	result := &GetResponse{
+		Namespace: namespace,
+		Key:       key,
+		ETag:      strings.Trim(resp.Header.Get("ETag"), "\""),
+		Version:   resp.Header.Get("X-Key-Version"),
+		HasState:  true,
+		reader:    reader,
+	}
+	successFields := []any{"key", key, "namespace", namespace, "endpoint", endpoint, "etag", result.ETag, "version", result.Version}
 	if public {
 		successFields = append(successFields, "public", true)
 	} else {
 		successFields = append(successFields, "lease_id", leaseID, "fencing_token", token)
 	}
 	c.logTraceCtx(ctx, "client.get.success", successFields...)
-	return reader, etag, version, nil
+	return result, nil
 }
 
-func (c *Client) getWithNamespace(ctx context.Context, key, leaseID, namespace string) (io.ReadCloser, string, string, error) {
-	return c.getWithNamespaceInternal(ctx, key, leaseID, namespace, false)
-}
-
-// GetWithNamespace streams the JSON state for key within namespace using the provided lease.
-func (c *Client) GetWithNamespace(ctx context.Context, namespace, key, leaseID string) (io.ReadCloser, string, string, error) {
-	norm, err := c.namespaceFor(namespace)
-	if err != nil {
-		return nil, "", "", err
+// Load unmarshals the current state for key into v. When no state exists, v is left untouched.
+func (c *Client) Load(ctx context.Context, key string, v any, optFns ...LoadOption) error {
+	if v == nil {
+		return nil
 	}
-	return c.getWithNamespace(ctx, key, leaseID, norm)
-}
-
-// Get streams the JSON state for key in the client's default namespace using the provided lease.
-func (c *Client) Get(ctx context.Context, key, leaseID string) (io.ReadCloser, string, string, error) {
-	return c.GetWithNamespace(ctx, "", key, leaseID)
-}
-
-// GetPublicWithNamespace streams the latest published JSON state for namespace/key without a lease.
-func (c *Client) GetPublicWithNamespace(ctx context.Context, namespace, key string) (io.ReadCloser, string, string, error) {
-	norm, err := c.namespaceFor(namespace)
+	resp, err := c.getWithOptions(ctx, key, applyLoadOptions(optFns).GetOptions)
 	if err != nil {
-		return nil, "", "", err
+		return err
 	}
-	return c.getWithNamespaceInternal(ctx, key, "", norm, true)
-}
-
-// GetPublic streams the latest published JSON for key in the client's default namespace.
-func (c *Client) GetPublic(ctx context.Context, key string) (io.ReadCloser, string, string, error) {
-	return c.GetPublicWithNamespace(ctx, "", key)
-}
-
-// Load delegates to sess.Load.
-func (c *Client) Load(ctx context.Context, sess *LeaseSession, v any) error {
-	return sess.Load(ctx, v)
+	if resp == nil {
+		return nil
+	}
+	defer resp.Close()
+	if !resp.HasState {
+		return nil
+	}
+	reader := resp.Reader()
+	if reader == nil {
+		return nil
+	}
+	switch target := v.(type) {
+	case *Document:
+		target.Namespace = resp.Namespace
+		target.Key = resp.Key
+		target.Version = resp.Version
+		target.ETag = resp.ETag
+		if target.Metadata == nil {
+			target.Metadata = map[string]string{}
+		}
+		if target.Body == nil {
+			target.Body = make(map[string]any)
+		}
+		return json.NewDecoder(reader).Decode(&target.Body)
+	default:
+		return json.NewDecoder(reader).Decode(target)
+	}
 }
 
 // Save delegates to sess.Save.
 func (c *Client) Save(ctx context.Context, sess *LeaseSession, v any) error {
 	return sess.Save(ctx, v)
-}
-
-// GetBytesWithNamespace loads the JSON state into memory and returns bytes + headers for namespace/key.
-func (c *Client) GetBytesWithNamespace(ctx context.Context, namespace, key, leaseID string) ([]byte, string, string, error) {
-	reader, etag, version, err := c.GetWithNamespace(ctx, namespace, key, leaseID)
-	if err != nil {
-		return nil, "", "", err
-	}
-	if reader == nil {
-		return nil, etag, version, nil
-	}
-	defer reader.Close()
-	data, err := io.ReadAll(reader)
-	if err != nil {
-		return nil, "", "", err
-	}
-	return data, etag, version, nil
-}
-
-// GetBytes loads the JSON state for key in the default namespace into memory.
-func (c *Client) GetBytes(ctx context.Context, key, leaseID string) ([]byte, string, string, error) {
-	return c.GetBytesWithNamespace(ctx, "", key, leaseID)
-}
-
-// GetPublicBytesWithNamespace returns the published JSON bytes plus etag/version for namespace/key.
-func (c *Client) GetPublicBytesWithNamespace(ctx context.Context, namespace, key string) ([]byte, string, string, error) {
-	reader, etag, version, err := c.GetPublicWithNamespace(ctx, namespace, key)
-	if err != nil {
-		return nil, "", "", err
-	}
-	if reader == nil {
-		return nil, etag, version, nil
-	}
-	defer reader.Close()
-	data, err := io.ReadAll(reader)
-	if err != nil {
-		return nil, "", "", err
-	}
-	return data, etag, version, nil
-}
-
-// GetPublicBytes returns the published JSON bytes for key in the default namespace.
-func (c *Client) GetPublicBytes(ctx context.Context, key string) ([]byte, string, string, error) {
-	return c.GetPublicBytesWithNamespace(ctx, "", key)
-}
-
-// LoadPublicWithNamespace reads the latest published JSON state for key into v
-// without acquiring a lease. When no state exists, v is left untouched.
-func (c *Client) LoadPublicWithNamespace(ctx context.Context, namespace, key string, v any) error {
-	if v == nil {
-		return nil
-	}
-	data, _, _, err := c.GetPublicBytesWithNamespace(ctx, namespace, key)
-	if err != nil {
-		return err
-	}
-	if len(data) == 0 {
-		return nil
-	}
-	return json.Unmarshal(data, v)
-}
-
-// LoadPublic reads the latest published JSON state for key into v using the
-// client's default namespace.
-func (c *Client) LoadPublic(ctx context.Context, key string, v any) error {
-	return c.LoadPublicWithNamespace(ctx, "", key, v)
 }
 
 // Update uploads new JSON state from the provided reader.

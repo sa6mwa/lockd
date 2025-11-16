@@ -167,12 +167,22 @@ func BenchmarkClientGetBytes(b *testing.B) {
 	b.SetBytes(int64(len(payload)))
 
 	for b.Loop() {
-		data, _, _, err := cli.GetBytes(ctx, benchKey, benchLease)
+		resp, err := cli.Get(ctx, benchKey,
+			WithGetLeaseID(benchLease),
+			WithGetPublicDisabled(true),
+		)
 		if err != nil {
 			b.Fatalf("get state bytes: %v", err)
 		}
-		if len(data) != len(payload) {
-			b.Fatalf("unexpected payload length: got %d want %d", len(data), len(payload))
+		if resp != nil {
+			data, err := resp.Bytes()
+			resp.Close()
+			if err != nil {
+				b.Fatalf("read state bytes: %v", err)
+			}
+			if len(data) != len(payload) {
+				b.Fatalf("unexpected payload length: got %d want %d", len(data), len(payload))
+			}
 		}
 	}
 }
@@ -192,15 +202,22 @@ func BenchmarkClientGetStream(b *testing.B) {
 	b.SetBytes(int64(len(payload)))
 
 	for b.Loop() {
-		reader, _, _, err := cli.Get(ctx, benchKey, benchLease)
+		resp, err := cli.Get(ctx, benchKey,
+			WithGetLeaseID(benchLease),
+			WithGetPublicDisabled(true),
+		)
 		if err != nil {
 			b.Fatalf("get state stream: %v", err)
 		}
+		if resp == nil {
+			b.Fatal("expected response")
+		}
+		reader := resp.Reader()
 		if reader == nil {
 			b.Fatal("expected reader")
 		}
 		written, err := io.Copy(io.Discard, reader)
-		reader.Close()
+		resp.Close()
 		if err != nil {
 			b.Fatalf("stream copy: %v", err)
 		}

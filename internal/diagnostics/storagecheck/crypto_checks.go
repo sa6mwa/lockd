@@ -16,9 +16,9 @@ import (
 	"pkt.systems/lockd/internal/cryptoutil"
 	"pkt.systems/lockd/internal/queue"
 	"pkt.systems/lockd/internal/storage"
-	"pkt.systems/lockd/internal/tlsutil"
 	"pkt.systems/lockd/internal/uuidv7"
 	"pkt.systems/lockd/namespaces"
+	"pkt.systems/lockd/tlsutil"
 )
 
 // prepareCryptoForVerify ensures kryptograf material is available and constructs

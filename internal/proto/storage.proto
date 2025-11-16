@@ -30,6 +30,15 @@ message MetaRecord {
   LockMeta meta = 2;
 }
 
+message NamespaceQueryConfig {
+  string preferred_engine = 1;
+  string fallback_engine = 2;
+}
+
+message NamespaceConfig {
+  NamespaceQueryConfig query = 1;
+}
+
 message QueueMessageMeta {
   string type = 1;
   string queue = 2;

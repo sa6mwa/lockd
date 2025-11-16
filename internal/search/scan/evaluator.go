@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"pkt.systems/lockd/api"
+	"pkt.systems/lockd/internal/jsonpointer"
 )
 
 type evaluator struct {
@@ -150,12 +151,12 @@ func valueAtPath(root any, field string) (any, bool) {
 	if field == "" {
 		return nil, false
 	}
+	segments, err := jsonpointer.Split(field)
+	if err != nil || len(segments) == 0 {
+		return nil, false
+	}
 	current := root
-	segments := strings.Split(field, ".")
 	for _, segment := range segments {
-		if segment == "" {
-			return nil, false
-		}
 		switch node := current.(type) {
 		case map[string]any:
 			val, ok := node[segment]

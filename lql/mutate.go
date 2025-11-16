@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"pkt.systems/lockd/internal/jsonpointer"
 )
 
 // MutationKind identifies the operation applied to a JSON path.
@@ -30,8 +32,9 @@ type Mutation struct {
 }
 
 // ParseMutations parses CLI-style mutation expressions into Mutation structs.
-// Supports dotted paths, brace shorthand (foo.bar{a=1, b=2}), rm:/time: prefixes,
-// and ++/--/+=/-= increment forms.
+// Paths follow JSON Pointer semantics (`/foo/bar`), so literal dots or spaces in
+// keys require no extra quoting. Brace shorthand (`/foo{/bar=1,/baz=2}`),
+// rm:/time: prefixes, and ++/--/+=/-= increment forms are supported.
 func ParseMutations(exprs []string, now time.Time) ([]Mutation, error) {
 	if len(exprs) == 0 {
 		return nil, fmt.Errorf("no field mutations provided")
@@ -61,6 +64,43 @@ func ParseMutationsString(expr string, now time.Time) ([]Mutation, error) {
 		return nil, err
 	}
 	return ParseMutations(chunks, now)
+}
+
+// Mutations parses variadic mutation expressions (each of which may contain
+// comma/newline separated clauses) using the provided timestamp for time:
+// operands.
+func Mutations(now time.Time, exprs ...string) ([]Mutation, error) {
+	var chunks []string
+	for _, raw := range exprs {
+		expr := strings.TrimSpace(raw)
+		if expr == "" {
+			continue
+		}
+		parts, err := splitExpressions(expr)
+		if err != nil {
+			return nil, err
+		}
+		if len(parts) == 0 {
+			chunks = append(chunks, expr)
+		} else {
+			chunks = append(chunks, parts...)
+		}
+	}
+	return ParseMutations(chunks, now)
+}
+
+// Mutate applies the provided mutation expressions to doc using time.Now().
+func Mutate(doc map[string]any, exprs ...string) error {
+	return MutateWithTime(doc, time.Now(), exprs...)
+}
+
+// MutateWithTime applies mutation expressions using the supplied time.
+func MutateWithTime(doc map[string]any, now time.Time, exprs ...string) error {
+	muts, err := Mutations(now, exprs...)
+	if err != nil {
+		return err
+	}
+	return ApplyMutations(doc, muts)
 }
 
 func parseMutationExpr(expr string, now time.Time) ([]Mutation, error) {
@@ -214,55 +254,21 @@ func buildIncrementMutation(path string, delta float64) (Mutation, error) {
 }
 
 func splitPath(path string) ([]string, error) {
-	var parts []string
-	var token strings.Builder
-	inQuotes := false
-	var quote rune
-	escape := false
-	flush := func() {
-		if token.Len() == 0 {
-			return
-		}
-		segment := strings.TrimSpace(token.String())
-		token.Reset()
-		if segment != "" {
-			parts = append(parts, segment)
-		}
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, fmt.Errorf("path empty")
 	}
-	for _, r := range path {
-		switch {
-		case escape:
-			token.WriteRune(r)
-			escape = false
-		case inQuotes:
-			switch r {
-			case '\\':
-				escape = true
-			case quote:
-				inQuotes = false
-			default:
-				token.WriteRune(r)
-			}
-		default:
-			switch r {
-			case '"', '\'':
-				inQuotes = true
-				quote = r
-			case '.':
-				flush()
-			default:
-				token.WriteRune(r)
-			}
-		}
+	if !strings.HasPrefix(path, "/") {
+		return nil, fmt.Errorf("mutation path %q must start with '/'", path)
 	}
-	if inQuotes {
-		return nil, fmt.Errorf("unterminated quote in path %q", path)
+	segments, err := jsonpointer.Split(path)
+	if err != nil {
+		return nil, err
 	}
-	flush()
-	if len(parts) == 0 {
-		return nil, fmt.Errorf("mutation path %q empty", path)
+	if len(segments) == 0 {
+		return nil, fmt.Errorf("path %q refers to document root", path)
 	}
-	return parts, nil
+	return segments, nil
 }
 
 func parseValue(lit string, timeMode bool, now time.Time) (any, error) {

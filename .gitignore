@@ -1,4 +1,5 @@
 testdata/
+!integration/query/querydata/
 /lockd
 /lockc
 /cmd/lockd/lockd

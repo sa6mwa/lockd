@@ -14,6 +14,7 @@ import (
 	"pkt.systems/pslog"
 
 	"pkt.systems/lockd/internal/storage"
+	"pkt.systems/lockd/namespaces"
 )
 
 type backend struct {
@@ -465,6 +466,13 @@ func (b *backend) Close() error {
 	finish("ok", nil)
 	verbose.Debug("storage.close.success", "elapsed", time.Since(begin))
 	return nil
+}
+
+func (b *backend) DefaultNamespaceConfig() namespaces.Config {
+	if provider, ok := b.inner.(namespaces.ConfigProvider); ok && provider != nil {
+		return provider.DefaultNamespaceConfig()
+	}
+	return namespaces.DefaultConfig()
 }
 
 func (b *backend) SubscribeQueueChanges(namespace, queue string) (storage.QueueChangeSubscription, error) {

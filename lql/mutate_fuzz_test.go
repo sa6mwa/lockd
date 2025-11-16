@@ -8,14 +8,14 @@ import (
 func FuzzParseMutationsString(f *testing.F) {
 	now := time.Unix(1_750_000_000, 0)
 	seeds := []string{
-		`counter=1`,
-		`state.count++`,
-		`state.count--`,
-		`rm:legacy.field`,
-		`time:state.updated=NOW`,
-		`state.details{owner="alice",note="hi"}`,
-		`state."strange key"=value`,
-		`state{"hello key"=world,count=+2}`,
+		`/counter=1`,
+		`/state/count++`,
+		`/state/count--`,
+		`rm:/legacy/field`,
+		`time:/state/updated=NOW`,
+		`/state/details{/owner="alice",/note="hi"}`,
+		`/state/strange key=value`,
+		`/state{/hello key=world,/count=+2}`,
 	}
 	for _, seed := range seeds {
 		f.Add(seed)

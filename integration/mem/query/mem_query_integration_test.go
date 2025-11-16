@@ -15,8 +15,8 @@ import (
 	"pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/integration/internal/cryptotest"
+	querydata "pkt.systems/lockd/integration/query/querydata"
 	queriesuite "pkt.systems/lockd/integration/query/suite"
-	querytestdata "pkt.systems/lockd/integration/query/testdata"
 	"pkt.systems/lockd/namespaces"
 	"pkt.systems/pslog"
 )
@@ -37,8 +37,76 @@ func TestMemQueryResultsSupportPublicRead(t *testing.T) {
 	queriesuite.RunPublicRead(t, startMemQueryServer)
 }
 
+func TestMemQueryDocumentStreaming(t *testing.T) {
+	queriesuite.RunDocumentStreaming(t, startMemQueryServer)
+}
+
 func TestMemQueryDomainDatasets(t *testing.T) {
 	queriesuite.RunDomainDatasets(t, startMemQueryServer)
+}
+
+func TestMemNamespaceQueryConfig(t *testing.T) {
+	ts := startMemQueryServer(t)
+	httpClient := newHTTPClient(t, ts)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	cfg, etag, err := ts.Client.GetNamespaceConfig(ctx, namespaces.Default)
+	if err != nil {
+		t.Fatalf("get namespace config: %v", err)
+	}
+	if cfg.Query.PreferredEngine != "scan" || cfg.Query.FallbackEngine != "none" {
+		t.Fatalf("unexpected default config: %+v", cfg)
+	}
+
+	updateReq := api.NamespaceConfigRequest{
+		Namespace: namespaces.Default,
+		Query: &api.NamespaceQueryConfig{
+			PreferredEngine: "index",
+			FallbackEngine:  "scan",
+		},
+	}
+	updated, newETag, err := ts.Client.UpdateNamespaceConfig(ctx, updateReq, lockdclient.NamespaceConfigOptions{IfMatch: etag})
+	if err != nil {
+		t.Fatalf("update namespace config: %v", err)
+	}
+	if updated.Query.PreferredEngine != "index" || updated.Query.FallbackEngine != "scan" {
+		t.Fatalf("unexpected updated config: %+v", updated)
+	}
+
+	querydata.SeedState(t, ctx, ts.Client, "", "namespace-config-check", map[string]any{"status": "open"})
+	reqBody, err := json.Marshal(api.QueryRequest{
+		Namespace: namespaces.Default,
+		Selector:  api.Selector{},
+		Limit:     10,
+	})
+	if err != nil {
+		t.Fatalf("marshal query request: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, ts.URL()+"/v1/query", bytes.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("new query request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		t.Fatalf("query request: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("query status = %d", resp.StatusCode)
+	}
+
+	resetReq := api.NamespaceConfigRequest{
+		Namespace: namespaces.Default,
+		Query: &api.NamespaceQueryConfig{
+			PreferredEngine: "scan",
+			FallbackEngine:  "none",
+		},
+	}
+	if _, _, err := ts.Client.UpdateNamespaceConfig(ctx, resetReq, lockdclient.NamespaceConfigOptions{IfMatch: newETag}); err != nil {
+		t.Fatalf("reset namespace config: %v", err)
+	}
 }
 
 func TestMemQueryHiddenKeys(t *testing.T) {
@@ -49,8 +117,8 @@ func TestMemQueryHiddenKeys(t *testing.T) {
 
 	visible := "hidden-visible"
 	hidden := "hidden-secret"
-	querytestdata.SeedState(t, ctx, ts.Client, "", visible, map[string]any{"status": "open"})
-	querytestdata.SeedState(t, ctx, ts.Client, "", hidden, map[string]any{"status": "open"})
+	querydata.SeedState(t, ctx, ts.Client, "", visible, map[string]any{"status": "open"})
+	querydata.SeedState(t, ctx, ts.Client, "", hidden, map[string]any{"status": "open"})
 	markKeyHidden(ctx, t, ts.Client, namespaces.Default, hidden)
 
 	body, err := json.Marshal(api.QueryRequest{
@@ -78,7 +146,7 @@ func TestMemQueryHiddenKeys(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&qr); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	querytestdata.ExpectKeySet(t, qr.Keys, []string{visible})
+	querydata.ExpectKeySet(t, qr.Keys, []string{visible})
 }
 
 func startMemQueryServer(t testing.TB) *lockd.TestServer {

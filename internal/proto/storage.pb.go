@@ -250,6 +250,102 @@ func (x *MetaRecord) GetMeta() *LockMeta {
 	return nil
 }
 
+type NamespaceQueryConfig struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	PreferredEngine string                 `protobuf:"bytes,1,opt,name=preferred_engine,json=preferredEngine,proto3" json:"preferred_engine,omitempty"`
+	FallbackEngine  string                 `protobuf:"bytes,2,opt,name=fallback_engine,json=fallbackEngine,proto3" json:"fallback_engine,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *NamespaceQueryConfig) Reset() {
+	*x = NamespaceQueryConfig{}
+	mi := &file_storage_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NamespaceQueryConfig) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NamespaceQueryConfig) ProtoMessage() {}
+
+func (x *NamespaceQueryConfig) ProtoReflect() protoreflect.Message {
+	mi := &file_storage_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NamespaceQueryConfig.ProtoReflect.Descriptor instead.
+func (*NamespaceQueryConfig) Descriptor() ([]byte, []int) {
+	return file_storage_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *NamespaceQueryConfig) GetPreferredEngine() string {
+	if x != nil {
+		return x.PreferredEngine
+	}
+	return ""
+}
+
+func (x *NamespaceQueryConfig) GetFallbackEngine() string {
+	if x != nil {
+		return x.FallbackEngine
+	}
+	return ""
+}
+
+type NamespaceConfig struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Query         *NamespaceQueryConfig  `protobuf:"bytes,1,opt,name=query,proto3" json:"query,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *NamespaceConfig) Reset() {
+	*x = NamespaceConfig{}
+	mi := &file_storage_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NamespaceConfig) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NamespaceConfig) ProtoMessage() {}
+
+func (x *NamespaceConfig) ProtoReflect() protoreflect.Message {
+	mi := &file_storage_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NamespaceConfig.ProtoReflect.Descriptor instead.
+func (*NamespaceConfig) Descriptor() ([]byte, []int) {
+	return file_storage_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *NamespaceConfig) GetQuery() *NamespaceQueryConfig {
+	if x != nil {
+		return x.Query
+	}
+	return nil
+}
+
 type QueueMessageMeta struct {
 	state                    protoimpl.MessageState `protogen:"open.v1"`
 	Type                     string                 `protobuf:"bytes,1,opt,name=type,proto3" json:"type,omitempty"`
@@ -275,7 +371,7 @@ type QueueMessageMeta struct {
 
 func (x *QueueMessageMeta) Reset() {
 	*x = QueueMessageMeta{}
-	mi := &file_storage_proto_msgTypes[3]
+	mi := &file_storage_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -287,7 +383,7 @@ func (x *QueueMessageMeta) String() string {
 func (*QueueMessageMeta) ProtoMessage() {}
 
 func (x *QueueMessageMeta) ProtoReflect() protoreflect.Message {
-	mi := &file_storage_proto_msgTypes[3]
+	mi := &file_storage_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -300,7 +396,7 @@ func (x *QueueMessageMeta) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueueMessageMeta.ProtoReflect.Descriptor instead.
 func (*QueueMessageMeta) Descriptor() ([]byte, []int) {
-	return file_storage_proto_rawDescGZIP(), []int{3}
+	return file_storage_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *QueueMessageMeta) GetType() string {
@@ -448,7 +544,12 @@ const file_storage_proto_rawDesc = "" +
 	"\n" +
 	"MetaRecord\x12\x12\n" +
 	"\x04etag\x18\x01 \x01(\tR\x04etag\x12,\n" +
-	"\x04meta\x18\x02 \x01(\v2\x18.lockd.internal.LockMetaR\x04meta\"\xd7\x05\n" +
+	"\x04meta\x18\x02 \x01(\v2\x18.lockd.internal.LockMetaR\x04meta\"j\n" +
+	"\x14NamespaceQueryConfig\x12)\n" +
+	"\x10preferred_engine\x18\x01 \x01(\tR\x0fpreferredEngine\x12'\n" +
+	"\x0ffallback_engine\x18\x02 \x01(\tR\x0efallbackEngine\"M\n" +
+	"\x0fNamespaceConfig\x12:\n" +
+	"\x05query\x18\x01 \x01(\v2$.lockd.internal.NamespaceQueryConfigR\x05query\"\xd7\x05\n" +
 	"\x10QueueMessageMeta\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x12\x14\n" +
 	"\x05queue\x18\x02 \x01(\tR\x05queue\x12\x0e\n" +
@@ -485,26 +586,29 @@ func file_storage_proto_rawDescGZIP() []byte {
 	return file_storage_proto_rawDescData
 }
 
-var file_storage_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_storage_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_storage_proto_goTypes = []any{
-	(*Lease)(nil),            // 0: lockd.internal.Lease
-	(*LockMeta)(nil),         // 1: lockd.internal.LockMeta
-	(*MetaRecord)(nil),       // 2: lockd.internal.MetaRecord
-	(*QueueMessageMeta)(nil), // 3: lockd.internal.QueueMessageMeta
-	(*structpb.Struct)(nil),  // 4: google.protobuf.Struct
-	(*structpb.Value)(nil),   // 5: google.protobuf.Value
+	(*Lease)(nil),                // 0: lockd.internal.Lease
+	(*LockMeta)(nil),             // 1: lockd.internal.LockMeta
+	(*MetaRecord)(nil),           // 2: lockd.internal.MetaRecord
+	(*NamespaceQueryConfig)(nil), // 3: lockd.internal.NamespaceQueryConfig
+	(*NamespaceConfig)(nil),      // 4: lockd.internal.NamespaceConfig
+	(*QueueMessageMeta)(nil),     // 5: lockd.internal.QueueMessageMeta
+	(*structpb.Struct)(nil),      // 6: google.protobuf.Struct
+	(*structpb.Value)(nil),       // 7: google.protobuf.Value
 }
 var file_storage_proto_depIdxs = []int32{
 	0, // 0: lockd.internal.LockMeta.lease:type_name -> lockd.internal.Lease
-	4, // 1: lockd.internal.LockMeta.attributes:type_name -> google.protobuf.Struct
+	6, // 1: lockd.internal.LockMeta.attributes:type_name -> google.protobuf.Struct
 	1, // 2: lockd.internal.MetaRecord.meta:type_name -> lockd.internal.LockMeta
-	4, // 3: lockd.internal.QueueMessageMeta.attributes:type_name -> google.protobuf.Struct
-	5, // 4: lockd.internal.QueueMessageMeta.last_error:type_name -> google.protobuf.Value
-	5, // [5:5] is the sub-list for method output_type
-	5, // [5:5] is the sub-list for method input_type
-	5, // [5:5] is the sub-list for extension type_name
-	5, // [5:5] is the sub-list for extension extendee
-	0, // [0:5] is the sub-list for field type_name
+	3, // 3: lockd.internal.NamespaceConfig.query:type_name -> lockd.internal.NamespaceQueryConfig
+	6, // 4: lockd.internal.QueueMessageMeta.attributes:type_name -> google.protobuf.Struct
+	7, // 5: lockd.internal.QueueMessageMeta.last_error:type_name -> google.protobuf.Value
+	6, // [6:6] is the sub-list for method output_type
+	6, // [6:6] is the sub-list for method input_type
+	6, // [6:6] is the sub-list for extension type_name
+	6, // [6:6] is the sub-list for extension extendee
+	0, // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_storage_proto_init() }
@@ -512,14 +616,14 @@ func file_storage_proto_init() {
 	if File_storage_proto != nil {
 		return
 	}
-	file_storage_proto_msgTypes[3].OneofWrappers = []any{}
+	file_storage_proto_msgTypes[5].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_storage_proto_rawDesc), len(file_storage_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   4,
+			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

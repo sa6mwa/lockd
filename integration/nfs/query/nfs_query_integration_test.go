@@ -35,6 +35,10 @@ func TestNFSQueryResultsSupportPublicRead(t *testing.T) {
 	queriesuite.RunPublicRead(t, startNFSQueryServer)
 }
 
+func TestNFSQueryDocumentStreaming(t *testing.T) {
+	queriesuite.RunDocumentStreaming(t, startNFSQueryServer)
+}
+
 func TestNFSQueryDomainDatasets(t *testing.T) {
 	queriesuite.RunDomainDatasets(t, startNFSQueryServer)
 }

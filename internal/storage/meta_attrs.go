@@ -54,11 +54,25 @@ func (m *Meta) ClearQueryExcluded() {
 
 // SetQueryHidden sets or clears the query-hidden flag.
 func (m *Meta) SetQueryHidden(hidden bool) {
+	if m == nil {
+		return
+	}
 	if hidden {
 		m.MarkQueryExcluded()
-	} else {
-		m.ClearQueryExcluded()
+		return
 	}
+	// Persist the preference explicitly so future defaults know the user opted in.
+	m.SetAttribute(MetaAttributeQueryExclude, "false")
+}
+
+// HasQueryHiddenPreference reports whether the metadata carries an explicit
+// query-hidden attribute (true or false).
+func (m *Meta) HasQueryHiddenPreference() bool {
+	if m == nil || m.Attributes == nil {
+		return false
+	}
+	_, ok := m.Attributes[MetaAttributeQueryExclude]
+	return ok
 }
 
 // QueryExcluded reports whether this key should be hidden from queries.

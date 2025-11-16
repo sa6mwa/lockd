@@ -2,11 +2,26 @@
 
 > ⚠️ **This is v0.0, beware of bugs and breaking changes.**
 
-`lockd` is a single-binary coordination service that delivers **exclusive
-leases**, **atomic JSON state**, and an **at-least-once queue** for distributed
-workers. It is intentionally small, CGO-free, suitable for static linking (e.g.
-`FROM scratch` images), and runs cleanly as PID 1 inside containers or minimal
-VMs.
+`lockd` is a single-binary coordination plane that combines **exclusive leases**,
+**atomic JSON state**, **searchable document storage**, and an **at-least-once
+queue** (with optional envelope encryption) behind one API. It stays CGO-free,
+statically linked, and happy as PID 1 in tiny containers or VMs.
+
+### What is lockd?
+
+Think of lockd as a coordination kernel for workflows and services. It lets you:
+
+- **Protect shared work** with leases so only one worker advances a checkpoint at a time.
+- **Persist JSON documents** directly on disks, S3/MinIO, or Azure Blob, then query them with selectors or stream them back as whole documents.
+- **Move work between stages** using the built-in queue (enqueue/dequeue/ack/nack/extend) without deploying a separate message bus.
+
+Because everything rides on the same storage abstraction, you can run lockd as a
+lightweight state/queue service in your own cluster, push it behind mTLS on the
+edge, or layer it over cloud object stores to create a simple hosted NoSQL-style
+document store with queues attached. Typical real-world uses include workflow
+runners, ETL checkpoints, IoT or fleet coordination, long-running ML tasks, or
+any system that needs “small database + queue + leasing” without managing three
+separate products.
 
 Typical flow:
 
@@ -17,6 +32,10 @@ Typical flow:
 
 If the worker crashes or the connection drops, TTL expiry allows the next
 worker to resume from the last committed state.
+
+<a href="https://github.com/sa6mwa/centaurarticles/blob/main/pub/10x.pdf" target="_blank">
+<img align="right" src="10x.png" width="170" height="240" alt="Article about human—AI software development">
+</a>
 
 > **Note from the author**
 >
@@ -30,130 +49,95 @@ worker to resume from the last committed state.
 
 ## Features
 
-- **Exclusive leases** (one holder per key) with configurable TTLs, keepalive,
-  and a background sweeper to reap expired locks.
-- **Atomic JSON state** up to ~100 MB (configurable) with CAS via version + ETag headers.
-- **Monotonic fencing tokens** protect against delayed clients; every lease-bound
-  request must include the latest `X-Fencing-Token` issued by the server.
-- **Acquire-for-update helper** wraps acquire + get + update into a single callback that
-  keeps the lease alive while your function reads the snapshot and posts an
-  update. The helper releases the lease automatically when the function
-  returns.
-- **Public reads** via `/v1/get?public=1` (and `lockd client get --public`) let dashboards
-  or other observers stream the latest published snapshot without acquiring a
-  lease; writers continue to use the standard lease-bound flow. The Go SDK
-  exposes `Client.GetPublic*` / `Client.LoadPublic*` helpers for the same
-  purpose.
-- **Remove-state API** lets lease holders delete the JSON blob with the same CAS
-  semantics (`X-If-Version` / `X-If-State-ETag`) used by updates.
-- **Queue primitives** built atop the same storage backend offering enqueue,
-  stateless/stateful dequeue, ack/nack/extend helpers, and automatic DLQ moves
-  once `max_attempts` is reached.
-- **Simple HTTP/JSON API** (no gRPC) capable of running with or without TLS.
-- **Storage backends**
-  - **S3 / S3-compatible** object stores using a conditional copy pattern.
-  - **Azure Blob Storage** with Shared Key or SAS authentication.
-  - **Disk** backend optimised for SSD/NVMe with optional retention. On Linux,
-    queue consumers receive change notifications via inotify when the root
-    filesystem is not NFS; disable with `--disk-queue-watch=false` if you prefer
-    pure polling.
-  - **In-memory** backend for tests.
-- **Go SDK** (`client` package) with automatic retries, structured errors,
-  and automatic retries for handshake failures.
-- **Cobra/Viper CLI** with environment parity (`LOCKD_*`).
-- **Diagnostics** (`lockd verify store`) and integration suites (AWS, MinIO, Disk, Azure, OTLP, queues).
+### Coordination primitives
+
+- **Exclusive leases** per key with configurable TTLs, keep-alives, fencing tokens, and sweeper reaping for expired holders.
+- **Acquire-for-update helpers** wrap acquire → get → update, keeping leases alive while user code runs and releasing them automatically.
+- **Public reads** let dashboards or downstream systems fetch published state without holding leases (`/v1/get?public=1`, `Client.Get` default behavior).
+
+### Document store + search
+
+- **Atomic JSON state** up to ~100 MB (configurable) with CAS (version + ETag) headers.
+- **Namespace-aware indexing** across S3/MinIO, Azure, or disk backends. Query with RFC 6901 selectors (`/workflow/state="done"`, braces, `>=`, etc.).
+- **Streaming query results**: keys-only (compact JSON) or NDJSON documents with metadata, consumable via SDK/CLI.
+- **Encryption everywhere** when configured—metadata, state blobs, queue payloads all flow through `internal/storage.Crypto`.
+
+### Queue subsystem
+
+- **At-least-once queue** built on the same storage: enqueue, stateless/stateful dequeue, ack/nack/extend, DLQ after `max_attempts`.
+- **Visibility controls** (ack deadlines, reschedule, extend) and QRF throttling hooks for overload protection.
+- **State sidecar** per message to hold workflow context; created lazily via `EnsureStateExists`.
+
+### APIs & tooling
+
+- **Simple HTTP/JSON API** (no gRPC) with optional mTLS. All endpoints support correlation IDs, structured errors, and fencing tokens.
+- **Go SDK (`client`)** with retries, structured `APIError`, acquire-for-update, streaming query helpers, and document helpers (`client.Document`).
+- **Cobra/Viper CLI** that mirrors the SDK (leases, queue operations, `lockd client query`, `lockd client namespace`, etc.) and is covered by unit tests.
+
+### Storage backends
+
+- **S3 / MinIO / S3-compatible** using conditional copy CAS and optional KMS/SSE.
+- **Azure Blob Storage** (Shared Key or SAS) with the same storage port.
+- **Disk** backend optimized for SSD/NVMe, with optional inotify watcher for queue change feed; works over NFS via pure polling.
+- **In-memory** backend for tests and demos.
+
+### Operations & observability
+
+- **Structured logging** (`pslog`) with subsystem tagging (`server.lifecycle.core`, `search.index`, `queue.dispatcher`, etc.).
+- **Watchdogs** baked into unit/integration tests to catch hangs instantly.
+- **`lockd verify store`** diagnostics ensure backend credentials + permissions + encryption descriptors are valid before deploying.
+- **Integration suites** (`run-integration-suites.sh`) cover every backend/feature combination; use them before landing cross-cutting changes.
 
 ---
 
-## Architecture Overview
+## Architecture
 
-```
-                                  +---------------------------+
-                                  |      Storage Backends     |
-                                  |  (S3 / Disk / Memory …)   |
-                                  +-------------+-------------+
-                                                ^
-                                  encrypted I/O |
-                                                |
-                                 +--------------+-------------+
-                                 |       Storage Crypto       |
-                                 |     (kryptograf DEKs +     |
-                                 |optional Snappy compression)|
-                                 +--------------+-------------+
-                                                ^
-                                 CAS meta/state |
-                                                |
-+------------------+    HTTPS + mTLS    +-------+--------+
-|  Worker Apps     |<------------------>|   HTTP API     |
-|  (Go client SDK) |                    |    (lockd)     |
-+---------+--------+                    +-------+--------+
-          |                                     |
-          | leases / queue ops                  | request dispatch
-          v                                     v
-+---------+---------+         queue ops   +-----+---------+
-| Lease Manager &   |-------------------->| Queue Service |
-| Sweeper           |                     |  (meta/state) |
-+-------------------+                     +-------+-------+
-                                                  |
-                           reschedule / ready set |
-                                                  v
-                                    +-------------+-------------+
-                                    |      Queue Dispatcher     |
-                                    |       + Ready Cache       |
-                                    +------+------+-------------+
-                                           |    ^
-                              notify/watch |    | mark demand
-                      +--------------------+----+------------------+
-                      |   Storage Change Feed (fsnotify/S3/mem)    |
-                      +--------------------+----+------------------+
-                                           |    |
-                        throttle decisions |    | usage & metrics
-+------------------+                +------+----+------+
-| QRF (perimeter)  |<---------------|  HTTP API routes |
-+------------------+                +------------------+
-         ^
-         | samples
-+--------+--------+
-|  LSF (local)    |
-|  sampling       |
-+-----------------+
-```
+![Lockd component view](docs/diagrams/component-view.png)
 
-The ASCII sketch mirrors the PlantUML component diagram in
-`docs/diagrams/lockd-architecture.puml`.
+### Subsystems (`sys` hierarchy)
 
-### Key subsystems
+Every structured log carries a `sys` field (`system.subsystem.component`). The
+strings come directly from `loggingutil.WithSubsystem` and represent concrete
+code paths. The primary production subsystems are:
 
-- **Worker apps / Go client SDK** – issue lease, state, and queue operations over HTTPS with mTLS.
-- **HTTP API** – authenticates requests, applies QRF throttling, and fans out to the internal services.
-- **Lease manager & sweeper** – hands out exclusive leases, keeps them alive, and reaps expired holders.
-- **Queue service** – owns queue metadata, state blobs, and CAS coordination with the storage layer.
-- **Dispatcher + ready cache** – multiplexes consumer demand, batches storage reads, and feeds ready messages to waiters.
-- **Storage change feed** – abstracts fsnotify/S3/memory notifications into dispatcher wakeups.
-- **Storage crypto** – wraps kryptograf usage for metadata and per-object DEKs, encrypting blobs before they reach the backend and decrypting them on the way out.
-- **Storage backends** – pluggable CAS store for meta/state and payload blobs (S3, disk, MinIO, Azure, mem, …).
-- **LSF (Local Security Force)** – samples host-level metrics and feeds them into
-  **QRF (Quick Reaction Force)**, which enforces backpressure/throttling decisions.
+- `client.sdk` – Go SDK calls (leases, queue APIs, acquire-for-update helper).
+- `client.cli`, `cli.root`, `cli.verify` – Cobra/Viper CLI plumbing, namespace
+  helpers, and the `lockd verify` workflows.
+- `api.http.server` – TLS listener, mux, and server-level errors. Each handler
+  also emits `api.http.router.<operation>` (for example `api.http.router.acquire`,
+  `api.http.router.queue.enqueue`, `api.http.router.query`).
+- `control.lsf.observer` – Host sampling loop that feeds the QRF controller.
+- `control.qrf.controller` – Applies throttling/Retry-After headers and exposes
+  demand metrics to HTTP handlers.
+- `server.lifecycle.core` – Supervises background loops (sweeper, telemetry,
+  namespace config) and owns process-level lifecycle logging.
+- `server.shutdown.controller` – Drives drain-aware shutdown, emits
+  `Shutdown-Imminent`, and monitors the close budget.
+- `namespace.config` – Manages per-namespace capabilities (scan vs. index) and
+  backs `/v1/namespace` plus search adapters.
+- `queue.dispatcher.core` – Ready cache, change-feed watcher, and consumer
+  demand reconciliation.
+- `search.scan` – Selector evaluation + scan adapter (explicit engine or fallback).
+- `search.index` – Index manager, memtable flushers, `/v1/index/flush`.
+- `storage.pipeline.snappy.pre_encrypt` – Optional compression pass executed
+  before encryption whenever storage compression is enabled.
+- `storage.crypto.envelope` – Kryptograf envelope encryption for metadata/state/queue payloads.
+- `storage.backend.core` – Storage adapters (S3/MinIO, disk, Azure, mem).
+- `observability.telemetry.exporter` – OTLP exporter for traces and metrics.
 
-#### Subsystem ↔ `sys` mapping
+Additional prefixes show up in specialised contexts:
 
-Every block above maps to a canonical structured-logging prefix. All logs include `app=lockd` and a `sys` key with the `system.subsystem.component[.subcomponent]` hierarchy.
+- `bench.disk.*`, `bench.minio.*` – Benchmark harnesses and perf suites.
+- `api.http.router.*` – Every HTTP route (acquire, query, queue ops, etc.).
+- `client.cli.*` / `cli.verify` – CLI subcommands and auth workflows.
 
-| Architecture block / concern        | Assigned `sys` value                    | Notes |
-|-------------------------------------|-----------------------------------------|-------|
-| Worker apps / Go SDK / CLI          | `client.sdk`, `client.cli`              | CLI commands and SDK helpers share this family. |
-| HTTP API routes + router            | `api.http.router`                       | Handlers append `.acquire`, `.queue`, `.health`, etc. |
-| Lease manager & sweeper             | `server.lease.manager`, `server.lease.sweeper` | Background reapers / TTL extension loops. |
-| Queue service (meta/state)          | `queue.service.meta`, `queue.service.state` | Covers CAS coordination for queue metadata/state. |
-| Dispatcher + ready cache            | `queue.dispatcher.core`, `queue.dispatcher.ready_cache` | Watchers/events append `.watch`, `.events`. |
-| Storage change feed                 | `storage.change_feed.fsnotify`, `storage.change_feed.s3`, etc. | Backend-specific watchers add suffixes. |
-| Storage crypto / pipeline           | `storage.crypto.envelope`, `storage.pipeline.snappy.pre_encrypt` | Mirrors kryptograf + compression stages. |
-| Storage backends                    | `storage.backend.s3`, `storage.backend.disk`, `storage.backend.mem`, … | Adapter-specific operations. |
-| LSF observer                        | `control.lsf.observer`                  | Host sampling and gauges. |
-| QRF controller                      | `control.qrf.controller`                | Retry-after and throttle state transitions. |
-| Shutdown controller                 | `server.shutdown.controller`            | Drain/watchdog subcomponents append `.drain`, `.listener`, etc. |
-| Telemetry exporters                 | `observability.telemetry.exporter`      | OTLP and future sinks. |
-| Benchmark / integration harnesses   | `bench.disk`, `bench.minio`, `bench.client`, … | Tests/benchmarks prefix with suite + role. |
+### Sequence diagrams
+
+Lockd’s major workflows are documented as PlantUML sequence diagrams:
+
+- [State path](docs/diagrams/sequence-state.png) — acquire/get/update/release over the lease/state surface.
+- [Queue path](docs/diagrams/sequence-queue.png) — enqueue, dequeue, and ack/nack/extend across the queue service.
+- [Search path](docs/diagrams/sequence-search.png) — `/v1/query` execution and `/v1/index/flush`.
 
 ### Request flow
 
@@ -193,7 +177,7 @@ all clients must use the callback helper described above.
 - `internal/storage` – backend interface, retry wrapper, S3/Disk/Memory.
 - `client` – public Go SDK.
 - `cmd/lockd` – CLI entrypoint (Cobra/Viper).
-- `internal/tlsutil` – bundle loading/generation helpers.
+- `tlsutil` – bundle loading/generation helpers.
 - `integration/` – end-to-end tests (mem, disk, NFS, AWS, MinIO, Azure, OTLP, queues).
 
 ## API documentation
@@ -201,7 +185,7 @@ all clients must use the callback helper described above.
 The HTTP handlers embed [swaggo](https://github.com/swaggo/swag) annotations so the OpenAPI description can be produced straight from the code. Run `make swagger` (or `go generate ./swagger`) with the `swag` binary on your `PATH` to refresh the spec. Generation writes three artifacts to `swagger/docs/`:
 
 - `swagger.json` and `swagger.yaml` for downstream tooling.
-- `swagger.html`, a self-contained Swagger UI page that inlines the JSON spec.
+- [`swagger.html`](swagger/docs/swagger.html), a self-contained Swagger UI page that inlines the JSON spec.
 
 These files live alongside the CLI so the reusable server library stays swaggo-free. Serve the HTML with any static web host—or just open it locally—to explore the API interactively.
 
@@ -367,6 +351,28 @@ The same attribute can ride along with state uploads by setting the
 Server-side diagnostics (e.g. `lockd-diagnostics/*`) are automatically hidden so
 queries never leak internal housekeeping blobs. Future metadata attributes will
 use the same endpoint and response envelope (`api.MetadataUpdateResponse`).
+
+### Query return modes
+
+`POST /v1/query` still returns `{namespace, keys, cursor}` JSON by default, but
+you can now request document streams by passing `return=documents`. In document
+mode the server replies with `Content-Type: application/x-ndjson`, sets the
+cursor/index metadata via headers, and streams rows shaped like:
+
+```
+{"ns":"default","key":"orders/123","ver":42,"doc":{"status":"ready"}}
+```
+
+Only published documents are streamed, so the semantics match `public=1` GET.
+The Go SDK exposes `client.WithQueryReturnDocuments()` plus a revamped
+`QueryResponse` that provides `Mode()`, `Keys()`, and `ForEach` helpers. In
+streaming mode each row exposes `row.DocumentReader()` (close it when you’re
+done) or the convenience `row.DocumentInto(...)` / `row.Document()` helpers. If
+you only need the identifiers, call `Keys()` to drain the stream without
+materialising any documents. Response headers mirror the cursor and index
+sequence (`X-Lockd-Query-Cursor`, `X-Lockd-Query-Index-Seq`), and the metadata
+map is available both in headers and on the JSON response for the keys-only
+mode.
 
 #### Queue dispatcher tuning
 
@@ -539,6 +545,52 @@ The generated file contains the same keys as the CLI flags (for example
 `listen-proto`, `json-max`, `json-util`, `payload-spool-mem`, `disk-retention`, `disk-janitor-interval`, `s3-region`, `s3-disable-tls`). When present, the configuration file
 is read before environment variables so you can override individual settings via
 `LOCKD_*` exports or command-line flags.
+
+#### Bootstrap config, CA, and client certs
+
+Use `lockd --bootstrap /path/to/config-dir` to idempotently generate a CA bundle
+(`ca.pem`), server bundle with kryptograf metadata (`server.pem` +
+`server.denylist`), a starter client certificate (`client.pem`), and a
+`config.yaml` wired to that material. The flag is safe to run on every start; it
+skips files that already exist and only fills in the missing pieces. Container
+images built from this repo run with `--bootstrap /config` by default so
+mounting an empty `/config` volume automatically provisions mTLS + storage
+encryption.
+
+### Container image
+
+Build a minimal image with the provided `Containerfile`:
+
+```sh
+nerdctl build -t lockd:latest .
+# or with podman...
+podman build -t lockd:latest .
+```
+
+The final stage is `FROM scratch` with `/lockd` as entrypoint. It exposes two
+volumes:
+
+- `/config` – persisted certificates, config, denylist, and kryptograf material
+- `/storage` – default `disk:///storage` backend for state/queue data
+
+Run the server:
+
+```sh
+nerdctl run -p 9341:9341 -v lockd-config:/config -v lockd-data:/storage localhost/lockd:latest
+```
+
+Because the entrypoint appends `--bootstrap /config`, mounting a fresh config
+volume auto-creates CA/server/client bundles plus `config.yaml`. You can also
+invoke admin commands directly:
+
+```sh
+nerdctl run -ti -v lockd-config:/config localhost/lockd:latest auth new client \
+  --cn worker-2 --out /config/client-worker-2.pem
+```
+
+Environment variables still override everything (for example supply
+`LOCKD_STORE`, `LOCKD_S3_ENDPOINT`, etc.) so the same image works for disk,
+MinIO, Azure, or AWS deployments.
 
 ### JSON Compaction Engines
 
@@ -951,21 +1003,39 @@ lockd client release --key orders
 
 # State operations / pipe through edit
 lockd client get --key orders -o - \
-  | lockd client edit status.counter++ \
+  | lockd client edit /status/counter++ \
   | lockd client update --key orders
 lockd client remove --key orders
 
 # Atomic JSON mutations (mutate using an existing lease)
-lockd client set --key orders progress.step=fetch progress.count++ time:progress.updated=NOW
+lockd client set --key orders /progress/step=fetch /progress/count++ time:/progress/updated=NOW
 
 # Rich mutations with brace/quoted syntax (LQL)
 lockd client set --key ledger \
-  'data{"hello key"="mars traveler",count++}' \
-  meta.previous=world \
-  time:meta.processed=NOW
+  '/data{/hello key="mars traveler",/count++}' \
+  /meta/previous=world \
+  time:/meta/processed=NOW
 
 # Local JSON helper (no server interaction)
-lockd client edit checkpoint.json progress.step="done" progress.count=+5
+lockd client edit checkpoint.json /progress/step="done" /progress/count=+5
+
+# Query keys or stream documents
+lockd client query '/report/status="staged"'
+lockd client query --output text --file keys.txt '/report/status="staged"'
+lockd client query --documents --file staged.ndjson '/progress/count>=10'
+lockd client query --documents --directory ./export '/report/region="emea"'
+
+`lockd client query` parses the same LQL selector syntax as the server and
+defaults to a compact JSON array of keys. Pass `--output text` for newline
+lists that are easy to pipe into other shell tools. `--documents` switches the
+request to `return=documents`, streaming each JSON state as NDJSON (to stdout by
+default, or `--file`/`--directory` to store the feed). Directory mode writes one
+`<key>.json` file per match, making it trivial to diff or archive results.
+Selectors support shorthand comparison syntax, so `/progress/count>=10` is
+automatically rewritten into the full `range{...}` clause, and `/status="ok"`
+maps to an equality predicate without brace boilerplate. The selector argument
+is required; to query “everything” explicitly pass an empty string (e.g.
+`lockd client query ""`).
 ```
 
 Pass `--public` to `lockd client get` when you only need the last published
@@ -1004,6 +1074,13 @@ lockd client queue extend --extend 45s
 and workflow state leases; the exported `LOCKD_QUEUE_STATE_*` variables align
 with the fields consumed by `queue ack`/`nack`/`extend`.
 
+> Custom clients must send `/v1/queue/enqueue` as `multipart/form-data` (or
+> `multipart/related`) with two parts named **`meta`** and **`payload`**. The
+> `meta` part contains a JSON-encoded `api.EnqueueRequest`; the `payload` part
+> streams the message body and may use any `Content-Type` (e.g.
+> `application/json`). Earlier builds auto-detected JSON, but current releases
+> require the explicit field names, matching the Go SDK and CLI.
+
 Payloads are streamed directly to disk. When `--payload-out` is omitted the CLI
 creates a temporary file and exports its location via
 `LOCKD_QUEUE_PAYLOAD_PATH`, making it easy to hand off large bodies to other
@@ -1011,12 +1088,15 @@ tools without buffering in memory.
 
 The CLI auto-discovers `client*.pem` bundles under `$HOME/.lockd/` (or use
 `--bundle`) and performs the same host-agnostic mTLS verification as the SDK.
-`set` and `edit` consume the shared LQL mutation DSL. Mutations accept dotted
-paths (`progress.counter++`), brace blocks that fan out to nested fields
-(`data{"hello key"="mars traveler",count++}`), quoted segments, increments
-(`=+3`/`--`), removals (`rm:`/`delete:`), and `time:` prefixes for RFC3339
-timestamps. Commas and newlines can be mixed freely, e.g.
-`lockd client set --key ledger 'meta{owner="alice",previous="world"}'`.
+`set` and `edit` consume the shared LQL mutation DSL. Paths now use JSON Pointer
+syntax ([RFC 6901](https://datatracker.ietf.org/doc/html/rfc6901))
+(`/progress/counter++`), so literal dots, spaces, or Unicode in
+keys are handled transparently (only `/` and `~` are escaped as `~1`/`~0`). The
+mutator also supports brace blocks that fan out to nested fields
+(`/data{/hello key="mars traveler",/count++}`), increments (`=+3`/`--`),
+removals (`rm:`/`delete:`), and `time:` prefixes for RFC3339 timestamps.
+Commas and newlines can be mixed freely, e.g. `lockd client set --key ledger
+'meta{/owner="alice",/previous="world"}'`.
 
 Timeout knobs mirror the Go client: `--timeout` (HTTP dial+request),
 `--close-timeout` (release window), and `--keepalive-timeout`
@@ -1035,13 +1115,6 @@ convenient way to populate environment variables for subsequent commands.
 When mTLS is enabled (default) the CLI assumes HTTPS for bare `host[:port]`
 values; when you pass `--disable-mtls` it assumes HTTP. Supplying an explicit
 `http://...`/`https://...` URL is always honoured.
-
-## Sequence Diagrams
-
-- [![Lockd Lease Lifecycle (Overview)](docs/diagrams/lockd-overview.jpeg)](docs/diagrams/lockd-overview.jpeg)
-- [![Lockd Lease Lifecycle (Disk Backend)](docs/diagrams/lockd-disk.jpeg)](docs/diagrams/lockd-disk.jpeg)
-- [![Lockd Lease Lifecycle (S3 Backend)](docs/diagrams/lockd-s3.jpeg)](docs/diagrams/lockd-s3.jpeg)
-- [![Lockd Lease Lifecycle (Azure Blob)](docs/diagrams/lockd-azure.jpeg)](docs/diagrams/lockd-azure.jpeg)
 
 ## Integration Tests
 

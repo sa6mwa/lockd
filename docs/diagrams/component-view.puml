@@ -1,0 +1,111 @@
+@startuml
+skinparam backgroundColor transparent
+skinparam shadowing false
+skinparam roundcorner 8
+skinparam wrapWidth 200
+skinparam defaultTextAlignment center
+skinparam packageBackgroundColor white
+
+!define COLOR_CLIENT #E8F1FF
+!define COLOR_CONTROL #F1E8FF
+!define COLOR_HTTP #FFF3E0
+!define COLOR_SERVICE #E7F8EF
+!define COLOR_QUEUE #EDEAFF
+!define COLOR_SEARCH #FFEDED
+!define COLOR_STORAGE #F0F0F0
+
+' Clients / CLI
+package "Client Tier" {
+  component clientSdk as "client.sdk" COLOR_CLIENT
+  component clientCli as "client.cli" COLOR_CLIENT
+  component cliRoot as "cli.root" COLOR_CLIENT
+  component cliVerify as "cli.verify" COLOR_CLIENT
+}
+
+clientCli --> clientSdk
+cliRoot --> clientCli
+cliVerify --> clientCli
+
+' Control plane
+component lsf as "control.lsf.observer" COLOR_CONTROL
+component qrf as "control.qrf.controller" COLOR_CONTROL
+lsf --> qrf : samples
+
+' HTTP front door
+component apiRouter as "api.http.router.*\n/api.http.server" COLOR_HTTP
+clientSdk --> apiRouter
+qrf --> apiRouter : throttle decisions
+
+' Namespace/config + lifecycle (shown implicitly)
+component nsConfig as "namespace.config" COLOR_SERVICE
+apiRouter --> nsConfig
+
+' Lease/state services
+component leaseSvc as "server.lease.manager \n server.lease.sweeper" COLOR_SERVICE
+apiRouter --> leaseSvc
+
+' Queue services
+component queueSvc as "queue.service.meta/state" COLOR_QUEUE
+component queueDispatch as "queue.dispatcher.core\n+ ready cache" COLOR_QUEUE
+component changeFeed as "storage.change_feed.*" COLOR_QUEUE
+apiRouter --> queueSvc
+queueSvc --> queueDispatch : ready set
+queueDispatch --> changeFeed : notify/watch
+changeFeed --> queueDispatch : fsnotify events
+
+' Search/index subsystem
+component searchScan as "search.scan" COLOR_SEARCH
+component searchIndex as "search.index" COLOR_SEARCH
+apiRouter --> searchScan
+apiRouter --> searchIndex
+changeFeed --> searchIndex : ingest events
+
+' Storage pipeline + backends
+component snappy as "storage.pipeline.snappy.pre_encrypt" COLOR_STORAGE
+component crypto as "storage.crypto.envelope" COLOR_STORAGE
+component backend as "storage.backend.*" COLOR_STORAGE
+
+component stormem as "storage.backend.mem" COLOR_STORAGE
+component stordisk as "storage.backend.disk" COLOR_STORAGE
+component stors3 as "storage.backend.s3/aws" COLOR_STORAGE
+component storazure as "storage.backend.azure" COLOR_STORAGE
+
+interface backendPort as " " COLOR_STORAGE
+
+database awss3 as "AWS S3" COLOR_STORAGE
+database s3compat as "S3 Compatible\n(e.g MinIO)" COLOR_STORAGE
+database azureblob as "Azure Blob" COLOR_STORAGE
+database disk as "Disk (native)" COLOR_STORAGE
+database mem as "In-memory (native)" COLOR_STORAGE
+
+component telemetry as "observability.telemetry.exporter" COLOR_CONTROL
+component lifecycle as "server.lifecycle.core" COLOR_CONTROL
+lifecycle --> apiRouter : supervise handlers
+component shutdownCtl as "server.shutdown.controller" COLOR_CONTROL
+
+leaseSvc --> snappy : state blobs
+queueSvc --> snappy : queue payloads
+searchScan --> snappy : state reads (scan)
+searchIndex --> snappy : index segments
+
+snappy --> crypto
+crypto --> backend
+
+backend -- backendPort
+
+backendPort )-down- stormem
+backendPort )-down- stordisk
+backendPort )-down- stors3
+backendPort )-down- storazure
+
+stormem -- mem
+stordisk -- disk
+stors3 -- awss3
+stors3 -- s3compat
+storazure -- azureblob
+
+lifecycle --> telemetry : export traces/metrics
+shutdownCtl --> lifecycle
+lifecycle --> shutdownCtl : drain signals
+
+@enduml

@@ -25,7 +25,7 @@ type flakyPutStore struct {
 	failFlag  uint32
 }
 
-	func (s *flakyPutStore) PutObject(ctx context.Context, namespace, key string, body io.Reader, opts storage.PutObjectOptions) (*storage.ObjectInfo, error) {
+func (s *flakyPutStore) PutObject(ctx context.Context, namespace, key string, body io.Reader, opts storage.PutObjectOptions) (*storage.ObjectInfo, error) {
 	if s.targetKey != "" && key == s.targetKey && opts.ExpectedETag != "" && atomic.CompareAndSwapUint32(&s.failFlag, 0, 1) {
 		return nil, storage.ErrNotFound
 	}

@@ -201,7 +201,7 @@ func (o *Observer) sample(ts time.Time) {
 		CollectedAt:                     ts,
 	}
 	if o.logger != nil && o.cfg.LogInterval > 0 && (o.lastLogTime.IsZero() || ts.Sub(o.lastLogTime) >= o.cfg.LogInterval) {
-		o.logger.Debug("lockd.lsf.sample",
+		o.logger.Trace("lockd.lsf.sample",
 			"queue_producer_inflight", snapshot.QueueProducerInflight,
 			"queue_consumer_inflight", snapshot.QueueConsumerInflight,
 			"queue_ack_inflight", snapshot.QueueAckInflight,

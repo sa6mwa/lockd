@@ -18,6 +18,7 @@ import (
 	queuetestutil "pkt.systems/lockd/integration/queue/testutil"
 	"pkt.systems/lockd/internal/diagnostics/storagecheck"
 	"pkt.systems/lockd/internal/storage/s3"
+	"pkt.systems/lockd/namespaces"
 	"pkt.systems/pslog"
 )
 
@@ -105,7 +106,16 @@ func startMinioQueueServerWithOptions(t testing.TB, cfg lockd.Config, serverOpts
 	}
 	opts = append(opts, cryptotest.SharedMTLSOptions(t)...)
 	opts = append(opts, serverOpts...)
-	return lockd.StartTestServer(t, opts...)
+	ts := lockd.StartTestServer(t, opts...)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		if err := ts.Stop(ctx); err != nil {
+			t.Logf("minio queue test server stop: %v", err)
+		}
+		miniohelpers.CleanupNamespaces(t, cfg, namespaces.Default)
+	})
+	return ts
 }
 
 func ensureMinioQueueEnv(t testing.TB) {

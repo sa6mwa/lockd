@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -11,9 +12,11 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -23,7 +26,7 @@ import (
 	"pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/internal/loggingutil"
-	"pkt.systems/lockd/internal/tlsutil"
+	"pkt.systems/lockd/tlsutil"
 	"pkt.systems/pslog"
 )
 
@@ -67,36 +70,11 @@ const (
 )
 
 func newClientCommand() *cobra.Command {
-	cfg := &clientCLIConfig{}
-	var verbose bool
 	cmd := &cobra.Command{
 		Use:   "client",
 		Short: "Interact with a running lockd server",
 	}
-
-	flags := cmd.PersistentFlags()
-	flags.String("server", "https://127.0.0.1:9341", "lockd server base URL")
-	flags.String("bundle", "", "path to client bundle PEM (default auto-discover under $HOME/.lockd)")
-	flags.Bool("disable-mtls", false, "disable mutual TLS (plain HTTP by default for bare endpoints)")
-	flags.Duration("timeout", lockdclient.DefaultHTTPTimeout, "HTTP client timeout")
-	flags.Duration("close-timeout", lockdclient.DefaultCloseTimeout, "timeout to wait for lease release during Close()")
-	flags.Duration("keepalive-timeout", lockdclient.DefaultKeepAliveTimeout, "timeout to wait for keepalive responses")
-	flags.Bool("drain-aware-shutdown", true, "automatically release leases when the server is draining")
-	flags.String("log-level", "none", "client log level (trace|debug|info|warn|error|none)")
-	flags.String("log-output", "", "client log output path (default stderr)")
-	flags.BoolVarP(&verbose, "verbose", "v", false, "enable verbose (trace) client logging")
-
-	mustBindFlag(clientServerKey, "LOCKD_CLIENT_SERVER", flags.Lookup("server"))
-	mustBindFlag(clientBundleKey, "LOCKD_CLIENT_BUNDLE", flags.Lookup("bundle"))
-	mustBindFlag(clientDisableMTLSKey, "LOCKD_CLIENT_DISABLE_MTLS", flags.Lookup("disable-mtls"))
-	mustBindFlag(clientTimeoutKey, "LOCKD_CLIENT_TIMEOUT", flags.Lookup("timeout"))
-	mustBindFlag(clientCloseTimeoutKey, "LOCKD_CLIENT_CLOSE_TIMEOUT", flags.Lookup("close-timeout"))
-	mustBindFlag(clientKeepAliveTimeoutKey, "LOCKD_CLIENT_KEEPALIVE_TIMEOUT", flags.Lookup("keepalive-timeout"))
-	mustBindFlag(clientDrainAwareKey, "LOCKD_CLIENT_DRAIN_AWARE", flags.Lookup("drain-aware-shutdown"))
-	mustBindFlag(clientLogLevelKey, "LOCKD_CLIENT_LOG_LEVEL", flags.Lookup("log-level"))
-	mustBindFlag(clientLogOutputKey, "LOCKD_CLIENT_LOG_OUTPUT", flags.Lookup("log-output"))
-
-	cfg.verboseFlag = &verbose
+	cfg := addClientConnectionFlags(cmd, true)
 
 	cmd.AddCommand(
 		newClientQueueCommand(cfg),
@@ -108,6 +86,7 @@ func newClientCommand() *cobra.Command {
 		newClientRemoveCommand(cfg),
 		newClientSetCommand(cfg),
 		newClientEditCommand(cfg),
+		newClientQueryCommand(cfg),
 	)
 
 	return cmd
@@ -125,6 +104,35 @@ func mustBindFlag(key, env string, flag *pflag.Flag) {
 			panic(err)
 		}
 	}
+}
+
+func addClientConnectionFlags(cmd *cobra.Command, includeVerbose bool) *clientCLIConfig {
+	cfg := &clientCLIConfig{}
+	flags := cmd.PersistentFlags()
+	flags.String("server", "https://127.0.0.1:9341", "lockd server base URL")
+	flags.String("bundle", "", "path to client bundle PEM (default auto-discover under $HOME/.lockd)")
+	flags.Bool("disable-mtls", false, "disable mutual TLS (plain HTTP by default for bare endpoints)")
+	flags.Duration("timeout", lockdclient.DefaultHTTPTimeout, "HTTP client timeout")
+	flags.Duration("close-timeout", lockdclient.DefaultCloseTimeout, "timeout to wait for lease release during Close()")
+	flags.Duration("keepalive-timeout", lockdclient.DefaultKeepAliveTimeout, "timeout to wait for keepalive responses")
+	flags.Bool("drain-aware-shutdown", true, "automatically release leases when the server is draining")
+	flags.String("log-level", "none", "client log level (trace|debug|info|warn|error|none)")
+	flags.String("log-output", "", "client log output path (default stderr)")
+	mustBindFlag(clientServerKey, "LOCKD_CLIENT_SERVER", flags.Lookup("server"))
+	mustBindFlag(clientBundleKey, "LOCKD_CLIENT_BUNDLE", flags.Lookup("bundle"))
+	mustBindFlag(clientDisableMTLSKey, "LOCKD_CLIENT_DISABLE_MTLS", flags.Lookup("disable-mtls"))
+	mustBindFlag(clientTimeoutKey, "LOCKD_CLIENT_TIMEOUT", flags.Lookup("timeout"))
+	mustBindFlag(clientCloseTimeoutKey, "LOCKD_CLIENT_CLOSE_TIMEOUT", flags.Lookup("close-timeout"))
+	mustBindFlag(clientKeepAliveTimeoutKey, "LOCKD_CLIENT_KEEPALIVE_TIMEOUT", flags.Lookup("keepalive-timeout"))
+	mustBindFlag(clientDrainAwareKey, "LOCKD_CLIENT_DRAIN_AWARE", flags.Lookup("drain-aware-shutdown"))
+	mustBindFlag(clientLogLevelKey, "LOCKD_CLIENT_LOG_LEVEL", flags.Lookup("log-level"))
+	mustBindFlag(clientLogOutputKey, "LOCKD_CLIENT_LOG_OUTPUT", flags.Lookup("log-output"))
+	if includeVerbose {
+		var verbose bool
+		flags.BoolVarP(&verbose, "verbose", "v", false, "enable verbose (trace) client logging")
+		cfg.verboseFlag = &verbose
+	}
+	return cfg
 }
 
 type clientCLIConfig struct {
@@ -1426,6 +1434,7 @@ func newClientGetCommand(cfg *clientCLIConfig) *cobra.Command {
 				return err
 			}
 			var lease string
+			opts := []lockdclient.GetOption{lockdclient.WithGetNamespace(resolveNamespaceInput(namespace))}
 			if !public {
 				lease, err = resolveLease(leaseID)
 				if err != nil {
@@ -1436,26 +1445,28 @@ func newClientGetCommand(cfg *clientCLIConfig) *cobra.Command {
 					return err
 				}
 				cli.RegisterLeaseToken(lease, token)
+				opts = append(opts, lockdclient.WithGetLeaseID(lease), lockdclient.WithGetPublicDisabled(true))
 			}
-			ns := resolveNamespaceInput(namespace)
 			ctx, _ := commandContextWithCorrelation(cmd)
-			var reader io.ReadCloser
-			var etag, version string
-			if public {
-				reader, etag, version, err = cli.GetPublicWithNamespace(ctx, ns, key)
-			} else {
-				reader, etag, version, err = cli.GetWithNamespace(ctx, ns, key, lease)
-			}
+			resp, err := cli.Get(ctx, key, opts...)
 			if err != nil {
 				return err
 			}
+			if resp != nil {
+				defer resp.Close()
+			}
 			var data []byte
-			if reader != nil {
-				defer reader.Close()
-				data, err = io.ReadAll(reader)
+			if resp != nil {
+				data, err = resp.Bytes()
 				if err != nil {
 					return err
 				}
+			}
+			etag := ""
+			version := ""
+			if resp != nil {
+				etag = resp.ETag
+				version = resp.Version
 			}
 			fmtChoice := parseStateFormat(stateFormat(format), outputPath)
 			payload, err := formatStatePayload(data, fmtChoice)
@@ -1511,7 +1522,7 @@ func newClientUpdateCommand(cfg *clientCLIConfig) *cobra.Command {
 		Example: `  # Pipe edited state back into the server
   eval "$(lockd client acquire --key orders)" \
     && lockd client get --output - \
-    | lockd client edit status.counter++ \
+    | lockd client edit /status/counter++ \
     | lockd client update`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -1663,10 +1674,10 @@ func newClientSetCommand(cfg *clientCLIConfig) *cobra.Command {
 		Use:   "set mutation [mutation...]",
 		Short: "Mutate JSON state fields for an active lease",
 		Example: `  # Increment a counter and stamp the current time
-  lockd client set --key orders progress.counter++ time:progress.updated=NOW
+  lockd client set --key orders /progress/counter++ time:/progress/updated=NOW
 
   # Mutate multiple fields with brace shorthand + quoted keys
-  lockd client set --key ledger 'data{"hello key"="mars traveler",count++}' meta.previous=world`,
+  lockd client set --key ledger '/data{/hello key="mars traveler",/count++}' /meta/previous=world`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Args:          cobra.MinimumNArgs(1),
@@ -1698,9 +1709,29 @@ func newClientSetCommand(cfg *clientCLIConfig) *cobra.Command {
 			cli.RegisterLeaseToken(lease, token)
 			ns := resolveNamespaceInput(namespace)
 			ctx := cmd.Context()
-			stateBytes, etag, version, err := cli.GetBytesWithNamespace(ctx, ns, key, lease)
+			resp, err := cli.Get(ctx, key,
+				lockdclient.WithGetNamespace(ns),
+				lockdclient.WithGetLeaseID(lease),
+				lockdclient.WithGetPublicDisabled(true),
+			)
 			if err != nil {
 				return err
+			}
+			if resp != nil {
+				defer resp.Close()
+			}
+			var stateBytes []byte
+			if resp != nil {
+				stateBytes, err = resp.Bytes()
+				if err != nil {
+					return err
+				}
+			}
+			etag := ""
+			version := ""
+			if resp != nil {
+				etag = resp.ETag
+				version = resp.Version
 			}
 			doc, err := parseJSONObject(stateBytes)
 			if err != nil {
@@ -1764,7 +1795,7 @@ func newClientEditCommand(_ *clientCLIConfig) *cobra.Command {
 		Use:   "edit mutation [mutation...]",
 		Short: "Apply JSON field mutations to a local file",
 		Example: `  # Increment counter in place
-  lockd client edit --file checkpoint.json status.counter++`,
+  lockd client edit --file checkpoint.json /status/counter++`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if format != "" && strings.ToLower(format) != "json" && strings.ToLower(format) != "auto" {
@@ -1804,6 +1835,81 @@ func newClientEditCommand(_ *clientCLIConfig) *cobra.Command {
 	}
 	cmd.Flags().StringVarP(&inputPath, "file", "f", "", "input/output file path (default stdin/stdout)")
 	cmd.Flags().StringVar(&format, "type", "json", "input type (currently only json supported)")
+	return cmd
+}
+
+func newClientQueryCommand(cfg *clientCLIConfig) *cobra.Command {
+	var namespace string
+	var outputPath string
+	var outputFormat string
+	var documents bool
+	var directory string
+	cmd := &cobra.Command{
+		Use:   "query [selector ...]",
+		Short: "Execute LQL selectors and stream matching keys or documents",
+		Example: `  # List keys that match a selector
+  lockd client query '/status/state="staged"'
+
+  # Stream documents as NDJSON
+  lockd client query --documents '/progress/count>=10'
+
+  # Iterate over keys via text output
+  lockd client query --output text '/status/state="staged"' \
+    | while read -r key; do lockd client get --public --key "$key"; done`,
+		Args: cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			selector := strings.Join(args, "\n")
+			mode := outputMode(strings.ToLower(outputFormat))
+			if mode != outputJSON && mode != outputText {
+				return fmt.Errorf("invalid --output %q (expected json or text)", outputFormat)
+			}
+			dir := strings.TrimSpace(directory)
+			docsMode := documents || dir != ""
+			if docsMode && mode == outputText {
+				return fmt.Errorf("--output text is only supported for key listings; omit --documents or switch to json")
+			}
+			if dir != "" && outputPath != "" && outputPath != "-" {
+				return fmt.Errorf("--directory cannot be combined with --file/-f output")
+			}
+			if err := cfg.load(); err != nil {
+				return err
+			}
+			defer cfg.cleanup()
+			cli, err := cfg.client()
+			if err != nil {
+				return err
+			}
+			ns := resolveNamespaceInput(namespace)
+			opts := []lockdclient.QueryOption{
+				lockdclient.WithQueryNamespace(ns),
+				lockdclient.WithQuery(selector),
+			}
+			if documents {
+				opts = append(opts, lockdclient.WithQueryReturnDocuments())
+			}
+			ctx, _ := commandContextWithCorrelation(cmd)
+			resp, err := cli.Query(ctx, opts...)
+			if err != nil {
+				return err
+			}
+			if resp == nil {
+				return nil
+			}
+			defer resp.Close()
+			if docsMode {
+				if dir != "" {
+					return writeQueryDocumentsDirectory(resp, dir)
+				}
+				return writeQueryDocumentsStream(cmd, resp, outputPath)
+			}
+			return writeQueryKeys(cmd, outputPath, mode, resp.Keys())
+		},
+	}
+	cmd.Flags().StringVarP(&namespace, "namespace", "n", "", "namespace to query (defaults to configured namespace)")
+	cmd.Flags().StringVarP(&outputPath, "file", "f", "-", "output file (use - for stdout)")
+	cmd.Flags().StringVarP(&outputFormat, "output", "o", string(outputJSON), "output format for keys (json|text)")
+	cmd.Flags().BoolVarP(&documents, "documents", "d", false, "stream matching documents as NDJSON instead of keys")
+	cmd.Flags().StringVarP(&directory, "directory", "F", "", "directory to write individual document files (enables documents mode)")
 	return cmd
 }
 
@@ -1876,6 +1982,155 @@ func writeStateOutput(path string, data []byte) error {
 	}
 	return os.WriteFile(path, data, 0o600)
 }
+
+func writeQueryKeys(cmd *cobra.Command, path string, mode outputMode, keys []string) error {
+	if mode == outputText {
+		var buf bytes.Buffer
+		for _, key := range keys {
+			buf.WriteString(key)
+			buf.WriteByte('\n')
+		}
+		return writeQueryBytes(cmd, path, buf.Bytes())
+	}
+	if keys == nil {
+		keys = []string{}
+	}
+	payload, err := json.Marshal(keys)
+	if err != nil {
+		return err
+	}
+	payload = append(payload, '\n')
+	return writeQueryBytes(cmd, path, payload)
+}
+
+func writeQueryBytes(cmd *cobra.Command, path string, data []byte) error {
+	if path == "" || path == "-" {
+		if len(data) == 0 {
+			return nil
+		}
+		_, err := cmd.OutOrStdout().Write(data)
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
+}
+
+func writeQueryDocumentsStream(cmd *cobra.Command, resp *lockdclient.QueryResponse, path string) error {
+	if resp == nil {
+		return nil
+	}
+	writer, err := openQueryWriter(cmd, path)
+	if err != nil {
+		return err
+	}
+	defer writer.Close()
+	buf := bufio.NewWriter(writer)
+	if err := resp.ForEach(func(row lockdclient.QueryRow) error {
+		reader, err := row.DocumentReader()
+		if err != nil {
+			return err
+		}
+		defer reader.Close()
+		if _, err := io.Copy(buf, reader); err != nil {
+			return err
+		}
+		return buf.WriteByte('\n')
+	}); err != nil {
+		_ = buf.Flush()
+		return err
+	}
+	return buf.Flush()
+}
+
+func writeQueryDocumentsDirectory(resp *lockdclient.QueryResponse, dir string) error {
+	if resp == nil {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	counts := map[string]int{}
+	return resp.ForEach(func(row lockdclient.QueryRow) error {
+		reader, err := row.DocumentReader()
+		if err != nil {
+			return err
+		}
+		defer reader.Close()
+		base := sanitizeKeyFilename(row.Key)
+		if base == "" {
+			base = "doc"
+		}
+		idx := counts[base]
+		counts[base] = idx + 1
+		name := base
+		if idx > 0 {
+			name = fmt.Sprintf("%s-%d", base, idx)
+		}
+		tmp, err := os.CreateTemp(dir, name+"-*.tmp")
+		if err != nil {
+			return err
+		}
+		_, copyErr := io.Copy(tmp, reader)
+		closeErr := tmp.Close()
+		if copyErr != nil {
+			os.Remove(tmp.Name())
+			return copyErr
+		}
+		if closeErr != nil {
+			os.Remove(tmp.Name())
+			return closeErr
+		}
+		finalPath := filepath.Join(dir, name+".json")
+		if err := os.Rename(tmp.Name(), finalPath); err != nil {
+			os.Remove(tmp.Name())
+			return err
+		}
+		return nil
+	})
+}
+
+func sanitizeKeyFilename(key string) string {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range key {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-' || r == '_' || r == '.':
+			b.WriteRune(r)
+		case unicode.IsSpace(r):
+			b.WriteByte('-')
+		case r == '/' || r == '\\':
+			b.WriteByte('-')
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return strings.Trim(b.String(), "-_.")
+}
+
+func openQueryWriter(cmd *cobra.Command, path string) (io.WriteCloser, error) {
+	if path == "" || path == "-" {
+		return nopWriteCloser{Writer: cmd.OutOrStdout()}, nil
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	return file, nil
+}
+
+type nopWriteCloser struct {
+	io.Writer
+}
+
+func (n nopWriteCloser) Close() error { return nil }
 
 func loadStatePayload(path string, format stateFormat) ([]byte, error) {
 	data, _, err := readInput(path)

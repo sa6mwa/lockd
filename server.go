@@ -24,11 +24,13 @@ import (
 	"pkt.systems/lockd/internal/lsf"
 	"pkt.systems/lockd/internal/qrf"
 	"pkt.systems/lockd/internal/search"
+	indexer "pkt.systems/lockd/internal/search/index"
 	"pkt.systems/lockd/internal/search/scan"
 	"pkt.systems/lockd/internal/storage"
 	loggingbackend "pkt.systems/lockd/internal/storage/logging"
 	"pkt.systems/lockd/internal/storage/retry"
-	"pkt.systems/lockd/internal/tlsutil"
+	"pkt.systems/lockd/namespaces"
+	"pkt.systems/lockd/tlsutil"
 	"pkt.systems/pslog"
 
 	"go.opentelemetry.io/otel"
@@ -40,6 +42,7 @@ type Server struct {
 	cfg          Config
 	logger       pslog.Logger
 	backend      storage.Backend
+	indexManager *indexer.Manager
 	handler      *httpapi.Handler
 	httpSrv      *http.Server
 	httpShutdown func(context.Context) error
@@ -407,7 +410,11 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 			LogInterval:    cfg.LSFLogInterval,
 		}, qrfCtrl, logger)
 	}
-	var searchAdapter search.Adapter
+	defaultNamespaceCfg := namespaces.DefaultConfig()
+	if provider, ok := backend.(namespaces.ConfigProvider); ok && provider != nil {
+		defaultNamespaceCfg = provider.DefaultNamespaceConfig()
+	}
+	var scanAdapter search.Adapter
 	if backend != nil {
 		adapter, err := scan.New(scan.Config{
 			Backend:          backend,
@@ -417,7 +424,61 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 		if err != nil {
 			return nil, err
 		}
-		searchAdapter = adapter
+		scanAdapter = adapter
+	}
+	var namespaceConfigs *namespaces.ConfigStore
+	if backend != nil {
+		namespaceConfigs = namespaces.NewConfigStore(backend, crypto, loggingutil.WithSubsystem(logger, "namespace.config"), defaultNamespaceCfg)
+	}
+	var indexManager *indexer.Manager
+	var indexAdapter search.Adapter
+	var indexStore *indexer.Store
+	if backend != nil {
+		indexStore = indexer.NewStore(backend, crypto)
+		if indexStore != nil {
+			indexLogger := loggingutil.WithSubsystem(logger, "search.index")
+			flushDocs := cfg.IndexerFlushDocs
+			flushInterval := cfg.IndexerFlushInterval
+			if defaults, ok := backend.(storage.IndexerDefaultsProvider); ok && defaults != nil {
+				defDocs, defInterval := defaults.IndexerFlushDefaults()
+				if !cfg.IndexerFlushDocsSet && defDocs > 0 {
+					flushDocs = defDocs
+				}
+				if !cfg.IndexerFlushIntervalSet && defInterval > 0 {
+					flushInterval = defInterval
+				}
+			}
+			indexManager = indexer.NewManager(indexStore, indexer.WriterOptions{
+				FlushDocs:     flushDocs,
+				FlushInterval: flushInterval,
+				Logger:        indexLogger,
+			})
+			if adapter, err := indexer.NewAdapter(indexer.AdapterConfig{
+				Store:  indexStore,
+				Logger: indexLogger,
+			}); err != nil {
+				return nil, err
+			} else {
+				indexAdapter = adapter
+			}
+			indexLogger.Info("indexer.config",
+				"flush_docs", flushDocs,
+				"flush_interval", flushInterval,
+				"docs_override", cfg.IndexerFlushDocsSet,
+				"interval_override", cfg.IndexerFlushIntervalSet)
+		}
+	}
+	var searchAdapter search.Adapter
+	switch {
+	case scanAdapter != nil && indexAdapter != nil:
+		searchAdapter = search.NewDispatcher(search.DispatcherConfig{
+			Index: indexAdapter,
+			Scan:  scanAdapter,
+		})
+	case indexAdapter != nil:
+		searchAdapter = indexAdapter
+	default:
+		searchAdapter = scanAdapter
 	}
 	var srvRef *Server
 	handler := httpapi.New(httpapi.Config{
@@ -426,6 +487,9 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 		Logger:                     logger,
 		Clock:                      serverClock,
 		SearchAdapter:              searchAdapter,
+		NamespaceConfigs:           namespaceConfigs,
+		DefaultNamespaceConfig:     defaultNamespaceCfg,
+		IndexManager:               indexManager,
 		DefaultNamespace:           cfg.DefaultNamespace,
 		JSONMaxBytes:               cfg.JSONMaxBytes,
 		CompactWriter:              jsonUtil.compactWriter,
@@ -480,6 +544,7 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 		cfg:              cfg,
 		logger:           loggingutil.WithSubsystem(logger, "server.lifecycle.core"),
 		backend:          backend,
+		indexManager:     indexManager,
 		handler:          handler,
 		httpSrv:          httpSrv,
 		httpShutdown:     httpSrv.Shutdown,
@@ -635,6 +700,9 @@ func (s *Server) ShutdownWithOptions(ctx context.Context, opts ...CloseOption) e
 		s.listener = nil
 	}
 	s.stopSweeper()
+	if s.indexManager != nil {
+		s.indexManager.Close(ctx)
+	}
 	if err := s.backend.Close(); err != nil {
 		s.logger.Error("shutdown.backend.close_error", "error", err)
 		return err

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"pkt.systems/lockd"
+	querydata "pkt.systems/lockd/integration/query/querydata"
 	queriesuite "pkt.systems/lockd/integration/query/suite"
 )
 
@@ -27,6 +28,10 @@ func TestAWSQueryResultsSupportPublicRead(t *testing.T) {
 	queriesuite.RunPublicRead(t, startAWSQueryServer)
 }
 
+func TestAWSQueryDocumentStreaming(t *testing.T) {
+	queriesuite.RunDocumentStreaming(t, startAWSQueryServer)
+}
+
 func TestAWSQueryDomainDatasets(t *testing.T) {
 	queriesuite.RunDomainDatasets(t, startAWSQueryServer, queriesuite.WithReducedDataset())
 }
@@ -35,11 +40,14 @@ func startAWSQueryServer(t testing.TB) *lockd.TestServer {
 	t.Helper()
 	cfg := loadAWSConfig(t)
 	ensureStoreReady(t, context.Background(), cfg)
+	CleanupQueryNamespaces(t, cfg)
 	ts := startAWSTestServer(t, cfg)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
+		querydata.FlushQueryNamespaces(t, ctx, ts.Client)
 		_ = ts.Stop(ctx)
+		CleanupQueryNamespaces(t, cfg)
 	})
 	return ts
 }

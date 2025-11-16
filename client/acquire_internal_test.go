@@ -1,6 +1,8 @@
 package client
 
 import (
+	"context"
+	"io"
 	"testing"
 	"time"
 )
@@ -49,5 +51,19 @@ func TestAcquireRetryDelayAppliesNegativeJitter(t *testing.T) {
 	}
 	if wait < 0 {
 		t.Fatalf("wait must be non-negative, got %s", wait)
+	}
+}
+
+func TestShouldRetryForUpdateUnexpectedEOF(t *testing.T) {
+	if !shouldRetryForUpdate(io.ErrUnexpectedEOF) {
+		t.Fatalf("expected unexpected EOF to be retryable")
+	}
+	if !shouldRetryForUpdate(io.EOF) {
+		t.Fatalf("expected EOF to be retryable")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if shouldRetryForUpdate(ctx.Err()) {
+		t.Fatalf("context cancellation should not be retryable")
 	}
 }

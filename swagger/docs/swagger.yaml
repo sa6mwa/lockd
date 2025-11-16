@@ -172,14 +172,29 @@ definitions:
       visibility_timeout_seconds:
         type: integer
     type: object
-  api.InTerm:
+  api.IndexFlushRequest:
     properties:
-      any:
-        items:
-          type: string
-        type: array
-      field:
+      mode:
         type: string
+      namespace:
+        type: string
+    type: object
+  api.IndexFlushResponse:
+    properties:
+      accepted:
+        type: boolean
+      flush_id:
+        type: string
+      flushed:
+        type: boolean
+      index_seq:
+        type: integer
+      mode:
+        type: string
+      namespace:
+        type: string
+      pending:
+        type: boolean
     type: object
   api.KeepAliveRequest:
     properties:
@@ -244,6 +259,27 @@ definitions:
       requeued:
         type: boolean
     type: object
+  api.NamespaceConfigRequest:
+    properties:
+      namespace:
+        type: string
+      query:
+        $ref: '#/definitions/api.NamespaceQueryConfig'
+    type: object
+  api.NamespaceConfigResponse:
+    properties:
+      namespace:
+        type: string
+      query:
+        $ref: '#/definitions/api.NamespaceQueryConfig'
+    type: object
+  api.NamespaceQueryConfig:
+    properties:
+      fallback_engine:
+        type: string
+      preferred_engine:
+        type: string
+    type: object
   api.QueryRequest:
     properties:
       cursor:
@@ -255,8 +291,11 @@ definitions:
         type: integer
       namespace:
         type: string
+      return:
+        $ref: '#/definitions/api.QueryReturn'
       selector:
-        $ref: '#/definitions/api.Selector'
+        type: object
+        x-example: '{"eq":{"field":"type","value":"alpha"}}'
     type: object
   api.QueryResponse:
     properties:
@@ -275,19 +314,14 @@ definitions:
       namespace:
         type: string
     type: object
-  api.RangeTerm:
-    properties:
-      field:
-        type: string
-      gt:
-        type: number
-      gte:
-        type: number
-      lt:
-        type: number
-      lte:
-        type: number
-    type: object
+  api.QueryReturn:
+    enum:
+    - keys
+    - documents
+    type: string
+    x-enum-varnames:
+    - QueryReturnKeys
+    - QueryReturnDocuments
   api.ReleaseRequest:
     properties:
       key:
@@ -308,36 +342,6 @@ definitions:
         type: integer
       removed:
         type: boolean
-    type: object
-  api.Selector:
-    properties:
-      and:
-        items:
-          $ref: '#/definitions/api.Selector'
-        type: array
-      eq:
-        $ref: '#/definitions/api.Term'
-      exists:
-        type: string
-      in:
-        $ref: '#/definitions/api.InTerm'
-      not:
-        $ref: '#/definitions/api.Selector'
-      or:
-        items:
-          $ref: '#/definitions/api.Selector'
-        type: array
-      prefix:
-        $ref: '#/definitions/api.Term'
-      range:
-        $ref: '#/definitions/api.RangeTerm'
-    type: object
-  api.Term:
-    properties:
-      field:
-        type: string
-      value:
-        type: string
     type: object
   api.UpdateResponse:
     properties:
@@ -525,6 +529,58 @@ paths:
       summary: Read the JSON checkpoint for a key
       tags:
       - lease
+  /v1/index/flush:
+    post:
+      consumes:
+      - application/json
+      description: Forces the namespace index writer to flush pending documents. Supports
+        synchronous (wait) and asynchronous modes.
+      parameters:
+      - description: Namespace override
+        in: query
+        name: namespace
+        type: string
+      - description: Flush mode (wait or async)
+        in: query
+        name: mode
+        type: string
+      - description: Flush request
+        in: body
+        name: request
+        schema:
+          $ref: '#/definitions/api.IndexFlushRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.IndexFlushResponse'
+        "202":
+          description: Accepted
+          schema:
+            $ref: '#/definitions/api.IndexFlushResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - mTLS: []
+      summary: Flush namespace index segments
+      tags:
+      - index
   /v1/keepalive:
     post:
       consumes:
@@ -633,12 +689,75 @@ paths:
       summary: Update lock metadata
       tags:
       - lease
+  /v1/namespace:
+    get:
+      description: Returns query engine preferences for the namespace.
+      parameters:
+      - description: Namespace override (defaults to server setting)
+        in: query
+        name: namespace
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.NamespaceConfigResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - mTLS: []
+      summary: Get namespace configuration
+      tags:
+      - namespace
+    post:
+      consumes:
+      - application/json
+      description: Updates query engine preferences for the namespace.
+      parameters:
+      - description: Namespace override (defaults to server setting)
+        in: query
+        name: namespace
+        type: string
+      - description: Conditionally update when the ETag matches
+        in: header
+        name: If-Match
+        type: string
+      - description: Namespace configuration payload
+        in: body
+        name: config
+        required: true
+        schema:
+          $ref: '#/definitions/api.NamespaceConfigRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.NamespaceConfigResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - mTLS: []
+      summary: Update namespace configuration
+      tags:
+      - namespace
   /v1/query:
     post:
       consumes:
       - application/json
-      description: Executes a selector-based search within a namespace and returns
-        matching keys plus a cursor for pagination.
+      description: 'Executes a selector-based search within a namespace and returns
+        matching keys plus a cursor for pagination. Example request body: `{"namespace":"default","selector":{"eq":{"field":"type","value":"alpha"}},"limit":25,"return":"keys"}`'
       parameters:
       - description: Namespace override (defaults to server setting)
         in: query
@@ -656,6 +775,10 @@ paths:
         in: query
         name: selector
         type: string
+      - description: Return mode (keys or documents)
+        in: query
+        name: return
+        type: string
       - description: Query request (selector, limit, cursor)
         in: body
         name: request
@@ -663,6 +786,7 @@ paths:
           $ref: '#/definitions/api.QueryRequest'
       produces:
       - application/json
+      - application/x-ndjson
       responses:
         "200":
           description: OK

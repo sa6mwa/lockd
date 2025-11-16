@@ -23,7 +23,7 @@ import (
 	"pkt.systems/lockd/internal/cryptoutil"
 	"pkt.systems/lockd/internal/loggingutil"
 	memorybackend "pkt.systems/lockd/internal/storage/memory"
-	"pkt.systems/lockd/internal/tlsutil"
+	"pkt.systems/lockd/tlsutil"
 	"pkt.systems/pslog"
 )
 

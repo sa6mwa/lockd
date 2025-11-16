@@ -21,7 +21,7 @@ import (
 	"pkt.systems/lockd/internal/cryptoutil"
 	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/storage"
-	"pkt.systems/lockd/internal/tlsutil"
+	"pkt.systems/lockd/tlsutil"
 	"pkt.systems/pslog"
 )
 

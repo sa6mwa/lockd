@@ -1,0 +1,68 @@
+@startuml
+skin rose
+skinparam participantPadding 15
+skinparam boxPadding 15
+skinparam shadowing false
+skinparam roundcorner 8
+
+participant Producer
+participant "HTTP API" as API
+participant "Queue Service" as Queue
+participant "Storage Crypto" as Crypto
+participant "Storage Backend" as Backend
+participant "Queue Dispatcher" as Dispatcher
+participant Consumer
+
+== Enqueue ==
+Producer -> API: POST /v1/queue/enqueue (multipart)
+API -> Queue: validate meta
+Queue -> Crypto: encrypt payload + meta
+Crypto -> Backend: write queue state
+alt backend unavailable
+    Backend --> Crypto: error (retryable)
+    Crypto --> Queue: failure
+    Queue --> API: 503 enqueue_failed
+    API --> Producer: retry hint
+else success
+    Backend --> Crypto: payload etag/id
+    Crypto --> Queue: ack
+    Queue --> API: EnqueueResponse
+    API --> Producer: message_id, attempts
+end
+
+== Dequeue ==
+Consumer -> API: POST /v1/queue/dequeue
+API -> Queue: fetch ready set / block
+Queue -> Dispatcher: request demand
+Dispatcher -> Backend: read messages
+alt queue empty / wait
+    Backend --> Dispatcher: no messages
+    Dispatcher --> Queue: none available
+    Queue --> API: 409 waiting (retry_after)
+    API --> Consumer: retry hint / cursor
+else message ready
+    Backend --> Dispatcher: encrypted payload/meta
+    Dispatcher -> Crypto: decrypt
+    Crypto --> Dispatcher: payload stream
+    Dispatcher --> Queue: deliver message
+    Queue --> API: Lease + payload path
+    API --> Consumer: env exports + leasing info
+end
+
+== Ack / Nack / Extend ==
+Consumer -> API: queue ack/nack/extend
+API -> Queue: validate lease + fencing
+Queue -> Crypto: encrypt meta update
+Crypto -> Backend: store meta / visibility
+alt stale lease / fencing mismatch
+    Backend --> Crypto: error (fencing mismatch)
+    Crypto --> Queue: failure
+    Queue --> API: 409 fencing_conflict
+    API --> Consumer: lease invalid -> redrive
+else success
+    Backend --> Crypto: ack
+    Crypto --> Queue: ack
+    Queue --> API: ack
+    API --> Consumer: 200 OK
+end
+@enduml

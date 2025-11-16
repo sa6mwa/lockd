@@ -268,6 +268,86 @@ const docTemplate = `{
                 }
             }
         },
+        "/v1/index/flush": {
+            "post": {
+                "security": [
+                    {
+                        "mTLS": []
+                    }
+                ],
+                "description": "Forces the namespace index writer to flush pending documents. Supports synchronous (wait) and asynchronous modes.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "index"
+                ],
+                "summary": "Flush namespace index segments",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Namespace override",
+                        "name": "namespace",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Flush mode (wait or async)",
+                        "name": "mode",
+                        "in": "query"
+                    },
+                    {
+                        "description": "Flush request",
+                        "name": "request",
+                        "in": "body",
+                        "schema": {
+                            "$ref": "#/definitions/api.IndexFlushRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.IndexFlushResponse"
+                        }
+                    },
+                    "202": {
+                        "description": "Accepted",
+                        "schema": {
+                            "$ref": "#/definitions/api.IndexFlushResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/v1/keepalive": {
             "post": {
                 "security": [
@@ -432,14 +512,115 @@ const docTemplate = `{
                 }
             }
         },
-        "/v1/query": {
+        "/v1/namespace": {
+            "get": {
+                "security": [
+                    {
+                        "mTLS": []
+                    }
+                ],
+                "description": "Returns query engine preferences for the namespace.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "namespace"
+                ],
+                "summary": "Get namespace configuration",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Namespace override (defaults to server setting)",
+                        "name": "namespace",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.NamespaceConfigResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    }
+                }
+            },
             "post": {
-                "description": "Executes a selector-based search within a namespace and returns matching keys plus a cursor for pagination.",
+                "security": [
+                    {
+                        "mTLS": []
+                    }
+                ],
+                "description": "Updates query engine preferences for the namespace.",
                 "consumes": [
                     "application/json"
                 ],
                 "produces": [
                     "application/json"
+                ],
+                "tags": [
+                    "namespace"
+                ],
+                "summary": "Update namespace configuration",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Namespace override (defaults to server setting)",
+                        "name": "namespace",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Conditionally update when the ETag matches",
+                        "name": "If-Match",
+                        "in": "header"
+                    },
+                    {
+                        "description": "Namespace configuration payload",
+                        "name": "config",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.NamespaceConfigRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.NamespaceConfigResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/query": {
+            "post": {
+                "description": "Executes a selector-based search within a namespace and returns matching keys plus a cursor for pagination. Example request body: ` + "`" + `{\"namespace\":\"default\",\"selector\":{\"eq\":{\"field\":\"type\",\"value\":\"alpha\"}},\"limit\":25,\"return\":\"keys\"}` + "`" + `",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json",
+                    "application/x-ndjson"
                 ],
                 "tags": [
                     "lease"
@@ -468,6 +649,12 @@ const docTemplate = `{
                         "type": "string",
                         "description": "Selector JSON (optional when providing a JSON body)",
                         "name": "selector",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Return mode (keys or documents)",
+                        "name": "return",
                         "in": "query"
                     },
                     {
@@ -1623,17 +1810,40 @@ const docTemplate = `{
                 }
             }
         },
-        "api.InTerm": {
+        "api.IndexFlushRequest": {
             "type": "object",
             "properties": {
-                "any": {
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                },
-                "field": {
+                "mode": {
                     "type": "string"
+                },
+                "namespace": {
+                    "type": "string"
+                }
+            }
+        },
+        "api.IndexFlushResponse": {
+            "type": "object",
+            "properties": {
+                "accepted": {
+                    "type": "boolean"
+                },
+                "flush_id": {
+                    "type": "string"
+                },
+                "flushed": {
+                    "type": "boolean"
+                },
+                "index_seq": {
+                    "type": "integer"
+                },
+                "mode": {
+                    "type": "string"
+                },
+                "namespace": {
+                    "type": "string"
+                },
+                "pending": {
+                    "type": "boolean"
                 }
             }
         },
@@ -1734,6 +1944,39 @@ const docTemplate = `{
                 }
             }
         },
+        "api.NamespaceConfigRequest": {
+            "type": "object",
+            "properties": {
+                "namespace": {
+                    "type": "string"
+                },
+                "query": {
+                    "$ref": "#/definitions/api.NamespaceQueryConfig"
+                }
+            }
+        },
+        "api.NamespaceConfigResponse": {
+            "type": "object",
+            "properties": {
+                "namespace": {
+                    "type": "string"
+                },
+                "query": {
+                    "$ref": "#/definitions/api.NamespaceQueryConfig"
+                }
+            }
+        },
+        "api.NamespaceQueryConfig": {
+            "type": "object",
+            "properties": {
+                "fallback_engine": {
+                    "type": "string"
+                },
+                "preferred_engine": {
+                    "type": "string"
+                }
+            }
+        },
         "api.QueryRequest": {
             "type": "object",
             "properties": {
@@ -1750,8 +1993,12 @@ const docTemplate = `{
                 "namespace": {
                     "type": "string"
                 },
+                "return": {
+                    "$ref": "#/definitions/api.QueryReturn"
+                },
                 "selector": {
-                    "$ref": "#/definitions/api.Selector"
+                    "type": "object",
+                    "x-example": "{\"eq\":{\"field\":\"type\",\"value\":\"alpha\"}}"
                 }
             }
         },
@@ -1781,25 +2028,16 @@ const docTemplate = `{
                 }
             }
         },
-        "api.RangeTerm": {
-            "type": "object",
-            "properties": {
-                "field": {
-                    "type": "string"
-                },
-                "gt": {
-                    "type": "number"
-                },
-                "gte": {
-                    "type": "number"
-                },
-                "lt": {
-                    "type": "number"
-                },
-                "lte": {
-                    "type": "number"
-                }
-            }
+        "api.QueryReturn": {
+            "type": "string",
+            "enum": [
+                "keys",
+                "documents"
+            ],
+            "x-enum-varnames": [
+                "QueryReturnKeys",
+                "QueryReturnDocuments"
+            ]
         },
         "api.ReleaseRequest": {
             "type": "object",
@@ -1831,52 +2069,6 @@ const docTemplate = `{
                 },
                 "removed": {
                     "type": "boolean"
-                }
-            }
-        },
-        "api.Selector": {
-            "type": "object",
-            "properties": {
-                "and": {
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/definitions/api.Selector"
-                    }
-                },
-                "eq": {
-                    "$ref": "#/definitions/api.Term"
-                },
-                "exists": {
-                    "type": "string"
-                },
-                "in": {
-                    "$ref": "#/definitions/api.InTerm"
-                },
-                "not": {
-                    "$ref": "#/definitions/api.Selector"
-                },
-                "or": {
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/definitions/api.Selector"
-                    }
-                },
-                "prefix": {
-                    "$ref": "#/definitions/api.Term"
-                },
-                "range": {
-                    "$ref": "#/definitions/api.RangeTerm"
-                }
-            }
-        },
-        "api.Term": {
-            "type": "object",
-            "properties": {
-                "field": {
-                    "type": "string"
-                },
-                "value": {
-                    "type": "string"
                 }
             }
         },

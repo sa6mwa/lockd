@@ -111,6 +111,8 @@ func expandPath(p string) (string, error) {
 func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 	var cfg lockd.Config
 	var logLevel string
+	var bootstrapDir string
+	var bootstrapRan bool
 
 	cmd := &cobra.Command{
 		Use:           "lockd",
@@ -149,6 +151,18 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 			if err := bindConfig(&cfg); err != nil {
 				return err
 			}
+			flagChanged := func(name string) bool {
+				if f := cmd.Flags().Lookup(name); f != nil {
+					return f.Changed
+				}
+				return false
+			}
+			envSet := func(key string) bool {
+				_, ok := os.LookupEnv(key)
+				return ok
+			}
+			cfg.IndexerFlushDocsSet = flagChanged("indexer-flush-docs") || viper.InConfig("indexer-flush-docs") || envSet("LOCKD_INDEXER_FLUSH_DOCS")
+			cfg.IndexerFlushIntervalSet = flagChanged("indexer-flush-interval") || viper.InConfig("indexer-flush-interval") || envSet("LOCKD_INDEXER_FLUSH_INTERVAL")
 			logLevel = viper.GetString("log-level")
 
 			level, ok := pslog.ParseLevel(logLevel)
@@ -185,6 +199,26 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 			return nil
 		},
 	}
+
+	cmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		if bootstrapDir == "" || bootstrapRan {
+			return nil
+		}
+		bootstrapRan = true
+		abs, err := filepath.Abs(bootstrapDir)
+		if err != nil {
+			return fmt.Errorf("resolve --bootstrap path: %w", err)
+		}
+		if os.Getenv("LOCKD_CONFIG_DIR") == "" {
+			if err := os.Setenv("LOCKD_CONFIG_DIR", abs); err != nil {
+				return fmt.Errorf("set LOCKD_CONFIG_DIR: %w", err)
+			}
+		}
+		logger := loggingutil.WithSubsystem(baseLogger, "cli.bootstrap")
+		return bootstrapConfigDir(abs, logger)
+	}
+
+	cmd.PersistentFlags().StringVar(&bootstrapDir, "bootstrap", "", "initialize certificates + config under this directory before running (idempotent)")
 
 	flags := cmd.Flags()
 	flags.StringP("config", "c", "", "path to YAML config file (defaults to $HOME/.lockd/"+lockd.DefaultConfigFileName+")")
@@ -229,6 +263,8 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 	flags.Duration("queue-poll-interval", lockd.DefaultQueuePollInterval, "baseline poll interval for queue discovery")
 	flags.Duration("queue-poll-jitter", lockd.DefaultQueuePollJitter, "extra random delay added to queue poll interval (set 0 to disable)")
 	flags.Duration("queue-resilient-poll-interval", lockd.DefaultQueueResilientPollInterval, "safety poll interval when watchers are active (set 0 to disable)")
+	flags.Int("indexer-flush-docs", lockd.DefaultIndexerFlushDocs, "flush index segments after this many documents")
+	flags.Duration("indexer-flush-interval", lockd.DefaultIndexerFlushInterval, "maximum duration to buffer index postings before flushing")
 	flags.Duration("lsf-sample-interval", lockd.DefaultLSFSampleInterval, "sampling interval for the local security force (LSF)")
 	flags.Duration("lsf-log-interval", lockd.DefaultLSFLogInterval, "interval between LSF telemetry logs (set 0 to disable)")
 	flags.Bool("qrf-enabled", true, "enable perimeter defence quick reaction force (QRF)")
@@ -275,6 +311,7 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 		"s3-kms-key-id", "s3-max-part-size", "aws-region", "aws-kms-key-id", "azure-key", "azure-endpoint", "azure-sas-token",
 		"storage-retry-attempts", "storage-retry-base-delay", "storage-retry-max-delay", "storage-retry-multiplier",
 		"queue-max-consumers", "queue-poll-interval", "queue-poll-jitter", "queue-resilient-poll-interval",
+		"indexer-flush-docs", "indexer-flush-interval",
 		"disk-queue-watch", "mem-queue-watch", "disable-storage-encryption", "storage-encryption-snappy",
 		"lsf-sample-interval", "lsf-log-interval",
 		"qrf-enabled", "qrf-queue-soft-limit", "qrf-queue-hard-limit", "qrf-queue-consumer-soft-limit", "qrf-queue-consumer-hard-limit", "qrf-lock-soft-limit", "qrf-lock-hard-limit",
@@ -292,6 +329,8 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 	cmd.AddCommand(newVerifyCommand(loggingutil.WithSubsystem(baseLogger, "cli.verify")))
 	cmd.AddCommand(newAuthCommand())
 	cmd.AddCommand(newClientCommand())
+	cmd.AddCommand(newNamespaceCommand())
+	cmd.AddCommand(newIndexCommand())
 	cmd.AddCommand(newConfigCommand())
 
 	return cmd
@@ -382,6 +421,14 @@ func bindConfig(cfg *lockd.Config) error {
 	cfg.QueuePollInterval = viper.GetDuration("queue-poll-interval")
 	cfg.QueuePollJitter = viper.GetDuration("queue-poll-jitter")
 	cfg.QueueResilientPollInterval = viper.GetDuration("queue-resilient-poll-interval")
+	cfg.IndexerFlushDocs = viper.GetInt("indexer-flush-docs")
+	if cfg.IndexerFlushDocs <= 0 {
+		cfg.IndexerFlushDocs = lockd.DefaultIndexerFlushDocs
+	}
+	cfg.IndexerFlushInterval = viper.GetDuration("indexer-flush-interval")
+	if cfg.IndexerFlushInterval <= 0 {
+		cfg.IndexerFlushInterval = lockd.DefaultIndexerFlushInterval
+	}
 	cfg.LSFSampleInterval = viper.GetDuration("lsf-sample-interval")
 	cfg.LSFLogInterval = viper.GetDuration("lsf-log-interval")
 	cfg.LSFLogIntervalSet = true

@@ -1,4 +1,4 @@
-//go:build integration && mem
+//go:build integration && mem && crypto
 
 package memcrypto
 

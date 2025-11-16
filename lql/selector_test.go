@@ -7,30 +7,30 @@ import (
 
 func TestParseSelectorValuesSimple(t *testing.T) {
 	values := url.Values{}
-	values.Set("eq.field", "status")
+	values.Set("eq.field", "/status")
 	values.Set("eq.value", "open")
-	sel, found, err := ParseSelectorValues(values)
+	sel, err := ParseSelectorValues(values)
 	if err != nil {
 		t.Fatalf("parse failed: %v", err)
 	}
-	if !found {
+	if sel.IsEmpty() {
 		t.Fatal("expected selector")
 	}
-	if sel.Eq == nil || sel.Eq.Field != "status" || sel.Eq.Value != "open" {
+	if sel.Eq == nil || sel.Eq.Field != "/status" || sel.Eq.Value != "open" {
 		t.Fatalf("unexpected selector %+v", sel)
 	}
 }
 
 func TestParseSelectorValuesBrace(t *testing.T) {
 	values := url.Values{}
-	values.Set("and.eq{field=status,value=open}", "")
-	values.Set("or.eq{field=owner,value=alice}", "")
-	values.Set("or.1.eq{field=owner,value=bob}", "")
-	sel, found, err := ParseSelectorValues(values)
+	values.Set("and.eq{field=/status,value=open}", "")
+	values.Set("or.eq{field=/owner,value=alice}", "")
+	values.Set("or.1.eq{field=/owner,value=bob}", "")
+	sel, err := ParseSelectorValues(values)
 	if err != nil {
 		t.Fatalf("parse failed: %v", err)
 	}
-	if !found {
+	if sel.IsEmpty() {
 		t.Fatal("expected selector")
 	}
 	if sel.Or == nil || len(sel.Or) != 3 {
@@ -39,12 +39,12 @@ func TestParseSelectorValuesBrace(t *testing.T) {
 }
 
 func TestParseSelectorString(t *testing.T) {
-	expr := "eq{field=status,value=open},or.eq{field=owner,value=\"alice\"},or.1.eq{field=owner,value=bob}"
-	sel, found, err := ParseSelectorString(expr)
+	expr := "eq{field=/status,value=open},or.eq{field=/owner,value=\"alice\"},or.1.eq{field=/owner,value=bob}"
+	sel, err := ParseSelectorString(expr)
 	if err != nil {
 		t.Fatalf("parse failed: %v", err)
 	}
-	if !found {
+	if sel.IsEmpty() {
 		t.Fatal("expected selector")
 	}
 	if sel.Or == nil || len(sel.Or) != 3 {
@@ -54,13 +54,13 @@ func TestParseSelectorString(t *testing.T) {
 
 func TestParseSelectorStringWhitespace(t *testing.T) {
 	expr := `and.eq{
-field="hello"
-value="hi, world"},and.eq{field=status value="okili dokili"}`
-	sel, found, err := ParseSelectorString(expr)
+field="/hello"
+value="hi, world"},and.eq{field=/status value="okili dokili"}`
+	sel, err := ParseSelectorString(expr)
 	if err != nil {
 		t.Fatalf("parse failed: %v", err)
 	}
-	if !found {
+	if sel.IsEmpty() {
 		t.Fatal("expected selector")
 	}
 	if len(sel.And) != 2 {
@@ -69,23 +69,23 @@ value="hi, world"},and.eq{field=status value="okili dokili"}`
 }
 
 func TestParseSelectorStringInvalid(t *testing.T) {
-	if _, _, err := ParseSelectorString("and.eq{field=status,value=open"); err == nil {
+	if _, err := ParseSelectorString("and.eq{field=/status,value=open"); err == nil {
 		t.Fatal("expected parse error")
 	}
 }
 
 func TestParseSelectorBooleanValue(t *testing.T) {
-	expr := `and.eq{field=flag,value=true},and.eq{field=other,value=false}`
-	sel, found, err := ParseSelectorString(expr)
+	expr := `and.eq{field=/flag,value=true},and.eq{field=/other,value=false}`
+	sel, err := ParseSelectorString(expr)
 	if err != nil {
 		t.Fatalf("parse failed: %v", err)
 	}
-	if !found || len(sel.And) != 2 {
+	if sel.IsEmpty() || len(sel.And) != 2 {
 		t.Fatalf("expected two and clauses, got %+v", sel)
 	}
 	expected := map[string]string{
-		"flag":  "true",
-		"other": "false",
+		"/flag":  "true",
+		"/other": "false",
 	}
 	for _, clause := range sel.And {
 		if clause.Eq == nil {
@@ -105,6 +105,64 @@ func TestParseSelectorBooleanValue(t *testing.T) {
 	}
 }
 
+func TestParseSelectorShorthand(t *testing.T) {
+	t.Run("equality", func(t *testing.T) {
+		sel, err := ParseSelectorString(`/status="open"`)
+		if err != nil {
+			t.Fatalf("parse shorthand eq: %v", err)
+		}
+		if sel.Eq == nil || sel.Eq.Field != "/status" || sel.Eq.Value != "open" {
+			t.Fatalf("unexpected eq selector %+v", sel)
+		}
+	})
+
+	t.Run("not equal", func(t *testing.T) {
+		sel, err := ParseSelectorString(`/type!=critical`)
+		if err != nil {
+			t.Fatalf("parse shorthand !=: %v", err)
+		}
+		if sel.Not == nil || sel.Not.Eq == nil || sel.Not.Eq.Field != "/type" || sel.Not.Eq.Value != "critical" {
+			t.Fatalf("unexpected not selector %+v", sel)
+		}
+	})
+
+	t.Run("greater than", func(t *testing.T) {
+		sel, err := ParseSelectorString(`/progress/count>10`)
+		if err != nil {
+			t.Fatalf("parse shorthand >: %v", err)
+		}
+		if sel.Range == nil || sel.Range.Field != "/progress/count" || sel.Range.GT == nil || *sel.Range.GT != 10 {
+			t.Fatalf("unexpected range selector %+v", sel.Range)
+		}
+	})
+
+	t.Run("gte with spaces", func(t *testing.T) {
+		sel, err := ParseSelectorString("  /progress/count   >=   42  ")
+		if err != nil {
+			t.Fatalf("parse shorthand >=: %v", err)
+		}
+		if sel.Range == nil || sel.Range.GTE == nil || *sel.Range.GTE != 42 {
+			t.Fatalf("unexpected gte selector %+v", sel.Range)
+		}
+	})
+
+	t.Run("lte numeric", func(t *testing.T) {
+		sel, err := ParseSelectorString(`/battery_mv<=3600`)
+		if err != nil {
+			t.Fatalf("parse shorthand <=: %v", err)
+		}
+		if sel.Range == nil || sel.Range.LTE == nil || *sel.Range.LTE != 3600 {
+			t.Fatalf("unexpected lte selector %+v", sel.Range)
+		}
+	})
+
+	t.Run("invalid missing value", func(t *testing.T) {
+		if _, err := ParseSelectorString(`/count>=`); err == nil {
+			t.Fatalf("expected error for missing value")
+		}
+	})
+}
+
 func TestParseSelectorStringRegression(t *testing.T) {
 	inputs := map[string]string{
 		"NegativeIndex":  "And.-1",
@@ -118,7 +176,7 @@ func TestParseSelectorStringRegression(t *testing.T) {
 					t.Fatalf("parse panicked for %q: %v", input, r)
 				}
 			}()
-			_, _, _ = ParseSelectorString(input)
+			_, _ = ParseSelectorString(input)
 		})
 	}
 }

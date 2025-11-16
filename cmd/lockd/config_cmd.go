@@ -116,7 +116,7 @@ func configHumanizeBytes(n int64) string {
 	return strings.ReplaceAll(humanize.Bytes(uint64(n)), " ", "")
 }
 
-func defaultConfigYAML() ([]byte, error) {
+func defaultConfigYAML(overrides ...func(*configDefaults)) ([]byte, error) {
 	defaults := configDefaults{
 		Listen:                   lockd.DefaultListen,
 		ListenProto:              lockd.DefaultListenProto,
@@ -146,6 +146,11 @@ func defaultConfigYAML() ([]byte, error) {
 		StorageRetryMaxDelay:     lockd.DefaultStorageRetryMaxDelay.String(),
 		StorageRetryMultiplier:   lockd.DefaultStorageRetryMultiplier,
 		LogLevel:                 "info",
+	}
+	for _, fn := range overrides {
+		if fn != nil {
+			fn(&defaults)
+		}
 	}
 
 	out, err := yaml.Marshal(&defaults)

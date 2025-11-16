@@ -1,12 +1,21 @@
-FROM golang:1.25.2 AS build
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+
+FROM golang:1.25.3 AS build
 WORKDIR /src/lockd
-ENV CGO_ENABLED=0
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN go build -trimpath -ldflags="-s -w" -o /lockd ./cmd/lockd
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags="-s -w" -o /out/lockd ./cmd/lockd
 
 FROM scratch
-COPY --from=build /lockd /lockd
-EXPOSE 8080
-ENTRYPOINT ["/lockd"]
+COPY --from=build /out/lockd /lockd
+ENV LOCKD_CONFIG_DIR=/config \
+    LOCKD_STORE=disk:///storage
+WORKDIR /
+VOLUME ["/config", "/storage"]
+EXPOSE 9341
+ENTRYPOINT ["/lockd","--bootstrap","/config"]

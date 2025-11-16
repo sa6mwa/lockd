@@ -42,27 +42,34 @@ func TestQuerySkipsHiddenKeys(t *testing.T) {
 		t.Fatalf("new request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := httpClient.Do(req)
+	httpResp, err := httpClient.Do(req)
 	if err != nil {
 		t.Fatalf("query call: %v", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("unexpected status %d", resp.StatusCode)
+	defer httpResp.Body.Close()
+	if httpResp.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected status %d", httpResp.StatusCode)
 	}
 	var qr api.QueryResponse
-	if err := json.NewDecoder(resp.Body).Decode(&qr); err != nil {
+	if err := json.NewDecoder(httpResp.Body).Decode(&qr); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
 	if len(qr.Keys) != 1 || qr.Keys[0] != visibleKey {
 		t.Fatalf("expected only %q, got %+v", visibleKey, qr.Keys)
 	}
 
-	reader, _, _, err := ts.Client.GetPublicWithNamespace(ctx, namespaces.Default, hiddenKey)
+	stateResp, err := ts.Client.Get(ctx, hiddenKey, client.WithGetNamespace(namespaces.Default))
 	if err != nil {
 		t.Fatalf("get hidden state: %v", err)
 	}
-	defer reader.Close()
+	defer stateResp.Close()
+	if !stateResp.HasState {
+		t.Fatalf("expected hidden payload")
+	}
+	reader := stateResp.Reader()
+	if reader == nil {
+		t.Fatalf("missing reader")
+	}
 	var payload map[string]any
 	if err := json.NewDecoder(reader).Decode(&payload); err != nil {
 		t.Fatalf("decode hidden payload: %v", err)

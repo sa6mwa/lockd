@@ -20,7 +20,9 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
 
 	"pkt.systems/kryptograf"
+	"pkt.systems/lockd/internal/search"
 	"pkt.systems/lockd/internal/storage"
+	"pkt.systems/lockd/namespaces"
 )
 
 // Config controls connectivity to Azure Blob Storage.
@@ -40,6 +42,13 @@ type Store struct {
 	container string
 	prefix    string
 	crypto    *storage.Crypto
+}
+
+func (s *Store) DefaultNamespaceConfig() namespaces.Config {
+	cfg := namespaces.DefaultConfig()
+	cfg.Query.Preferred = search.EngineIndex
+	cfg.Query.Fallback = namespaces.FallbackNone
+	return cfg
 }
 
 type countingReader struct {

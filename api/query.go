@@ -9,10 +9,11 @@ import (
 // QueryRequest expresses a selector-based search within a namespace.
 type QueryRequest struct {
 	Namespace string         `json:"namespace,omitempty"`
-	Selector  Selector       `json:"selector,omitempty"`
+	Selector  Selector       `json:"selector,omitempty" swaggertype:"object" extensions:"x-example={\"eq\":{\"field\":\"type\",\"value\":\"alpha\"}}"`
 	Limit     int            `json:"limit,omitempty"`
 	Cursor    string         `json:"cursor,omitempty"`
 	Fields    map[string]any `json:"fields,omitempty"`
+	Return    QueryReturn    `json:"return,omitempty"`
 }
 
 // QueryResponse returns matching keys plus cursor metadata.
@@ -24,6 +25,16 @@ type QueryResponse struct {
 	Metadata  map[string]string `json:"metadata,omitempty"`
 }
 
+// QueryReturn enumerates the supported payload shapes for /v1/query responses.
+type QueryReturn string
+
+const (
+	// QueryReturnKeys streams an object containing a key slice (default behaviour).
+	QueryReturnKeys QueryReturn = "keys"
+	// QueryReturnDocuments streams newline-delimited JSON rows containing full documents.
+	QueryReturnDocuments QueryReturn = "documents"
+)
+
 // Selector represents the recursive selector AST.
 type Selector struct {
 	And    []Selector `json:"and,omitempty"`
@@ -34,6 +45,20 @@ type Selector struct {
 	Range  *RangeTerm `json:"range,omitempty"`
 	In     *InTerm    `json:"in,omitempty"`
 	Exists string     `json:"exists,omitempty"`
+}
+
+// IsEmpty reports whether the selector contains any clauses.
+func (s Selector) IsEmpty() bool {
+	if len(s.And) > 0 || len(s.Or) > 0 {
+		return false
+	}
+	if s.Not != nil && !s.Not.IsEmpty() {
+		return false
+	}
+	if s.Eq != nil || s.Prefix != nil || s.Range != nil || s.In != nil {
+		return false
+	}
+	return s.Exists == ""
 }
 
 // Term represents a simple field/value predicate.

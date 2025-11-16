@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package lockd.internal;
+
+option go_package = "pkt.systems/lockd/internal/proto;proto";
+
+message IndexManifest {
+  uint64 seq = 1;
+  int64 updated_at_unix = 2;
+  repeated IndexShard shards = 3;
+}
+
+message IndexShard {
+  uint32 shard_id = 1;
+  repeated IndexSegmentRef segments = 2;
+}
+
+message IndexSegmentRef {
+  string segment_id = 1;
+  int64 created_at_unix = 2;
+  uint64 doc_count = 3;
+}
+
+message IndexSegment {
+  string segment_id = 1;
+  int64 created_at_unix = 2;
+  repeated FieldBlock fields = 3;
+}
+
+message FieldBlock {
+  string name = 1;
+  repeated TermPosting postings = 2;
+}
+
+message TermPosting {
+  string term = 1;
+  repeated string keys = 2;
+}

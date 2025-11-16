@@ -1,4 +1,4 @@
-//go:build integration && disk
+//go:build integration && disk && crypto
 
 package diskcrypto
 

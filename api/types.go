@@ -31,9 +31,9 @@ type AcquireResponse struct {
 
 // UpdateResponse captures metadata returned by POST /v1/update.
 type UpdateResponse struct {
-	NewVersion   int64  `json:"new_version"`
-	NewStateETag string `json:"new_state_etag"`
-	Bytes        int64  `json:"bytes"`
+	NewVersion   int64              `json:"new_version"`
+	NewStateETag string             `json:"new_state_etag"`
+	Bytes        int64              `json:"bytes"`
 	Metadata     MetadataAttributes `json:"metadata,omitempty"`
 }
 
@@ -70,14 +70,14 @@ type RemoveResponse struct {
 
 // DescribeResponse is returned from GET /v1/describe.
 type DescribeResponse struct {
-	Namespace string `json:"namespace"`
-	Key       string `json:"key"`
-	Owner     string `json:"owner,omitempty"`
-	LeaseID   string `json:"lease_id,omitempty"`
-	ExpiresAt int64  `json:"expires_at_unix,omitempty"`
-	Version   int64  `json:"version"`
-	StateETag string `json:"state_etag,omitempty"`
-	UpdatedAt int64  `json:"updated_at_unix,omitempty"`
+	Namespace string             `json:"namespace"`
+	Key       string             `json:"key"`
+	Owner     string             `json:"owner,omitempty"`
+	LeaseID   string             `json:"lease_id,omitempty"`
+	ExpiresAt int64              `json:"expires_at_unix,omitempty"`
+	Version   int64              `json:"version"`
+	StateETag string             `json:"state_etag,omitempty"`
+	UpdatedAt int64              `json:"updated_at_unix,omitempty"`
 	Metadata  MetadataAttributes `json:"metadata,omitempty"`
 }
 
@@ -97,10 +97,28 @@ type MetadataAttributes struct {
 
 // MetadataUpdateResponse acknowledges metadata mutations.
 type MetadataUpdateResponse struct {
-	Namespace string              `json:"namespace,omitempty"`
-	Key       string              `json:"key,omitempty"`
-	Version   int64               `json:"version"`
-	Metadata  MetadataAttributes  `json:"metadata,omitempty"`
+	Namespace string             `json:"namespace,omitempty"`
+	Key       string             `json:"key,omitempty"`
+	Version   int64              `json:"version"`
+	Metadata  MetadataAttributes `json:"metadata,omitempty"`
+}
+
+// NamespaceQueryConfig describes the query engine preferences for a namespace.
+type NamespaceQueryConfig struct {
+	PreferredEngine string `json:"preferred_engine"`
+	FallbackEngine  string `json:"fallback_engine"`
+}
+
+// NamespaceConfigRequest mutates namespace-level settings.
+type NamespaceConfigRequest struct {
+	Namespace string                `json:"namespace,omitempty"`
+	Query     *NamespaceQueryConfig `json:"query,omitempty"`
+}
+
+// NamespaceConfigResponse surfaces namespace-level settings.
+type NamespaceConfigResponse struct {
+	Namespace string               `json:"namespace"`
+	Query     NamespaceQueryConfig `json:"query"`
 }
 
 // EnqueueRequest represents POST /v1/queue/enqueue.

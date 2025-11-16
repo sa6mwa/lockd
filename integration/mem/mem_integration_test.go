@@ -1,4 +1,4 @@
-//go:build integration && mem && !lq
+//go:build integration && mem && !lq && !query && !crypto
 
 package memintegration
 
@@ -169,27 +169,30 @@ func TestMemPublicGetAfterRelease(t *testing.T) {
 	// Attempt a normal leased GET using the old lease id/token – expect lease_required.
 	token := strconv.FormatInt(lease.FencingToken, 10)
 	cli.RegisterLeaseToken(lease.LeaseID, token)
-	_, _, _, err := cli.GetWithNamespace(ctx, "", key, lease.LeaseID)
+	_, err := cli.Get(ctx, key,
+		lockdclient.WithGetLeaseID(lease.LeaseID),
+		lockdclient.WithGetPublicDisabled(true),
+	)
 	var apiErr *lockdclient.APIError
 	if err == nil || !errors.As(err, &apiErr) || apiErr.Response.ErrorCode != "lease_required" {
 		t.Fatalf("expected lease_required from stale lease get, got %v", err)
 	}
 
 	// Public GET should succeed without a lease.
-	reader, etag, version, err := cli.GetPublicWithNamespace(ctx, "", key)
+	resp, err := cli.Get(ctx, key)
 	if err != nil {
 		t.Fatalf("public get failed: %v", err)
 	}
-	if reader == nil {
+	if resp == nil || !resp.HasState {
 		t.Fatalf("expected public payload")
 	}
-	defer reader.Close()
-	data, err := io.ReadAll(reader)
+	defer resp.Close()
+	data, err := resp.Bytes()
 	if err != nil {
 		t.Fatalf("read public body: %v", err)
 	}
-	if len(etag) == 0 || len(version) == 0 {
-		t.Fatalf("expected etag and version, got etag=%q version=%q", etag, version)
+	if len(resp.ETag) == 0 || len(resp.Version) == 0 {
+		t.Fatalf("expected etag and version, got etag=%q version=%q", resp.ETag, resp.Version)
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(data, &payload); err != nil {

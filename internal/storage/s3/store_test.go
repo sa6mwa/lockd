@@ -213,6 +213,34 @@ func TestNotFoundAwareObjectConverts404(t *testing.T) {
 	}
 }
 
+func TestClassifyPutObjectError(t *testing.T) {
+	preconditionErr := minio.ErrorResponse{StatusCode: http.StatusPreconditionFailed}
+	notFoundErr := minio.ErrorResponse{StatusCode: http.StatusNotFound}
+	otherErr := errors.New("boom")
+
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+		want     error
+	}{
+		{name: "nil", err: nil, want: nil},
+		{name: "precondition", err: preconditionErr, want: storage.ErrCASMismatch},
+		{name: "not found with expected", err: notFoundErr, expected: true, want: storage.ErrNotFound},
+		{name: "not found without expected", err: notFoundErr, expected: false, want: nil},
+		{name: "other", err: otherErr, want: nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := classifyPutObjectError(tt.err, tt.expected)
+			if !errors.Is(got, tt.want) {
+				t.Fatalf("classifyPutObjectError = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNotFoundAwareObjectPassthrough(t *testing.T) {
 	expected := errors.New("boom")
 	obj := &stubObject{readErr: expected, readAtErr: expected, seekErr: expected}

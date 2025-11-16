@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -11,16 +12,19 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"pkt.systems/lockd"
 	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/client"
+	"pkt.systems/lockd/namespaces"
 	"pkt.systems/pslog"
 )
 
@@ -28,6 +32,7 @@ func TestUnixSocketClientLifecycle(t *testing.T) {
 	socket := filepath.Join(t.TempDir(), "lockd.sock")
 	ts := lockd.StartTestServer(t,
 		lockd.WithTestUnixSocket(socket),
+		lockd.WithTestCloseDefaults(lockd.WithDrainLeases(0), lockd.WithShutdownTimeout(500*time.Millisecond)),
 	)
 	cli := ts.Client
 	if cli == nil {
@@ -54,6 +59,7 @@ func TestLeaseSessionLoadSave(t *testing.T) {
 	socket := filepath.Join(t.TempDir(), "lockd-state.sock")
 	ts := lockd.StartTestServer(t,
 		lockd.WithTestUnixSocket(socket),
+		lockd.WithTestCloseDefaults(lockd.WithDrainLeases(0), lockd.WithShutdownTimeout(500*time.Millisecond)),
 	)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -110,8 +116,108 @@ func TestLeaseSessionLoadSave(t *testing.T) {
 	}
 }
 
+func TestClientDocumentSaveAndLoad(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "lockd-doc.sock")
+	ts := lockd.StartTestServer(t,
+		lockd.WithTestUnixSocket(socket),
+		lockd.WithTestCloseDefaults(lockd.WithDrainLeases(0), lockd.WithShutdownTimeout(500*time.Millisecond)),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cli := ts.Client
+	if cli == nil {
+		var err error
+		cli, err = ts.NewClient()
+		if err != nil {
+			t.Fatalf("new client: %v", err)
+		}
+	}
+
+	key := "doc-save-load"
+	lease, err := cli.Acquire(ctx, api.AcquireRequest{
+		Namespace:  namespaces.Default,
+		Key:        key,
+		Owner:      "doc-tester",
+		TTLSeconds: 15,
+		BlockSecs:  client.BlockWaitForever,
+	})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	doc := client.NewDocument(namespaces.Default, key)
+	if err := doc.Mutate(
+		"/status=ready",
+		"/attempt=1",
+		"time:/timestamps/updated=NOW",
+	); err != nil {
+		lease.Close()
+		t.Fatalf("mutate: %v", err)
+	}
+	if err := lease.Save(ctx, doc); err != nil {
+		lease.Close()
+		t.Fatalf("save document: %v", err)
+	}
+	if err := lease.Release(ctx); err != nil {
+		t.Fatalf("release after doc save: %v", err)
+	}
+
+	loaded := &client.Document{}
+	if err := cli.Load(ctx, key, loaded, client.WithLoadNamespace(namespaces.Default)); err != nil {
+		t.Fatalf("load into document: %v", err)
+	}
+	if loaded.Namespace != namespaces.Default || loaded.Key != key {
+		t.Fatalf("unexpected loaded identity: %+v", loaded)
+	}
+	if loaded.Body["status"] != "ready" {
+		t.Fatalf("expected status ready, got %+v", loaded.Body)
+	}
+
+	resp, err := cli.Get(ctx, key, client.WithGetNamespace(namespaces.Default))
+	if err != nil {
+		t.Fatalf("get for document: %v", err)
+	}
+	getDoc, err := resp.Document()
+	if err != nil {
+		t.Fatalf("response document: %v", err)
+	}
+	if getDoc == nil || getDoc.Body["status"] != "ready" {
+		t.Fatalf("unexpected get doc: %+v", getDoc)
+	}
+
+	lease2, err := cli.Acquire(ctx, api.AcquireRequest{
+		Namespace:  namespaces.Default,
+		Key:        key,
+		Owner:      "doc-reader",
+		TTLSeconds: 15,
+		BlockSecs:  client.BlockWaitForever,
+	})
+	if err != nil {
+		t.Fatalf("reacquire: %v", err)
+	}
+	readerPayload := `{"status":"reader","attempt":2}`
+	if err := lease2.Save(ctx, strings.NewReader(readerPayload)); err != nil {
+		lease2.Close()
+		t.Fatalf("save reader payload: %v", err)
+	}
+	if err := lease2.Release(ctx); err != nil {
+		t.Fatalf("release after reader save: %v", err)
+	}
+
+	var target struct {
+		Status  string `json:"status"`
+		Attempt int    `json:"attempt"`
+	}
+	if err := cli.Load(ctx, key, &target, client.WithLoadNamespace(namespaces.Default)); err != nil {
+		t.Fatalf("load struct: %v", err)
+	}
+	if target.Status != "reader" || target.Attempt != 2 {
+		t.Fatalf("unexpected struct load: %+v", target)
+	}
+}
+
 func TestAcquireAutoGeneratesKey(t *testing.T) {
-	ts := lockd.StartTestServer(t)
+	ts := lockd.StartTestServer(t, lockd.WithTestCloseDefaults(lockd.WithDrainLeases(0), lockd.WithShutdownTimeout(500*time.Millisecond)))
 	cli := ts.Client
 	if cli == nil {
 		var err error
@@ -436,7 +542,9 @@ func TestCorrelationTransportMiddleware(t *testing.T) {
 
 func TestAcquireForUpdateImmediateUpdate(t *testing.T) {
 	socket := filepath.Join(t.TempDir(), "lockd-drain.sock")
-	ts := lockd.StartTestServer(t, lockd.WithTestUnixSocket(socket))
+	ts := lockd.StartTestServer(t,
+		lockd.WithTestUnixSocket(socket),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -517,8 +625,11 @@ func TestAcquireForUpdateImmediateUpdate(t *testing.T) {
 	}
 }
 
-func TestClientLoadPublic(t *testing.T) {
-	ts := lockd.StartTestServer(t, lockd.WithTestLoggerFromTB(t, pslog.TraceLevel))
+func TestClientLoadDefaultsToPublic(t *testing.T) {
+	ts := lockd.StartTestServer(t,
+		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
+		lockd.WithTestCloseDefaults(lockd.WithDrainLeases(0), lockd.WithShutdownTimeout(500*time.Millisecond)),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -549,11 +660,176 @@ func TestClientLoadPublic(t *testing.T) {
 	}
 
 	var snapshot map[string]int
-	if err := cli.LoadPublic(ctx, key, &snapshot); err != nil {
-		t.Fatalf("load public: %v", err)
+	if err := cli.Load(ctx, key, &snapshot); err != nil {
+		t.Fatalf("load default public: %v", err)
 	}
 	if snapshot["value"] != 42 {
 		t.Fatalf("unexpected snapshot %+v", snapshot)
+	}
+}
+
+func TestClientGetPublicDisabledRequiresLease(t *testing.T) {
+	ts := lockd.StartTestServer(t,
+		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
+		lockd.WithTestCloseDefaults(lockd.WithDrainLeases(0), lockd.WithShutdownTimeout(500*time.Millisecond)),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cli := ts.Client
+	if cli == nil {
+		var err error
+		cli, err = ts.NewClient()
+		if err != nil {
+			t.Fatalf("new client: %v", err)
+		}
+	}
+
+	key := "public-disabled"
+	lease, err := cli.Acquire(ctx, api.AcquireRequest{
+		Key:        key,
+		Owner:      "writer",
+		TTLSeconds: 5,
+		BlockSecs:  client.BlockWaitForever,
+	})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if _, err := lease.UpdateBytes(ctx, []byte(`{"value":1}`)); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+	if err := lease.Release(ctx); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	_, err = cli.Get(ctx, key, client.WithGetPublicDisabled(true))
+	if err == nil {
+		t.Fatalf("expected error when public disabled without lease")
+	}
+	if !strings.Contains(err.Error(), "lease_id required") {
+		t.Fatalf("expected client lease validation error, got %v", err)
+	}
+}
+
+func TestClientUseNamespaceDefaults(t *testing.T) {
+	ts := lockd.StartTestServer(t,
+		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
+		lockd.WithTestCloseDefaults(lockd.WithDrainLeases(0), lockd.WithShutdownTimeout(500*time.Millisecond)),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cli := ts.Client
+	if cli == nil {
+		var err error
+		cli, err = ts.NewClient()
+		if err != nil {
+			t.Fatalf("new client: %v", err)
+		}
+	}
+
+	if err := cli.UseNamespace("alpha"); err != nil {
+		t.Fatalf("use namespace: %v", err)
+	}
+
+	lease, err := cli.Acquire(ctx, api.AcquireRequest{
+		Key:        "ns-key",
+		Owner:      "writer",
+		TTLSeconds: 5,
+		BlockSecs:  client.BlockWaitForever,
+	})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if lease.Namespace != "alpha" {
+		t.Fatalf("expected namespace alpha, got %s", lease.Namespace)
+	}
+	if _, err := lease.UpdateBytes(ctx, []byte(`{"value":99}`)); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if err := lease.Release(ctx); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	resp, err := cli.Get(ctx, "ns-key")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if resp == nil || resp.Namespace != "alpha" {
+		t.Fatalf("expected namespace alpha response, got %+v", resp)
+	}
+	data, err := resp.Bytes()
+	resp.Close()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(data) != `{"value":99}` {
+		t.Fatalf("unexpected payload: %s", data)
+	}
+}
+
+func TestClientUseLeaseIDDefaults(t *testing.T) {
+	ts := lockd.StartTestServer(t,
+		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
+		lockd.WithTestCloseDefaults(lockd.WithDrainLeases(0), lockd.WithShutdownTimeout(500*time.Millisecond)),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cli := ts.Client
+	if cli == nil {
+		var err error
+		cli, err = ts.NewClient()
+		if err != nil {
+			t.Fatalf("new client: %v", err)
+		}
+	}
+
+	lease, err := cli.Acquire(ctx, api.AcquireRequest{
+		Key:        "lease-default",
+		Owner:      "worker",
+		TTLSeconds: 10,
+		BlockSecs:  client.BlockWaitForever,
+	})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	cli.UseLeaseID(lease.LeaseID)
+	if _, err := lease.UpdateBytes(ctx, []byte(`{"value":7}`)); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	resp, err := cli.Get(ctx, "lease-default", client.WithGetPublicDisabled(true))
+	if err != nil {
+		t.Fatalf("sticky lease get: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected response")
+	}
+	data, err := resp.Bytes()
+	resp.Close()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(data) != `{"value":7}` {
+		t.Fatalf("unexpected payload: %s", data)
+	}
+
+	if err := lease.Release(ctx); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	_, err = cli.Get(ctx, "lease-default", client.WithGetPublicDisabled(true))
+	if err == nil {
+		t.Fatalf("expected error after lease cleared")
+	}
+	var apiErr *client.APIError
+	if errors.As(err, &apiErr) {
+		if apiErr.Response.ErrorCode != "lease_required" {
+			t.Fatalf("expected lease_required after release, got %v", apiErr.Response.ErrorCode)
+		}
+	} else if !strings.Contains(err.Error(), "lease_id required") {
+		t.Fatalf("unexpected error after release: %v", err)
 	}
 }
 
@@ -818,7 +1094,10 @@ func TestAcquireForUpdateRetriesOnLeaseRequired(t *testing.T) {
 }
 
 func TestAcquireForUpdateHandlerError(t *testing.T) {
-	ts := lockd.StartTestServer(t, lockd.WithTestUnixSocket(filepath.Join(t.TempDir(), "handler-error.sock")))
+	ts := lockd.StartTestServer(t,
+		lockd.WithTestUnixSocket(filepath.Join(t.TempDir(), "handler-error.sock")),
+		lockd.WithTestCloseDefaults(lockd.WithDrainLeases(0), lockd.WithShutdownTimeout(500*time.Millisecond)),
+	)
 	cli := ts.Client
 	if cli == nil {
 		var err error
@@ -844,6 +1123,52 @@ func TestAcquireForUpdateHandlerError(t *testing.T) {
 	}
 }
 
+func TestAcquireForUpdateRetriesAfterHandlerEOF(t *testing.T) {
+	ts := lockd.StartTestServer(t,
+		lockd.WithTestUnixSocket(filepath.Join(t.TempDir(), "handler-eof.sock")),
+		lockd.WithTestCloseDefaults(lockd.WithDrainLeases(0), lockd.WithShutdownTimeout(500*time.Millisecond)),
+	)
+	cli := ts.Client
+	if cli == nil {
+		var err error
+		cli, err = ts.NewClient()
+		if err != nil {
+			t.Fatalf("new client: %v", err)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var attempts int32
+	err := cli.AcquireForUpdate(ctx, api.AcquireRequest{
+		Key:        "handler-eof",
+		Owner:      "tester",
+		TTLSeconds: 5,
+		BlockSecs:  client.BlockNoWait,
+	}, func(handlerCtx context.Context, af *client.AcquireForUpdateContext) error {
+		if af.State != nil {
+			if _, err := af.State.Bytes(); err != nil {
+				return err
+			}
+		}
+		if atomic.AddInt32(&attempts, 1) == 1 {
+			return io.ErrUnexpectedEOF
+		}
+		doc := map[string]any{"attempt": attempts}
+		if err := af.Save(handlerCtx, doc); err != nil {
+			return err
+		}
+		return nil
+	}, client.WithAcquireFailureRetries(3), client.WithAcquireBackoff(5*time.Millisecond, 5*time.Millisecond, 1.0), client.WithAcquireJitter(0))
+	if err != nil {
+		t.Fatalf("acquire-for-update: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("expected handler to retry once, got %d attempts", attempts)
+	}
+}
+
 func TestTestServerChaosProxy(t *testing.T) {
 	chaos := &lockd.ChaosConfig{
 		Seed:                    42,
@@ -851,7 +1176,10 @@ func TestTestServerChaosProxy(t *testing.T) {
 		MaxDelay:                3 * time.Millisecond,
 		BandwidthBytesPerSecond: 0,
 	}
-	ts := lockd.StartTestServer(t, lockd.WithTestChaos(chaos))
+	ts := lockd.StartTestServer(t,
+		lockd.WithTestChaos(chaos),
+		lockd.WithTestCloseDefaults(lockd.WithDrainLeases(0), lockd.WithShutdownTimeout(500*time.Millisecond)),
+	)
 	serverAddr := ts.Server.ListenerAddr().String()
 	proxyAddr := ts.Addr().String()
 	if serverAddr == proxyAddr {
@@ -1624,5 +1952,258 @@ func TestClientSubscribeWithState(t *testing.T) {
 	}
 	if stateLease, ok := ackReq["state_lease_id"].(string); !ok || stateLease != "lease-state" {
 		t.Fatalf("expected state lease in ack: %+v", ackReq)
+	}
+}
+
+func TestClientFlushIndexEnablesQueryResults(t *testing.T) {
+	ts := lockd.StartTestServer(t,
+		lockd.WithTestConfigFunc(func(cfg *lockd.Config) {
+			cfg.IndexerFlushInterval = time.Hour
+			cfg.IndexerFlushDocs = 1000
+		}),
+		lockd.WithTestCloseDefaults(lockd.WithDrainLeases(0), lockd.WithShutdownTimeout(500*time.Millisecond)),
+	)
+	cli := ts.Client
+	if cli == nil {
+		var err error
+		cli, err = ts.NewClient()
+		if err != nil {
+			t.Fatalf("new client: %v", err)
+		}
+	}
+	httpClient, err := ts.NewHTTPClient()
+	if err != nil {
+		t.Fatalf("http client: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, _, err = cli.UpdateNamespaceConfig(ctx, api.NamespaceConfigRequest{
+		Namespace: namespaces.Default,
+		Query: &api.NamespaceQueryConfig{
+			PreferredEngine: "index",
+			FallbackEngine:  "none",
+		},
+	}, client.NamespaceConfigOptions{})
+	if err != nil {
+		t.Fatalf("set namespace config: %v", err)
+	}
+	lease, err := cli.Acquire(ctx, api.AcquireRequest{
+		Namespace:  namespaces.Default,
+		Key:        "flush-index-key",
+		Owner:      "index-test",
+		TTLSeconds: 30,
+		BlockSecs:  client.BlockNoWait,
+	})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if err := lease.Save(ctx, map[string]any{"status": "ready"}); err != nil {
+		lease.Close()
+		t.Fatalf("save: %v", err)
+	}
+	if err := lease.Release(ctx); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	queryReq := api.QueryRequest{
+		Namespace: namespaces.Default,
+		Selector:  api.Selector{Eq: &api.Term{Field: "/status", Value: "ready"}},
+	}
+	baseURL := ts.URL()
+	initial := performQuery(t, httpClient, baseURL, queryReq, "index")
+	if len(initial.Keys) != 0 {
+		t.Fatalf("expected no keys before flush, got %v", initial.Keys)
+	}
+	flushResp, err := cli.FlushIndex(ctx, namespaces.Default, client.WithFlushModeWait())
+	if err != nil {
+		t.Fatalf("flush index: %v", err)
+	}
+	if !flushResp.Flushed {
+		t.Fatalf("expected flushed response, got %+v", flushResp)
+	}
+	final := performQuery(t, httpClient, baseURL, queryReq, "index")
+	if len(final.Keys) != 1 || final.Keys[0] != "flush-index-key" {
+		t.Fatalf("unexpected keys after flush: %v", final.Keys)
+	}
+}
+
+func performQuery(t testing.TB, httpClient *http.Client, baseURL string, req api.QueryRequest, engine string) api.QueryResponse {
+	t.Helper()
+	payload, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal query request: %v", err)
+	}
+	values := url.Values{}
+	if strings.TrimSpace(req.Namespace) != "" {
+		values.Set("namespace", req.Namespace)
+	}
+	if strings.TrimSpace(engine) != "" {
+		values.Set("engine", engine)
+	}
+	fullURL := baseURL + "/v1/query"
+	if encoded := values.Encode(); encoded != "" {
+		fullURL += "?" + encoded
+	}
+	httpReq, err := http.NewRequest(http.MethodPost, fullURL, bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("new query request: %v", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient.Do(httpReq)
+	if err != nil {
+		t.Fatalf("query request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("query status %d", resp.StatusCode)
+	}
+	var out api.QueryResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode query response: %v", err)
+	}
+	return out
+}
+
+func TestClientQuery(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/query", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("unexpected method %s", r.Method)
+		}
+		if got := r.URL.Query().Get("engine"); got != "index" {
+			t.Fatalf("unexpected engine %s", got)
+		}
+		if got := r.URL.Query().Get("refresh"); got != "wait_for" {
+			t.Fatalf("unexpected refresh %s", got)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		if !strings.Contains(string(body), "\"namespace\":\"default\"") {
+			t.Fatalf("missing namespace in payload: %s", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"namespace":"default","keys":["usertable:user0001"],"cursor":"abc"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	cli, err := client.New(srv.URL, client.WithDisableMTLS(true))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	resp, err := cli.Query(context.Background(),
+		client.WithQueryNamespace("default"),
+		client.WithQuery("eq{field=/status,value=open}"),
+		client.WithQueryLimit(5),
+		client.WithQueryEngineIndex(),
+		client.WithQueryRefreshWaitFor(),
+	)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if resp == nil || resp.Cursor != "abc" || len(resp.Keys()) != 1 {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+	count := 0
+	if err := resp.ForEach(func(row client.QueryRow) error {
+		count++
+		if row.Namespace != "default" || row.Key != "usertable:user0001" {
+			return fmt.Errorf("unexpected row %+v", row)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("foreach: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 row, got %d", count)
+	}
+}
+
+func TestClientQueryInvalidLQL(t *testing.T) {
+	cli, err := client.New("http://127.0.0.1", client.WithDisableMTLS(true))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	_, err = cli.Query(context.Background(), client.WithQuery("eq{field=/status"))
+	if err == nil {
+		t.Fatalf("expected parse error")
+	}
+}
+
+
+func TestClientQueryDocuments(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/query", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("return"); got != "documents" {
+			t.Fatalf("unexpected return mode %s", got)
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Header().Set("X-Lockd-Query-Return", "documents")
+		w.Header().Set("X-Lockd-Query-Cursor", "next-doc")
+		w.Header().Set("X-Lockd-Query-Index-Seq", "42")
+		w.Header().Set("X-Lockd-Query-Metadata", `{"hint":"scan"}`)
+		fmt.Fprintln(w, `{"ns":"default","key":"doc-1","ver":7,"doc":{"status":"ready"}}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	cli, err := client.New(srv.URL, client.WithDisableMTLS(true))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	resp, err := cli.Query(context.Background(),
+		client.WithQueryNamespace("default"),
+		client.WithQueryReturnDocuments(),
+	)
+	if err != nil {
+		t.Fatalf("query documents: %v", err)
+	}
+	if resp.Mode() != client.QueryReturnDocuments {
+		t.Fatalf("expected documents mode, got %s", resp.Mode())
+	}
+	keys := resp.Keys()
+	if len(keys) != 1 || keys[0] != "doc-1" {
+		t.Fatalf("unexpected keys %v", keys)
+	}
+	if err := resp.Close(); err != nil {
+		t.Fatalf("close drained response: %v", err)
+	}
+	resp2, err := cli.Query(context.Background(),
+		client.WithQueryNamespace("default"),
+		client.WithQueryReturnDocuments(),
+	)
+	if err != nil {
+		t.Fatalf("query documents 2: %v", err)
+	}
+	defer resp2.Close()
+	count := 0
+	if err := resp2.ForEach(func(row client.QueryRow) error {
+		count++
+		if !row.HasDocument() {
+			return fmt.Errorf("expected document payload")
+		}
+		var doc struct {
+			Status string `json:"status"`
+		}
+		if err := row.DocumentInto(&doc); err != nil {
+			return err
+		}
+		if doc.Status != "ready" {
+			return fmt.Errorf("unexpected doc %+v", doc)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("foreach documents: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 row, got %d", count)
+	}
+	if resp2.Cursor != "next-doc" {
+		t.Fatalf("expected cursor next-doc, got %s", resp2.Cursor)
+	}
+	if resp2.IndexSeq != 42 {
+		t.Fatalf("expected index seq 42, got %d", resp2.IndexSeq)
+	}
+	if hint := resp2.Metadata["hint"]; hint != "scan" {
+		t.Fatalf("expected metadata hint=scan, got %v", resp2.Metadata)
 	}
 }

@@ -1,4 +1,4 @@
-//go:build integration && minio
+//go:build integration && minio && crypto
 
 package miniocrypto
 
@@ -315,6 +315,14 @@ func startMinioServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client {
 	}
 	options = append(options, cryptotest.SharedMTLSOptions(tb)...)
 	ts := lockd.StartTestServer(tb, options...)
+	tb.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		if err := ts.Stop(ctx); err != nil {
+			tb.Logf("minio crypto test server stop: %v", err)
+		}
+		miniointegration.CleanupNamespaces(tb, cfg, namespaces.Default)
+	})
 	if ts.Client != nil {
 		return ts.Client
 	}

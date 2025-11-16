@@ -92,15 +92,15 @@ const (
 `
 )
 
-func TestParseMutationsBraceAndDot(t *testing.T) {
+func TestParseMutationsBraceAndPointer(t *testing.T) {
 	now := time.Date(2025, 10, 11, 1, 0, 0, 0, time.UTC)
 	input := []string{
-		"state.progress=ready",
-		"state.metrics++",
-		`state.details{owner="alice",note="hi, world"}`,
-		"state.metrics=+3",
-		"time:state.updated=NOW",
-		"rm:state.legacy",
+		"/state/progress=ready",
+		"/state/metrics++",
+		`/state/details{/owner="alice",/note="hi, world"}`,
+		"/state/metrics=+3",
+		"time:/state/updated=NOW",
+		"rm:/state/legacy",
 	}
 	muts, err := ParseMutations(input, now)
 	if err != nil {
@@ -124,16 +124,62 @@ func TestParseMutationsBraceAndDot(t *testing.T) {
 	assertMutation(t, muts[6], MutationRemove, []string{"state", "legacy"})
 }
 
+func TestMutationsHelper(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	muts, err := Mutations(now,
+		"/foo=bar,/count=1",
+		"/count++",
+	)
+	if err != nil {
+		t.Fatalf("Mutations: %v", err)
+	}
+	if len(muts) != 3 {
+		t.Fatalf("unexpected mutation count %d", len(muts))
+	}
+	doc := map[string]any{}
+	if err := ApplyMutations(doc, muts); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if doc["foo"] != "bar" {
+		t.Fatalf("unexpected foo %v", doc["foo"])
+	}
+	var count float64
+	switch v := doc["count"].(type) {
+	case float64:
+		count = v
+	case int64:
+		count = float64(v)
+	default:
+		t.Fatalf("unexpected type %T", v)
+	}
+	if count != 2 {
+		t.Fatalf("unexpected count %v", count)
+	}
+}
+
+func TestMutateHelper(t *testing.T) {
+	doc := map[string]any{}
+	if err := Mutate(doc, "/status=pending", "/status=done"); err != nil {
+		t.Fatalf("mutate: %v", err)
+	}
+	if doc["status"] != "done" {
+		t.Fatalf("unexpected status %v", doc["status"])
+	}
+	if err := Mutate(doc, "badexpr"); err == nil {
+		t.Fatalf("expected error for invalid expr")
+	}
+}
+
 func TestParseMutationsString(t *testing.T) {
 	now := time.Date(2025, 10, 11, 1, 0, 0, 0, time.UTC)
 	payload := `
-state.details{
-  owner = "alice"
-  note = "hi, world"
+/state/details{
+  /owner = "alice"
+  /note = "hi, world"
 }
-delete:state.details.temporary
-state.count=+4
-state.count--
+delete:/state/details/temporary
+/state/count=+4
+/state/count--
 `
 	muts, err := ParseMutationsString(payload, now)
 	if err != nil {
@@ -157,7 +203,7 @@ state.count--
 
 func TestParseMutationsStringError(t *testing.T) {
 	now := time.Now()
-	_, err := ParseMutationsString(`state.details{owner="alice"`, now)
+	_, err := ParseMutationsString(`/state/details{/owner="alice"`, now)
 	if err == nil {
 		t.Fatalf("expected error for unterminated brace")
 	}
@@ -203,11 +249,11 @@ func TestApplyMutationsJSON(t *testing.T) {
 	}
 	now := time.Date(2025, 10, 11, 2, 0, 0, 0, time.UTC)
 	muts, err := ParseMutations([]string{
-		"state.count=+4",
-		"state.count--",
-		`state.details{owner="alice",note="updated"}`,
-		"time:state.updated=NOW",
-		"rm:state.details.legacy",
+		"/state/count=+4",
+		"/state/count--",
+		`/state/details{/owner="alice",/note="updated"}`,
+		"time:/state/updated=NOW",
+		"rm:/state/details/legacy",
 	}, now)
 	if err != nil {
 		t.Fatalf("ParseMutations: %v", err)
@@ -243,8 +289,8 @@ func TestParseMutationsQuotedPaths(t *testing.T) {
 		},
 	}
 	muts, err := ParseMutations([]string{
-		`data{"hello key"=Mars,count++}`,
-		`meta{name=hellomarser,previous=world}`,
+		`/data{/hello key=Mars,/count++}`,
+		`/meta{/name=hellomarser,/previous=world}`,
 	}, now)
 	if err != nil {
 		t.Fatalf("ParseMutations: %v", err)
@@ -265,7 +311,7 @@ func TestParseMutationsQuotedPaths(t *testing.T) {
 	}
 }
 
-func TestParseMutationsQuotedDotNotation(t *testing.T) {
+func TestParseMutationsPointerInline(t *testing.T) {
 	now := time.Date(2025, 10, 11, 3, 0, 0, 0, time.UTC)
 	doc := map[string]any{
 		"data": map[string]any{
@@ -276,7 +322,7 @@ func TestParseMutationsQuotedDotNotation(t *testing.T) {
 			"name": "helloworlder",
 		},
 	}
-	expr := `data."hello key"=Mars,data.count++,meta.name=hellomarser,meta.previous=world`
+	expr := `/data/hello key=Mars,/data/count++,/meta/name=hellomarser,/meta/previous=world`
 	muts, err := ParseMutationsString(expr, now)
 	if err != nil {
 		t.Fatalf("ParseMutationsString: %v", err)
@@ -296,15 +342,15 @@ func TestParseMutationsQuotedDotNotation(t *testing.T) {
 
 func TestSelectorFinanceTransaction(t *testing.T) {
 	expr := `
-and.eq{field=transaction.status,value=pending},
-and.range{field=transaction.amount.net,gte=12000},
-or.eq{field=transaction.counterparty.country,value=SE},
-or.1.eq{field=transaction.counterparty.country,value=NO}`
-	sel, found, err := ParseSelectorString(expr)
+and.eq{field=/transaction/status,value=pending},
+and.range{field=/transaction/amount/net,gte=12000},
+or.eq{field=/transaction/counterparty/country,value=SE},
+or.1.eq{field=/transaction/counterparty/country,value=NO}`
+	sel, err := ParseSelectorString(expr)
 	if err != nil {
 		t.Fatalf("ParseSelectorString: %v", err)
 	}
-	if !found {
+	if sel.IsEmpty() {
 		t.Fatalf("expected selector")
 	}
 	if len(sel.Or) != 3 {
@@ -315,15 +361,15 @@ or.1.eq{field=transaction.counterparty.country,value=NO}`
 		t.Fatalf("expected base and clauses, got %+v", base)
 	}
 	clauses := selectorClausesByField(t, base.And)
-	if eq := clauses["transaction.status"]; eq.Eq == nil || eq.Eq.Value != "pending" {
+	if eq := clauses["/transaction/status"]; eq.Eq == nil || eq.Eq.Value != "pending" {
 		t.Fatalf("unexpected status clause %+v", eq)
 	}
-	if rng := clauses["transaction.amount.net"]; rng.Range == nil || rng.Range.GTE == nil || *rng.Range.GTE != 12000 {
+	if rng := clauses["/transaction/amount/net"]; rng.Range == nil || rng.Range.GTE == nil || *rng.Range.GTE != 12000 {
 		t.Fatalf("unexpected range clause %+v", rng)
 	}
 	seen := make(map[string]bool)
 	for _, clause := range sel.Or[1:] {
-		if clause.Eq == nil || clause.Eq.Field != "transaction.counterparty.country" {
+		if clause.Eq == nil || clause.Eq.Field != "/transaction/counterparty/country" {
 			t.Fatalf("unexpected or clause %+v", clause)
 		}
 		seen[clause.Eq.Value] = true
@@ -336,11 +382,11 @@ or.1.eq{field=transaction.counterparty.country,value=NO}`
 func TestFinanceTransactionMutations(t *testing.T) {
 	doc := decodeJSONFixture(t, financeTransactionJSON)
 	muts, err := ParseMutations([]string{
-		"transaction.status=posted",
-		"transaction.approvals.completed++",
-		"transaction.approvals.last_user=auditor-2",
-		"transaction.entries.2000.cost_center=HQ",
-		"transaction.counterparty.risk_score=+5",
+		"/transaction/status=posted",
+		"/transaction/approvals/completed++",
+		"/transaction/approvals/last_user=auditor-2",
+		"/transaction/entries/2000/cost_center=HQ",
+		"/transaction/counterparty/risk_score=+5",
 	}, time.Now())
 	if err != nil {
 		t.Fatalf("ParseMutations: %v", err)
@@ -367,17 +413,17 @@ func TestFinanceTransactionMutations(t *testing.T) {
 
 func TestSelectorVoucherDocument(t *testing.T) {
 	expr := `
-and.eq{field=voucher.book,value=GENERAL},
-and.eq{field=voucher.header.currency,value=EUR},
-and.eq{field=voucher.header.period,value=2025-11},
-and.range{field=voucher.lines.20.amount,gte=3000},
-or.eq{field=voucher.lines.10.dimensions.cost_center,value=LON},
-or.1.eq{field=voucher.lines.10.dimensions.cost_center,value=AMS}`
-	sel, found, err := ParseSelectorString(expr)
+and.eq{field=/voucher/book,value=GENERAL},
+and.eq{field=/voucher/header/currency,value=EUR},
+and.eq{field=/voucher/header/period,value=2025-11},
+and.range{field=/voucher/lines/20/amount,gte=3000},
+or.eq{field=/voucher/lines/10/dimensions/cost_center,value=LON},
+or.1.eq{field=/voucher/lines/10/dimensions/cost_center,value=AMS}`
+	sel, err := ParseSelectorString(expr)
 	if err != nil {
 		t.Fatalf("ParseSelectorString: %v", err)
 	}
-	if !found {
+	if sel.IsEmpty() {
 		t.Fatalf("expected selector")
 	}
 	if len(sel.Or) != 3 {
@@ -388,21 +434,21 @@ or.1.eq{field=voucher.lines.10.dimensions.cost_center,value=AMS}`
 		t.Fatalf("expected 4 and terms, got %+v", base)
 	}
 	clauses := selectorClausesByField(t, base.And)
-	for _, field := range []string{"voucher.book", "voucher.header.currency", "voucher.header.period"} {
+	for _, field := range []string{"/voucher/book", "/voucher/header/currency", "/voucher/header/period"} {
 		clause, ok := clauses[field]
 		if !ok || clause.Eq == nil {
 			t.Fatalf("missing eq clause for %s in %+v", field, clauses)
 		}
 	}
-	if clause := clauses["voucher.header.period"]; clause.Eq.Value != "2025-11" {
+	if clause := clauses["/voucher/header/period"]; clause.Eq.Value != "2025-11" {
 		t.Fatalf("unexpected period clause %+v", clause)
 	}
-	if rng := clauses["voucher.lines.20.amount"]; rng.Range == nil || rng.Range.GTE == nil || *rng.Range.GTE != 3000 {
+	if rng := clauses["/voucher/lines/20/amount"]; rng.Range == nil || rng.Range.GTE == nil || *rng.Range.GTE != 3000 {
 		t.Fatalf("unexpected range term %+v", rng)
 	}
 	regions := make(map[string]bool)
 	for _, clause := range sel.Or[1:] {
-		if clause.Eq == nil || clause.Eq.Field != "voucher.lines.10.dimensions.cost_center" {
+		if clause.Eq == nil || clause.Eq.Field != "/voucher/lines/10/dimensions/cost_center" {
 			t.Fatalf("unexpected region clause %+v", clause)
 		}
 		regions[clause.Eq.Value] = true
@@ -415,13 +461,13 @@ or.1.eq{field=voucher.lines.10.dimensions.cost_center,value=AMS}`
 func TestVoucherMutations(t *testing.T) {
 	doc := decodeJSONFixture(t, voucherDocumentJSON)
 	muts, err := ParseMutations([]string{
-		"voucher.header.posted=true",
-		"voucher.attachments.count++",
-		"voucher.lines.20.amount=+250",
-		"voucher.lines.30.account=ACC-2999",
-		"voucher.lines.30.type=credit",
-		"voucher.lines.30.amount=250",
-		"voucher.lines.30.dimensions.cost_center=HUB",
+		"/voucher/header/posted=true",
+		"/voucher/attachments/count++",
+		"/voucher/lines/20/amount=+250",
+		"/voucher/lines/30/account=ACC-2999",
+		"/voucher/lines/30/type=credit",
+		"/voucher/lines/30/amount=250",
+		"/voucher/lines/30/dimensions/cost_center=HUB",
 	}, time.Now())
 	if err != nil {
 		t.Fatalf("ParseMutations: %v", err)
@@ -453,17 +499,17 @@ func TestVoucherMutations(t *testing.T) {
 
 func TestSelectorIoTFirmware(t *testing.T) {
 	expr := `
-and.eq{field=device.firmware.channel,value=stable},
-and.eq{field=device.fleet,value=retail-pos},
-and.range{field=device.rollout.progress.percent,gte=30},
-and.range{field=device.telemetry.battery_mv,gte=3600},
-or.eq{field=device.location.region,value=us-west},
-or.1.eq{field=device.location.region,value=ap-south}`
-	sel, found, err := ParseSelectorString(expr)
+and.eq{field=/device/firmware/channel,value=stable},
+and.eq{field=/device/fleet,value=retail-pos},
+and.range{field=/device/rollout/progress/percent,gte=30},
+and.range{field=/device/telemetry/battery_mv,gte=3600},
+or.eq{field=/device/location/region,value=us-west},
+or.1.eq{field=/device/location/region,value=ap-south}`
+	sel, err := ParseSelectorString(expr)
 	if err != nil {
 		t.Fatalf("ParseSelectorString: %v", err)
 	}
-	if !found {
+	if sel.IsEmpty() {
 		t.Fatalf("expected selector")
 	}
 	if len(sel.Or) != 3 {
@@ -474,21 +520,21 @@ or.1.eq{field=device.location.region,value=ap-south}`
 		t.Fatalf("expected four and clauses, got %+v", base)
 	}
 	clauses := selectorClausesByField(t, base.And)
-	for _, field := range []string{"device.firmware.channel", "device.fleet"} {
+	for _, field := range []string{"/device/firmware/channel", "/device/fleet"} {
 		clause, ok := clauses[field]
 		if !ok || clause.Eq == nil {
 			t.Fatalf("missing eq clause for %s", field)
 		}
 	}
-	if rng := clauses["device.rollout.progress.percent"]; rng.Range == nil || rng.Range.GTE == nil || *rng.Range.GTE != 30 {
+	if rng := clauses["/device/rollout/progress/percent"]; rng.Range == nil || rng.Range.GTE == nil || *rng.Range.GTE != 30 {
 		t.Fatalf("unexpected rollout range %+v", rng)
 	}
-	if rng := clauses["device.telemetry.battery_mv"]; rng.Range == nil || rng.Range.GTE == nil || *rng.Range.GTE != 3600 {
+	if rng := clauses["/device/telemetry/battery_mv"]; rng.Range == nil || rng.Range.GTE == nil || *rng.Range.GTE != 3600 {
 		t.Fatalf("unexpected telemetry range %+v", rng)
 	}
 	expectedRegions := map[string]bool{"us-west": false, "ap-south": false}
 	for _, clause := range sel.Or[1:] {
-		if clause.Eq == nil || clause.Eq.Field != "device.location.region" {
+		if clause.Eq == nil || clause.Eq.Field != "/device/location/region" {
 			t.Fatalf("unexpected region clause %+v", clause)
 		}
 		if _, ok := expectedRegions[clause.Eq.Value]; ok {
@@ -505,13 +551,13 @@ or.1.eq{field=device.location.region,value=ap-south}`
 func TestIoTFirmwareMutations(t *testing.T) {
 	doc := decodeJSONFixture(t, firmwareUpgradeJSON)
 	muts, err := ParseMutations([]string{
-		"device.rollout.progress.percent=+15",
-		"device.rollout.progress.status=draining",
-		"device.rollout.policy.max_failures=+1",
-		`device.rollout.window.end="2025-11-07T06:00:00Z"`,
-		"device.firmware.target.version=2.4.1",
-		`device.telemetry.last_seen="2025-11-08T05:00:00Z"`,
-		"device.rollout.override_reason=site-maintenance",
+		"/device/rollout/progress/percent=+15",
+		"/device/rollout/progress/status=draining",
+		"/device/rollout/policy/max_failures=+1",
+		`/device/rollout/window/end="2025-11-07T06:00:00Z"`,
+		"/device/firmware/target/version=2.4.1",
+		`/device/telemetry/last_seen="2025-11-08T05:00:00Z"`,
+		"/device/rollout/override_reason=site-maintenance",
 	}, time.Now())
 	if err != nil {
 		t.Fatalf("ParseMutations: %v", err)
@@ -554,8 +600,8 @@ func TestApplyMutationsErrors(t *testing.T) {
 }
 
 func TestSplitPathErrors(t *testing.T) {
-	if _, err := splitPath(`data."unterminated`); err == nil {
-		t.Fatalf("expected error for unterminated quote")
+	if _, err := splitPath(`state.counter`); err == nil {
+		t.Fatalf("expected error for legacy dotted path")
 	}
 	if _, err := splitPath(``); err == nil {
 		t.Fatalf("expected error for empty path")

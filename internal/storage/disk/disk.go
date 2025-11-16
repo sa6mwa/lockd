@@ -20,8 +20,10 @@ import (
 
 	"pkt.systems/kryptograf"
 	"pkt.systems/lockd/internal/loggingutil"
+	"pkt.systems/lockd/internal/search"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/uuidv7"
+	"pkt.systems/lockd/namespaces"
 	"pkt.systems/pslog"
 )
 
@@ -51,6 +53,18 @@ type Store struct {
 	queueWatchEnabled bool
 	queueWatchMode    string
 	queueWatchReason  string
+}
+
+func (s *Store) DefaultNamespaceConfig() namespaces.Config {
+	cfg := namespaces.DefaultConfig()
+	cfg.Query.Preferred = search.EngineIndex
+	cfg.Query.Fallback = namespaces.FallbackNone
+	return cfg
+}
+
+// IndexerFlushDefaults suggests disk-friendly indexer tuning.
+func (s *Store) IndexerFlushDefaults() (int, time.Duration) {
+	return 1000, 10 * time.Second
 }
 
 var globalLocks sync.Map

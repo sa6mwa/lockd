@@ -31,7 +31,180 @@ var aggregatorTokens = map[string]struct{}{
 const maxSelectorIndex = 1 << 20
 
 // ParseSelectorValues scans URL parameters for selector expressions and returns the AST.
-func ParseSelectorValues(values url.Values) (api.Selector, bool, error) {
+func ParseSelectorValues(values url.Values) (api.Selector, error) {
+	selector, found, err := parseSelectorValuesInternal(values)
+	if err != nil {
+		return api.Selector{}, err
+	}
+	if !found {
+		return api.Selector{}, nil
+	}
+	return selector, nil
+}
+
+// ParseSelectorString parses a comma/newline separated selector expression string (LQL).
+func ParseSelectorString(expr string) (api.Selector, error) {
+	tokens, err := splitExpressions(expr)
+	if err != nil {
+		return api.Selector{}, err
+	}
+	if len(tokens) == 0 {
+		return api.Selector{}, nil
+	}
+	values := url.Values{}
+	for _, token := range tokens {
+		rewritten, ok, err := rewriteShorthandExpression(token)
+		if err != nil {
+			return api.Selector{}, err
+		}
+		if ok {
+			values.Add(rewritten, "")
+			continue
+		}
+		values.Add(token, "")
+	}
+	return ParseSelectorValues(values)
+}
+
+func rewriteShorthandExpression(expr string) (string, bool, error) {
+	trimmed := strings.TrimSpace(expr)
+	if trimmed == "" {
+		return "", false, nil
+	}
+	if firstSelectorToken(trimmed) != "" {
+		return "", false, nil
+	}
+	field, op, value, ok, err := parseShorthandComponents(trimmed)
+	if err != nil || !ok {
+		return "", ok && err == nil, err
+	}
+	forceNumeric := op == ">" || op == ">=" || op == "<" || op == "<="
+	literal, err := normalizeShorthandValue(value, forceNumeric)
+	if err != nil {
+		return "", false, err
+	}
+	switch op {
+	case "=", "==":
+		return fmt.Sprintf("eq{field=%s,value=%s}", field, literal), true, nil
+	case "!=":
+		return fmt.Sprintf("not.eq{field=%s,value=%s}", field, literal), true, nil
+	case ">":
+		return fmt.Sprintf("range{field=%s,gt=%s}", field, literal), true, nil
+	case ">=":
+		return fmt.Sprintf("range{field=%s,gte=%s}", field, literal), true, nil
+	case "<":
+		return fmt.Sprintf("range{field=%s,lt=%s}", field, literal), true, nil
+	case "<=":
+		return fmt.Sprintf("range{field=%s,lte=%s}", field, literal), true, nil
+	default:
+		return "", false, nil
+	}
+}
+
+func parseShorthandComponents(expr string) (field, op, value string, matched bool, err error) {
+	trimmed := strings.TrimSpace(expr)
+	if trimmed == "" {
+		return "", "", "", false, nil
+	}
+	inQuotes := false
+	var quote rune
+	for i, r := range trimmed {
+		switch r {
+		case '\'', '"':
+			if !inQuotes {
+				inQuotes = true
+				quote = r
+			} else if quote == r {
+				inQuotes = false
+				quote = 0
+			}
+		default:
+		}
+		if inQuotes {
+			continue
+		}
+		if i+1 < len(trimmed) {
+			candidate := trimmed[i : i+2]
+			if isShorthandOperator(candidate) {
+				fieldPart := strings.TrimSpace(trimmed[:i])
+				valuePart := trimmed[i+2:]
+				return fieldPart, candidate, valuePart, true, validateShorthandParts(expr, fieldPart, valuePart)
+			}
+		}
+		if isSingleOperator(r) {
+			fieldPart := strings.TrimSpace(trimmed[:i])
+			valuePart := trimmed[i+1:]
+			return fieldPart, string(r), valuePart, true, validateShorthandParts(expr, fieldPart, valuePart)
+		}
+	}
+	return "", "", "", false, nil
+}
+
+func validateShorthandParts(expr, field, value string) error {
+	field = strings.TrimSpace(field)
+	value = strings.TrimSpace(value)
+	if field == "" {
+		return fmt.Errorf("selector shorthand %q missing field", expr)
+	}
+	if !strings.HasPrefix(field, "/") {
+		return fmt.Errorf("selector shorthand %q requires JSON Pointer field", expr)
+	}
+	if value == "" {
+		return fmt.Errorf("selector shorthand %q missing value", expr)
+	}
+	return nil
+}
+
+func isShorthandOperator(op string) bool {
+	switch op {
+	case "!=", ">=", "<=", "==":
+		return true
+	default:
+		return false
+	}
+}
+
+func isSingleOperator(r rune) bool {
+	switch r {
+	case '=', '>', '<':
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeShorthandValue(raw string, numericOnly bool) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", fmt.Errorf("selector shorthand missing value")
+	}
+	if _, quoted := stripQuotes(trimmed); quoted {
+		if numericOnly {
+			return "", fmt.Errorf("range comparisons require numeric literals")
+		}
+		return trimmed, nil
+	}
+	if _, err := strconv.ParseFloat(trimmed, 64); err == nil {
+		return trimmed, nil
+	}
+	lowered := strings.ToLower(trimmed)
+	if lowered == "true" || lowered == "false" {
+		if numericOnly {
+			return "", fmt.Errorf("range comparisons require numeric literals")
+		}
+		return lowered, nil
+	}
+	if numericOnly {
+		return "", fmt.Errorf("range comparisons require numeric literals")
+	}
+	buf, err := json.Marshal(trimmed)
+	if err != nil {
+		return fmt.Sprintf("\"%s\"", trimmed), nil
+	}
+	return string(buf), nil
+}
+
+func parseSelectorValuesInternal(values url.Values) (api.Selector, bool, error) {
 	builder := newSelectorBuilder()
 	found := false
 	for rawKey, vals := range values {
@@ -69,22 +242,6 @@ func ParseSelectorValues(values url.Values) (api.Selector, bool, error) {
 		return api.Selector{}, false, nil
 	}
 	return builder.build()
-}
-
-// ParseSelectorString parses a comma/newline separated selector expression string (LQL).
-func ParseSelectorString(expr string) (api.Selector, bool, error) {
-	tokens, err := splitExpressions(expr)
-	if err != nil {
-		return api.Selector{}, false, err
-	}
-	if len(tokens) == 0 {
-		return api.Selector{}, false, nil
-	}
-	values := url.Values{}
-	for _, token := range tokens {
-		values.Add(token, "")
-	}
-	return ParseSelectorValues(values)
 }
 
 func firstSelectorToken(raw string) string {

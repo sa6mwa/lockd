@@ -1,4 +1,4 @@
-//go:build integration && disk && !lq
+//go:build integration && disk && !lq && !query && !crypto
 
 package diskintegration
 

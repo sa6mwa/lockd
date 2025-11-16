@@ -72,6 +72,7 @@ add_backend() {
 
 add_backend mem 1 0 0
 add_suite "mem/query" "mem" "integration mem query" ""
+add_suite "mem/crypto" "mem" "integration mem crypto" ""
 add_backend disk 1 1 1
 add_suite "disk/query" "disk" "integration disk query" ".env.disk"
 add_backend nfs 1 0 1

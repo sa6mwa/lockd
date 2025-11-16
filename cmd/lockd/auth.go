@@ -14,7 +14,7 @@ import (
 
 	"pkt.systems/lockd"
 	"pkt.systems/lockd/internal/cryptoutil"
-	"pkt.systems/lockd/internal/tlsutil"
+	"pkt.systems/lockd/tlsutil"
 )
 
 func newAuthCommand() *cobra.Command {

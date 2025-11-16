@@ -28,12 +28,14 @@ import (
 	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/internal/clock"
 	"pkt.systems/lockd/internal/correlation"
+	"pkt.systems/lockd/internal/jsonpointer"
 	"pkt.systems/lockd/internal/jsonutil"
 	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/lsf"
 	"pkt.systems/lockd/internal/qrf"
 	"pkt.systems/lockd/internal/queue"
 	"pkt.systems/lockd/internal/search"
+	indexer "pkt.systems/lockd/internal/search/index"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/uuidv7"
 	"pkt.systems/lockd/lql"
@@ -45,13 +47,19 @@ const defaultPayloadSpoolMemoryThreshold = 4 << 20 // 4 MiB in-memory, then spil
 const (
 	headerFencingToken        = "X-Fencing-Token"
 	headerMetadataQueryHidden = "X-Lockd-Meta-Query-Hidden"
+	headerQueryCursor         = "X-Lockd-Query-Cursor"
+	headerQueryIndexSeq       = "X-Lockd-Query-Index-Seq"
+	headerQueryMetadata       = "X-Lockd-Query-Metadata"
+	headerQueryReturn         = "X-Lockd-Query-Return"
 )
 const headerCorrelationID = "X-Correlation-Id"
 const headerShutdownImminent = "Shutdown-Imminent"
+const contentTypeNDJSON = "application/x-ndjson"
 const maxQueueDequeueBatch = 64
 const queueEnsureTimeoutGrace = 2 * time.Second
 const defaultQueryLimit = 100
 const maxQueryLimit = 1000
+const namespaceConfigBodyLimit = 32 << 10
 
 const (
 	acquireBackoffStart      = 500 * time.Millisecond
@@ -92,36 +100,47 @@ func queueBlockModeLabel(blockSeconds int64) string {
 
 // Handler wires HTTP endpoints to backend operations.
 type Handler struct {
-	store                 storage.Backend
-	crypto                *storage.Crypto
-	queueSvc              *queue.Service
-	queueDisp             *queue.Dispatcher
-	searchAdapter         search.Adapter
-	logger                pslog.Logger
-	clock                 clock.Clock
-	lsfObserver           *lsf.Observer
-	qrf                   *qrf.Controller
-	jsonMaxBytes          int64
-	compactWriter         func(io.Writer, io.Reader, int64) error
-	defaultTTL            time.Duration
-	maxTTL                time.Duration
-	acquireBlock          time.Duration
-	spoolThreshold        int64
-	defaultNamespace      string
-	namespaceTracker      *NamespaceTracker
-	leaseCache            sync.Map
-	createLocks           sync.Map
-	observedKeys          sync.Map
-	enforceClientIdentity bool
-	tracer                trace.Tracer
-	metaWarmupAttempts    int
-	metaWarmupInitial     time.Duration
-	metaWarmupMax         time.Duration
-	stateWarmupAttempts   int
-	stateWarmupInitial    time.Duration
-	stateWarmupMax        time.Duration
-	pendingDeliveries     sync.Map // map[string]*pendingQueueDeliveries
-	shutdownState         func() ShutdownState
+	store                  storage.Backend
+	crypto                 *storage.Crypto
+	queueSvc               *queue.Service
+	queueDisp              *queue.Dispatcher
+	searchAdapter          search.Adapter
+	namespaceConfigs       *namespaces.ConfigStore
+	defaultNamespaceConfig namespaces.Config
+	indexManager           *indexer.Manager
+	indexControl           indexFlushController
+	logger                 pslog.Logger
+	clock                  clock.Clock
+	lsfObserver            *lsf.Observer
+	qrf                    *qrf.Controller
+	jsonMaxBytes           int64
+	compactWriter          func(io.Writer, io.Reader, int64) error
+	defaultTTL             time.Duration
+	maxTTL                 time.Duration
+	acquireBlock           time.Duration
+	spoolThreshold         int64
+	defaultNamespace       string
+	namespaceTracker       *NamespaceTracker
+	leaseCache             sync.Map
+	createLocks            sync.Map
+	observedKeys           sync.Map
+	enforceClientIdentity  bool
+	tracer                 trace.Tracer
+	metaWarmupAttempts     int
+	metaWarmupInitial      time.Duration
+	metaWarmupMax          time.Duration
+	stateWarmupAttempts    int
+	stateWarmupInitial     time.Duration
+	stateWarmupMax         time.Duration
+	pendingDeliveries      sync.Map // map[string]*pendingQueueDeliveries
+	shutdownState          func() ShutdownState
+}
+
+type indexFlushController interface {
+	Pending(namespace string) bool
+	FlushNamespace(ctx context.Context, namespace string) error
+	ManifestSeq(ctx context.Context, namespace string) (uint64, error)
+	WaitForReadable(ctx context.Context, namespace string) error
 }
 
 // ShutdownState exposes the server's current shutdown posture.
@@ -427,6 +446,9 @@ type Config struct {
 	Crypto                     *storage.Crypto
 	QueueService               *queue.Service
 	SearchAdapter              search.Adapter
+	NamespaceConfigs           *namespaces.ConfigStore
+	DefaultNamespaceConfig     namespaces.Config
+	IndexManager               *indexer.Manager
 	Logger                     pslog.Logger
 	Clock                      clock.Clock
 	DefaultNamespace           string
@@ -554,6 +576,11 @@ func New(cfg Config) *Handler {
 			logger.Warn("httpapi.handler.invalid_default_namespace", "namespace", cfg.DefaultNamespace, "error", err)
 		}
 	}
+	defaultNamespaceConfig := cfg.DefaultNamespaceConfig
+	defaultNamespaceConfig.Normalize()
+	if err := defaultNamespaceConfig.Validate(); err != nil {
+		defaultNamespaceConfig = namespaces.DefaultConfig()
+	}
 	tracker := cfg.NamespaceTracker
 	if tracker == nil {
 		tracker = NewNamespaceTracker(defaultNamespace)
@@ -561,32 +588,36 @@ func New(cfg Config) *Handler {
 		tracker.Observe(defaultNamespace)
 	}
 	return &Handler{
-		store:                 cfg.Store,
-		crypto:                crypto,
-		queueSvc:              queueSvc,
-		queueDisp:             queueDisp,
-		searchAdapter:         cfg.SearchAdapter,
-		logger:                logger,
-		clock:                 clk,
-		lsfObserver:           cfg.LSFObserver,
-		qrf:                   cfg.QRFController,
-		jsonMaxBytes:          cfg.JSONMaxBytes,
-		compactWriter:         cw,
-		defaultTTL:            cfg.DefaultTTL,
-		maxTTL:                cfg.MaxTTL,
-		acquireBlock:          cfg.AcquireBlock,
-		spoolThreshold:        threshold,
-		defaultNamespace:      defaultNamespace,
-		enforceClientIdentity: cfg.EnforceClientIdentity,
-		tracer:                otel.Tracer("pkt.systems/lockd/httpapi"),
-		metaWarmupAttempts:    metaWarmupAttempts,
-		metaWarmupInitial:     metaWarmupInitial,
-		metaWarmupMax:         metaWarmupMax,
-		stateWarmupAttempts:   stateWarmupAttempts,
-		stateWarmupInitial:    stateWarmupInitial,
-		stateWarmupMax:        stateWarmupMax,
-		shutdownState:         cfg.ShutdownState,
-		namespaceTracker:      tracker,
+		store:                  cfg.Store,
+		crypto:                 crypto,
+		queueSvc:               queueSvc,
+		queueDisp:              queueDisp,
+		searchAdapter:          cfg.SearchAdapter,
+		namespaceConfigs:       cfg.NamespaceConfigs,
+		defaultNamespaceConfig: defaultNamespaceConfig,
+		indexManager:           cfg.IndexManager,
+		indexControl:           cfg.IndexManager,
+		logger:                 logger,
+		clock:                  clk,
+		lsfObserver:            cfg.LSFObserver,
+		qrf:                    cfg.QRFController,
+		jsonMaxBytes:           cfg.JSONMaxBytes,
+		compactWriter:          cw,
+		defaultTTL:             cfg.DefaultTTL,
+		maxTTL:                 cfg.MaxTTL,
+		acquireBlock:           cfg.AcquireBlock,
+		spoolThreshold:         threshold,
+		defaultNamespace:       defaultNamespace,
+		enforceClientIdentity:  cfg.EnforceClientIdentity,
+		tracer:                 otel.Tracer("pkt.systems/lockd/httpapi"),
+		metaWarmupAttempts:     metaWarmupAttempts,
+		metaWarmupInitial:      metaWarmupInitial,
+		metaWarmupMax:          metaWarmupMax,
+		stateWarmupAttempts:    stateWarmupAttempts,
+		stateWarmupInitial:     stateWarmupInitial,
+		stateWarmupMax:         stateWarmupMax,
+		shutdownState:          cfg.ShutdownState,
+		namespaceTracker:       tracker,
 	}
 }
 
@@ -601,6 +632,8 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle("/v1/metadata", h.wrap("update_metadata", h.handleMetadata))
 	mux.Handle("/v1/remove", h.wrap("remove", h.handleRemove))
 	mux.Handle("/v1/describe", h.wrap("describe", h.handleDescribe))
+	mux.Handle("/v1/index/flush", h.wrap("index.flush", h.handleIndexFlush))
+	mux.Handle("/v1/namespace", h.wrap("namespace", h.handleNamespaceConfig))
 	mux.Handle("/v1/queue/enqueue", h.wrap("queue.enqueue", h.handleQueueEnqueue))
 	mux.Handle("/v1/queue/dequeue", h.wrap("queue.dequeue", h.handleQueueDequeue))
 	mux.Handle("/v1/queue/dequeueWithState", h.wrap("queue.dequeue_with_state", h.handleQueueDequeueWithState))
@@ -1446,14 +1479,16 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request) error {
 
 // handleQuery godoc
 // @Summary      Query keys within a namespace
-// @Description  Executes a selector-based search within a namespace and returns matching keys plus a cursor for pagination.
+// @Description  Executes a selector-based search within a namespace and returns matching keys plus a cursor for pagination. Example request body: `{"namespace":"default","selector":{"eq":{"field":"type","value":"alpha"}},"limit":25,"return":"keys"}`
 // @Tags         lease
 // @Accept       json
 // @Produce      json
+// @Produce      application/x-ndjson
 // @Param        namespace  query    string  false  "Namespace override (defaults to server setting)"
 // @Param        limit      query    integer false  "Maximum number of keys to return (1-1000, defaults to 100)"
 // @Param        cursor     query    string  false  "Opaque pagination cursor"
 // @Param        selector   query    string  false  "Selector JSON (optional when providing a JSON body)"
+// @Param        return     query    string  false  "Return mode (keys or documents)"
 // @Param        request    body     api.QueryRequest  false  "Query request (selector, limit, cursor)"
 // @Success      200        {object} api.QueryResponse
 // @Failure      400        {object} api.ErrorResponse
@@ -1487,6 +1522,14 @@ func (h *Handler) handleQuery(w http.ResponseWriter, r *http.Request) error {
 		_ = r.Body.Close()
 	}
 	query := r.URL.Query()
+	returnMode := api.QueryReturnKeys
+	if req.Return != "" {
+		normalized, err := parseQueryReturnMode(string(req.Return))
+		if err != nil {
+			return err
+		}
+		returnMode = normalized
+	}
 	if ns := strings.TrimSpace(query.Get("namespace")); ns != "" {
 		req.Namespace = ns
 	}
@@ -1509,14 +1552,23 @@ func (h *Handler) handleQuery(w http.ResponseWriter, r *http.Request) error {
 		}
 		req.Selector = selector
 	} else if zeroSelector(req.Selector) {
-		if selector, found, err := lql.ParseSelectorValues(query); err != nil {
+		selector, err := lql.ParseSelectorValues(query)
+		if err != nil {
 			return httpError{
 				Status: http.StatusBadRequest,
 				Code:   "invalid_selector",
 				Detail: err.Error(),
 			}
-		} else if found {
+		}
+		if !selector.IsEmpty() {
 			req.Selector = selector
+		}
+	}
+	if err := normalizeSelectorFields(&req.Selector); err != nil {
+		return httpError{
+			Status: http.StatusBadRequest,
+			Code:   "invalid_selector",
+			Detail: err.Error(),
 		}
 	}
 	namespace, err := h.resolveNamespace(req.Namespace)
@@ -1543,12 +1595,38 @@ func (h *Handler) handleQuery(w http.ResponseWriter, r *http.Request) error {
 		}
 		fields = parsed
 	}
+	engineHint, err := parseEngineHint(strings.TrimSpace(query.Get("engine")))
+	if err != nil {
+		return err
+	}
+	if rawReturn := strings.TrimSpace(query.Get("return")); rawReturn != "" {
+		normalized, err := parseQueryReturnMode(rawReturn)
+		if err != nil {
+			return err
+		}
+		returnMode = normalized
+	}
+	req.Return = returnMode
+	refreshMode, err := parseRefreshMode(strings.TrimSpace(query.Get("refresh")))
+	if err != nil {
+		return err
+	}
+	engine, err := h.selectQueryEngine(r.Context(), namespace, engineHint)
+	if err != nil {
+		return err
+	}
+	if engine == search.EngineIndex && refreshMode == refreshWaitFor {
+		if err := h.waitForIndexReadable(r.Context(), namespace); err != nil {
+			return err
+		}
+	}
 	internalReq := search.Request{
 		Namespace: namespace,
 		Selector:  req.Selector,
 		Limit:     limit,
 		Cursor:    req.Cursor,
 		Fields:    fields,
+		Engine:    engine,
 	}
 	result, err := h.searchAdapter.Query(r.Context(), internalReq)
 	if err != nil {
@@ -1561,14 +1639,447 @@ func (h *Handler) handleQuery(w http.ResponseWriter, r *http.Request) error {
 		}
 		return fmt.Errorf("query: %w", err)
 	}
-	resp := api.QueryResponse{
-		Namespace: namespace,
-		Keys:      result.Keys,
-		Cursor:    result.Cursor,
-		IndexSeq:  result.IndexSeq,
-		Metadata:  result.Metadata,
+	if engine == search.EngineIndex && h.indexControl != nil {
+		if result.Metadata == nil {
+			result.Metadata = make(map[string]string)
+		}
+		result.Metadata["index_pending"] = strconv.FormatBool(h.indexControl.Pending(namespace))
+	}
+	switch returnMode {
+	case api.QueryReturnDocuments:
+		return h.writeQueryDocuments(r.Context(), w, namespace, result)
+	default:
+		resp := api.QueryResponse{
+			Namespace: namespace,
+			Keys:      result.Keys,
+			Cursor:    result.Cursor,
+			IndexSeq:  result.IndexSeq,
+			Metadata:  result.Metadata,
+		}
+		return h.writeQueryKeysResponse(w, resp, returnMode)
+	}
+}
+
+func (h *Handler) writeQueryKeysResponse(w http.ResponseWriter, resp api.QueryResponse, mode api.QueryReturn) error {
+	headers := makeQueryResponseHeaders(resp.Cursor, resp.IndexSeq, resp.Metadata, mode)
+	h.writeJSON(w, http.StatusOK, resp, headers)
+	return nil
+}
+
+func makeQueryResponseHeaders(cursor string, indexSeq uint64, metadata map[string]string, mode api.QueryReturn) map[string]string {
+	headers := map[string]string{
+		headerQueryReturn: string(mode),
+	}
+	if cursor != "" {
+		headers[headerQueryCursor] = cursor
+	}
+	if indexSeq > 0 {
+		headers[headerQueryIndexSeq] = strconv.FormatUint(indexSeq, 10)
+	}
+	if len(metadata) > 0 {
+		if payload, err := json.Marshal(metadata); err == nil {
+			headers[headerQueryMetadata] = string(payload)
+		}
+	}
+	return headers
+}
+
+func (h *Handler) writeQueryDocuments(ctx context.Context, w http.ResponseWriter, namespace string, result search.Result) error {
+	headers := makeQueryResponseHeaders(result.Cursor, result.IndexSeq, result.Metadata, api.QueryReturnDocuments)
+	for k, v := range headers {
+		w.Header().Set(k, v)
+	}
+	w.Header().Set("Content-Type", contentTypeNDJSON)
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+	logger := pslog.LoggerFromContext(ctx)
+	if logger == nil {
+		logger = h.logger
+	}
+	for _, key := range result.Keys {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		reader, version, skip, err := h.openPublishedDocument(ctx, namespace, key)
+		if err != nil {
+			return err
+		}
+		if skip {
+			logger.Trace("query.documents.skip", "namespace", namespace, "key", key)
+			if reader != nil {
+				reader.Close()
+			}
+			continue
+		}
+		if err := h.streamDocumentRow(w, namespace, key, version, reader); err != nil {
+			reader.Close()
+			return err
+		}
+		reader.Close()
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+	return nil
+}
+
+func (h *Handler) openPublishedDocument(ctx context.Context, namespace, key string) (io.ReadCloser, int64, bool, error) {
+	storageKey, err := h.namespacedKey(namespace, key)
+	if err != nil {
+		return nil, 0, false, httpError{Status: http.StatusBadRequest, Code: "invalid_key", Detail: err.Error()}
+	}
+	meta, _, err := h.ensureMeta(ctx, namespace, storageKey)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	if meta == nil || meta.QueryExcluded() || meta.StateETag == "" {
+		return nil, 0, true, nil
+	}
+	publishedVersion := meta.PublishedVersion
+	if publishedVersion == 0 {
+		publishedVersion = meta.Version
+	}
+	if publishedVersion == 0 {
+		return nil, 0, true, nil
+	}
+	if publishedVersion < meta.Version {
+		return nil, 0, false, httpError{
+			Status: http.StatusServiceUnavailable,
+			Code:   "state_not_published",
+			Detail: "state update not published yet",
+		}
+	}
+	stateCtx := ctx
+	if len(meta.StateDescriptor) > 0 {
+		stateCtx = storage.ContextWithStateDescriptor(stateCtx, meta.StateDescriptor)
+	}
+	if meta.StatePlaintextBytes > 0 {
+		stateCtx = storage.ContextWithStatePlaintextSize(stateCtx, meta.StatePlaintextBytes)
+	}
+	logger := pslog.LoggerFromContext(ctx)
+	if logger == nil {
+		logger = h.logger
+	}
+	reader, info, err := h.readStateWithWarmup(stateCtx, namespace, storageKey, true, logger)
+	if errors.Is(err, storage.ErrNotFound) {
+		return nil, 0, true, nil
+	}
+	if err != nil {
+		return nil, 0, false, err
+	}
+	size := meta.StatePlaintextBytes
+	if size == 0 && info != nil {
+		size = info.Size
+	}
+	if h.jsonMaxBytes > 0 && size > h.jsonMaxBytes {
+		reader.Close()
+		return nil, 0, false, httpError{Status: http.StatusRequestEntityTooLarge, Code: "document_too_large", Detail: fmt.Sprintf("state exceeds %d bytes", h.jsonMaxBytes)}
+	}
+	return reader, publishedVersion, false, nil
+}
+
+type queryDocumentRow struct {
+	Namespace string `json:"ns"`
+	Key       string `json:"key"`
+	Version   int64  `json:"ver,omitempty"`
+}
+
+func (h *Handler) streamDocumentRow(w io.Writer, namespace, key string, version int64, doc io.Reader) error {
+	row := queryDocumentRow{Namespace: namespace, Key: key, Version: version}
+	prefix, err := json.Marshal(row)
+	if err != nil {
+		return err
+	}
+	if len(prefix) == 0 {
+		return fmt.Errorf("empty prefix")
+	}
+	// Write prefix without trailing '}'
+	if _, err := w.Write(prefix[:len(prefix)-1]); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(w, `,"doc":`); err != nil {
+		return err
+	}
+	lw := &limitedWriter{Writer: w, limit: h.jsonMaxBytes}
+	if _, err := io.Copy(lw, doc); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(w, "}\n"); err != nil {
+		return err
+	}
+	return nil
+}
+
+type limitedWriter struct {
+	io.Writer
+	limit int64
+	wrote int64
+}
+
+func (lw *limitedWriter) Write(p []byte) (int, error) {
+	if lw.limit > 0 && lw.wrote+int64(len(p)) > lw.limit {
+		return 0, httpError{Status: http.StatusRequestEntityTooLarge, Code: "document_too_large", Detail: fmt.Sprintf("state exceeds %d bytes", lw.limit)}
+	}
+	n, err := lw.Writer.Write(p)
+	lw.wrote += int64(n)
+	return n, err
+}
+
+// handleIndexFlush godoc
+// @Summary      Flush namespace index segments
+// @Description  Forces the namespace index writer to flush pending documents. Supports synchronous (wait) and asynchronous modes.
+// @Tags         index
+// @Accept       json
+// @Produce      json
+// @Param        namespace  query   string  false  "Namespace override"
+// @Param        mode       query   string  false  "Flush mode (wait or async)"
+// @Param        request    body    api.IndexFlushRequest  false  "Flush request"
+// @Success      200  {object}  api.IndexFlushResponse
+// @Success      202  {object}  api.IndexFlushResponse
+// @Failure      400  {object}  api.ErrorResponse
+// @Failure      404  {object}  api.ErrorResponse
+// @Failure      409  {object}  api.ErrorResponse
+// @Failure      503  {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/index/flush [post]
+func (h *Handler) handleIndexFlush(w http.ResponseWriter, r *http.Request) error {
+	if r.Method != http.MethodPost {
+		return httpError{Status: http.StatusMethodNotAllowed, Code: "method_not_allowed", Detail: "index flush requires POST"}
+	}
+	if h.indexControl == nil {
+		return httpError{Status: http.StatusNotImplemented, Code: "index_unavailable", Detail: "indexing is disabled"}
+	}
+	defer r.Body.Close()
+	var payload api.IndexFlushRequest
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil && err != io.EOF {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_body", Detail: fmt.Sprintf("failed to decode request: %v", err)}
+	}
+	query := r.URL.Query()
+	namespace := strings.TrimSpace(payload.Namespace)
+	if ns := strings.TrimSpace(query.Get("namespace")); ns != "" {
+		namespace = ns
+	}
+	resolved, err := h.resolveNamespace(namespace)
+	if err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
+	}
+	mode := strings.TrimSpace(payload.Mode)
+	if m := strings.TrimSpace(query.Get("mode")); m != "" {
+		mode = m
+	}
+	switch strings.ToLower(mode) {
+	case "", "wait", "sync":
+		mode = "wait"
+	case "async":
+		mode = "async"
+	default:
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_mode", Detail: fmt.Sprintf("unsupported flush mode %q", mode)}
+	}
+	h.observeNamespace(resolved)
+	if mode == "async" {
+		flushID := uuidv7.NewString()
+		pending := h.indexControl.Pending(resolved)
+		logger := pslog.LoggerFromContext(r.Context())
+		if logger != nil {
+			logger.Debug("index.flush.async_scheduled", "namespace", resolved, "flush_id", flushID)
+		}
+		go func(ns, reqID string) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			if err := h.indexControl.FlushNamespace(ctx, ns); err != nil {
+				if h.logger != nil {
+					h.logger.Warn("index.flush.async_error", "namespace", ns, "flush_id", reqID, "error", err)
+				}
+			} else if h.logger != nil {
+				h.logger.Debug("index.flush.async_complete", "namespace", ns, "flush_id", reqID)
+			}
+		}(resolved, flushID)
+		resp := api.IndexFlushResponse{
+			Namespace: resolved,
+			Mode:      mode,
+			Accepted:  true,
+			Flushed:   false,
+			Pending:   pending,
+			FlushID:   flushID,
+		}
+		h.writeJSON(w, http.StatusAccepted, resp, nil)
+		return nil
+	}
+	if err := h.indexControl.FlushNamespace(r.Context(), resolved); err != nil {
+		return fmt.Errorf("index flush: %w", err)
+	}
+	seq, err := h.indexControl.ManifestSeq(r.Context(), resolved)
+	if err != nil {
+		return fmt.Errorf("load index manifest: %w", err)
+	}
+	resp := api.IndexFlushResponse{
+		Namespace: resolved,
+		Mode:      mode,
+		Accepted:  true,
+		Flushed:   true,
+		Pending:   h.indexControl.Pending(resolved),
+		IndexSeq:  seq,
 	}
 	h.writeJSON(w, http.StatusOK, resp, nil)
+	return nil
+}
+
+func parseEngineHint(raw string) (search.EngineHint, error) {
+	if raw == "" {
+		return search.EngineAuto, nil
+	}
+	switch strings.ToLower(raw) {
+	case "auto":
+		return search.EngineAuto, nil
+	case "index":
+		return search.EngineIndex, nil
+	case "scan":
+		return search.EngineScan, nil
+	default:
+		return search.EngineAuto, httpError{
+			Status: http.StatusBadRequest,
+			Code:   "invalid_engine",
+			Detail: fmt.Sprintf("unsupported query engine %q", raw),
+		}
+	}
+}
+
+type refreshMode string
+
+const (
+	refreshImmediate refreshMode = ""
+	refreshWaitFor   refreshMode = "wait_for"
+)
+
+func parseRefreshMode(raw string) (refreshMode, error) {
+	if raw == "" {
+		return refreshImmediate, nil
+	}
+	switch strings.ToLower(raw) {
+	case "wait_for", "wait-for":
+		return refreshWaitFor, nil
+	default:
+		return refreshImmediate, httpError{
+			Status: http.StatusBadRequest,
+			Code:   "invalid_refresh",
+			Detail: fmt.Sprintf("unsupported refresh mode %q", raw),
+		}
+	}
+}
+
+func parseQueryReturnMode(raw string) (api.QueryReturn, error) {
+	if raw == "" {
+		return api.QueryReturnKeys, nil
+	}
+	switch strings.ToLower(raw) {
+	case "keys":
+		return api.QueryReturnKeys, nil
+	case "documents", "document", "docs":
+		return api.QueryReturnDocuments, nil
+	default:
+		return api.QueryReturnKeys, httpError{
+			Status: http.StatusBadRequest,
+			Code:   "invalid_return",
+			Detail: fmt.Sprintf("unsupported return mode %q", raw),
+		}
+	}
+}
+
+func (h *Handler) selectQueryEngine(ctx context.Context, namespace string, hint search.EngineHint) (search.EngineHint, error) {
+	caps, err := h.searchAdapter.Capabilities(ctx, namespace)
+	if err != nil {
+		return "", err
+	}
+	cfg := h.defaultNamespaceConfig
+	if h.namespaceConfigs != nil {
+		if loaded, _, loadErr := h.namespaceConfigs.Load(ctx, namespace); loadErr == nil {
+			cfg = loaded
+		} else {
+			logger := pslog.LoggerFromContext(ctx)
+			if logger != nil {
+				logger.Warn("namespace.config.load_failed", "namespace", namespace, "error", loadErr)
+			}
+		}
+	}
+	engine, err := cfg.SelectEngine(hint, caps)
+	if err != nil {
+		requested := string(hint)
+		if requested == "" || hint == search.EngineAuto {
+			requested = "auto"
+		}
+		return "", httpError{
+			Status: http.StatusBadRequest,
+			Code:   "query_engine_unavailable",
+			Detail: err.Error(),
+		}
+	}
+	return engine, nil
+}
+
+func (h *Handler) waitForIndexReadable(ctx context.Context, namespace string) error {
+	if h == nil || h.indexControl == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return h.indexControl.WaitForReadable(ctx, namespace)
+}
+
+func normalizeSelectorFields(sel *api.Selector) error {
+	if sel == nil {
+		return nil
+	}
+	if sel.Eq != nil {
+		normalized, err := jsonpointer.Normalize(sel.Eq.Field)
+		if err != nil {
+			return fmt.Errorf("eq.field: %w", err)
+		}
+		sel.Eq.Field = normalized
+	}
+	if sel.Prefix != nil {
+		normalized, err := jsonpointer.Normalize(sel.Prefix.Field)
+		if err != nil {
+			return fmt.Errorf("prefix.field: %w", err)
+		}
+		sel.Prefix.Field = normalized
+	}
+	if sel.Range != nil {
+		normalized, err := jsonpointer.Normalize(sel.Range.Field)
+		if err != nil {
+			return fmt.Errorf("range.field: %w", err)
+		}
+		sel.Range.Field = normalized
+	}
+	if sel.In != nil {
+		normalized, err := jsonpointer.Normalize(sel.In.Field)
+		if err != nil {
+			return fmt.Errorf("in.field: %w", err)
+		}
+		sel.In.Field = normalized
+	}
+	if sel.Exists != "" {
+		normalized, err := jsonpointer.Normalize(sel.Exists)
+		if err != nil {
+			return fmt.Errorf("exists.field: %w", err)
+		}
+		sel.Exists = normalized
+	}
+	for i := range sel.And {
+		if err := normalizeSelectorFields(&sel.And[i]); err != nil {
+			return err
+		}
+	}
+	for i := range sel.Or {
+		if err := normalizeSelectorFields(&sel.Or[i]); err != nil {
+			return err
+		}
+	}
+	if sel.Not != nil {
+		if err := normalizeSelectorFields(sel.Not); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -1765,6 +2276,9 @@ func (h *Handler) handleUpdate(w http.ResponseWriter, r *http.Request) error {
 		"new_state_etag", meta.StateETag,
 		"bytes", putRes.BytesWritten,
 	)
+	if h.indexManager != nil {
+		h.indexStatePayload(r.Context(), namespace, keyComponent, spool)
+	}
 	resp := api.UpdateResponse{
 		NewVersion:   meta.Version,
 		NewStateETag: meta.StateETag,
@@ -2184,8 +2698,8 @@ func (h *Handler) handleQueueEnqueue(w http.ResponseWriter, r *http.Request) err
 			return fmt.Errorf("queue enqueue multipart: %w", err)
 		}
 		name := part.FormName()
-		switch {
-		case name == "meta" || strings.EqualFold(part.Header.Get("Content-Type"), "application/json"):
+		switch name {
+		case "meta":
 			if haveMeta {
 				part.Close()
 				return httpError{Status: http.StatusBadRequest, Code: "duplicate_meta", Detail: "duplicate meta part"}
@@ -2196,10 +2710,14 @@ func (h *Handler) handleQueueEnqueue(w http.ResponseWriter, r *http.Request) err
 			}
 			haveMeta = true
 			part.Close()
-		case name == "payload" || payloadReader == nil:
-			payloadReader = part
-			payloadCloser = part
-			payloadContentType = part.Header.Get("Content-Type")
+		case "payload":
+			if payloadReader == nil {
+				payloadReader = part
+				payloadCloser = part
+				payloadContentType = part.Header.Get("Content-Type")
+			} else {
+				part.Close()
+			}
 		default:
 			part.Close()
 		}
@@ -3744,6 +4262,7 @@ func (h *Handler) acquireLeaseForKey(ctx context.Context, logger pslog.Logger, p
 	}
 	h.observeNamespace(namespace)
 	relKey := relativeKey(namespace, params.Key)
+	isQueueStateKey := queue.IsQueueStateKey(relKey)
 	if params.Owner == "" {
 		return nil, httpError{Status: http.StatusBadRequest, Code: "missing_owner", Detail: "owner required"}
 	}
@@ -3775,6 +4294,9 @@ func (h *Handler) acquireLeaseForKey(ctx context.Context, logger pslog.Logger, p
 		meta, metaETag, err := h.ensureMeta(ctx, namespace, params.Key)
 		if err != nil {
 			return nil, err
+		}
+		if isQueueStateKey && meta != nil && !meta.HasQueryHiddenPreference() {
+			meta.SetQueryHidden(true)
 		}
 		if meta.Lease != nil && meta.Lease.ExpiresAtUnix <= now.Unix() {
 			meta.Lease = nil
@@ -5147,6 +5669,136 @@ func (h *Handler) generateUniqueKey(ctx context.Context, namespace string) (stri
 		}
 	}
 	return "", fmt.Errorf("unable to allocate unique key after %d attempts", maxAttempts)
+}
+
+func (h *Handler) handleNamespaceConfig(w http.ResponseWriter, r *http.Request) error {
+	if h.namespaceConfigs == nil {
+		return httpError{
+			Status: http.StatusNotImplemented,
+			Code:   "namespace_config_unavailable",
+			Detail: "namespace configuration endpoints are disabled",
+		}
+	}
+	switch r.Method {
+	case http.MethodGet:
+		return h.handleNamespaceConfigGet(w, r)
+	case http.MethodPost:
+		return h.handleNamespaceConfigSet(w, r)
+	default:
+		w.Header().Set("Allow", "GET, POST")
+		return httpError{
+			Status: http.StatusMethodNotAllowed,
+			Code:   "method_not_allowed",
+			Detail: "supported methods: GET, POST",
+		}
+	}
+}
+
+// handleNamespaceConfigGet godoc
+// @Summary      Get namespace configuration
+// @Description  Returns query engine preferences for the namespace.
+// @Tags         namespace
+// @Produce      json
+// @Param        namespace  query   string  false  "Namespace override (defaults to server setting)"
+// @Success      200        {object}  api.NamespaceConfigResponse
+// @Failure      400        {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/namespace [get]
+func (h *Handler) handleNamespaceConfigGet(w http.ResponseWriter, r *http.Request) error {
+	namespace, err := h.resolveNamespace(r.URL.Query().Get("namespace"))
+	if err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
+	}
+	h.observeNamespace(namespace)
+	cfg, etag, err := h.namespaceConfigs.Load(r.Context(), namespace)
+	if err != nil {
+		return fmt.Errorf("load namespace config: %w", err)
+	}
+	resp := api.NamespaceConfigResponse{
+		Namespace: namespace,
+		Query: api.NamespaceQueryConfig{
+			PreferredEngine: string(cfg.Query.Preferred),
+			FallbackEngine:  string(cfg.Query.Fallback),
+		},
+	}
+	headers := map[string]string{}
+	if etag != "" {
+		headers["ETag"] = etag
+	}
+	h.writeJSON(w, http.StatusOK, resp, headers)
+	return nil
+}
+
+// handleNamespaceConfigSet godoc
+// @Summary      Update namespace configuration
+// @Description  Updates query engine preferences for the namespace.
+// @Tags         namespace
+// @Accept       json
+// @Produce      json
+// @Param        namespace  query   string  false  "Namespace override (defaults to server setting)"
+// @Param        If-Match   header  string  false  "Conditionally update when the ETag matches"
+// @Param        config     body    api.NamespaceConfigRequest  true  "Namespace configuration payload"
+// @Success      200        {object}  api.NamespaceConfigResponse
+// @Failure      400        {object}  api.ErrorResponse
+// @Failure      409        {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/namespace [post]
+func (h *Handler) handleNamespaceConfigSet(w http.ResponseWriter, r *http.Request) error {
+	namespace, err := h.resolveNamespace(r.URL.Query().Get("namespace"))
+	if err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
+	}
+	body := http.MaxBytesReader(w, r.Body, namespaceConfigBodyLimit)
+	defer body.Close()
+	var payload api.NamespaceConfigRequest
+	if err := json.NewDecoder(body).Decode(&payload); err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_body", Detail: err.Error()}
+	}
+	if strings.TrimSpace(payload.Namespace) != "" {
+		namespace, err = h.resolveNamespace(payload.Namespace)
+		if err != nil {
+			return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
+		}
+	}
+	if payload.Query == nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace_request", Detail: "query configuration required"}
+	}
+	h.observeNamespace(namespace)
+	cfg, _, err := h.namespaceConfigs.Load(r.Context(), namespace)
+	if err != nil {
+		return fmt.Errorf("load namespace config: %w", err)
+	}
+	if val := strings.TrimSpace(payload.Query.PreferredEngine); val != "" {
+		cfg.Query.Preferred = search.EngineHint(strings.ToLower(val))
+	}
+	if val := strings.TrimSpace(payload.Query.FallbackEngine); val != "" {
+		cfg.Query.Fallback = namespaces.FallbackMode(strings.ToLower(val))
+	}
+	expectedETag := strings.Trim(strings.TrimSpace(r.Header.Get("If-Match")), "\"")
+	newETag, err := h.namespaceConfigs.Save(r.Context(), namespace, cfg, expectedETag)
+	if err != nil {
+		if errors.Is(err, storage.ErrCASMismatch) {
+			return httpError{
+				Status: http.StatusConflict,
+				Code:   "namespace_config_conflict",
+				Detail: "namespace configuration changed concurrently",
+			}
+		}
+		return fmt.Errorf("save namespace config: %w", err)
+	}
+	resp := api.NamespaceConfigResponse{
+		Namespace: namespace,
+		Query: api.NamespaceQueryConfig{
+			PreferredEngine: string(cfg.Query.Preferred),
+			FallbackEngine:  string(cfg.Query.Fallback),
+		},
+	}
+	headers := map[string]string{}
+	if newETag != "" {
+		headers["ETag"] = newETag
+	}
+	h.writeJSON(w, http.StatusOK, resp, headers)
+	return nil
 }
 
 func (h *Handler) dropLease(leaseID string) {

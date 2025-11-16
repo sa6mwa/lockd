@@ -13,8 +13,10 @@ import (
 	"time"
 
 	"pkt.systems/kryptograf"
+	"pkt.systems/lockd/internal/search"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/uuidv7"
+	"pkt.systems/lockd/namespaces"
 )
 
 // Config configures the in-memory store behaviour.
@@ -38,6 +40,13 @@ type Store struct {
 	queueWatchMu      sync.Mutex
 
 	crypto *storage.Crypto
+}
+
+func (s *Store) DefaultNamespaceConfig() namespaces.Config {
+	cfg := namespaces.DefaultConfig()
+	cfg.Query.Preferred = search.EngineScan
+	cfg.Query.Fallback = namespaces.FallbackNone
+	return cfg
 }
 
 func canonicalKey(namespace, key string) (string, error) {

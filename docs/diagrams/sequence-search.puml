@@ -1,0 +1,50 @@
+@startuml
+skin rose
+skinparam participantPadding 15
+skinparam boxPadding 15
+skinparam shadowing false
+skinparam roundcorner 8
+
+participant Client
+participant "HTTP API" as API
+participant "Namespace Config" as NsCfg
+participant "Search Adapter" as Adapter
+participant "Storage Crypto" as Crypto
+participant "Storage Backend" as Backend
+participant "Index Writer" as Index
+
+== Query ==
+Client -> API: POST /v1/query (selector, namespace)
+API -> NsCfg: resolve engine (scan vs index)
+NsCfg --> API: preferred + fallback
+API -> Adapter: execute selector
+Adapter -> Crypto: fetch state / segments
+Crypto -> Backend: read scan chunks or segments
+Backend --> Crypto: encrypted JSON / manifest
+Crypto --> Adapter: decoded docs / postings
+Adapter --> API: keys + cursor
+API --> Client: 200 QueryResponse
+alt engine fallback
+    Adapter --> API: engine unavailable
+    API -> NsCfg: request fallback
+    NsCfg --> API: fallback engine (scan/index)
+    API -> Adapter: retry with fallback
+    Adapter --> API: keys/cursor
+    API --> Client: 200 QueryResponse (engine=fallback)
+end
+
+== Index Flush (async path) ==
+API -> Index: /v1/index/flush (async)
+Index -> Crypto: flush pending segments
+Crypto -> Backend: write manifest + segment blobs
+alt already flushed / empty
+    Backend --> Crypto: no pending segments
+    Crypto --> Index: noop
+    Index --> API: 200 flushed=false
+else background flush
+    Backend --> Crypto: ack
+    Crypto --> Index: ack
+    Index --> API: request_id, pending flag
+    API --> Client: 202 Accepted (async) or 200 OK (sync)
+end
+@enduml

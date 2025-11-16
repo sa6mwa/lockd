@@ -184,3 +184,9 @@ type QueueChangeFeed interface {
 type QueueWatchStatusProvider interface {
 	QueueWatchStatus() (enabled bool, mode string, reason string)
 }
+
+// IndexerDefaultsProvider allows storage backends to tune writer flush behaviour
+// based on underlying consistency and latency characteristics.
+type IndexerDefaultsProvider interface {
+	IndexerFlushDefaults() (flushDocs int, flushInterval time.Duration)
+}

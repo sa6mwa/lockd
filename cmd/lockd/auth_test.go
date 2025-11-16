@@ -11,7 +11,7 @@ import (
 	"pkt.systems/kryptograf/keymgmt"
 	"pkt.systems/lockd"
 	"pkt.systems/lockd/internal/cryptoutil"
-	"pkt.systems/lockd/internal/tlsutil"
+	"pkt.systems/lockd/tlsutil"
 )
 
 func runAuthCommand(t *testing.T, args ...string) string {

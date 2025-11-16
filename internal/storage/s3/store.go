@@ -21,7 +21,9 @@ import (
 
 	"pkt.systems/kryptograf"
 	"pkt.systems/lockd/internal/loggingutil"
+	"pkt.systems/lockd/internal/search"
 	"pkt.systems/lockd/internal/storage"
+	"pkt.systems/lockd/namespaces"
 	"pkt.systems/pslog"
 )
 
@@ -46,6 +48,13 @@ type Store struct {
 	client *minio.Client
 	cfg    Config
 	crypto *storage.Crypto
+}
+
+func (s *Store) DefaultNamespaceConfig() namespaces.Config {
+	cfg := namespaces.DefaultConfig()
+	cfg.Query.Preferred = search.EngineIndex
+	cfg.Query.Fallback = namespaces.FallbackNone
+	return cfg
 }
 
 type countingWriter struct {
@@ -749,12 +758,17 @@ func (s *Store) PutObject(ctx context.Context, namespace, key string, body io.Re
 	}
 	info, err := s.client.PutObject(ctx, s.cfg.Bucket, object, body, length, putOpts)
 	if err != nil {
-		if isPreconditionFailed(err) {
+		switch classifyPutObjectError(err, opts.ExpectedETag != "") {
+		case storage.ErrCASMismatch:
 			logger.Debug("s3.put_object.cas_mismatch", "namespace", namespace, "key", key, "object", object, "expected_etag", opts.ExpectedETag)
 			return nil, storage.ErrCASMismatch
+		case storage.ErrNotFound:
+			logger.Debug("s3.put_object.not_found", "namespace", namespace, "key", key, "object", object, "expected_etag", opts.ExpectedETag)
+			return nil, storage.ErrNotFound
+		default:
+			logger.Debug("s3.put_object.put_error", "namespace", namespace, "key", key, "object", object, "error", err)
+			return nil, s.wrapError(err, "s3: put object")
 		}
-		logger.Debug("s3.put_object.put_error", "namespace", namespace, "key", key, "object", object, "error", err)
-		return nil, s.wrapError(err, "s3: put object")
 	}
 	meta := &storage.ObjectInfo{
 		Key:          key,
@@ -852,6 +866,19 @@ func (s *Store) applySSE(opts *minio.PutObjectOptions) {
 			}
 		}
 	}
+}
+
+func classifyPutObjectError(err error, hasExpectedETag bool) error {
+	if err == nil {
+		return nil
+	}
+	if isPreconditionFailed(err) {
+		return storage.ErrCASMismatch
+	}
+	if hasExpectedETag && isNotFound(err) {
+		return storage.ErrNotFound
+	}
+	return nil
 }
 
 func stripETag(etag string) string {

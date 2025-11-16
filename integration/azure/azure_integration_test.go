@@ -1,4 +1,4 @@
-//go:build integration && azure && !lq
+//go:build integration && azure && !lq && !query && !crypto
 
 package azureintegration
 
@@ -8,11 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"os"
 	"runtime"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -25,15 +22,9 @@ import (
 	"pkt.systems/lockd/integration/internal/cryptotest"
 	shutdowntest "pkt.systems/lockd/integration/internal/shutdowntest"
 	testlog "pkt.systems/lockd/integration/internal/testlog"
-	"pkt.systems/lockd/internal/diagnostics/storagecheck"
 	"pkt.systems/lockd/internal/uuidv7"
 	"pkt.systems/lockd/namespaces"
 	"pkt.systems/pslog"
-)
-
-var (
-	azureStoreVerifyOnce sync.Once
-	azureStoreVerifyErr  error
 )
 
 func TestAzureStoreVerification(t *testing.T) {
@@ -1015,26 +1006,33 @@ func acquireWithRetry(t *testing.T, ctx context.Context, cli *lockdclient.Client
 }
 
 func getStateJSON(ctx context.Context, cli *lockdclient.Client, key, leaseID string) (map[string]any, string, string, error) {
-	reader, etag, version, err := cli.Get(ctx, key, leaseID)
+	opts := []lockdclient.GetOption{}
+	if leaseID != "" {
+		opts = append(opts, lockdclient.WithGetLeaseID(leaseID))
+	}
+	resp, err := cli.Get(ctx, key, opts...)
 	if err != nil {
 		return nil, "", "", err
 	}
-	if reader == nil {
-		return nil, etag, version, nil
+	if resp == nil {
+		return nil, "", "", nil
 	}
-	defer reader.Close()
-	data, err := io.ReadAll(reader)
+	defer resp.Close()
+	if !resp.HasState {
+		return nil, resp.ETag, resp.Version, nil
+	}
+	data, err := resp.Bytes()
 	if err != nil {
 		return nil, "", "", err
 	}
 	if len(data) == 0 {
-		return nil, etag, version, nil
+		return nil, resp.ETag, resp.Version, nil
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(data, &payload); err != nil {
 		return nil, "", "", err
 	}
-	return payload, etag, version, nil
+	return payload, resp.ETag, resp.Version, nil
 }
 
 func releaseLease(t *testing.T, ctx context.Context, cli *lockdclient.Client, key, leaseID string) bool {
@@ -1043,115 +1041,4 @@ func releaseLease(t *testing.T, ctx context.Context, cli *lockdclient.Client, ke
 		t.Fatalf("release: %v", err)
 	}
 	return resp.Released
-}
-
-func loadAzureConfig(tb testing.TB) lockd.Config {
-	store := strings.TrimSpace(os.Getenv("LOCKD_STORE"))
-	if store == "" {
-		tb.Skip("LOCKD_STORE must reference an azure:// URI for Azure integration tests")
-	}
-	if !strings.HasPrefix(store, "azure://") {
-		tb.Fatalf("LOCKD_STORE must reference an azure:// URI, got %q", store)
-	}
-	cfg := lockd.Config{
-		Store:         store,
-		AzureEndpoint: os.Getenv("LOCKD_AZURE_ENDPOINT"),
-		AzureSASToken: os.Getenv("LOCKD_AZURE_SAS_TOKEN"),
-	}
-	cfg.AzureAccountKey = os.Getenv("LOCKD_AZURE_ACCOUNT_KEY")
-	cryptotest.MaybeEnableStorageEncryption(tb, &cfg)
-	return cfg
-}
-
-func ensureAzureStoreReady(tb testing.TB, ctx context.Context, cfg lockd.Config) {
-	azuretest.ResetContainerForCrypto(tb, cfg)
-	azureStoreVerifyOnce.Do(func() {
-		res, err := storagecheck.VerifyStore(ctx, cfg)
-		if err != nil {
-			azureStoreVerifyErr = err
-			return
-		}
-		if !res.Passed() {
-			azureStoreVerifyErr = fmt.Errorf("store verification failed: %+v", res)
-		}
-	})
-	if azureStoreVerifyErr != nil {
-		tb.Fatalf("store verification failed: %v", azureStoreVerifyErr)
-	}
-}
-
-func startAzureTestServer(t testing.TB, cfg lockd.Config, opts ...lockd.TestServerOption) *lockd.TestServer {
-	t.Helper()
-	cfgCopy := cfg
-	if cfgCopy.JSONMaxBytes == 0 {
-		cfgCopy.JSONMaxBytes = 100 << 20
-	}
-	if cfgCopy.DefaultTTL == 0 {
-		cfgCopy.DefaultTTL = 30 * time.Second
-	}
-	if cfgCopy.MaxTTL == 0 {
-		cfgCopy.MaxTTL = 2 * time.Minute
-	}
-	if cfgCopy.AcquireBlock == 0 {
-		cfgCopy.AcquireBlock = 5 * time.Second
-	}
-	if cfgCopy.SweeperInterval == 0 {
-		cfgCopy.SweeperInterval = 5 * time.Second
-	}
-	if cfgCopy.StorageRetryMaxAttempts < 12 {
-		cfgCopy.StorageRetryMaxAttempts = 12
-	}
-	if cfgCopy.StorageRetryBaseDelay < 500*time.Millisecond {
-		cfgCopy.StorageRetryBaseDelay = 500 * time.Millisecond
-	}
-	if cfgCopy.StorageRetryMaxDelay < 15*time.Second {
-		cfgCopy.StorageRetryMaxDelay = 15 * time.Second
-	}
-
-	options := []lockd.TestServerOption{
-		lockd.WithTestConfig(cfgCopy),
-		lockd.WithTestListener("tcp", "127.0.0.1:0"),
-		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
-		lockd.WithTestClientOptions(
-			lockdclient.WithHTTPTimeout(2*time.Minute),
-			lockdclient.WithCloseTimeout(2*time.Minute),
-			lockdclient.WithKeepAliveTimeout(2*time.Minute),
-			lockdclient.WithForUpdateTimeout(2*time.Minute),
-			lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
-		),
-	}
-	options = append(options, opts...)
-	options = append(options, cryptotest.SharedMTLSOptions(t)...)
-	closeDefaults := lockd.WithTestCloseDefaults(
-		lockd.WithDrainLeases(-1),
-		lockd.WithShutdownTimeout(10*time.Second),
-	)
-	options = append(options, closeDefaults)
-	return lockd.StartTestServer(t, options...)
-}
-
-func directClient(t testing.TB, ts *lockd.TestServer) *lockdclient.Client {
-	t.Helper()
-	addr := ts.Server.ListenerAddr()
-	if addr == nil {
-		t.Fatalf("listener not initialised")
-	}
-	scheme := "http"
-	if ts.Config.MTLSEnabled() {
-		scheme = "https"
-	}
-	endpoint := fmt.Sprintf("%s://%s", scheme, addr.String())
-	cli, err := ts.NewEndpointsClient([]string{endpoint},
-		lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
-		lockdclient.WithHTTPTimeout(2*time.Minute),
-		lockdclient.WithEndpointShuffle(false),
-	)
-	if err != nil {
-		t.Fatalf("direct client: %v", err)
-	}
-	return cli
-}
-
-func cleanupAzure(t *testing.T, cfg lockd.Config, key string) {
-	azuretest.CleanupKey(t, cfg, namespaces.Default, key)
 }

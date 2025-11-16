@@ -12,13 +12,13 @@ import (
 func TestParseMutations(t *testing.T) {
 	now := time.Date(2025, 10, 11, 1, 0, 0, 0, time.UTC)
 	muts, err := parseMutations([]string{
-		"foo.bar=42",
-		"foo.enabled=true",
-		"path.value=hello",
-		"path.list++",
-		"path.sum=-3",
-		"time:meta.timestamp=NOW",
-		"rm:legacy.field",
+		"/foo/bar=42",
+		"/foo/enabled=true",
+		"/path/value=hello",
+		"/path/list++",
+		"/path/sum=-3",
+		"time:/meta/timestamp=NOW",
+		"rm:/legacy/field",
 	}, now)
 	if err != nil {
 		t.Fatalf("parseMutations: %v", err)
@@ -57,13 +57,13 @@ func TestParseMutations(t *testing.T) {
 func TestApplyMutations(t *testing.T) {
 	doc := map[string]any{}
 	muts, err := parseMutations([]string{
-		"counter=1",
-		"counter++",
-		"nested.value=hello",
-		"nested.answer=41",
-		"nested.answer=+1",
-		"delete:nested.value",
-		"rm:missing.field",
+		"/counter=1",
+		"/counter++",
+		"/nested/value=hello",
+		"/nested/answer=41",
+		"/nested/answer=+1",
+		"delete:/nested/value",
+		"rm:/missing/field",
 	}, time.Now())
 	if err != nil {
 		t.Fatalf("parseMutations: %v", err)

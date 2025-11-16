@@ -8,7 +8,7 @@ import (
 
 	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/client"
-	"pkt.systems/lockd/internal/tlsutil"
+	"pkt.systems/lockd/tlsutil"
 )
 
 func TestNewTestServerDefault(t *testing.T) {

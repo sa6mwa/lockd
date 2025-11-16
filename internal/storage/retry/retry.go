@@ -8,6 +8,7 @@ import (
 	"pkt.systems/lockd/internal/clock"
 	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/storage"
+	"pkt.systems/lockd/namespaces"
 	"pkt.systems/pslog"
 )
 
@@ -158,6 +159,13 @@ func (b *backend) DeleteObject(ctx context.Context, namespace, key string, opts 
 
 func (b *backend) Close() error {
 	return b.inner.Close()
+}
+
+func (b *backend) DefaultNamespaceConfig() namespaces.Config {
+	if provider, ok := b.inner.(namespaces.ConfigProvider); ok && provider != nil {
+		return provider.DefaultNamespaceConfig()
+	}
+	return namespaces.DefaultConfig()
 }
 
 func (b *backend) SubscribeQueueChanges(namespace, queue string) (storage.QueueChangeSubscription, error) {

@@ -19,10 +19,21 @@ import (
 	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/internal/correlation"
 	"pkt.systems/lockd/internal/loggingutil"
+	"pkt.systems/lockd/internal/queue"
 	"pkt.systems/lockd/internal/search"
+	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/memory"
 	"pkt.systems/lockd/namespaces"
 )
+
+func scanNamespaceConfig() namespaces.Config {
+	return namespaces.Config{
+		Query: namespaces.QueryEngines{
+			Preferred: search.EngineScan,
+			Fallback:  namespaces.FallbackNone,
+		},
+	}
+}
 
 func TestAcquireLifecycle(t *testing.T) {
 	store := memory.New()
@@ -160,11 +171,12 @@ func TestQuerySuccess(t *testing.T) {
 		},
 	}
 	handler := New(Config{
-		Store:         store,
-		Logger:        pslog.NewStructured(io.Discard),
-		Clock:         newStubClock(time.Unix(1_700_000_000, 0)),
-		SearchAdapter: adapter,
-		JSONMaxBytes:  1 << 20,
+		Store:                  store,
+		Logger:                 pslog.NewStructured(io.Discard),
+		Clock:                  newStubClock(time.Unix(1_700_000_000, 0)),
+		SearchAdapter:          adapter,
+		DefaultNamespaceConfig: scanNamespaceConfig(),
+		JSONMaxBytes:           1 << 20,
 	})
 	mux := http.NewServeMux()
 	handler.Register(mux)
@@ -174,7 +186,7 @@ func TestQuerySuccess(t *testing.T) {
 	reqBody := api.QueryRequest{
 		Namespace: "custom",
 		Selector: api.Selector{
-			Eq: &api.Term{Field: "status", Value: "open"},
+			Eq: &api.Term{Field: "/status", Value: "open"},
 		},
 		Limit: 5,
 	}
@@ -204,9 +216,99 @@ func TestQuerySuccess(t *testing.T) {
 	if adapter.last.Limit != 5 {
 		t.Fatalf("expected limit 5, got %d", adapter.last.Limit)
 	}
-	if adapter.last.Selector.Eq == nil || adapter.last.Selector.Eq.Field != "status" {
+	if adapter.last.Selector.Eq == nil || adapter.last.Selector.Eq.Field != "/status" {
 		t.Fatalf("selector not forwarded: %+v", adapter.last.Selector)
 	}
+	if adapter.last.Engine != search.EngineScan {
+		t.Fatalf("expected scan engine, got %s", adapter.last.Engine)
+	}
+}
+
+func TestQueryEngineSelection(t *testing.T) {
+	t.Run("scan", func(t *testing.T) {
+		adapter := &stubSearchAdapter{}
+		server := newQueryTestServer(t, adapter)
+		defer server.Close()
+		resp, err := http.Post(server.URL+"/v1/query?engine=scan", "application/json", strings.NewReader(`{"namespace":"default"}`))
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200, got %d", resp.StatusCode)
+		}
+		if adapter.last.Engine != search.EngineScan {
+			t.Fatalf("expected scan engine, got %s", adapter.last.Engine)
+		}
+	})
+
+	t.Run("index unavailable", func(t *testing.T) {
+		adapter := &stubSearchAdapter{}
+		server := newQueryTestServer(t, adapter)
+		defer server.Close()
+		resp, err := http.Post(server.URL+"/v1/query?engine=index", "application/json", strings.NewReader(`{"namespace":"default"}`))
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d", resp.StatusCode)
+		}
+		var errResp api.ErrorResponse
+		if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
+			t.Fatalf("decode error: %v", err)
+		}
+		if errResp.ErrorCode != "query_engine_unavailable" {
+			t.Fatalf("expected query_engine_unavailable, got %s", errResp.ErrorCode)
+		}
+	})
+
+	t.Run("index available", func(t *testing.T) {
+		adapter := &stubSearchAdapter{caps: search.Capabilities{Index: true}}
+		server := newQueryTestServer(t, adapter)
+		defer server.Close()
+		cfgPayload := `{"namespace":"default","query":{"preferred_engine":"index","fallback_engine":"scan"}}`
+		respCfg, err := http.Post(server.URL+"/v1/namespace", "application/json", strings.NewReader(cfgPayload))
+		if err != nil {
+			t.Fatalf("namespace config request failed: %v", err)
+		}
+		respCfg.Body.Close()
+		if respCfg.StatusCode != http.StatusOK {
+			t.Fatalf("expected namespace config 200, got %d", respCfg.StatusCode)
+		}
+		resp, err := http.Post(server.URL+"/v1/query?engine=index", "application/json", strings.NewReader(`{"namespace":"default"}`))
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200, got %d", resp.StatusCode)
+		}
+		if adapter.last.Engine != search.EngineIndex {
+			t.Fatalf("expected index engine, got %s", adapter.last.Engine)
+		}
+	})
+
+	t.Run("invalid", func(t *testing.T) {
+		adapter := &stubSearchAdapter{}
+		server := newQueryTestServer(t, adapter)
+		defer server.Close()
+		resp, err := http.Post(server.URL+"/v1/query?engine=bogus", "application/json", strings.NewReader(`{"namespace":"default"}`))
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d", resp.StatusCode)
+		}
+		var errResp api.ErrorResponse
+		if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
+			t.Fatalf("decode error: %v", err)
+		}
+		if errResp.ErrorCode != "invalid_engine" {
+			t.Fatalf("expected invalid_engine, got %s", errResp.ErrorCode)
+		}
+	})
 }
 
 func TestQueryInvalidCursor(t *testing.T) {
@@ -215,11 +317,12 @@ func TestQueryInvalidCursor(t *testing.T) {
 		err: fmt.Errorf("%w: bad cursor", search.ErrInvalidCursor),
 	}
 	handler := New(Config{
-		Store:         store,
-		Logger:        pslog.NewStructured(io.Discard),
-		Clock:         newStubClock(time.Unix(1_700_000_000, 0)),
-		SearchAdapter: adapter,
-		JSONMaxBytes:  1 << 20,
+		Store:                  store,
+		Logger:                 pslog.NewStructured(io.Discard),
+		Clock:                  newStubClock(time.Unix(1_700_000_000, 0)),
+		SearchAdapter:          adapter,
+		DefaultNamespaceConfig: scanNamespaceConfig(),
+		JSONMaxBytes:           1 << 20,
 	})
 	mux := http.NewServeMux()
 	handler.Register(mux)
@@ -241,6 +344,109 @@ func TestQueryInvalidCursor(t *testing.T) {
 	}
 	if errResp.ErrorCode != "invalid_cursor" {
 		t.Fatalf("expected invalid_cursor, got %s", errResp.ErrorCode)
+	}
+}
+
+func TestQueryReturnDocuments(t *testing.T) {
+	ctx := context.Background()
+	store := memory.New()
+	adapter := &stubSearchAdapter{
+		result: search.Result{
+			Keys:     []string{"stream-1", "stream-2"},
+			Cursor:   "next-cursor",
+			IndexSeq: 99,
+			Metadata: map[string]string{"hint": "scan"},
+		},
+	}
+	defaultCfg := scanNamespaceConfig()
+	configStore := namespaces.NewConfigStore(store, nil, nil, defaultCfg)
+	handler := New(Config{
+		Store:                  store,
+		Logger:                 loggingutil.NoopLogger(),
+		Clock:                  newStubClock(time.Unix(1_700_000_500, 0)),
+		SearchAdapter:          adapter,
+		NamespaceConfigs:       configStore,
+		DefaultNamespaceConfig: defaultCfg,
+		JSONMaxBytes:           1 << 20,
+	})
+	mux := http.NewServeMux()
+	handler.Register(mux)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	seed := func(key string, body string) {
+		res, err := store.WriteState(ctx, namespaces.Default, key, strings.NewReader(body), storage.PutStateOptions{})
+		if err != nil {
+			t.Fatalf("write state %s: %v", key, err)
+		}
+		meta := &storage.Meta{
+			Version:             1,
+			PublishedVersion:    1,
+			StateETag:           res.NewETag,
+			StatePlaintextBytes: res.BytesWritten,
+			UpdatedAtUnix:       time.Now().Unix(),
+		}
+		if _, err := store.StoreMeta(ctx, namespaces.Default, key, meta, ""); err != nil {
+			t.Fatalf("store meta %s: %v", key, err)
+		}
+	}
+	seed("stream-1", `{"status":"ready","rank":1}`)
+	seed("stream-2", `{"status":"waiting","rank":2}`)
+	resp, err := http.Post(server.URL+"/v1/query?namespace=default&return=documents", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatalf("query request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, data)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != contentTypeNDJSON {
+		t.Fatalf("expected %s content type, got %s", contentTypeNDJSON, ct)
+	}
+	if mode := resp.Header.Get(headerQueryReturn); mode != string(api.QueryReturnDocuments) {
+		t.Fatalf("expected return header documents, got %s", mode)
+	}
+	if cursor := resp.Header.Get(headerQueryCursor); cursor != "next-cursor" {
+		t.Fatalf("expected cursor header, got %s", cursor)
+	}
+	if seq := resp.Header.Get(headerQueryIndexSeq); seq != "99" {
+		t.Fatalf("expected index seq header, got %s", seq)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(body)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 rows, got %d (%q)", len(lines), lines)
+	}
+	var rows []map[string]any
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var row map[string]any
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			t.Fatalf("decode row: %v", err)
+		}
+		rows = append(rows, row)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 decoded rows, got %d", len(rows))
+	}
+	if rows[0]["ns"].(string) != namespaces.Default || rows[0]["key"].(string) != "stream-1" {
+		t.Fatalf("unexpected first row: %+v", rows[0])
+	}
+	firstDoc, ok := rows[0]["doc"].(map[string]any)
+	if !ok || firstDoc["status"] != "ready" {
+		t.Fatalf("unexpected first document: %+v", rows[0])
+	}
+	if rows[1]["key"].(string) != "stream-2" {
+		t.Fatalf("unexpected second row: %+v", rows[1])
+	}
+	secondDoc, ok := rows[1]["doc"].(map[string]any)
+	if !ok || secondDoc["status"] != "waiting" {
+		t.Fatalf("unexpected second document: %+v", rows[1])
 	}
 }
 
@@ -629,8 +835,8 @@ func TestMetadataUpdateTogglesQueryHidden(t *testing.T) {
 	}
 
 	clearHeaders := map[string]string{
-		"X-Lease-ID":               acquireResp.LeaseID,
-		"X-Fencing-Token":          token,
+		"X-Lease-ID":              acquireResp.LeaseID,
+		"X-Fencing-Token":         token,
 		headerMetadataQueryHidden: "false",
 	}
 	metaResp = api.MetadataUpdateResponse{}
@@ -678,8 +884,8 @@ func TestMetadataUpdateValidations(t *testing.T) {
 
 	t.Run("invalid header value", func(t *testing.T) {
 		badHeaders := map[string]string{
-			"X-Lease-ID":               acquireResp.LeaseID,
-			"X-Fencing-Token":          token,
+			"X-Lease-ID":              acquireResp.LeaseID,
+			"X-Fencing-Token":         token,
 			headerMetadataQueryHidden: "definitely-not-bool",
 		}
 		var errResp api.ErrorResponse
@@ -720,6 +926,95 @@ func TestMetadataUpdateValidations(t *testing.T) {
 	})
 }
 
+func TestQueueStateAcquireDefaultsHidden(t *testing.T) {
+	store := memory.New()
+	handler := New(Config{
+		Store:        store,
+		Logger:       loggingutil.NoopLogger(),
+		Clock:        newStubClock(time.Unix(1_700_000_000, 0)),
+		JSONMaxBytes: 1 << 20,
+		DefaultTTL:   10 * time.Second,
+		MaxTTL:       time.Minute,
+	})
+	stateKey, err := queue.StateLeaseKey(namespaces.Default, "workflow", "msg-1")
+	if err != nil {
+		t.Fatalf("state key: %v", err)
+	}
+	ctx := context.Background()
+	outcome, err := handler.acquireLeaseForKey(ctx, handler.logger, acquireParams{
+		Namespace: namespaces.Default,
+		Key:       stateKey,
+		Owner:     "worker-a",
+		TTL:       5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("acquire state lease: %v", err)
+	}
+	defer handler.releaseLeaseOutcome(ctx, stateKey, outcome)
+	relState := relativeKey(namespaces.Default, stateKey)
+	meta, _, err := store.LoadMeta(ctx, namespaces.Default, relState)
+	if err != nil {
+		t.Fatalf("load meta: %v", err)
+	}
+	if meta == nil || !meta.QueryExcluded() {
+		t.Fatalf("expected queue state meta to be query hidden, got %+v", meta)
+	}
+	if val, ok := meta.GetAttribute(storage.MetaAttributeQueryExclude); !ok || val != "true" {
+		t.Fatalf("expected query_hidden attribute=true, got %q ok=%v", val, ok)
+	}
+}
+
+func TestQueueStateAcquireRespectsManualVisibility(t *testing.T) {
+	store := memory.New()
+	handler := New(Config{
+		Store:        store,
+		Logger:       loggingutil.NoopLogger(),
+		Clock:        newStubClock(time.Unix(1_700_000_000, 0)),
+		JSONMaxBytes: 1 << 20,
+		DefaultTTL:   10 * time.Second,
+		MaxTTL:       time.Minute,
+	})
+	stateKey, err := queue.StateLeaseKey(namespaces.Default, "workflow", "msg-2")
+	if err != nil {
+		t.Fatalf("state key: %v", err)
+	}
+	ctx := context.Background()
+	acquire := func(owner string) {
+		outcome, err := handler.acquireLeaseForKey(ctx, handler.logger, acquireParams{
+			Namespace: namespaces.Default,
+			Key:       stateKey,
+			Owner:     owner,
+			TTL:       5 * time.Second,
+		})
+		if err != nil {
+			t.Fatalf("acquire (%s): %v", owner, err)
+		}
+		defer handler.releaseLeaseOutcome(ctx, stateKey, outcome)
+	}
+	acquire("worker-init")
+	relState := relativeKey(namespaces.Default, stateKey)
+	meta, etag, err := store.LoadMeta(ctx, namespaces.Default, relState)
+	if err != nil {
+		t.Fatalf("load meta: %v", err)
+	}
+	meta.SetQueryHidden(false)
+	if _, err := store.StoreMeta(ctx, namespaces.Default, relState, meta, etag); err != nil {
+		t.Fatalf("store meta: %v", err)
+	}
+	acquire("worker-visible")
+	meta, _, err = store.LoadMeta(ctx, namespaces.Default, relState)
+	if err != nil {
+		t.Fatalf("reload meta: %v", err)
+	}
+	if meta.QueryExcluded() {
+		val, _ := meta.GetAttribute(storage.MetaAttributeQueryExclude)
+		t.Fatalf("expected manual opt-in to persist, got attribute=%q", val)
+	}
+	if val, ok := meta.GetAttribute(storage.MetaAttributeQueryExclude); !ok || val != "false" {
+		t.Fatalf("expected stored attribute=false, got %q ok=%v", val, ok)
+	}
+}
+
 func doJSON(t *testing.T, server *httptest.Server, method, path string, headers map[string]string, body any, out any) int {
 	t.Helper()
 	var payload io.Reader
@@ -757,6 +1052,25 @@ func doJSON(t *testing.T, server *httptest.Server, method, path string, headers 
 		}
 	}
 	return resp.StatusCode
+}
+
+func newQueryTestServer(t *testing.T, adapter search.Adapter) *httptest.Server {
+	t.Helper()
+	store := memory.New()
+	defaultCfg := scanNamespaceConfig()
+	configStore := namespaces.NewConfigStore(store, nil, nil, defaultCfg)
+	handler := New(Config{
+		Store:                  store,
+		Logger:                 pslog.NewStructured(io.Discard),
+		Clock:                  newStubClock(time.Unix(1_700_000_000, 0)),
+		SearchAdapter:          adapter,
+		NamespaceConfigs:       configStore,
+		DefaultNamespaceConfig: defaultCfg,
+		JSONMaxBytes:           1 << 20,
+	})
+	mux := http.NewServeMux()
+	handler.Register(mux)
+	return httptest.NewServer(mux)
 }
 
 type stubClock struct {
@@ -850,6 +1164,15 @@ type stubSearchAdapter struct {
 	last   search.Request
 	result search.Result
 	err    error
+	caps   search.Capabilities
+}
+
+func (s *stubSearchAdapter) Capabilities(context.Context, string) (search.Capabilities, error) {
+	caps := s.caps
+	if !caps.Index && !caps.Scan {
+		caps.Scan = true
+	}
+	return caps, nil
 }
 
 func (s *stubSearchAdapter) Query(ctx context.Context, req search.Request) (search.Result, error) {

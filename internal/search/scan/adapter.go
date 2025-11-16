@@ -49,6 +49,12 @@ func New(cfg Config) (*Adapter, error) {
 	}, nil
 }
 
+// Capabilities reports that the scan adapter always supports the scan engine
+// (and never provides an index engine).
+func (a *Adapter) Capabilities(context.Context, string) (search.Capabilities, error) {
+	return search.Capabilities{Scan: true}, nil
+}
+
 // Query enumerates namespace keys, applying selector filters in-memory.
 func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result, error) {
 	if req.Namespace == "" {

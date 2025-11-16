@@ -11,22 +11,23 @@ This section captures the state of the repo *today*. The sections that follow de
 
 ### Public reads (`public=1`)
 
-- ✅ `/v1/get` accepts `public=1` query flag (and SDK/CLI expose `--public` / `client.LoadPublic*` helpers).
+- ✅ `/v1/get` accepts `public=1` query flag (and SDK/CLI expose `--public` plus the unified `Client.Get`/`Client.Load` APIs).
 - ✅ Reads the latest **published** blob guarded by the metadata commit marker; no lease required.
-- ✅ Client SDK gained `LoadPublic`, `LoadPublicWithNamespace`, `LoadPublicBytes`, and metadata-aware helpers (e.g., `WithQueryHidden`).
+- ✅ Go SDK defaults to public reads whenever no lease is supplied; options like `WithGetPublicDisabled` enforce lease-only access.
 - ✅ Integration coverage (mem query suite + unit tests) ensures public reads stay consistent and hidden keys never leak.
 
 ### Query language + scan adapter
 
-- ✅ Exported `lql` package parses both dot-notation and brace shorthand into the shared Selector AST (JSON form stays the wire contract). Parser supports `and/or/not/eq/prefix/range/in/exists`, arrays, quoting, whitespace, etc.
+- ✅ Exported `lql` package parses JSON Pointer paths (RFC 6901) plus the brace shorthand into the shared Selector AST (JSON form stays the wire contract). Parser supports `and/or/not/eq/prefix/range/in/exists`, arrays, quoting, whitespace, etc.
 - ✅ `/v1/query` is live today, backed by the **scan adapter** that walks namespace metadata/state directly. It supports selectors, pagination, hidden key filtering, and returns `{keys, cursor, metadata}`.
 - ✅ Scan adapter ignores internal prefixes (e.g., `lockd-diagnostics/*`) and respects metadata flags like `lockd.query.exclude`.
+- ✅ Queue state (LQ) metadata defaults to `query_hidden`, so dequeueWithState blobs never enter `/v1/query` unless an operator explicitly clears the flag.
 - ✅ Query-specific integration suites for **mem, disk, minio, aws, azure** seed realistic datasets (vouchers, firmware rollouts, SALUTE reports, flight telemetry) and assert selectors/pagination/public-read behaviour.
 - ✅ Namespace + metadata plumbing is complete: selectors default to the request namespace, and metadata attributes (`query_hidden`) can be toggled via `/v1/metadata` + SDK options.
 
 ### LQL mutations
 
-- ✅ Same DSL now powers CLI mutations via the exported `lql` package. Brace & dot notations interoperate; fuzz corpuses became regression tests; tests exercise JSON mutations over “production-like” payloads (finance, IoT, telemetry).
+- ✅ Same DSL now powers CLI mutations via the exported `lql` package. JSON Pointer paths and brace notation interoperate; fuzz corpuses became regression tests; tests exercise JSON mutations over “production-like” payloads (finance, IoT, telemetry).
 
 ### Remaining work (high level)
 
@@ -56,7 +57,7 @@ Rather than add a vaguely named `/v1/read`, we will extend `/v1/get` with a `pub
 * The handler skips lease validation and serves the latest **published** blob (commit marker must exist).
 * Responses still include `ETag`/`X-Key-Version` so clients can detect stale data.
 * The call may lag slightly; read-your-write consistency remains the domain of lease holders.
-* CLI/SDK add opt-in knobs (`lockd client get --public`, `client.WithPublicGet()`).
+* CLI/SDK add opt-in knobs (`lockd client get --public`, `client.WithGetPublicDisabled(false)`/`true`).
 
 Implementation steps:
 

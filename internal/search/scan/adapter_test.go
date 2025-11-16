@@ -13,6 +13,7 @@ import (
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/memory"
 	"pkt.systems/lockd/lql"
+	"pkt.systems/lockd/namespaces"
 )
 
 func TestScanAdapterMatchAll(t *testing.T) {
@@ -54,11 +55,11 @@ func TestScanAdapterSelector(t *testing.T) {
 		"amount": 400,
 	})
 
-	sel, found, err := lql.ParseSelectorString(`
-and.eq{field=status,value=open},
-and.range{field=amount,gte=120,lt=200}`)
-	if err != nil || !found {
-		t.Fatalf("selector parse: %v found=%v", err, found)
+	sel, err := lql.ParseSelectorString(`
+and.eq{field=/status,value=open},
+and.range{field=/amount,gte=120,lt=200}`)
+	if err != nil || sel.IsEmpty() {
+		t.Fatalf("selector parse: %v", err)
 	}
 
 	adapter, err := New(Config{Backend: store})
@@ -152,6 +153,20 @@ func TestScanAdapterSkipsReservedAndHidden(t *testing.T) {
 	}
 	if len(result.Keys) != 1 || result.Keys[0] != "orders/visible" {
 		t.Fatalf("expected only visible order, got %+v", result.Keys)
+	}
+}
+
+func TestScanAdapterCapabilities(t *testing.T) {
+	adapter, err := New(Config{Backend: memory.New()})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	caps, err := adapter.Capabilities(context.Background(), namespaces.Default)
+	if err != nil {
+		t.Fatalf("capabilities: %v", err)
+	}
+	if !caps.Scan || caps.Index {
+		t.Fatalf("expected scan-only capabilities, got %+v", caps)
 	}
 }
 

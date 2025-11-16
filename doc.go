@@ -1,8 +1,8 @@
 // Package lockd exposes the Go APIs behind the single-binary coordination
-// service that delivers exclusive leases, atomic JSON state, and an
-// at-least-once queue. The server is designed to run cleanly as PID 1, but the
-// package also makes it easy to embed the server, spin up sidecars, or talk to
-// lockd from Go clients.
+// plane that combines exclusive leases, atomic JSON state (with search/index),
+// and an at-least-once queue. The server runs cleanly as PID 1 or can be
+// embedded as a library; the same storage abstraction powers disk, S3/MinIO,
+// Azure Blob, and in-memory backends with optional envelope encryption.
 //
 // Copyright (C) 2025 Michel Blomgren <https://pkt.systems>
 //
@@ -208,20 +208,21 @@
 // # LQL query & mutation language
 //
 // Both the CLI and HTTP APIs share a common selector/mutation DSL implemented
-// by `pkt.systems/lockd/lql`. Selectors accept dotted or brace forms
-// (`and.eq{field=status,value=open}`, `or.1.range{field=progress.percent,gte=50}`),
+// by `pkt.systems/lockd/lql`. Selectors accept JSON Pointer field paths
+// (`and.eq{field=/status,value=open}`, `or.1.range{field=/progress/percent,gte=50}`),
 // while mutations cover assignments, arithmetic (`++`, `--`, `=+5`), removals
 // (`rm:`/`delete:`), `time:` aliases for RFC3339 timestamps, and brace
 // shorthand that fans out to nested keys. Examples:
 //
 //	lockd client set --key ledger \
-//	    'data{"hello key"="mars traveler",count++}' \
-//	    meta.previous=world \
-//	    time:meta.processed=NOW
+//	    '/data{/hello key="mars traveler",/count++}' \
+//	    /meta/previous=world \
+//	    time:/meta/processed=NOW
 //
-// Keys wrapped in quotes preserve spaces or punctuation, and commas/newlines
-// can be mixed freely—making it practical to paste production-style JSON paths
-// into CLI tests, Go unit tests, or query strings (`/v1/query?and.eq{...}`).
+// Keys follow RFC 6901 JSON Pointer semantics (leading `/`; escape `/` as `~1`
+// and `~` as `~0`). Commas/newlines can be mixed freely—making it practical to
+// paste production-style JSON paths into CLI tests, Go unit tests, or query
+// strings (`/v1/query?and.eq{...}`).
 //
 // Consult README.md for detailed guidance, additional examples, and operational
 // considerations (TLS, auth bundles, environment variables).

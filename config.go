@@ -113,6 +113,11 @@ const (
 	DefaultLSFSampleInterval = 200 * time.Millisecond
 	// DefaultLSFLogInterval controls how often the LSF emits lockd.lsf.sample telemetry logs.
 	DefaultLSFLogInterval = 15 * time.Second
+
+	// DefaultIndexerFlushDocs determines how many documents trigger a flush.
+	DefaultIndexerFlushDocs = 1000
+	// DefaultIndexerFlushInterval bounds how long a memtable buffers before flushing.
+	DefaultIndexerFlushInterval = 30 * time.Second
 )
 
 // DefaultQueueMaxConsumers returns an adaptive per-server consumer ceiling derived from CPU count.
@@ -205,6 +210,12 @@ type Config struct {
 	QueuePollInterval          time.Duration
 	QueuePollJitter            time.Duration
 	QueueResilientPollInterval time.Duration
+
+	// Indexer tuning
+	IndexerFlushDocs        int
+	IndexerFlushInterval    time.Duration
+	IndexerFlushDocsSet     bool
+	IndexerFlushIntervalSet bool
 
 	// Quick Reaction Force (perimeter defense) configuration.
 	QRFEnabled                     bool
@@ -499,6 +510,16 @@ func (c *Config) Validate() error {
 
 // DefaultConfigDir returns the default configuration directory ($HOME/.lockd).
 func DefaultConfigDir() (string, error) {
+	if override := strings.TrimSpace(os.Getenv("LOCKD_CONFIG_DIR")); override != "" {
+		if filepath.IsAbs(override) {
+			return override, nil
+		}
+		abs, err := filepath.Abs(override)
+		if err != nil {
+			return "", err
+		}
+		return abs, nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err

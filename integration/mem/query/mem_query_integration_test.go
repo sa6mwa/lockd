@@ -74,7 +74,7 @@ func TestMemNamespaceQueryConfig(t *testing.T) {
 		t.Fatalf("unexpected updated config: %+v", updated)
 	}
 
-	querydata.SeedState(t, ctx, ts.Client, "", "namespace-config-check", map[string]any{"status": "open"})
+	querydata.SeedState(ctx, t, ts.Client, "", "namespace-config-check", map[string]any{"status": "open"})
 	reqBody, err := json.Marshal(api.QueryRequest{
 		Namespace: namespaces.Default,
 		Selector:  api.Selector{},
@@ -117,8 +117,8 @@ func TestMemQueryHiddenKeys(t *testing.T) {
 
 	visible := "hidden-visible"
 	hidden := "hidden-secret"
-	querydata.SeedState(t, ctx, ts.Client, "", visible, map[string]any{"status": "open"})
-	querydata.SeedState(t, ctx, ts.Client, "", hidden, map[string]any{"status": "open"})
+	querydata.SeedState(ctx, t, ts.Client, "", visible, map[string]any{"status": "open"})
+	querydata.SeedState(ctx, t, ts.Client, "", hidden, map[string]any{"status": "open"})
 	markKeyHidden(ctx, t, ts.Client, namespaces.Default, hidden)
 
 	body, err := json.Marshal(api.QueryRequest{

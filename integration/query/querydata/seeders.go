@@ -18,7 +18,7 @@ type datasetEntry struct {
 // SeedVoucherData populates a rich finance dataset (multiple books, currencies,
 // workflows, attachments, and multi-line vouchers) so selectors can exercise
 // complex paths.
-func SeedVoucherData(t testing.TB, ctx context.Context, cli *client.Client, profile DatasetProfile) {
+func SeedVoucherData(ctx context.Context, t testing.TB, cli *client.Client, profile DatasetProfile) {
 	t.Helper()
 	entries := make([]datasetEntry, 0, len(voucherRecords))
 	for _, record := range voucherRecords {
@@ -27,11 +27,11 @@ func SeedVoucherData(t testing.TB, ctx context.Context, cli *client.Client, prof
 		}
 		entries = append(entries, record.toDatasetEntry())
 	}
-	seedEntries(t, ctx, cli, "", entries)
+	seedEntries(ctx, t, cli, "", entries)
 }
 
 // SeedFirmwareData populates IoT devices across rollout states and regions.
-func SeedFirmwareData(t testing.TB, ctx context.Context, cli *client.Client, profile DatasetProfile) {
+func SeedFirmwareData(ctx context.Context, t testing.TB, cli *client.Client, profile DatasetProfile) {
 	t.Helper()
 	entries := make([]datasetEntry, 0, len(firmwareRecords))
 	for _, record := range firmwareRecords {
@@ -40,11 +40,11 @@ func SeedFirmwareData(t testing.TB, ctx context.Context, cli *client.Client, pro
 		}
 		entries = append(entries, record.toDatasetEntry())
 	}
-	seedEntries(t, ctx, cli, "", entries)
+	seedEntries(ctx, t, cli, "", entries)
 }
 
 // SeedSaluteData seeds SALUTE reports across affiliations and grids.
-func SeedSaluteData(t testing.TB, ctx context.Context, cli *client.Client, profile DatasetProfile) {
+func SeedSaluteData(ctx context.Context, t testing.TB, cli *client.Client, profile DatasetProfile) {
 	entries := make([]datasetEntry, 0, len(saluteRecords))
 	for _, record := range saluteRecords {
 		if !record.allowed(profile) {
@@ -52,11 +52,11 @@ func SeedSaluteData(t testing.TB, ctx context.Context, cli *client.Client, profi
 		}
 		entries = append(entries, record.toDatasetEntry())
 	}
-	seedEntries(t, ctx, cli, "", entries)
+	seedEntries(ctx, t, cli, "", entries)
 }
 
 // SeedFlightData seeds telemetry snapshots for multiple stages/modes.
-func SeedFlightData(t testing.TB, ctx context.Context, cli *client.Client, profile DatasetProfile) {
+func SeedFlightData(ctx context.Context, t testing.TB, cli *client.Client, profile DatasetProfile) {
 	entries := make([]datasetEntry, 0, len(flightRecords))
 	for _, record := range flightRecords {
 		if !record.allowed(profile) {
@@ -64,7 +64,7 @@ func SeedFlightData(t testing.TB, ctx context.Context, cli *client.Client, profi
 		}
 		entries = append(entries, record.toDatasetEntry())
 	}
-	seedEntries(t, ctx, cli, "", entries)
+	seedEntries(ctx, t, cli, "", entries)
 }
 
 // voucher dataset ----------------------------------------------------------------
@@ -296,9 +296,10 @@ var flightRecords = []flightRecord{
 
 // shared helpers ----------------------------------------------------------------
 
-func seedEntries(t testing.TB, ctx context.Context, cli *client.Client, namespace string, entries []datasetEntry) {
+func seedEntries(ctx context.Context, t testing.TB, cli *client.Client, namespace string, entries []datasetEntry) {
+	t.Helper()
 	for _, entry := range entries {
-		SeedState(t, ctx, cli, namespace, entry.Key, entry.Data)
+		SeedState(ctx, t, cli, namespace, entry.Key, entry.Data)
 	}
 }
 

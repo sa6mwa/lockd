@@ -3251,6 +3251,28 @@ func (c *Client) AcquireForUpdate(ctx context.Context, req api.AcquireRequest, h
 		sess, err := c.Acquire(handshakeCtx, req, opts...)
 		if err != nil {
 			handshakeCancel()
+			if shouldRetryForUpdate(err) {
+				retryCount++
+				if cfg.FailureRetries >= 0 && retryCount > cfg.FailureRetries {
+					c.logErrorCtx(ctx, "client.acquire_for_update.acquire_error", "key", req.Key, "error", err, "retries", retryCount)
+					return err
+				}
+				sleep := acquireRetryDelay(delay, cfg)
+				if sleep <= 0 {
+					sleep = 10 * time.Millisecond
+				}
+				if retryHint := retryAfterFromError(err); retryHint > sleep {
+					sleep = retryHint
+				}
+				delay = sleep
+				c.logDebugCtx(ctx, "client.acquire_for_update.retry_after_acquire_error", "key", req.Key, "retries", retryCount, "delay", sleep, "retry_after", retryAfterFromError(err), "qrf_state", qrfStateFromError(err), "error", err)
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(sleep):
+				}
+				continue
+			}
 			return err
 		}
 		keyForLog := sess.Key

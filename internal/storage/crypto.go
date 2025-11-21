@@ -29,6 +29,7 @@ type Crypto struct {
 
 // NewCrypto initialises a Crypto helper according to cfg. When encryption is disabled the returned value is nil.
 func NewCrypto(cfg CryptoConfig) (*Crypto, error) {
+	const defaultStreamChunkSize = 8 * 1024 // reduces per-writer buffer overhead vs kryptograf default (64 KiB)
 	if !cfg.Enabled {
 		return nil, nil
 	}
@@ -41,7 +42,7 @@ func NewCrypto(cfg CryptoConfig) (*Crypto, error) {
 	if cfg.RootKey == (keymgmt.RootKey{}) {
 		return nil, fmt.Errorf("storage crypto: root key required when encryption enabled")
 	}
-	kg := kryptograf.New(cfg.RootKey)
+	kg := kryptograf.New(cfg.RootKey).WithChunkSize(defaultStreamChunkSize)
 	if cfg.Snappy {
 		kg = kg.WithSnappy()
 	}

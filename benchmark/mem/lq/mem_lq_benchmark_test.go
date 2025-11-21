@@ -200,6 +200,9 @@ func runMemQueueBenchmark(b *testing.B, scenario queueBenchmarkScenario, payload
 		logLevel = pslog.DebugLevel
 	}
 	servers := make([]*lockd.TestServer, 0, scenario.servers)
+	var sharedCreds lockd.TestMTLSCredentials
+	credsReady := false
+
 	for i := 0; i < scenario.servers; i++ {
 		cfg := buildMemQueueConfig(b)
 		var opts []lockd.TestServerOption
@@ -213,12 +216,32 @@ func runMemQueueBenchmark(b *testing.B, scenario queueBenchmarkScenario, payload
 			lockd.WithTestConfig(cfg),
 			lockd.WithTestLogger(logger),
 			lockd.WithTestClientOptions(
-				lockdclient.WithDisableMTLS(true),
 				lockdclient.WithHTTPTimeout(5*time.Minute),
 				lockdclient.WithKeepAliveTimeout(5*time.Minute),
 				lockdclient.WithLogger(logger),
 			),
 		)
+		if !credsReady {
+			_, creds := maybeEnableStorageEncryption(b, &cfg)
+			if creds.Valid() {
+				sharedCreds = creds
+				credsReady = true
+			}
+		}
+		if sharedCreds.Valid() {
+			opts = append(opts,
+				lockd.WithTestMTLSCredentials(sharedCreds),
+			)
+		} else {
+			opts = append(opts, lockd.WithoutTestMTLS())
+			opts = append(opts, lockd.WithTestClientOptions(lockdclient.WithDisableMTLS(true)))
+		}
+		// Benchmarks run with many concurrent producers/consumers; allow graceful shutdown plenty of time
+		// and skip drain waits to avoid timeouts during cleanup.
+		opts = append(opts, lockd.WithTestCloseDefaults(
+			lockd.WithDrainLeases(0),
+			lockd.WithShutdownTimeout(30*time.Second),
+		))
 		if scenario.servers > 1 {
 			opts = append(opts, lockd.WithTestBackend(backend))
 		} else if i == 0 && scenario.servers == 1 {
@@ -662,18 +685,20 @@ func buildMemQueueConfig(tb testing.TB) lockd.Config {
 		QueuePollInterval:          500 * time.Microsecond,
 		QueuePollJitter:            500 * time.Microsecond,
 		QueueResilientPollInterval: 5 * time.Millisecond,
+		DisableHTTPTracing:         true,
+		DisableStorageTracing:      true,
 	}
 	cfg.MemQueueWatch = true
 	cfg.MemQueueWatchSet = true
 	cfg.QRFEnabled = false
-	maybeEnableStorageEncryption(tb, &cfg)
+	_, _ = maybeEnableStorageEncryption(tb, &cfg)
 	if err := cfg.Validate(); err != nil {
 		tb.Fatalf("config validation failed: %v", err)
 	}
 	return cfg
 }
 
-func maybeEnableStorageEncryption(tb testing.TB, cfg *lockd.Config) bool {
+func maybeEnableStorageEncryption(tb testing.TB, cfg *lockd.Config) (bool, lockd.TestMTLSCredentials) {
 	tb.Helper()
 	if cfg == nil {
 		tb.Fatalf("membench: nil config")
@@ -681,7 +706,7 @@ func maybeEnableStorageEncryption(tb testing.TB, cfg *lockd.Config) bool {
 	if os.Getenv(memBenchEncryptionEnv) != "1" {
 		cfg.DisableStorageEncryption = true
 		cfg.StorageEncryptionSnappy = false
-		return false
+		return false, lockd.TestMTLSCredentials{}
 	}
 	dir := tb.TempDir()
 	ca, err := tlsutil.GenerateCA("lockd-bench-ca", 365*24*time.Hour)
@@ -708,13 +733,25 @@ func maybeEnableStorageEncryption(tb testing.TB, cfg *lockd.Config) bool {
 	if err != nil {
 		tb.Fatalf("apply metadata material: %v", err)
 	}
+	clientCert, clientKey, err := ca.IssueClient("lockd-bench-client", 365*24*time.Hour)
+	if err != nil {
+		tb.Fatalf("issue client cert: %v", err)
+	}
+	clientBundle, err := tlsutil.EncodeClientBundle(ca.CertPEM, clientCert, clientKey)
+	if err != nil {
+		tb.Fatalf("encode client bundle: %v", err)
+	}
+	creds, err := lockd.NewTestMTLSCredentialsFromBundles(augmented, clientBundle)
+	if err != nil {
+		tb.Fatalf("build test mtls creds: %v", err)
+	}
 	bundlePath := filepath.Join(dir, "server.pem")
 	if err := os.WriteFile(bundlePath, augmented, 0o600); err != nil {
 		tb.Fatalf("write bundle: %v", err)
 	}
 	cfg.DisableStorageEncryption = false
 	cfg.BundlePath = bundlePath
-	return true
+	return true, creds
 }
 
 func prefillQueue(ctx context.Context, cli *lockdclient.Client, queue string, count int, payload []byte) (int, error) {

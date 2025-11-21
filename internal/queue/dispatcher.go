@@ -715,12 +715,6 @@ func (qs *queueState) resetDiscrepancyLocked() {
 	qs.lastDiscrepancy = time.Time{}
 }
 
-func (qs *queueState) resetDiscrepancy() {
-	qs.mu.Lock()
-	qs.resetDiscrepancyLocked()
-	qs.mu.Unlock()
-}
-
 func (qs *queueState) addWaiter(w *waiter) bool {
 	qs.mu.Lock()
 	defer qs.mu.Unlock()

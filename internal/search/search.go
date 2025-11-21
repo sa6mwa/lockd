@@ -38,12 +38,15 @@ type Adapter interface {
 type EngineHint string
 
 const (
-	EngineAuto  EngineHint = "auto"
+	// EngineAuto lets the dispatcher pick between index and scan engines.
+	EngineAuto EngineHint = "auto"
+	// EngineIndex forces indexed query execution.
 	EngineIndex EngineHint = "index"
-	EngineScan  EngineHint = "scan"
+	// EngineScan forces a storage scan for selectors.
+	EngineScan EngineHint = "scan"
 )
 
-// Capability flags describing which engines a namespace/adapter supports.
+// Capabilities describes which engines a namespace/adapter supports.
 type Capabilities struct {
 	Index bool
 	Scan  bool

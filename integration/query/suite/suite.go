@@ -51,10 +51,10 @@ func WithExtendedDataset() Option {
 // RunSelectors seeds simple documents and ensures selector matching behaves consistently.
 func RunSelectors(t *testing.T, factory ServerFactory) {
 	withServer(t, factory, 15*time.Second, func(ctx context.Context, ts *lockd.TestServer, httpClient *http.Client) {
-		querydata.SeedState(t, ctx, ts.Client, "", "orders-open-1", map[string]any{"status": "open", "amount": 150.0, "region": "us"})
-		querydata.SeedState(t, ctx, ts.Client, "", "orders-open-2", map[string]any{"status": "open", "amount": 80.0})
-		querydata.SeedState(t, ctx, ts.Client, "", "orders-closed", map[string]any{"status": "closed", "amount": 200.0})
-		flushNamespaces(t, ctx, ts.Client, namespaces.Default)
+		querydata.SeedState(ctx, t, ts.Client, "", "orders-open-1", map[string]any{"status": "open", "amount": 150.0, "region": "us"})
+		querydata.SeedState(ctx, t, ts.Client, "", "orders-open-2", map[string]any{"status": "open", "amount": 80.0})
+		querydata.SeedState(ctx, t, ts.Client, "", "orders-closed", map[string]any{"status": "closed", "amount": 200.0})
+		flushNamespaces(ctx, t, ts.Client, namespaces.Default)
 
 		selector, err := lql.ParseSelectorString(`
 and.eq{field=/status,value=open},
@@ -82,9 +82,9 @@ func RunPagination(t *testing.T, factory ServerFactory) {
 	withServer(t, factory, 15*time.Second, func(ctx context.Context, ts *lockd.TestServer, httpClient *http.Client) {
 		for i := 0; i < 4; i++ {
 			key := fmt.Sprintf("batch-%02d", i)
-			querydata.SeedState(t, ctx, ts.Client, querydata.PaginationNamespace, key, map[string]any{"status": "open", "index": i})
+			querydata.SeedState(ctx, t, ts.Client, querydata.PaginationNamespace, key, map[string]any{"status": "open", "index": i})
 		}
-		flushNamespaces(t, ctx, ts.Client, querydata.PaginationNamespace)
+		flushNamespaces(ctx, t, ts.Client, querydata.PaginationNamespace)
 		selector, err := lql.ParseSelectorString(`eq{field=/status,value=open}`)
 		if err != nil || selector.IsEmpty() {
 			t.Fatalf("parse selector: %v", err)
@@ -131,10 +131,10 @@ func RunPagination(t *testing.T, factory ServerFactory) {
 // RunNamespaceIsolation ensures results stay scoped to the requested namespace.
 func RunNamespaceIsolation(t *testing.T, factory ServerFactory) {
 	withServer(t, factory, 15*time.Second, func(ctx context.Context, ts *lockd.TestServer, httpClient *http.Client) {
-		querydata.SeedState(t, ctx, ts.Client, "alpha", "job-1", map[string]any{"status": "open"})
-		querydata.SeedState(t, ctx, ts.Client, "alpha", "job-2", map[string]any{"status": "open"})
-		querydata.SeedState(t, ctx, ts.Client, "beta", "job-3", map[string]any{"status": "open"})
-		flushNamespaces(t, ctx, ts.Client, "alpha", "beta")
+		querydata.SeedState(ctx, t, ts.Client, "alpha", "job-1", map[string]any{"status": "open"})
+		querydata.SeedState(ctx, t, ts.Client, "alpha", "job-2", map[string]any{"status": "open"})
+		querydata.SeedState(ctx, t, ts.Client, "beta", "job-3", map[string]any{"status": "open"})
+		flushNamespaces(ctx, t, ts.Client, "alpha", "beta")
 
 		sel, err := lql.ParseSelectorString(`eq{field=/status,value=open}`)
 		if err != nil || sel.IsEmpty() {
@@ -161,8 +161,8 @@ func RunNamespaceIsolation(t *testing.T, factory ServerFactory) {
 func RunPublicRead(t *testing.T, factory ServerFactory) {
 	withServer(t, factory, 15*time.Second, func(ctx context.Context, ts *lockd.TestServer, httpClient *http.Client) {
 		key := "report-" + time.Now().Format("150405")
-		querydata.SeedState(t, ctx, ts.Client, "", key, map[string]any{"status": "published", "payload": "value"})
-		flushNamespaces(t, ctx, ts.Client, namespaces.Default)
+		querydata.SeedState(ctx, t, ts.Client, "", key, map[string]any{"status": "published", "payload": "value"})
+		flushNamespaces(ctx, t, ts.Client, namespaces.Default)
 
 		sel, err := lql.ParseSelectorString(`eq{field=/status,value=published}`)
 		if err != nil || sel.IsEmpty() {
@@ -203,9 +203,9 @@ func RunPublicRead(t *testing.T, factory ServerFactory) {
 // RunDocumentStreaming ensures /v1/query can stream documents (return=documents) across adapters.
 func RunDocumentStreaming(t *testing.T, factory ServerFactory) {
 	withServer(t, factory, 15*time.Second, func(ctx context.Context, ts *lockd.TestServer, httpClient *http.Client) {
-		querydata.SeedState(t, ctx, ts.Client, namespaces.Default, "doc-stream-1", map[string]any{"status": "staged", "region": "emea"})
-		querydata.SeedState(t, ctx, ts.Client, namespaces.Default, "doc-stream-2", map[string]any{"status": "draft", "region": "amer"})
-		flushNamespaces(t, ctx, ts.Client, namespaces.Default)
+		querydata.SeedState(ctx, t, ts.Client, namespaces.Default, "doc-stream-1", map[string]any{"status": "staged", "region": "emea"})
+		querydata.SeedState(ctx, t, ts.Client, namespaces.Default, "doc-stream-2", map[string]any{"status": "draft", "region": "amer"})
+		flushNamespaces(ctx, t, ts.Client, namespaces.Default)
 
 		sel, err := lql.ParseSelectorString(`/status="staged"`)
 		if err != nil || sel.IsEmpty() {
@@ -248,11 +248,11 @@ func RunDomainDatasets(t *testing.T, factory ServerFactory, opts ...Option) {
 		}
 	}
 	withServer(t, factory, 30*time.Second, func(ctx context.Context, ts *lockd.TestServer, httpClient *http.Client) {
-		querydata.SeedVoucherData(t, ctx, ts.Client, cfg.datasetProfile)
-		querydata.SeedFirmwareData(t, ctx, ts.Client, cfg.datasetProfile)
-		querydata.SeedSaluteData(t, ctx, ts.Client, cfg.datasetProfile)
-		querydata.SeedFlightData(t, ctx, ts.Client, cfg.datasetProfile)
-		flushNamespaces(t, ctx, ts.Client, namespaces.Default)
+		querydata.SeedVoucherData(ctx, t, ts.Client, cfg.datasetProfile)
+		querydata.SeedFirmwareData(ctx, t, ts.Client, cfg.datasetProfile)
+		querydata.SeedSaluteData(ctx, t, ts.Client, cfg.datasetProfile)
+		querydata.SeedFlightData(ctx, t, ts.Client, cfg.datasetProfile)
+		flushNamespaces(ctx, t, ts.Client, namespaces.Default)
 
 		t.Run("vouchers-unposted", func(t *testing.T) {
 			if !shouldRun("vouchers-unposted") {
@@ -566,6 +566,6 @@ func doQueryDocuments(t testing.TB, httpClient *http.Client, baseURL string, req
 	return rows
 }
 
-func flushNamespaces(t testing.TB, ctx context.Context, cli *lockdclient.Client, namespaces ...string) {
-	querydata.FlushQueryNamespaces(t, ctx, cli, namespaces...)
+func flushNamespaces(ctx context.Context, t testing.TB, cli *lockdclient.Client, namespaces ...string) {
+	querydata.FlushQueryNamespaces(ctx, t, cli, namespaces...)
 }

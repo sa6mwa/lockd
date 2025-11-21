@@ -55,6 +55,7 @@ type Store struct {
 	queueWatchReason  string
 }
 
+// DefaultNamespaceConfig returns the preferred namespace settings for disk storage.
 func (s *Store) DefaultNamespaceConfig() namespaces.Config {
 	cfg := namespaces.DefaultConfig()
 	cfg.Query.Preferred = search.EngineIndex

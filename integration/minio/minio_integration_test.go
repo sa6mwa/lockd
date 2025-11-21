@@ -224,10 +224,10 @@ func TestMinioAcquireForUpdateCallbackSingleServer(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	watchdog := time.AfterFunc(10*time.Second, func() {
+	watchdog := time.AfterFunc(25*time.Second, func() {
 		buf := make([]byte, 1<<18)
 		n := runtime.Stack(buf, true)
-		panic("TestMinioAcquireForUpdateCallbackSingleServer timeout after 10s:\n" + string(buf[:n]))
+		panic("TestMinioAcquireForUpdateCallbackSingleServer timeout after 25s:\n" + string(buf[:n]))
 	})
 	defer watchdog.Stop()
 

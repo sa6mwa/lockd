@@ -44,6 +44,7 @@ type Store struct {
 	crypto    *storage.Crypto
 }
 
+// DefaultNamespaceConfig returns the preferred namespace settings for Azure backends.
 func (s *Store) DefaultNamespaceConfig() namespaces.Config {
 	cfg := namespaces.DefaultConfig()
 	cfg.Query.Preferred = search.EngineIndex

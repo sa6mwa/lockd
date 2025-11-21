@@ -1030,6 +1030,49 @@ func (t *acquireForUpdateRetryTransport) RoundTrip(req *http.Request) (*http.Res
 	}
 }
 
+type acquireForUpdateAcquireErrorTransport struct {
+	mu           sync.Mutex
+	acquireCalls int
+	getCalls     int
+	updateCalls  int
+	releaseCalls int
+}
+
+func (t *acquireForUpdateAcquireErrorTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	switch req.URL.Path {
+	case "/v1/acquire":
+		t.acquireCalls++
+		if t.acquireCalls == 1 {
+			return nil, context.DeadlineExceeded
+		}
+		leaseID := fmt.Sprintf("L-acq-%d", t.acquireCalls)
+		body := fmt.Sprintf(`{"lease_id":"%s","key":"orders","owner":"reader","expires_at_unix":%d,"version":1,"fencing_token":%d}`,
+			leaseID, time.Now().Add(time.Minute).Unix(), 80+t.acquireCalls)
+		resp := newJSONResponse(req, http.StatusOK, body)
+		resp.Header.Set("X-Correlation-Id", fmt.Sprintf("cid-acq-%d", t.acquireCalls))
+		return resp, nil
+	case "/v1/get":
+		t.getCalls++
+		resp := newJSONResponse(req, http.StatusOK, `{"value":1}`)
+		resp.Header.Set("ETag", "etag-one")
+		resp.Header.Set("X-Key-Version", "1")
+		resp.Header.Set("X-Fencing-Token", "201")
+		resp.Header.Set("Content-Length", strconv.Itoa(len(`{"value":1}`)))
+		return resp, nil
+	case "/v1/update":
+		t.updateCalls++
+		return newJSONResponse(req, http.StatusOK, `{"new_version":2,"new_state_etag":"etag-two","bytes":9}`), nil
+	case "/v1/release":
+		t.releaseCalls++
+		return newJSONResponse(req, http.StatusOK, `{"released":true}`), nil
+	default:
+		return newJSONResponse(req, http.StatusNotFound, `{"error":"not_found"}`), nil
+	}
+}
+
 func TestAcquireForUpdateRetriesOnLeaseRequired(t *testing.T) {
 	transport := &acquireForUpdateRetryTransport{}
 	httpClient := &http.Client{Transport: transport}
@@ -1166,6 +1209,69 @@ func TestAcquireForUpdateRetriesAfterHandlerEOF(t *testing.T) {
 	}
 	if attempts != 2 {
 		t.Fatalf("expected handler to retry once, got %d attempts", attempts)
+	}
+}
+
+func TestAcquireForUpdateRetriesAcquireError(t *testing.T) {
+	transport := &acquireForUpdateAcquireErrorTransport{}
+	httpClient := &http.Client{Transport: transport}
+
+	cli, err := client.NewWithEndpoints([]string{"http://acquire-retry:9341"},
+		client.WithDisableMTLS(true),
+		client.WithHTTPClient(httpClient),
+		client.WithHTTPTimeout(200*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	var updated bool
+	err = cli.AcquireForUpdate(ctx, api.AcquireRequest{
+		Key:        "orders",
+		Owner:      "reader",
+		TTLSeconds: 5,
+		BlockSecs:  client.BlockNoWait,
+	}, func(handlerCtx context.Context, af *client.AcquireForUpdateContext) error {
+		if af.State == nil || af.State.Reader == nil {
+			return fmt.Errorf("expected snapshot state")
+		}
+		if _, err := af.State.Bytes(); err != nil {
+			return err
+		}
+		if err := af.Save(handlerCtx, map[string]any{"value": 2}); err != nil {
+			return err
+		}
+		updated = true
+		return nil
+	}, client.WithAcquireFailureRetries(3), client.WithAcquireBackoff(5*time.Millisecond, 5*time.Millisecond, 1.0), client.WithAcquireJitter(0))
+	if err != nil {
+		t.Fatalf("acquire-for-update: %v", err)
+	}
+
+	transport.mu.Lock()
+	acquireCalls := transport.acquireCalls
+	getCalls := transport.getCalls
+	updateCalls := transport.updateCalls
+	releaseCalls := transport.releaseCalls
+	transport.mu.Unlock()
+
+	if acquireCalls < 2 {
+		t.Fatalf("expected acquire retries, got %d", acquireCalls)
+	}
+	if getCalls != 1 {
+		t.Fatalf("expected single get, got %d", getCalls)
+	}
+	if updateCalls != 1 {
+		t.Fatalf("expected single update, got %d", updateCalls)
+	}
+	if releaseCalls != 1 {
+		t.Fatalf("expected release, got %d", releaseCalls)
+	}
+	if !updated {
+		t.Fatalf("expected handler to update state")
 	}
 }
 
@@ -2129,7 +2235,6 @@ func TestClientQueryInvalidLQL(t *testing.T) {
 		t.Fatalf("expected parse error")
 	}
 }
-
 
 func TestClientQueryDocuments(t *testing.T) {
 	mux := http.NewServeMux()

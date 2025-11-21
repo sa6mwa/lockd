@@ -21,11 +21,13 @@ const (
 	contentTypeEncrypted = storage.ContentTypeProtobufEncrypted
 )
 
+// Store persists index manifests and segments on a storage backend.
 type Store struct {
 	backend storage.Backend
 	crypto  *storage.Crypto
 }
 
+// NewStore constructs an index store backed by the provided storage backend.
 func NewStore(backend storage.Backend, crypto *storage.Crypto) *Store {
 	if backend == nil {
 		return nil
@@ -33,6 +35,7 @@ func NewStore(backend storage.Backend, crypto *storage.Crypto) *Store {
 	return &Store{backend: backend, crypto: crypto}
 }
 
+// LoadManifest returns the index manifest and ETag for the namespace, defaulting to an empty manifest when missing.
 func (s *Store) LoadManifest(ctx context.Context, namespace string) (*Manifest, string, error) {
 	if s == nil || s.backend == nil {
 		return NewManifest(), "", nil
@@ -63,6 +66,7 @@ func (s *Store) LoadManifest(ctx context.Context, namespace string) (*Manifest, 
 	return manifest, info.ETag, nil
 }
 
+// SaveManifest writes the manifest with optional expected ETag for CAS semantics.
 func (s *Store) SaveManifest(ctx context.Context, namespace string, manifest *Manifest, expectedETag string) (string, error) {
 	if s == nil || s.backend == nil {
 		return "", fmt.Errorf("index store unavailable")
@@ -93,6 +97,7 @@ func (s *Store) SaveManifest(ctx context.Context, namespace string, manifest *Ma
 	return info.ETag, nil
 }
 
+// WriteSegment persists a segment and returns its ETag.
 func (s *Store) WriteSegment(ctx context.Context, namespace string, segment *Segment) (string, error) {
 	if s == nil || s.backend == nil {
 		return "", fmt.Errorf("index store unavailable")
@@ -122,6 +127,7 @@ func (s *Store) WriteSegment(ctx context.Context, namespace string, segment *Seg
 	return object, nil
 }
 
+// LoadSegment retrieves and decrypts a segment by ID.
 func (s *Store) LoadSegment(ctx context.Context, namespace, segmentID string) (*Segment, error) {
 	if s == nil || s.backend == nil {
 		return nil, fmt.Errorf("index store unavailable")
@@ -148,6 +154,7 @@ func (s *Store) LoadSegment(ctx context.Context, namespace, segmentID string) (*
 	return SegmentFromProto(&msg), nil
 }
 
+// DeleteSegment removes the persisted segment object.
 func (s *Store) DeleteSegment(ctx context.Context, namespace, segmentID string) error {
 	if s == nil || s.backend == nil {
 		return fmt.Errorf("index store unavailable")

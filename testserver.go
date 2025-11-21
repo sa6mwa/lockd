@@ -1114,8 +1114,20 @@ func (m *testMTLSMaterial) NewHTTPClient() (*http.Client, error) {
 		MinVersion:   tls.VersionTLS12,
 		RootCAs:      m.clientParsed.CAPool,
 		Certificates: []tls.Certificate{m.clientParsed.Certificate},
+		ClientSessionCache: tls.NewLRUClientSessionCache(512),
 	}
-	return &http.Client{Transport: transport, Timeout: 5 * time.Second}, nil
+	transport.ForceAttemptHTTP2 = true
+	transport.MaxIdleConns = 2048
+	transport.MaxIdleConnsPerHost = 2048
+	transport.MaxConnsPerHost = 0 // unlimited; rely on per-request context deadlines
+	transport.IdleConnTimeout = 90 * time.Second
+	transport.DisableCompression = true
+
+	return &http.Client{
+		Transport: transport,
+		// Per-request contexts already bound timeouts; keep client-wide timeout open.
+		Timeout: 0,
+	}, nil
 }
 
 func dedupeHosts(hosts []string) []string {

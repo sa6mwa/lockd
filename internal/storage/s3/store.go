@@ -50,6 +50,7 @@ type Store struct {
 	crypto *storage.Crypto
 }
 
+// DefaultNamespaceConfig returns the preferred namespace defaults for S3 backends.
 func (s *Store) DefaultNamespaceConfig() namespaces.Config {
 	cfg := namespaces.DefaultConfig()
 	cfg.Query.Preferred = search.EngineIndex

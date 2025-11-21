@@ -1,0 +1,102 @@
+package core
+
+import (
+	"context"
+	"errors"
+	"io"
+	"time"
+
+	"pkt.systems/lockd/internal/qrf"
+	"pkt.systems/lockd/internal/queue"
+)
+
+// QueueEnqueueCommand describes a transport-neutral enqueue request.
+type QueueEnqueueCommand struct {
+	Namespace      string
+	Queue          string
+	Payload        io.Reader
+	DelaySeconds   int64
+	VisibilitySecs int64
+	TTLSeconds     int64
+	MaxAttempts    int
+	Attributes     map[string]any
+	ContentType    string
+}
+
+// QueueEnqueueResult surfaces details of the enqueued message.
+type QueueEnqueueResult struct {
+	Namespace           string
+	Queue               string
+	MessageID           string
+	Attempts            int
+	MaxAttempts         int
+	NotVisibleUntilUnix int64
+	VisibilityTimeout   int64
+	PayloadBytes        int64
+	CorrelationID       string
+}
+
+// Enqueue inserts a message into the queue backend.
+func (s *Service) Enqueue(ctx context.Context, cmd QueueEnqueueCommand) (*QueueEnqueueResult, error) {
+	if err := s.maybeThrottleQueue(qrf.KindQueueProducer); err != nil {
+		return nil, err
+	}
+	qsvc, ok := s.queueProvider.(*queue.Service)
+	if !ok || qsvc == nil {
+		return nil, Failure{Code: "queue_disabled", Detail: "queue service not configured", HTTPStatus: 501}
+	}
+	if cmd.Queue == "" {
+		return nil, Failure{Code: "missing_queue", Detail: "queue is required", HTTPStatus: 400}
+	}
+	ns, err := s.resolveNamespace(cmd.Namespace)
+	if err != nil {
+		return nil, Failure{Code: "invalid_namespace", Detail: err.Error(), HTTPStatus: 400}
+	}
+	s.observeNamespace(ns)
+
+	opts := queue.EnqueueOptions{
+		Delay:       secondsToDuration(cmd.DelaySeconds),
+		Visibility:  secondsToDuration(cmd.VisibilitySecs),
+		TTL:         secondsToDuration(cmd.TTLSeconds),
+		MaxAttempts: cmd.MaxAttempts,
+		Attributes:  cmd.Attributes,
+		ContentType: cmd.ContentType,
+	}
+
+	msg, err := qsvc.Enqueue(ctx, ns, cmd.Queue, cmd.Payload, opts)
+	if err != nil {
+		return nil, classifyQueueError(err)
+	}
+	if s.queueDispatcher != nil {
+		s.queueDispatcher.Notify(ns, cmd.Queue)
+	}
+	return &QueueEnqueueResult{
+		Namespace:           msg.Namespace,
+		Queue:               msg.Queue,
+		MessageID:           msg.ID,
+		Attempts:            msg.Attempts,
+		MaxAttempts:         msg.MaxAttempts,
+		NotVisibleUntilUnix: msg.NotVisibleUntil.Unix(),
+		VisibilityTimeout:   int64(msg.Visibility.Seconds()),
+		PayloadBytes:        msg.PayloadBytes,
+		CorrelationID:       msg.CorrelationID,
+	}, nil
+}
+
+func secondsToDuration(v int64) time.Duration {
+	if v <= 0 {
+		return 0
+	}
+	return time.Duration(v) * time.Second
+}
+
+func classifyQueueError(err error) error {
+	var failure Failure
+	switch {
+	case errors.Is(err, queue.ErrTooManyConsumers):
+		failure = Failure{Code: "queue_busy", Detail: "too many consumers", HTTPStatus: 503}
+	default:
+		return err
+	}
+	return failure
+}

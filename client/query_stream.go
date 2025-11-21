@@ -411,7 +411,6 @@ type jsonValueReader struct {
 	escape   bool
 	depth    int
 	simple   bool
-	drained  bool
 }
 
 func newJSONValueReader(r *bufio.Reader) (*jsonValueReader, error) {

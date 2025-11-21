@@ -87,6 +87,7 @@ EXIT_CODE=0
 
 export LOCKD_TEST_STORAGE_ENCRYPTION=$crypto_enabled
 export LOCKD_TEST_WITH_MTLS=$mtls_enabled
+export OTEL_SDK_DISABLED=1
 if [[ $crypto_enabled -eq 1 ]]; then
   echo "LOCKD_TEST_STORAGE_ENCRYPTION=1 (encryption enabled)"
 else
@@ -97,6 +98,7 @@ if [[ $mtls_enabled -eq 1 ]]; then
 else
   echo "LOCKD_TEST_WITH_MTLS=0 (mTLS disabled)"
 fi
+echo "OTEL_SDK_DISABLED=1 (telemetry disabled for benchmarks)"
 echo
 
 for suite in "${SUITES_TO_RUN[@]}"; do

@@ -43,47 +43,6 @@ func (s *stubService) EnsureMessageReady(ctx context.Context, namespace, queue, 
 	return nil
 }
 
-type stubWatchSubscription struct {
-	events chan struct{}
-}
-
-func (s *stubWatchSubscription) Events() <-chan struct{} { return s.events }
-
-func (s *stubWatchSubscription) Close() error {
-	close(s.events)
-	return nil
-}
-
-type stubWatchFactory struct {
-	sub *stubWatchSubscription
-}
-
-func (f *stubWatchFactory) Subscribe(namespace, queue string) (WatchSubscription, error) {
-	return f.sub, nil
-}
-
-func makeCandidate(queueName, id string) *Candidate {
-	doc := messageDocument{
-		Type:              "queue_msg",
-		Namespace:         "default",
-		Queue:             queueName,
-		ID:                id,
-		NotVisibleUntil:   time.Unix(0, 0),
-		MaxAttempts:       5,
-		VisibilityTimeout: 30,
-	}
-	desc := MessageDescriptor{
-		ID:           id,
-		MetadataKey:  "meta/" + id,
-		MetadataETag: "etag-" + id,
-		Document:     doc,
-	}
-	return &Candidate{
-		Descriptor: desc,
-		NextCursor: id + "-next",
-	}
-}
-
 func TestDispatcherTryWatcherDiscrepancy(t *testing.T) {
 	const namespace = "default"
 	svc := &stubService{

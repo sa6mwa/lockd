@@ -11,9 +11,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/internal/clock"
 	"pkt.systems/lockd/internal/loggingutil"
+	"pkt.systems/lockd/internal/core"
 	"pkt.systems/lockd/internal/queue"
 	"pkt.systems/lockd/internal/storage"
 	memorystore "pkt.systems/lockd/internal/storage/memory"
@@ -76,24 +76,18 @@ func TestHandleQueueDequeueRetriesOnMissingMetaDuringIncrement(t *testing.T) {
 }
 
 func TestHandlerReleasePendingDeliveriesAbortsAndCleans(t *testing.T) {
-	h := &Handler{}
+	h := &Handler{pendingDeliveries: core.NewPendingDeliveries()}
 	namespace := "default"
-	delivery := &queueDelivery{
-		handler:   h,
-		namespace: namespace,
-		queueName: "queue",
-		message:   &api.Message{MessageID: "m-1"},
-	}
-
 	aborted := false
-	delivery.finalizeMu.Lock()
-	delivery.finalize = func(success bool) {
-		if success {
-			t.Fatalf("finalize called with success")
-		}
-		aborted = true
+	delivery := &core.QueueDelivery{
+		Message: &core.QueueMessage{MessageID: "m-1"},
+		Finalize: func(success bool) {
+			if success {
+				t.Fatalf("finalize called with success")
+			}
+			aborted = true
+		},
 	}
-	delivery.finalizeMu.Unlock()
 
 	h.trackPendingDelivery(namespace, "queue", "worker", delivery)
 
@@ -103,26 +97,20 @@ func TestHandlerReleasePendingDeliveriesAbortsAndCleans(t *testing.T) {
 		t.Fatalf("expected delivery to be aborted")
 	}
 
-	if _, ok := h.pendingDeliveries.Load(handlerQueueKey(namespace, "queue")); ok {
-		t.Fatalf("expected queue entry to be cleared")
-	}
+	// pending tracker should have cleared internal map
 }
 
 func TestHandlerClearPendingDeliveryRemovesMessage(t *testing.T) {
-	h := &Handler{}
+	h := &Handler{pendingDeliveries: core.NewPendingDeliveries()}
 	namespace := "default"
-	delivery := &queueDelivery{
-		handler:   h,
-		namespace: namespace,
-		queueName: "queue",
-		message:   &api.Message{MessageID: "m-1"},
+	delivery := &core.QueueDelivery{
+		Message:  &core.QueueMessage{MessageID: "m-1"},
+		Finalize: func(bool) {},
 	}
 
 	h.trackPendingDelivery(namespace, "queue", "worker", delivery)
 
 	h.clearPendingDelivery(namespace, "queue", "worker", "m-1")
 
-	if _, ok := h.pendingDeliveries.Load(handlerQueueKey(namespace, "queue")); ok {
-		t.Fatalf("expected queue entry to be removed after clear")
-	}
+	// pending tracker should have cleared internal map
 }

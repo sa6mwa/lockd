@@ -45,7 +45,7 @@ func startAWSQueryServer(t testing.TB) *lockd.TestServer {
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-		querydata.FlushQueryNamespaces(t, ctx, ts.Client)
+		querydata.FlushQueryNamespaces(ctx, t, ts.Client)
 		_ = ts.Stop(ctx)
 		CleanupQueryNamespaces(t, cfg)
 	})

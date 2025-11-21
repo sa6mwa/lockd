@@ -12,9 +12,8 @@ import (
 	"pkt.systems/lockd/namespaces"
 )
 
-const (
-	PaginationNamespace = "query-pagination"
-)
+// PaginationNamespace is the namespace dedicated to pagination-focused query fixtures.
+const PaginationNamespace = "query-pagination"
 
 var suiteNamespaces = []string{
 	namespaces.Default,
@@ -34,13 +33,16 @@ func QueryNamespaces() []string {
 type DatasetProfile int
 
 const (
+	// DatasetReduced seeds the smallest dataset used for smoke coverage.
 	DatasetReduced DatasetProfile = iota
+	// DatasetFull seeds the standard dataset used by most query suites.
 	DatasetFull
+	// DatasetExtended seeds the most exhaustive dataset for pagination/streaming.
 	DatasetExtended
 )
 
 // SeedState writes the provided JSON document to the requested namespace/key.
-func SeedState(t testing.TB, ctx context.Context, cli *client.Client, namespace, key string, state map[string]any) {
+func SeedState(ctx context.Context, t testing.TB, cli *client.Client, namespace, key string, state map[string]any) {
 	t.Helper()
 	payload, err := json.Marshal(state)
 	if err != nil {
@@ -88,7 +90,7 @@ func registerCleanup(t testing.TB, cli *client.Client, namespace, key string) {
 
 // FlushQueryNamespaces forces the index writer to flush pending documents for the provided namespaces.
 // When namespaces is empty, all suite namespaces are flushed.
-func FlushQueryNamespaces(t testing.TB, ctx context.Context, cli *client.Client, namespaces ...string) {
+func FlushQueryNamespaces(ctx context.Context, t testing.TB, cli *client.Client, namespaces ...string) {
 	t.Helper()
 	if cli == nil {
 		return

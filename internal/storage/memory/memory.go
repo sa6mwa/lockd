@@ -42,6 +42,7 @@ type Store struct {
 	crypto *storage.Crypto
 }
 
+// DefaultNamespaceConfig returns the default namespace settings for the in-memory backend.
 func (s *Store) DefaultNamespaceConfig() namespaces.Config {
 	cfg := namespaces.DefaultConfig()
 	cfg.Query.Preferred = search.EngineScan
@@ -404,6 +405,8 @@ func (s *Store) ListObjects(_ context.Context, namespace string, opts storage.Li
 	s.mu.Unlock()
 
 	result := &storage.ListResult{}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	count := 0
 	startAfter := ""
 	if opts.StartAfter != "" {
@@ -419,7 +422,10 @@ func (s *Store) ListObjects(_ context.Context, namespace string, opts storage.Li
 		if opts.Prefix != "" && !strings.HasPrefix(key, canonicalPrefix) {
 			continue
 		}
-		entry := s.objs[key]
+		entry, ok := s.objs[key]
+		if !ok {
+			continue
+		}
 		relative := strings.TrimPrefix(key, prefix)
 		result.Objects = append(result.Objects, storage.ObjectInfo{
 			Key:          relative,

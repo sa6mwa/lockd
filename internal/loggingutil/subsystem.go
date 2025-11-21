@@ -41,6 +41,11 @@ func WithSubsystem(logger pslog.Logger, subsystem string) pslog.Logger {
 	if subsystem == "" {
 		return EnsureLogger(logger)
 	}
+	logger = EnsureLogger(logger)
+	if IsNoop(logger) {
+		// Preserve the alloc-free noop logger when logging is disabled.
+		return logger
+	}
 	switch existing := logger.(type) {
 	case *subsystemLogger:
 		return &subsystemLogger{

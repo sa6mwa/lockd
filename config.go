@@ -149,27 +149,29 @@ func isValidJSONUtil(name string) bool {
 
 // Config captures the tunables for a lockd.Server instance.
 type Config struct {
-	Listen               string
-	ListenProto          string
-	Store                string
-	DefaultNamespace     string
-	JSONMaxBytes         int64
-	JSONUtil             string
-	SpoolMemoryThreshold int64
-	DiskRetention        time.Duration
-	DiskJanitorInterval  time.Duration
-	DiskQueueWatch       bool
-	MemQueueWatch        bool
-	MemQueueWatchSet     bool
-	DefaultTTL           time.Duration
-	MaxTTL               time.Duration
-	AcquireBlock         time.Duration
-	SweeperInterval      time.Duration
-	DrainGrace           time.Duration
-	DrainGraceSet        bool
-	ShutdownTimeout      time.Duration
-	ShutdownTimeoutSet   bool
-	OTLPEndpoint         string
+	Listen                string
+	ListenProto           string
+	Store                 string
+	DefaultNamespace      string
+	JSONMaxBytes          int64
+	JSONUtil              string
+	SpoolMemoryThreshold  int64
+	DiskRetention         time.Duration
+	DiskJanitorInterval   time.Duration
+	DiskQueueWatch        bool
+	MemQueueWatch         bool
+	MemQueueWatchSet      bool
+	DefaultTTL            time.Duration
+	MaxTTL                time.Duration
+	AcquireBlock          time.Duration
+	SweeperInterval       time.Duration
+	DrainGrace            time.Duration
+	DrainGraceSet         bool
+	ShutdownTimeout       time.Duration
+	ShutdownTimeoutSet    bool
+	OTLPEndpoint          string
+	DisableHTTPTracing    bool
+	DisableStorageTracing bool
 
 	// mTLS
 	DisableMTLS  bool

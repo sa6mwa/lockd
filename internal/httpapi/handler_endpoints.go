@@ -13,6 +13,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/trace"
@@ -1493,6 +1494,32 @@ func (h *Handler) handleQueueSubscribeWithState(w http.ResponseWriter, r *http.R
 	return h.handleQueueSubscribeInternal(w, r, true)
 }
 
+type deliverySlice struct {
+	items []*core.QueueDelivery
+}
+
+var deliverySlicePool sync.Pool
+
+func getSingleDeliverySlice(d *core.QueueDelivery) []*core.QueueDelivery {
+	if v, ok := deliverySlicePool.Get().(*deliverySlice); ok {
+		if cap(v.items) == 0 {
+			v.items = make([]*core.QueueDelivery, 1)
+		}
+		v.items = v.items[:1]
+		v.items[0] = d
+		return v.items
+	}
+	return []*core.QueueDelivery{d}
+}
+
+func putSingleDeliverySlice(items []*core.QueueDelivery) {
+	if len(items) != 1 {
+		return
+	}
+	items[0] = nil
+	deliverySlicePool.Put(&deliverySlice{items: items})
+}
+
 func (h *Handler) handleQueueSubscribeInternal(w http.ResponseWriter, r *http.Request, stateful bool) error {
 	baseCtx := r.Context()
 	if err := h.maybeThrottleQueue(qrf.KindQueueConsumer); err != nil {
@@ -1732,7 +1759,9 @@ func (h *Handler) handleQueueSubscribeInternal(w http.ResponseWriter, r *http.Re
 			}
 			hotUntil = time.Now().Add(subscribeHotWindow)
 			h.trackPendingDelivery(resolvedNamespace, queueName, owner, delivery)
-			writeErr := writeDeliveries([]*core.QueueDelivery{delivery}, nextCursor)
+			single := getSingleDeliverySlice(delivery)
+			writeErr := writeDeliveries(single, nextCursor)
+			putSingleDeliverySlice(single)
 			if writeErr != nil {
 				if delivery.Message != nil {
 					h.clearPendingDelivery(resolvedNamespace, queueName, owner, delivery.Message.MessageID)

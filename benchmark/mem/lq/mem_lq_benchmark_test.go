@@ -291,6 +291,14 @@ func runMemQueueBenchmark(b *testing.B, scenario queueBenchmarkScenario, payload
 			prefetchOverride = v
 		}
 	}
+	doublePrefetchOverride := 0
+	if scenario.servers > 1 {
+		if override := os.Getenv("MEM_LQ_BENCH_PREFETCH_DOUBLE"); override != "" {
+			if v, err := strconv.Atoi(override); err == nil && v > 0 {
+				doublePrefetchOverride = v
+			}
+		}
+	}
 
 	metrics := new(benchMetrics)
 
@@ -380,6 +388,9 @@ func runMemQueueBenchmark(b *testing.B, scenario queueBenchmarkScenario, payload
 			go func(worker int, cli *lockdclient.Client) {
 				defer wg.Done()
 				batchSize := scenario.prefetch
+				if scenario.servers > 1 && doublePrefetchOverride > 0 {
+					batchSize = doublePrefetchOverride
+				}
 				if prefetchOverride > 0 {
 					batchSize = prefetchOverride
 				}

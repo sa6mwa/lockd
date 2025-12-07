@@ -11,6 +11,7 @@ import (
 	"net/textproto"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -293,31 +294,33 @@ func writeQueueDeliveryBatch(w http.ResponseWriter, deliveries []*core.QueueDeli
 }
 
 func writeQueueDeliveriesToWriter(mw *multipart.Writer, deliveries []*core.QueueDelivery, defaultCursor string) (string, error) {
-	sink := &multipartQueueSink{mw: mw, defaultCursor: defaultCursor}
+	sink := getMultipartQueueSink()
+	sink.mw = mw
+	sink.defaultCursor = defaultCursor
+	sink.firstCID = ""
 	if err := core.WriteDeliveries(deliveries, defaultCursor, sink); err != nil {
+		putMultipartQueueSink(sink)
 		return "", err
 	}
-	return sink.firstCID, nil
+	first := sink.firstCID
+	putMultipartQueueSink(sink)
+	return first, nil
 }
 
 type multipartQueueSink struct {
 	mw            *multipart.Writer
 	defaultCursor string
 	firstCID      string
+	buf           []byte
 }
 
 func (s *multipartQueueSink) WriteMeta(idx, total int, d *core.QueueDelivery, defaultCursor string) error {
 	if s.mw == nil || d == nil {
 		return nil
 	}
-	metaHeader := textproto.MIMEHeader{}
-	metaHeader.Set("Content-Type", "application/json")
-	if total > 1 {
-		metaHeader.Set("Content-Disposition", fmt.Sprintf(`form-data; name="meta"; filename="meta-%d.json"`, idx))
-	} else {
-		metaHeader.Set("Content-Disposition", `form-data; name="meta"`)
-	}
+	metaHeader := getMetaHeader(total, idx)
 	metaPart, err := s.mw.CreatePart(metaHeader)
+	putHeader(metaHeader)
 	if err != nil {
 		return err
 	}
@@ -326,7 +329,12 @@ func (s *multipartQueueSink) WriteMeta(idx, total int, d *core.QueueDelivery, de
 		cursor = defaultCursor
 	}
 	meta := api.DequeueResponse{Message: toAPIDeliveryMessage(d.Message), NextCursor: cursor}
-	if err := json.NewEncoder(metaPart).Encode(meta); err != nil {
+	s.buf, err = json.Marshal(meta)
+	if err != nil {
+		return err
+	}
+	// json.Marshal does not add a newline; mirror Encoder.Encode behaviour.
+	if _, err := metaPart.Write(append(s.buf, '\n')); err != nil {
 		return err
 	}
 	if d.Message != nil && s.firstCID == "" {
@@ -339,25 +347,88 @@ func (s *multipartQueueSink) WritePayload(idx, total int, d *core.QueueDelivery)
 	if s.mw == nil || d == nil || d.Payload == nil {
 		return nil
 	}
-	payloadHeader := textproto.MIMEHeader{}
-	ctype := strings.TrimSpace(d.PayloadContentType)
-	if ctype == "" {
-		ctype = "application/octet-stream"
-	}
-	payloadHeader.Set("Content-Type", ctype)
-	if d.PayloadBytes >= 0 {
-		payloadHeader.Set("Content-Length", strconv.FormatInt(d.PayloadBytes, 10))
-	}
-	if total > 1 {
-		payloadHeader.Set("Content-Disposition", fmt.Sprintf(`form-data; name=\"payload\"; filename=\"payload-%d\"`, idx))
-	} else {
-		payloadHeader.Set("Content-Disposition", `form-data; name=\"payload\"`)
-	}
+	payloadHeader := getPayloadHeader(total, idx, d.PayloadContentType, d.PayloadBytes)
 	payloadPart, err := s.mw.CreatePart(payloadHeader)
+	putHeader(payloadHeader)
 	if err != nil {
 		return err
 	}
 	return core.PayloadCopy(payloadPart, d)
+}
+
+var multipartQueueSinkPool sync.Pool
+
+func getMultipartQueueSink() *multipartQueueSink {
+	if v, ok := multipartQueueSinkPool.Get().(*multipartQueueSink); ok {
+		return v
+	}
+	return &multipartQueueSink{}
+}
+
+func putMultipartQueueSink(s *multipartQueueSink) {
+	if s == nil {
+		return
+	}
+	s.mw = nil
+	s.defaultCursor = ""
+	s.firstCID = ""
+	if cap(s.buf) > 1<<16 {
+		s.buf = nil
+	} else {
+		s.buf = s.buf[:0]
+	}
+	multipartQueueSinkPool.Put(s)
+}
+
+var mimeHeaderPool sync.Pool
+
+func getHeader() textproto.MIMEHeader {
+	if v, ok := mimeHeaderPool.Get().(textproto.MIMEHeader); ok {
+		for k := range v {
+			delete(v, k)
+		}
+		return v
+	}
+	return make(textproto.MIMEHeader, 4)
+}
+
+func putHeader(h textproto.MIMEHeader) {
+	if h == nil {
+		return
+	}
+	for k := range h {
+		delete(h, k)
+	}
+	mimeHeaderPool.Put(h)
+}
+
+func getMetaHeader(total, idx int) textproto.MIMEHeader {
+	h := getHeader()
+	h.Set("Content-Type", "application/json")
+	if total > 1 {
+		h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="meta"; filename="meta-%d.json"`, idx))
+	} else {
+		h.Set("Content-Disposition", `form-data; name="meta"`)
+	}
+	return h
+}
+
+func getPayloadHeader(total, idx int, payloadContentType string, payloadBytes int64) textproto.MIMEHeader {
+	h := getHeader()
+	ctype := strings.TrimSpace(payloadContentType)
+	if ctype == "" {
+		ctype = "application/octet-stream"
+	}
+	h.Set("Content-Type", ctype)
+	if payloadBytes >= 0 {
+		h.Set("Content-Length", strconv.FormatInt(payloadBytes, 10))
+	}
+	if total > 1 {
+		h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="payload"; filename="payload-%d"`, idx))
+	} else {
+		h.Set("Content-Disposition", `form-data; name="payload"`)
+	}
+	return h
 }
 
 func toAPIDeliveryMessage(msg *core.QueueMessage) *api.Message {

@@ -5,14 +5,17 @@ set -uo pipefail
 crypto_enabled=1
 mtls_enabled=1
 benchtime=${BENCHTIME:-1x}
+prefetch_double=8
 
 print_usage() {
   cat <<'USAGE'
-Usage: run-benchmark-suites.sh [--disable-crypto] [--disable-mtls] [suite ...]
+Usage: run-benchmark-suites.sh [--disable-crypto] [--disable-mtls] [--prefetch-double N] [--benchtime DUR] [suite ...]
 
 Options:
   --disable-crypto   Run benchmarks with LOCKD_TEST_STORAGE_ENCRYPTION=0 (default 1).
   --disable-mtls     Run benchmarks with LOCKD_TEST_WITH_MTLS=0 (default 1).
+  --prefetch-double N Set MEM_LQ_BENCH_PREFETCH_DOUBLE for multi-server mem benches (default 8).
+  --benchtime DUR     Value passed to -benchtime (default 1x; e.g. 1s).
   --help, -h         Show this help text.
 
 Environment:
@@ -30,6 +33,14 @@ while [[ $# -gt 0 ]]; do
     --disable-mtls)
       mtls_enabled=0
       shift
+      ;;
+    --prefetch-double)
+      prefetch_double=${2:-}
+      shift 2
+      ;;
+    --benchtime)
+      benchtime=${2:-}
+      shift 2
       ;;
     --help|-h)
       print_usage
@@ -93,6 +104,7 @@ EXIT_CODE=0
 export LOCKD_TEST_STORAGE_ENCRYPTION=$crypto_enabled
 export LOCKD_TEST_WITH_MTLS=$mtls_enabled
 export OTEL_SDK_DISABLED=1
+export MEM_LQ_BENCH_PREFETCH_DOUBLE=$prefetch_double
 if [[ $crypto_enabled -eq 1 ]]; then
   echo "LOCKD_TEST_STORAGE_ENCRYPTION=1 (encryption enabled)"
 else
@@ -104,6 +116,7 @@ else
   echo "LOCKD_TEST_WITH_MTLS=0 (mTLS disabled)"
 fi
 echo "BENCHTIME=${benchtime} (passed to go test -benchtime)"
+echo "MEM_LQ_BENCH_PREFETCH_DOUBLE=${prefetch_double} (multi-server prefetch override)"
 echo "OTEL_SDK_DISABLED=1 (telemetry disabled for benchmarks)"
 echo
 

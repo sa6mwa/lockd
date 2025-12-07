@@ -1,6 +1,9 @@
 package core
 
-import "io"
+import (
+	"io"
+	"sync"
+)
 
 // QueueDeliverySink allows transports to encode deliveries (meta + payload) without duplicating iteration.
 type QueueDeliverySink interface {
@@ -35,6 +38,15 @@ func PayloadCopy(w io.Writer, d *QueueDelivery) error {
 	if d == nil || d.Payload == nil {
 		return nil
 	}
-	_, err := io.Copy(w, d.Payload)
+	buf := payloadCopyBufPool.Get().([]byte)
+	_, err := io.CopyBuffer(w, d.Payload, buf)
+	payloadCopyBufPool.Put(buf)
 	return err
+}
+
+var payloadCopyBufPool = sync.Pool{
+	New: func() any {
+		// 32 KiB matches io.Copy default; tweakable if profiles suggest.
+		return make([]byte, 32<<10)
+	},
 }

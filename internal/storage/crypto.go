@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"os"
 	"strings"
+	"sync"
 
 	"pkt.systems/kryptograf"
 	"pkt.systems/kryptograf/keymgmt"
@@ -27,6 +29,8 @@ type Crypto struct {
 	metadataContext  []byte
 }
 
+var cryptoBufferPool sync.Pool
+
 // NewCrypto initialises a Crypto helper according to cfg. When encryption is disabled the returned value is nil.
 func NewCrypto(cfg CryptoConfig) (*Crypto, error) {
 	const defaultStreamChunkSize = 8 * 1024 // reduces per-writer buffer overhead vs kryptograf default (64 KiB)
@@ -43,6 +47,9 @@ func NewCrypto(cfg CryptoConfig) (*Crypto, error) {
 		return nil, fmt.Errorf("storage crypto: root key required when encryption enabled")
 	}
 	kg := kryptograf.New(cfg.RootKey).WithChunkSize(defaultStreamChunkSize)
+	if enabled, _ := parseBoolEnv("LOCKD_USE_KRYPTO_POOL"); enabled {
+		kg = kg.WithOptions(kryptograf.WithBufferPool(&cryptoBufferPool))
+	}
 	if cfg.Snappy {
 		kg = kg.WithSnappy()
 	}
@@ -136,6 +143,21 @@ func (c *Crypto) MaterialFromDescriptor(context string, descriptor []byte) (kryp
 // StateObjectContext returns the encryption context used for a lock state object.
 func StateObjectContext(key string) string {
 	return "state:" + key
+}
+
+func parseBoolEnv(key string) (bool, bool) {
+	v, ok := os.LookupEnv(key)
+	if !ok {
+		return false, false
+	}
+	switch strings.ToLower(v) {
+	case "1", "true", "yes", "on":
+		return true, true
+	case "0", "false", "no", "off":
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 func queueObjectContext(prefix, namespace, relPath string) string {

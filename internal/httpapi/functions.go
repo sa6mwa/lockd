@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -252,6 +253,12 @@ func normalizeSelectorFields(sel *api.Selector) error {
 
 // convertCoreError maps transport-neutral core failures onto HTTP-aware errors.
 func convertCoreError(err error) error {
+	switch {
+	case errors.Is(err, storage.ErrCASMismatch):
+		return httpError{Status: http.StatusConflict, Code: "cas_mismatch", Detail: "storage cas mismatch"}
+	case errors.Is(err, storage.ErrNotFound):
+		return httpError{Status: http.StatusNotFound, Code: "not_found", Detail: "resource not found"}
+	}
 	if httpErr, ok := transport.ToHTTP(err); ok {
 		return httpError{
 			Status:     httpErr.Status,

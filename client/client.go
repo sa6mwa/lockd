@@ -5297,150 +5297,197 @@ func (c *Client) subscribe(ctx context.Context, queue string, opts SubscribeOpti
 		return httpReq, cancel, nil
 	}
 
-	resp, cancel, endpoint, err := c.attemptEndpoints(builder, "")
-	if err != nil {
-		return err
-	}
-	defer cancel()
-	defer resp.Body.Close()
-	c.observeShutdown(endpoint, resp)
-
-	if resp.StatusCode != http.StatusOK {
-		err := c.decodeError(resp)
-		return err
-	}
-
-	mediaType, params, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
-	if err != nil || !strings.HasPrefix(strings.ToLower(mediaType), "multipart/") {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
-		}
-		return fmt.Errorf("lockd: unexpected subscribe content-type %q", resp.Header.Get("Content-Type"))
-	}
-	boundary := params["boundary"]
-	if boundary == "" {
-		return fmt.Errorf("lockd: multipart response missing boundary")
-	}
-	mr := multipart.NewReader(resp.Body, boundary)
-	headerCID := resp.Header.Get(headerCorrelationID)
-	delivered := 0
-
 	for {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			return ctx.Err()
-		default:
 		}
 
-		metaPart, err := mr.NextPart()
-		if err == io.EOF {
-			break
-		}
+		resp, cancel, endpoint, err := c.attemptEndpoints(builder, "")
 		if err != nil {
-			return fmt.Errorf("lockd: subscribe meta part: %w", err)
+			return err
 		}
-		if name := metaPart.FormName(); name != "" && name != "meta" {
-			metaPart.Close()
-			return fmt.Errorf("lockd: unexpected multipart part %q", name)
-		}
-		var apiResp api.DequeueResponse
-		if err := json.NewDecoder(metaPart).Decode(&apiResp); err != nil {
-			metaPart.Close()
-			return fmt.Errorf("lockd: decode subscribe meta: %w", err)
-		}
-		metaPart.Close()
-		if apiResp.Message == nil {
-			continue
+		c.observeShutdown(endpoint, resp)
+
+		if resp.StatusCode != http.StatusOK {
+			apiErr := c.decodeError(resp)
+			resp.Body.Close()
+			cancel()
+			if apiErr != nil {
+				if typed, ok := apiErr.(*APIError); ok && typed.Response.ErrorCode == "waiting" {
+					time.Sleep(500 * time.Microsecond)
+					continue
+				}
+				if typed, ok := apiErr.(*APIError); ok && typed.Response.ErrorCode == "cas_mismatch" {
+					time.Sleep(500 * time.Microsecond)
+					continue
+				}
+				return apiErr
+			}
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			return fmt.Errorf("lockd: subscribe unexpected status %d", resp.StatusCode)
 		}
 
-		payloadPart, err := mr.NextPart()
-		var payloadBytes []byte
-		if err == io.EOF {
-			payloadBytes = nil
-		} else if err != nil {
-			return fmt.Errorf("lockd: subscribe payload part: %w", err)
-		} else {
-			if name := payloadPart.FormName(); name != "" && name != "payload" {
-				payloadPart.Close()
+		mediaType, params, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+		if err != nil || !strings.HasPrefix(strings.ToLower(mediaType), "multipart/") {
+			resp.Body.Close()
+			cancel()
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			return fmt.Errorf("lockd: unexpected subscribe content-type %q", resp.Header.Get("Content-Type"))
+		}
+		boundary := params["boundary"]
+		if boundary == "" {
+			resp.Body.Close()
+			cancel()
+			return fmt.Errorf("lockd: multipart response missing boundary")
+		}
+
+		mr := multipart.NewReader(resp.Body, boundary)
+		headerCID := resp.Header.Get(headerCorrelationID)
+		delivered := 0
+
+		for {
+			select {
+			case <-ctx.Done():
+				resp.Body.Close()
+				cancel()
+				return ctx.Err()
+			default:
+			}
+
+			metaPart, err := mr.NextPart()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				resp.Body.Close()
+				cancel()
+				return fmt.Errorf("lockd: subscribe meta part: %w", err)
+			}
+			if name := metaPart.FormName(); name != "" && name != "meta" {
+				metaPart.Close()
+				resp.Body.Close()
+				cancel()
 				return fmt.Errorf("lockd: unexpected multipart part %q", name)
 			}
-			if lengthHeader := payloadPart.Header.Get("Content-Length"); lengthHeader != "" {
-				if size, parseErr := strconv.ParseInt(lengthHeader, 10, 64); parseErr == nil && size >= 0 {
-					payloadBytes = make([]byte, size)
-					if _, err := io.ReadFull(payloadPart, payloadBytes); err != nil {
+			var apiResp api.DequeueResponse
+			if err := json.NewDecoder(metaPart).Decode(&apiResp); err != nil {
+				metaPart.Close()
+				resp.Body.Close()
+				cancel()
+				return fmt.Errorf("lockd: decode subscribe meta: %w", err)
+			}
+			metaPart.Close()
+			if apiResp.Message == nil {
+				continue
+			}
+
+			payloadPart, err := mr.NextPart()
+			var payloadBytes []byte
+			if err == io.EOF {
+				payloadBytes = nil
+			} else if err != nil {
+				resp.Body.Close()
+				cancel()
+				return fmt.Errorf("lockd: subscribe payload part: %w", err)
+			} else {
+				if name := payloadPart.FormName(); name != "" && name != "payload" {
+					payloadPart.Close()
+					resp.Body.Close()
+					cancel()
+					return fmt.Errorf("lockd: unexpected multipart part %q", name)
+				}
+				if lengthHeader := payloadPart.Header.Get("Content-Length"); lengthHeader != "" {
+					if size, parseErr := strconv.ParseInt(lengthHeader, 10, 64); parseErr == nil && size >= 0 {
+						payloadBytes = make([]byte, size)
+						if _, err := io.ReadFull(payloadPart, payloadBytes); err != nil {
+							payloadPart.Close()
+							resp.Body.Close()
+							cancel()
+							return fmt.Errorf("lockd: read subscribe payload (len=%d): %w", size, err)
+						}
+					} else {
+						payloadBytes, err = io.ReadAll(payloadPart)
 						payloadPart.Close()
-						return fmt.Errorf("lockd: read subscribe payload (len=%d): %w", size, err)
+						if err != nil {
+							resp.Body.Close()
+							cancel()
+							return fmt.Errorf("lockd: read subscribe payload: %w", err)
+						}
 					}
 				} else {
 					payloadBytes, err = io.ReadAll(payloadPart)
 					payloadPart.Close()
 					if err != nil {
+						resp.Body.Close()
+						cancel()
 						return fmt.Errorf("lockd: read subscribe payload: %w", err)
 					}
 				}
-			} else {
-				payloadBytes, err = io.ReadAll(payloadPart)
-				payloadPart.Close()
-				if err != nil {
-					return fmt.Errorf("lockd: read subscribe payload: %w", err)
+			}
+
+			if apiResp.Message.CorrelationID == "" {
+				if headerCID != "" {
+					apiResp.Message.CorrelationID = headerCID
+				} else if cid := CorrelationIDFromContext(ctx); cid != "" {
+					apiResp.Message.CorrelationID = cid
 				}
 			}
-		}
 
-		if apiResp.Message.CorrelationID == "" {
-			if headerCID != "" {
-				apiResp.Message.CorrelationID = headerCID
-			} else if cid := CorrelationIDFromContext(ctx); cid != "" {
-				apiResp.Message.CorrelationID = cid
+			payloadRC := io.NopCloser(bytes.NewReader(payloadBytes))
+			handle := &QueueMessageHandle{
+				client:        c,
+				msg:           *apiResp.Message,
+				cursor:        apiResp.NextCursor,
+				payloadStream: payloadRC,
 			}
-		}
-
-		payloadRC := io.NopCloser(bytes.NewReader(payloadBytes))
-		handle := &QueueMessageHandle{
-			client:        c,
-			msg:           *apiResp.Message,
-			cursor:        apiResp.NextCursor,
-			payloadStream: payloadRC,
-		}
-		if handle.msg.LeaseID != "" {
-			c.RegisterLeaseToken(handle.msg.LeaseID, strconv.FormatInt(handle.msg.FencingToken, 10))
-		}
-		if stateful && handle.msg.StateLeaseID != "" {
-			handle.state = &QueueStateHandle{
-				client:         c,
-				queue:          queue,
-				messageID:      handle.msg.MessageID,
-				leaseID:        handle.msg.StateLeaseID,
-				fencingToken:   handle.msg.StateFencingToken,
-				leaseExpiresAt: handle.msg.StateLeaseExpiresAtUnix,
-				stateETag:      handle.msg.StateETag,
-				correlationID:  handle.msg.CorrelationID,
+			if handle.msg.LeaseID != "" {
+				c.RegisterLeaseToken(handle.msg.LeaseID, strconv.FormatInt(handle.msg.FencingToken, 10))
 			}
-			c.RegisterLeaseToken(handle.state.leaseID, strconv.FormatInt(handle.state.fencingToken, 10))
+			if stateful && handle.msg.StateLeaseID != "" {
+				handle.state = &QueueStateHandle{
+					client:         c,
+					queue:          queue,
+					messageID:      handle.msg.MessageID,
+					leaseID:        handle.msg.StateLeaseID,
+					fencingToken:   handle.msg.StateFencingToken,
+					leaseExpiresAt: handle.msg.StateLeaseExpiresAtUnix,
+					stateETag:      handle.msg.StateETag,
+					correlationID:  handle.msg.CorrelationID,
+				}
+				c.RegisterLeaseToken(handle.state.leaseID, strconv.FormatInt(handle.state.fencingToken, 10))
+			}
+
+			msg := newQueueMessage(handle, nil, opts.OnCloseDelay)
+			var handlerErr error
+			if stateful {
+				handlerErr = stateHandler(ctx, msg, msg.StateHandle())
+			} else {
+				handlerErr = handler(ctx, msg)
+			}
+			if handlerErr != nil {
+				resp.Body.Close()
+				cancel()
+				return handlerErr
+			}
+			delivered++
 		}
 
-		msg := newQueueMessage(handle, nil, opts.OnCloseDelay)
-		var handlerErr error
-		if stateful {
-			handlerErr = stateHandler(ctx, msg, msg.StateHandle())
-		} else {
-			handlerErr = handler(ctx, msg)
+		endFields := []any{
+			"queue", queue,
+			"owner", owner,
+			"stateful", stateful,
+			"endpoint", endpoint,
+			"delivered", delivered,
 		}
-		if handlerErr != nil {
-			return handlerErr
-		}
-		delivered++
+		c.logInfoCtx(ctx, "client.queue.subscribe.complete", endFields...)
+		resp.Body.Close()
+		cancel()
+		return nil
 	}
-
-	endFields := []any{
-		"queue", queue,
-		"owner", owner,
-		"stateful", stateful,
-		"endpoint", endpoint,
-		"delivered", delivered,
-	}
-	c.logInfoCtx(ctx, "client.queue.subscribe.complete", endFields...)
-	return nil
 }
 
 func buildHTTPClient(rawBase string) (*http.Client, string, error) {

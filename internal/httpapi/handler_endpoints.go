@@ -30,6 +30,10 @@ import (
 	"pkt.systems/pslog"
 )
 
+// When set (used by benchmark harness) emit minimal error details to stderr even
+// if the logger is a noop, so failures are observable in no-log runs.
+var benchLogErrors = os.Getenv("MEM_LQ_BENCH_LOG_ERRORS") == "1"
+
 // handleAcquire godoc
 // @Summary      Acquire an exclusive lease
 // @Description  Acquire or wait for an exclusive lease on a key. When block_seconds > 0 the request will long-poll until a lease becomes available or the timeout elapses.
@@ -1719,7 +1723,7 @@ func (h *Handler) handleQueueSubscribeInternal(w http.ResponseWriter, r *http.Re
 				}
 			}
 			cleanup()
-			return err
+			return convertCoreError(err)
 		}
 
 		for _, delivery := range deliveries {
@@ -1757,7 +1761,7 @@ func (h *Handler) handleQueueSubscribeInternal(w http.ResponseWriter, r *http.Re
 				}
 				disconnectStatus = "error"
 				cleanup()
-				return writeErr
+				return convertCoreError(writeErr)
 			}
 			if debugQueueTiming {
 				fmt.Fprintf(os.Stderr, "[%s] queue.subscribe.delivered queue=%s mid=%s\n",
@@ -2100,6 +2104,9 @@ func (h *Handler) handleError(ctx context.Context, w http.ResponseWriter, err er
 	verbose := logger
 	var httpErr httpError
 	if errors.As(err, &httpErr) {
+		if benchLogErrors {
+			fmt.Fprintf(os.Stderr, "[bench-error] code=%s status=%d detail=%s error=%v\n", httpErr.Code, httpErr.Status, httpErr.Detail, err)
+		}
 		verbose.Debug("http.request.failure",
 			"status", httpErr.Status,
 			"code", httpErr.Code,
@@ -2124,6 +2131,9 @@ func (h *Handler) handleError(ctx context.Context, w http.ResponseWriter, err er
 		}
 		h.writeJSON(w, httpErr.Status, resp, headers)
 		return
+	}
+	if benchLogErrors {
+		fmt.Fprintf(os.Stderr, "[bench-error] code=internal_error status=500 detail=%v\n", err)
 	}
 	logger.Error("http.request.panic", "error", err)
 	resp := api.ErrorResponse{

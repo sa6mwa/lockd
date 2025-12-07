@@ -16,7 +16,6 @@ import (
 	"net/http/httptrace"
 	"net/textproto"
 	"net/url"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -30,30 +29,6 @@ import (
 	"pkt.systems/lockd/namespaces"
 	"pkt.systems/pslog"
 )
-
-const (
-	envClientHTTPTrace    = "LOCKD_CLIENT_HTTPTRACE"
-	envClientHTTPTraceAlt = "LOCKD_CLIENT_TRACE_HTTP"
-)
-
-func envBool(name string) bool {
-	val, ok := os.LookupEnv(name)
-	if !ok {
-		return false
-	}
-	val = strings.TrimSpace(val)
-	if val == "" {
-		return true
-	}
-	if b, err := strconv.ParseBool(val); err == nil {
-		return b
-	}
-	switch strings.ToLower(val) {
-	case "1", "t", "true", "yes", "on":
-		return true
-	}
-	return false
-}
 
 // EnqueueOptions controls enqueue behaviour.
 type EnqueueOptions struct {
@@ -1105,11 +1080,6 @@ func (c *Client) initialize(endpoints []string) error {
 	}
 	if c.forUpdateTimeout <= 0 {
 		c.forUpdateTimeout = defaultForUpdateTimeout
-	}
-	if !c.httpTraceEnabled {
-		if envBool(envClientHTTPTrace) || envBool(envClientHTTPTraceAlt) {
-			c.httpTraceEnabled = true
-		}
 	}
 	if c.defaultNamespace == "" {
 		c.defaultsMu.Lock()
@@ -2789,6 +2759,13 @@ func WithKeepAliveTimeout(d time.Duration) Option {
 		if d > 0 {
 			c.keepAliveTimeout = d
 		}
+	}
+}
+
+// WithHTTPTrace enables HTTP client tracing (net/http/httptrace hooks).
+func WithHTTPTrace() Option {
+	return func(c *Client) {
+		c.httpTraceEnabled = true
 	}
 }
 

@@ -304,6 +304,7 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 			MetadataDescriptor: cfg.MetadataDescriptor,
 			MetadataContext:    []byte(cfg.MetadataContext),
 			Snappy:             cfg.StorageEncryptionSnappy,
+			DisableBufferPool:  cfg.DisableKryptoPool,
 		})
 		if err != nil {
 			return nil, err
@@ -313,6 +314,8 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 	if cfg.StorageEncryptionEnabled() {
 		cryptoLogger := loggingutil.WithSubsystem(logger, "storage.crypto.envelope")
 		cryptoLogger.Info("storage.crypto.envelope enabled", "enabled", true)
+		poolLogger := loggingutil.WithSubsystem(logger, "storage.crypto.buffer_pool")
+		poolLogger.Info("storage.crypto.buffer_pool enabled", "enabled", !cfg.DisableKryptoPool)
 		snappyLogger := loggingutil.WithSubsystem(logger, "storage.pipeline.snappy.pre_encrypt")
 		if cfg.StorageEncryptionSnappy {
 			snappyLogger.Info("storage.pipeline.snappy pre-encrypt enabled", "enabled", true)

@@ -244,6 +244,7 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 	flags.Bool("mem-queue-watch", true, "enable in-memory queue change notifications")
 	flags.Bool("disable-storage-encryption", false, "disable kryptograf envelope encryption (plaintext at rest)")
 	flags.Bool("storage-encryption-snappy", false, "enable Snappy compression before encrypting objects")
+	flags.Bool("disable-krypto-pool", false, "disable kryptograf buffer pool (enabled by default)")
 	flags.Bool("disable-mtls", false, "disable mutual TLS")
 	flags.String("bundle", "", "path to combined server bundle PEM")
 	flags.String("denylist-path", "", "path to certificate denylist (optional)")
@@ -312,7 +313,7 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 		"storage-retry-attempts", "storage-retry-base-delay", "storage-retry-max-delay", "storage-retry-multiplier",
 		"queue-max-consumers", "queue-poll-interval", "queue-poll-jitter", "queue-resilient-poll-interval",
 		"indexer-flush-docs", "indexer-flush-interval",
-		"disk-queue-watch", "mem-queue-watch", "disable-storage-encryption", "storage-encryption-snappy",
+		"disk-queue-watch", "mem-queue-watch", "disable-storage-encryption", "storage-encryption-snappy", "disable-krypto-pool",
 		"lsf-sample-interval", "lsf-log-interval",
 		"qrf-enabled", "qrf-queue-soft-limit", "qrf-queue-hard-limit", "qrf-queue-consumer-soft-limit", "qrf-queue-consumer-hard-limit", "qrf-lock-soft-limit", "qrf-lock-hard-limit",
 		"qrf-memory-soft-limit", "qrf-memory-hard-limit", "qrf-memory-soft-limit-percent", "qrf-memory-hard-limit-percent",
@@ -381,6 +382,7 @@ func bindConfig(cfg *lockd.Config) error {
 	if viper.IsSet("storage-encryption") {
 		cfg.DisableStorageEncryption = !viper.GetBool("storage-encryption")
 	}
+	cfg.DisableKryptoPool = viper.GetBool("disable-krypto-pool")
 	cfg.StorageEncryptionSnappy = viper.GetBool("storage-encryption-snappy")
 	if cfg.DisableStorageEncryption {
 		cfg.StorageEncryptionSnappy = false

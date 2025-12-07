@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"sync"
 
@@ -19,6 +18,7 @@ type CryptoConfig struct {
 	MetadataDescriptor keymgmt.Descriptor
 	MetadataContext    []byte
 	Snappy             bool
+	DisableBufferPool  bool
 }
 
 // Crypto encapsulates kryptograf helpers for encrypting metadata, state, and queue payloads.
@@ -47,7 +47,7 @@ func NewCrypto(cfg CryptoConfig) (*Crypto, error) {
 		return nil, fmt.Errorf("storage crypto: root key required when encryption enabled")
 	}
 	kg := kryptograf.New(cfg.RootKey).WithChunkSize(defaultStreamChunkSize)
-	if enabled, _ := parseBoolEnv("LOCKD_USE_KRYPTO_POOL"); enabled {
+	if !cfg.DisableBufferPool {
 		kg = kg.WithOptions(kryptograf.WithBufferPool(&cryptoBufferPool))
 	}
 	if cfg.Snappy {
@@ -143,21 +143,6 @@ func (c *Crypto) MaterialFromDescriptor(context string, descriptor []byte) (kryp
 // StateObjectContext returns the encryption context used for a lock state object.
 func StateObjectContext(key string) string {
 	return "state:" + key
-}
-
-func parseBoolEnv(key string) (bool, bool) {
-	v, ok := os.LookupEnv(key)
-	if !ok {
-		return false, false
-	}
-	switch strings.ToLower(v) {
-	case "1", "true", "yes", "on":
-		return true, true
-	case "0", "false", "no", "off":
-		return false, true
-	default:
-		return false, false
-	}
 }
 
 func queueObjectContext(prefix, namespace, relPath string) string {

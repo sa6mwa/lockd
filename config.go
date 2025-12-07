@@ -184,6 +184,7 @@ type Config struct {
 	MetadataRootKey          keymgmt.RootKey
 	MetadataDescriptor       keymgmt.Descriptor
 	MetadataContext          string
+	DisableKryptoPool        bool
 
 	// Object-store options.
 	S3SSE             string

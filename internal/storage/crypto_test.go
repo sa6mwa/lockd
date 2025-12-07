@@ -3,6 +3,8 @@ package storage
 import (
 	"bytes"
 	"io"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"pkt.systems/kryptograf"
@@ -188,6 +190,16 @@ func TestCryptoSnappyRoundTrip(t *testing.T) {
 
 func mustNewTestCrypto(t *testing.T, snappy bool) *Crypto {
 	t.Helper()
+	cfg := mustNewTestCryptoConfig(t, snappy)
+	crypto, err := NewCrypto(cfg)
+	if err != nil {
+		t.Fatalf("init crypto: %v", err)
+	}
+	return crypto
+}
+
+func mustNewTestCryptoConfig(t *testing.T, snappy bool) CryptoConfig {
+	t.Helper()
 	root := kryptograf.MustGenerateRootKey()
 	kg := kryptograf.New(root)
 	material, err := kg.MintDEK([]byte("meta-context"))
@@ -196,15 +208,62 @@ func mustNewTestCrypto(t *testing.T, snappy bool) *Crypto {
 	}
 	desc := material.Descriptor
 	material.Zero()
-	crypto, err := NewCrypto(CryptoConfig{
+	return CryptoConfig{
 		Enabled:            true,
 		RootKey:            root,
 		MetadataDescriptor: desc,
 		MetadataContext:    []byte("meta-context"),
 		Snappy:             snappy,
+	}
+}
+
+func TestCryptoBufferPoolToggle(t *testing.T) {
+	t.Run("enabled_by_default", func(t *testing.T) {
+		cfg := mustNewTestCryptoConfig(t, false)
+		calls := exerciseCryptoPool(t, cfg)
+		if calls == 0 {
+			t.Fatalf("expected buffer pool to be used by default")
+		}
 	})
+
+	t.Run("disabled_via_config", func(t *testing.T) {
+		cfg := mustNewTestCryptoConfig(t, false)
+		cfg.DisableBufferPool = true
+		calls := exerciseCryptoPool(t, cfg)
+		if calls != 0 {
+			t.Fatalf("expected buffer pool to be disabled via config; got %d allocations", calls)
+		}
+	})
+}
+
+// exerciseCryptoPool encrypts and decrypts metadata while counting pool.Get calls.
+func exerciseCryptoPool(t *testing.T, cfg CryptoConfig) int32 {
+	t.Helper()
+	var gets int32
+	cryptoBufferPool = sync.Pool{
+		New: func() any {
+			atomic.AddInt32(&gets, 1)
+			return make([]byte, 1024)
+		},
+	}
+	t.Cleanup(func() {
+		cryptoBufferPool = sync.Pool{}
+	})
+	crypto, err := NewCrypto(cfg)
 	if err != nil {
 		t.Fatalf("init crypto: %v", err)
 	}
-	return crypto
+	payload := bytes.Repeat([]byte("pool-check-"), 32)
+	ciphertext, err := crypto.EncryptMetadata(payload)
+	if err != nil {
+		t.Fatalf("encrypt metadata: %v", err)
+	}
+	plaintext, err := crypto.DecryptMetadata(ciphertext)
+	if err != nil {
+		t.Fatalf("decrypt metadata: %v", err)
+	}
+	if !bytes.Equal(plaintext, payload) {
+		t.Fatalf("round trip mismatch")
+	}
+	return atomic.LoadInt32(&gets)
 }

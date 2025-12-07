@@ -4,6 +4,7 @@ set -uo pipefail
 
 crypto_enabled=1
 mtls_enabled=1
+benchtime=${BENCHTIME:-1x}
 
 print_usage() {
   cat <<'USAGE'
@@ -13,6 +14,10 @@ Options:
   --disable-crypto   Run benchmarks with LOCKD_TEST_STORAGE_ENCRYPTION=0 (default 1).
   --disable-mtls     Run benchmarks with LOCKD_TEST_WITH_MTLS=0 (default 1).
   --help, -h         Show this help text.
+
+Environment:
+  BENCHTIME          Value passed to -benchtime (default: 1x to avoid repeated
+                     reruns; set e.g. BENCHTIME=1s to restore Go's default).
 USAGE
 }
 
@@ -98,6 +103,7 @@ if [[ $mtls_enabled -eq 1 ]]; then
 else
   echo "LOCKD_TEST_WITH_MTLS=0 (mTLS disabled)"
 fi
+echo "BENCHTIME=${benchtime} (passed to go test -benchtime)"
 echo "OTEL_SDK_DISABLED=1 (telemetry disabled for benchmarks)"
 echo
 
@@ -111,7 +117,7 @@ for suite in "${SUITES_TO_RUN[@]}"; do
   fi
   log_file="$LOG_DIR/${suite//\//-}.log"
   echo "==> Running benchmark suite: $suite"
-  cmd="go test -run=^$ -bench=. -count=1 -benchmem -tags '$tags' ./$dir"
+  cmd="go test -run=^$ -bench=. -benchtime=$benchtime -count=1 -benchmem -tags '$tags' ./$dir"
   echo "Command: $cmd"
   if bash -c "$cmd" 2>&1 | tee "$log_file"; then
     STATUS[$suite]=0

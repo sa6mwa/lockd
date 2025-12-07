@@ -2,7 +2,6 @@ package namespaces
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 )
 
@@ -13,8 +12,6 @@ const (
 	// MaxLength caps the length of namespaces, queue names, and key segments.
 	MaxLength = 128
 )
-
-var componentPattern = regexp.MustCompile(`^[a-z0-9._-]+$`)
 
 // Normalize lowercases and validates ns, applying fallback when ns is empty.
 func Normalize(ns, fallback string) (string, error) {
@@ -48,10 +45,27 @@ func NormalizeComponent(name string) (string, error) {
 		return "", fmt.Errorf("value too long (max %d characters)", MaxLength)
 	}
 	name = strings.ToLower(name)
-	if !componentPattern.MatchString(name) {
+	if !isValidComponent(name) {
 		return "", fmt.Errorf("invalid value %q (allowed: lowercase letters, digits, '.', '_', '-')", name)
 	}
 	return name, nil
+}
+
+func isValidComponent(name string) bool {
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= 'a' && c <= 'z':
+			continue
+		case c >= '0' && c <= '9':
+			continue
+		case c == '.' || c == '_' || c == '-':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // NormalizeKey lowercases and validates a lock key. Keys may contain '/' to

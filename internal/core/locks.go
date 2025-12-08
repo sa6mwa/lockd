@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rs/xid"
 	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/internal/correlation"
 	"pkt.systems/lockd/internal/qrf"
@@ -106,8 +107,8 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (*AcquireResu
 		deadline = s.clock.Now().Add(block)
 	}
 
-	leaseID := uuidv7.NewString()
-	txnID := uuidv7.NewString()
+	leaseID := xid.New().String()
+	txnID := xid.New().String()
 	backoff := newAcquireBackoff()
 	for {
 		now := s.clock.Now()

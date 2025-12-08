@@ -7,6 +7,7 @@ This document outlines a staged path from today’s CAS/lease semantics to a pra
 - Transactions must span keys and namespaces; namespace boundaries are not transaction boundaries.
 - Idempotent, replay-safe operations; decisions are durable before fan-out.
 - Prefer storage-native moves/CAS over heavyweight logs; background sweepers remain responsible for orphaned artifacts.
+- **Identifiers:** txn IDs and lease IDs use compact `github.com/rs/xid`; uuidv7 remains for key/storage identifiers (manifests, segments) to preserve ordering there.
 
 ## Phase 0: Single-key transactional release (foundation)
 - Add `ReleaseDecision` (`commit`, `rollback`) to the ordinary `Acquire` flow.

@@ -22,6 +22,7 @@ type UpdateCommand struct {
 	Key            string
 	LeaseID        string
 	FencingToken   int64
+	TxnID          string
 	IfVersion      int64
 	IfVersionSet   bool
 	IfStateETag    string
@@ -66,6 +67,9 @@ func (s *Service) Update(ctx context.Context, cmd UpdateCommand) (*UpdateResult,
 	if cmd.Body == nil {
 		return nil, Failure{Code: "missing_body", Detail: "state body required", HTTPStatus: http.StatusBadRequest}
 	}
+	if strings.TrimSpace(cmd.TxnID) == "" {
+		return nil, Failure{Code: "missing_txn", Detail: "X-Txn-ID required", HTTPStatus: http.StatusBadRequest}
+	}
 
 	storageKey, err := s.namespacedKey(namespace, cmd.Key)
 	if err != nil {
@@ -100,45 +104,61 @@ func (s *Service) Update(ctx context.Context, cmd UpdateCommand) (*UpdateResult,
 		if err != nil {
 			return nil, err
 		}
-		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, now); err != nil {
+		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now); err != nil {
 			return nil, err
 		}
-		if cmd.IfVersionSet && meta.Version != cmd.IfVersion {
+		if meta.StagedTxnID != "" && meta.StagedTxnID != cmd.TxnID {
 			return nil, Failure{
-				Code:       "version_conflict",
-				Detail:     "state version mismatch",
+				Code:       "txn_mismatch",
+				Detail:     "different transaction already staged",
 				Version:    meta.Version,
 				ETag:       meta.StateETag,
 				HTTPStatus: http.StatusConflict,
 			}
 		}
-		if cmd.IfStateETag != "" && normalizeETag(meta.StateETag) != normalizeETag(cmd.IfStateETag) {
+		currentVersion := meta.Version
+		if meta.StagedTxnID == cmd.TxnID && meta.StagedVersion > 0 {
+			currentVersion = meta.StagedVersion
+		}
+		if cmd.IfVersionSet && currentVersion != cmd.IfVersion {
+			return nil, Failure{
+				Code:       "version_conflict",
+				Detail:     "state version mismatch",
+				Version:    currentVersion,
+				ETag:       meta.StateETag,
+				HTTPStatus: http.StatusConflict,
+			}
+		}
+		currentETag := meta.StateETag
+		if meta.StagedTxnID == cmd.TxnID && meta.StagedStateETag != "" {
+			currentETag = meta.StagedStateETag
+		}
+		if cmd.IfStateETag != "" && normalizeETag(currentETag) != normalizeETag(cmd.IfStateETag) {
 			return nil, Failure{
 				Code:       "etag_mismatch",
 				Detail:     "current state etag does not match",
-				Version:    meta.Version,
-				ETag:       meta.StateETag,
+				Version:    currentVersion,
+				ETag:       currentETag,
 				HTTPStatus: http.StatusConflict,
 			}
 		}
 
 		stateCtx := storage.ContextWithStateDescriptor(ctx, meta.StateDescriptor)
-		result, err := s.store.WriteState(stateCtx, namespace, keyComponent, reader, storage.PutStateOptions{
-			ExpectedETag: meta.StateETag,
-			Descriptor:   meta.StateDescriptor,
+		result, err := s.staging.StageState(stateCtx, namespace, keyComponent, cmd.TxnID, reader, storage.PutStateOptions{
+			Descriptor: meta.StateDescriptor,
 		})
 		if err != nil {
-			if errors.Is(err, storage.ErrCASMismatch) {
-				continue
-			}
-			return nil, fmt.Errorf("write state: %w", err)
+			return nil, fmt.Errorf("stage state: %w", err)
 		}
 
-		meta.StateETag = result.NewETag
-		meta.StateDescriptor = result.Descriptor
-		meta.StatePlaintextBytes = result.BytesWritten
-		meta.Version++
-		meta.PublishedVersion = meta.Version
+		meta.StagedTxnID = cmd.TxnID
+		meta.StagedStateETag = result.NewETag
+		meta.StagedStateDescriptor = result.Descriptor
+		meta.StagedStatePlaintextBytes = result.BytesWritten
+		meta.StagedRemove = false
+		if meta.StagedVersion == 0 {
+			meta.StagedVersion = meta.Version + 1
+		}
 		meta.UpdatedAtUnix = now.Unix()
 		if meta.FencingToken == 0 {
 			meta.FencingToken = cmd.FencingToken
@@ -151,24 +171,16 @@ func (s *Service) Update(ctx context.Context, cmd UpdateCommand) (*UpdateResult,
 			}
 			return nil, fmt.Errorf("store meta: %w", err)
 		}
-		res := &UpdateResult{
-			NewVersion:   meta.Version,
-			NewStateETag: meta.StateETag,
+		return &UpdateResult{
+			NewVersion:   meta.StagedVersion,
+			NewStateETag: meta.StagedStateETag,
 			Bytes:        result.BytesWritten,
 			Meta:         meta,
 			MetaETag:     newMetaETag,
 			Metadata:     map[string]any{},
 			Namespace:    namespace,
 			Key:          cmd.Key,
-		}
-		if s.indexManager != nil {
-			if rdr, rerr := spool.Reader(); rerr == nil {
-				if doc, derr := buildDocumentFromJSON(keyComponent, rdr); derr == nil {
-					_ = s.indexManager.Insert(namespace, doc)
-				}
-			}
-		}
-		return res, nil
+		}, nil
 	}
 }
 
@@ -190,6 +202,9 @@ func (s *Service) Remove(ctx context.Context, cmd RemoveCommand) (*RemoveResult,
 	if strings.TrimSpace(cmd.LeaseID) == "" {
 		return nil, Failure{Code: "missing_lease", Detail: "lease_id required", HTTPStatus: http.StatusBadRequest}
 	}
+	if strings.TrimSpace(cmd.TxnID) == "" {
+		return nil, Failure{Code: "missing_txn", Detail: "X-Txn-ID required", HTTPStatus: http.StatusBadRequest}
+	}
 	storageKey, err := s.namespacedKey(namespace, cmd.Key)
 	if err != nil {
 		return nil, Failure{Code: "invalid_key", Detail: err.Error(), HTTPStatus: http.StatusBadRequest}
@@ -202,77 +217,59 @@ func (s *Service) Remove(ctx context.Context, cmd RemoveCommand) (*RemoveResult,
 		if err != nil {
 			return nil, err
 		}
-		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, now); err != nil {
+		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now); err != nil {
 			return nil, err
 		}
-		if cmd.IfVersionSet && meta.Version != cmd.IfVersion {
+		currentVersion := meta.Version
+		if meta.StagedTxnID == cmd.TxnID && meta.StagedVersion > 0 {
+			currentVersion = meta.StagedVersion
+		}
+		if cmd.IfVersionSet && currentVersion != cmd.IfVersion {
 			return nil, Failure{
 				Code:       "version_conflict",
 				Detail:     "state version mismatch",
-				Version:    meta.Version,
+				Version:    currentVersion,
 				ETag:       meta.StateETag,
 				HTTPStatus: http.StatusConflict,
 			}
 		}
-		if cmd.IfStateETag != "" && normalizeETag(meta.StateETag) != normalizeETag(cmd.IfStateETag) {
+		currentETag := meta.StateETag
+		if meta.StagedTxnID == cmd.TxnID && meta.StagedStateETag != "" {
+			currentETag = meta.StagedStateETag
+		}
+		if cmd.IfStateETag != "" && normalizeETag(currentETag) != normalizeETag(cmd.IfStateETag) {
 			return nil, Failure{
 				Code:       "etag_mismatch",
 				Detail:     "state etag mismatch",
-				Version:    meta.Version,
-				ETag:       meta.StateETag,
+				Version:    currentVersion,
+				ETag:       currentETag,
 				HTTPStatus: http.StatusConflict,
 			}
 		}
 
-		hadState := meta.StateETag != ""
-		expectedETag := cmd.IfStateETag
-		if expectedETag != "" && normalizeETag(expectedETag) == normalizeETag(meta.StateETag) {
-			// Preserve backend-specific formatting (Azure includes quotes).
-			expectedETag = meta.StateETag
+		// Stage a remove operation.
+		_ = s.staging.DiscardStagedState(ctx, namespace, keyComponent, cmd.TxnID, storage.DiscardStagedOptions{IgnoreNotFound: true})
+		meta.StagedTxnID = cmd.TxnID
+		meta.StagedRemove = true
+		meta.StagedStateETag = ""
+		meta.StagedStateDescriptor = nil
+		meta.StagedStatePlaintextBytes = 0
+		if meta.StagedVersion == 0 {
+			meta.StagedVersion = meta.Version + 1
 		}
-
-		removeErr := s.store.Remove(ctx, namespace, keyComponent, expectedETag)
-		removed := false
-		switch {
-		case removeErr == nil:
-			removed = true
-		case errors.Is(removeErr, storage.ErrNotFound):
-			removed = false
-		case errors.Is(removeErr, storage.ErrCASMismatch):
-			return nil, Failure{
-				Code:       "etag_mismatch",
-				Detail:     "state etag mismatch",
-				Version:    meta.Version,
-				ETag:       meta.StateETag,
-				HTTPStatus: http.StatusConflict,
+		meta.UpdatedAtUnix = now.Unix()
+		newMetaETag, err := s.store.StoreMeta(ctx, namespace, keyComponent, meta, metaETag)
+		if err != nil {
+			if errors.Is(err, storage.ErrCASMismatch) {
+				continue
 			}
-		default:
-			return nil, fmt.Errorf("remove state: %w", removeErr)
+			return nil, fmt.Errorf("store meta: %w", err)
 		}
-
-		// Only bump version / clear state when we actually removed something or state existed.
-		if removed || hadState {
-			meta.Version++
-			meta.UpdatedAtUnix = now.Unix()
-			meta.StateETag = ""
-			meta.StateDescriptor = nil
-			meta.StatePlaintextBytes = 0
-			meta.PublishedVersion = meta.Version
-			newMetaETag, err := s.store.StoreMeta(ctx, namespace, keyComponent, meta, metaETag)
-			if err != nil {
-				if errors.Is(err, storage.ErrCASMismatch) {
-					continue
-				}
-				return nil, fmt.Errorf("store meta: %w", err)
-			}
-			metaETag = newMetaETag
-		}
-
 		return &RemoveResult{
-			Removed:    removed,
-			NewVersion: meta.Version,
+			Removed:    true,
+			NewVersion: meta.StagedVersion,
 			Meta:       meta,
-			MetaETag:   metaETag,
+			MetaETag:   newMetaETag,
 		}, nil
 	}
 }
@@ -298,6 +295,9 @@ func (s *Service) Metadata(ctx context.Context, cmd MetadataCommand) (*MetadataR
 	if cmd.Mutation.empty() {
 		return nil, Failure{Code: "invalid_body", Detail: "no metadata fields provided", HTTPStatus: http.StatusBadRequest}
 	}
+	if strings.TrimSpace(cmd.TxnID) == "" {
+		return nil, Failure{Code: "missing_txn", Detail: "X-Txn-ID required", HTTPStatus: http.StatusBadRequest}
+	}
 
 	storageKey, err := s.namespacedKey(namespace, cmd.Key)
 	if err != nil {
@@ -311,31 +311,53 @@ func (s *Service) Metadata(ctx context.Context, cmd MetadataCommand) (*MetadataR
 		if err != nil {
 			return nil, err
 		}
-		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, now); err != nil {
+		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now); err != nil {
 			return nil, err
 		}
-		if cmd.IfVersionSet && meta.Version != cmd.IfVersion {
+		currentVersion := meta.Version
+		if meta.StagedTxnID == cmd.TxnID && meta.StagedVersion > 0 {
+			currentVersion = meta.StagedVersion
+		}
+		if cmd.IfVersionSet && currentVersion != cmd.IfVersion {
 			return nil, Failure{
 				Code:       "version_conflict",
 				Detail:     "state version mismatch",
-				Version:    meta.Version,
+				Version:    currentVersion,
 				ETag:       meta.StateETag,
 				HTTPStatus: http.StatusConflict,
 			}
 		}
-		if cmd.IfStateETag != "" && normalizeETag(meta.StateETag) != normalizeETag(cmd.IfStateETag) {
+		currentETag := meta.StateETag
+		if meta.StagedTxnID == cmd.TxnID && meta.StagedStateETag != "" {
+			currentETag = meta.StagedStateETag
+		}
+		if cmd.IfStateETag != "" && normalizeETag(currentETag) != normalizeETag(cmd.IfStateETag) {
 			return nil, Failure{
 				Code:       "etag_mismatch",
 				Detail:     "state etag mismatch",
+				Version:    currentVersion,
+				ETag:       currentETag,
+				HTTPStatus: http.StatusConflict,
+			}
+		}
+		if meta.StagedTxnID != "" && meta.StagedTxnID != cmd.TxnID {
+			return nil, Failure{
+				Code:       "txn_mismatch",
+				Detail:     "different transaction already staged",
 				Version:    meta.Version,
 				ETag:       meta.StateETag,
 				HTTPStatus: http.StatusConflict,
 			}
 		}
-		cmd.Mutation.apply(meta)
+		if meta.StagedAttributes == nil {
+			meta.StagedAttributes = make(map[string]string)
+		}
+		meta.StagedTxnID = cmd.TxnID
+		cmd.Mutation.apply(meta, true /* staged */)
+		if meta.StagedVersion == 0 {
+			meta.StagedVersion = meta.Version + 1
+		}
 		meta.UpdatedAtUnix = now.Unix()
-		meta.Version++
-		meta.PublishedVersion = meta.Version
 		newMetaETag, err := s.store.StoreMeta(ctx, namespace, keyComponent, meta, metaETag)
 		if err != nil {
 			if errors.Is(err, storage.ErrCASMismatch) {
@@ -344,7 +366,7 @@ func (s *Service) Metadata(ctx context.Context, cmd MetadataCommand) (*MetadataR
 			return nil, fmt.Errorf("store meta: %w", err)
 		}
 		return &MetadataResult{
-			Version:  meta.Version,
+			Version:  meta.StagedVersion,
 			Meta:     meta,
 			MetaETag: newMetaETag,
 		}, nil

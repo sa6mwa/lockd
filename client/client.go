@@ -834,6 +834,7 @@ func (s *QueueStateHandle) CorrelationID() string {
 }
 
 const headerFencingToken = "X-Fencing-Token"
+const headerTxnID = "X-Txn-ID"
 const headerQueryCursor = "X-Lockd-Query-Cursor"
 const headerQueryIndexSeq = "X-Lockd-Query-Index-Seq"
 const headerQueryMetadata = "X-Lockd-Query-Metadata"
@@ -1156,6 +1157,11 @@ type LeaseSession struct {
 	drainTriggered atomic.Bool
 }
 
+// ReleaseOptions controls commit vs rollback semantics during lease release.
+type ReleaseOptions struct {
+	Rollback bool
+}
+
 // AcquireForUpdateHandler is invoked while a lease is held. The provided context
 // is canceled if the client loses the lease or keepalive fails.
 type AcquireForUpdateHandler func(context.Context, *AcquireForUpdateContext) error
@@ -1396,6 +1402,9 @@ func (s *LeaseSession) applyUpdate(ctx context.Context, body io.Reader, opts Upd
 	if opts.Namespace == "" {
 		opts.Namespace = s.Namespace
 	}
+	if opts.TxnID == "" {
+		opts.TxnID = s.TxnID
+	}
 	res, err := s.client.Update(ctx, s.Key, s.LeaseID, body, opts)
 	if err != nil {
 		return nil, err
@@ -1446,6 +1455,9 @@ func (s *LeaseSession) applyRemove(ctx context.Context, opts RemoveOptions) (*ap
 	ctx = WithCorrelationID(ctx, s.correlation())
 	if opts.Namespace == "" {
 		opts.Namespace = s.Namespace
+	}
+	if opts.TxnID == "" {
+		opts.TxnID = s.TxnID
 	}
 	res, err := s.client.Remove(ctx, s.Key, s.LeaseID, opts)
 	if err != nil {
@@ -1576,6 +1588,9 @@ func (s *LeaseSession) UpdateMetadata(ctx context.Context, meta MetadataOptions)
 		Namespace: s.Namespace,
 		Metadata:  meta,
 	}
+	if opts.TxnID == "" {
+		opts.TxnID = s.TxnID
+	}
 	if s.Version > 0 {
 		opts.IfVersion = strconv.FormatInt(s.Version, 10)
 	}
@@ -1603,7 +1618,13 @@ func (s *LeaseSession) KeepAlive(ctx context.Context, ttl time.Duration) (*api.K
 }
 
 // Release relinquishes the lease early; it is safe to call multiple times.
+// It commits staged changes by default. Use ReleaseWithOptions to request a rollback.
 func (s *LeaseSession) Release(ctx context.Context) error {
+	return s.ReleaseWithOptions(ctx, ReleaseOptions{})
+}
+
+// ReleaseWithOptions relinquishes the lease and allows callers to rollback staged changes.
+func (s *LeaseSession) ReleaseWithOptions(ctx context.Context, opts ReleaseOptions) error {
 	ctx = WithCorrelationID(ctx, s.correlation())
 	s.mu.Lock()
 	if s.closed {
@@ -1612,11 +1633,14 @@ func (s *LeaseSession) Release(ctx context.Context) error {
 		return err
 	}
 	s.mu.Unlock()
-	resp, err := s.client.releaseInternal(ctx, api.ReleaseRequest{
+	req := api.ReleaseRequest{
 		Namespace: s.Namespace,
 		Key:       s.Key,
 		LeaseID:   s.LeaseID,
-	}, s.endpoint)
+		TxnID:     s.TxnID,
+		Rollback:  opts.Rollback,
+	}
+	resp, err := s.client.releaseInternal(ctx, req, s.endpoint)
 	if err != nil {
 		s.mu.Lock()
 		s.closeErr = err
@@ -2162,6 +2186,7 @@ type UpdateOptions struct {
 	FencingToken string
 	Namespace    string
 	Metadata     MetadataOptions
+	TxnID        string
 }
 
 // UpdateOption customizes update behaviour.
@@ -2173,6 +2198,16 @@ type updateOptionFunc func(*UpdateOptions)
 
 func (f updateOptionFunc) apply(opts *UpdateOptions) {
 	f(opts)
+}
+
+// WithTxnID binds an update (or metadata mutation) to a transaction id.
+func WithTxnID(txnID string) UpdateOption {
+	return updateOptionFunc(func(opts *UpdateOptions) {
+		opts.TxnID = txnID
+		if opts.Metadata.TxnID == "" {
+			opts.Metadata.TxnID = txnID
+		}
+	})
 }
 
 // WithMetadata attaches metadata mutations to an update.
@@ -2196,6 +2231,7 @@ func WithQueryVisible() UpdateOption {
 // MetadataOptions captures metadata mutations attached to updates.
 type MetadataOptions struct {
 	QueryHidden *bool
+	TxnID       string
 }
 
 // NamespaceConfigOptions controls concurrency for namespace configuration mutations.
@@ -2261,6 +2297,7 @@ type RemoveOptions struct {
 	IfVersion    string
 	FencingToken string
 	Namespace    string
+	TxnID        string
 }
 
 type correlationTransport struct {
@@ -4250,6 +4287,9 @@ func (c *Client) Update(ctx context.Context, key, leaseID string, body io.Reader
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-Lease-ID", leaseID)
+		if opts.TxnID != "" {
+			req.Header.Set(headerTxnID, opts.TxnID)
+		}
 		if opts.IfETag != "" {
 			req.Header.Set("X-If-State-ETag", opts.IfETag)
 		}
@@ -4320,6 +4360,9 @@ func (c *Client) UpdateMetadata(ctx context.Context, key, leaseID string, opts U
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-Lease-ID", leaseID)
+		if opts.TxnID != "" {
+			req.Header.Set(headerTxnID, opts.TxnID)
+		}
 		if opts.IfVersion != "" {
 			req.Header.Set("X-If-Version", opts.IfVersion)
 		}
@@ -4374,6 +4417,9 @@ func (c *Client) Remove(ctx context.Context, key, leaseID string, opts RemoveOpt
 			return nil, nil, err
 		}
 		req.Header.Set("X-Lease-ID", leaseID)
+		if opts.TxnID != "" {
+			req.Header.Set(headerTxnID, opts.TxnID)
+		}
 		if opts.IfETag != "" {
 			req.Header.Set("X-If-State-ETag", opts.IfETag)
 		}

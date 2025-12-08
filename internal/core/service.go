@@ -41,6 +41,8 @@ type Service struct {
 	enforceIdentity        bool
 
 	createLocks *sync.Map
+
+	staging storage.StagingBackend
 }
 
 // New constructs the core Service with sane defaults.
@@ -93,5 +95,6 @@ func New(cfg Config) *Service {
 		shutdownState:          cfg.ShutdownState,
 		enforceIdentity:        cfg.EnforceIdentity,
 		createLocks:            &sync.Map{},
+		staging:                storage.EnsureStaging(cfg.Store),
 	}
 }

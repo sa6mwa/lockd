@@ -13,6 +13,12 @@ func (m *Meta) ensureAttributes() {
 	}
 }
 
+func (m *Meta) ensureStagedAttributes() {
+	if m.StagedAttributes == nil {
+		m.StagedAttributes = make(map[string]string)
+	}
+}
+
 // SetAttribute assigns a string attribute on the metadata.
 func (m *Meta) SetAttribute(key, value string) {
 	if m == nil || key == "" {
@@ -20,6 +26,15 @@ func (m *Meta) SetAttribute(key, value string) {
 	}
 	m.ensureAttributes()
 	m.Attributes[key] = value
+}
+
+// SetStagedAttribute assigns an attribute in the staged overlay.
+func (m *Meta) SetStagedAttribute(key, value string) {
+	if m == nil || key == "" {
+		return
+	}
+	m.ensureStagedAttributes()
+	m.StagedAttributes[key] = value
 }
 
 // ClearAttribute removes key from metadata attributes.
@@ -30,6 +45,17 @@ func (m *Meta) ClearAttribute(key string) {
 	delete(m.Attributes, key)
 	if len(m.Attributes) == 0 {
 		m.Attributes = nil
+	}
+}
+
+// ClearStagedAttribute removes key from staged attributes.
+func (m *Meta) ClearStagedAttribute(key string) {
+	if m == nil || key == "" || m.StagedAttributes == nil {
+		return
+	}
+	delete(m.StagedAttributes, key)
+	if len(m.StagedAttributes) == 0 {
+		m.StagedAttributes = nil
 	}
 }
 
@@ -50,6 +76,18 @@ func (m *Meta) MarkQueryExcluded() {
 // ClearQueryExcluded clears the hidden flag from metadata.
 func (m *Meta) ClearQueryExcluded() {
 	m.ClearAttribute(MetaAttributeQueryExclude)
+}
+
+// SetStagedQueryHidden sets or clears the query-hidden flag in staged attributes.
+func (m *Meta) SetStagedQueryHidden(hidden *bool) {
+	if m == nil || hidden == nil {
+		return
+	}
+	if *hidden {
+		m.SetStagedAttribute(MetaAttributeQueryExclude, "true")
+		return
+	}
+	m.SetStagedAttribute(MetaAttributeQueryExclude, "false")
 }
 
 // SetQueryHidden sets or clears the query-hidden flag.

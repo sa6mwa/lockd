@@ -50,6 +50,7 @@ const (
 	envServerURL         = "LOCKD_CLIENT_SERVER"
 	envRetryAfter        = "LOCKD_CLIENT_RETRY_AFTER"
 	envFencingToken      = "LOCKD_CLIENT_FENCING_TOKEN"
+	envTxnID             = "LOCKD_CLIENT_TXN_ID"
 	envCorrelation       = "LOCKD_CLIENT_CORRELATION_ID"
 	envQueueName         = "LOCKD_QUEUE_NAME"
 	envQueueMessageID    = "LOCKD_QUEUE_MESSAGE_ID"
@@ -527,6 +528,16 @@ func resolveFencing(token string) (string, error) {
 		return env, nil
 	}
 	return "", fmt.Errorf("--fencing-token is required (or set %s)", envFencingToken)
+}
+
+func resolveTxn(txn string) (string, error) {
+	if txn != "" {
+		return txn, nil
+	}
+	if env := os.Getenv(envTxnID); env != "" {
+		return env, nil
+	}
+	return "", fmt.Errorf("--txn-id is required (or set %s)", envTxnID)
 }
 
 func parseQueueAttributes(pairs []string) (map[string]any, error) {
@@ -1228,6 +1239,7 @@ func newClientAcquireCommand(cfg *clientCLIConfig) *cobra.Command {
 					{name: envKey, value: sess.Key},
 					{name: envOwner, value: sess.Owner},
 					{name: envFencingToken, value: sess.FencingTokenString()},
+					{name: envTxnID, value: sess.TxnID},
 					{name: envServerURL, value: cfg.server},
 					{name: envVersion, value: strconv.FormatInt(sess.Version, 10)},
 					{name: envETag, value: sess.StateETag},
@@ -1348,6 +1360,8 @@ func newClientReleaseCommand(cfg *clientCLIConfig) *cobra.Command {
 	var fencing string
 	var keyFlag string
 	var namespace string
+	var rollback bool
+	var txnID string
 	cmd := &cobra.Command{
 		Use:   "release",
 		Short: "Release a lease",
@@ -1377,9 +1391,13 @@ func newClientReleaseCommand(cfg *clientCLIConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			txn, err := resolveTxn(txnID)
+			if err != nil {
+				return err
+			}
 			cli.RegisterLeaseToken(lease, token)
 			ns := resolveNamespaceInput(namespace)
-			req := api.ReleaseRequest{Namespace: ns, Key: key, LeaseID: lease}
+			req := api.ReleaseRequest{Namespace: ns, Key: key, LeaseID: lease, TxnID: txn, Rollback: rollback}
 			ctx, _ := commandContextWithCorrelation(cmd)
 			resp, err := cli.Release(ctx, req)
 			if err != nil {
@@ -1397,8 +1415,10 @@ func newClientReleaseCommand(cfg *clientCLIConfig) *cobra.Command {
 	}
 	cmd.Flags().StringVarP(&keyFlag, "key", "k", "", "key to release (falls back to "+envKey+")")
 	cmd.Flags().StringVar(&leaseID, "lease", "", "lease identifier")
+	cmd.Flags().StringVar(&txnID, "txn-id", "", "transaction id (default from "+envTxnID+")")
 	cmd.Flags().StringVar(&output, "output", string(outputJSON), "output format (text|json)")
 	cmd.Flags().StringVar(&fencing, "fencing-token", "", "fencing token (default from "+envFencingToken+")")
+	cmd.Flags().BoolVar(&rollback, "rollback", false, "rollback staged changes instead of committing")
 	cmd.Flags().StringVarP(&namespace, "namespace", "n", "", "namespace for the lease (defaults to server configuration)")
 	return cmd
 }
@@ -1516,6 +1536,7 @@ func newClientUpdateCommand(cfg *clientCLIConfig) *cobra.Command {
 	var output string
 	var keyFlag string
 	var namespace string
+	var txnID string
 	cmd := &cobra.Command{
 		Use:   "update [input]",
 		Short: "Upload new state from a file",
@@ -1548,6 +1569,10 @@ func newClientUpdateCommand(cfg *clientCLIConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			txn, err := resolveTxn(txnID)
+			if err != nil {
+				return err
+			}
 			cli.RegisterLeaseToken(lease, token)
 			path := "-"
 			if len(args) == 1 {
@@ -1559,7 +1584,7 @@ func newClientUpdateCommand(cfg *clientCLIConfig) *cobra.Command {
 				return err
 			}
 			ns := resolveNamespaceInput(namespace)
-			opts := lockdclient.UpdateOptions{Namespace: ns, IfVersion: ifVersion, IfETag: ifETag, FencingToken: token}
+			opts := lockdclient.UpdateOptions{Namespace: ns, IfVersion: ifVersion, IfETag: ifETag, FencingToken: token, TxnID: txn}
 			ctx, _ := commandContextWithCorrelation(cmd)
 			result, err := cli.UpdateBytes(ctx, key, lease, payload, opts)
 			if err != nil {
@@ -1587,6 +1612,7 @@ func newClientUpdateCommand(cfg *clientCLIConfig) *cobra.Command {
 	cmd.Flags().StringVar(&ifVersion, "if-version", "", "conditional update on version")
 	cmd.Flags().StringVar(&ifETag, "if-etag", "", "conditional update on state etag")
 	cmd.Flags().StringVar(&fencing, "fencing-token", "", "fencing token (default from "+envFencingToken+")")
+	cmd.Flags().StringVar(&txnID, "txn-id", "", "transaction id (default from "+envTxnID+")")
 	cmd.Flags().StringVar(&output, "output", string(outputJSON), "output format (text|json)")
 	cmd.Flags().StringVarP(&namespace, "namespace", "n", "", "namespace for the key (defaults to server configuration)")
 	return cmd
@@ -1600,6 +1626,7 @@ func newClientRemoveCommand(cfg *clientCLIConfig) *cobra.Command {
 	var output string
 	var keyFlag string
 	var namespace string
+	var txnID string
 	cmd := &cobra.Command{
 		Use:     "remove",
 		Aliases: []string{"delete", "rm"},
@@ -1630,9 +1657,13 @@ func newClientRemoveCommand(cfg *clientCLIConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			txn, err := resolveTxn(txnID)
+			if err != nil {
+				return err
+			}
 			cli.RegisterLeaseToken(lease, token)
 			ns := resolveNamespaceInput(namespace)
-			opts := lockdclient.RemoveOptions{Namespace: ns, IfVersion: ifVersion, IfETag: ifETag, FencingToken: token}
+			opts := lockdclient.RemoveOptions{Namespace: ns, IfVersion: ifVersion, IfETag: ifETag, FencingToken: token, TxnID: txn}
 			ctx, _ := commandContextWithCorrelation(cmd)
 			result, err := cli.Remove(ctx, key, lease, opts)
 			if err != nil {
@@ -1656,6 +1687,7 @@ func newClientRemoveCommand(cfg *clientCLIConfig) *cobra.Command {
 	cmd.Flags().StringVar(&ifVersion, "if-version", "", "conditional remove on version")
 	cmd.Flags().StringVar(&ifETag, "if-etag", "", "conditional remove on state etag")
 	cmd.Flags().StringVar(&fencing, "fencing-token", "", "fencing token (default from "+envFencingToken+")")
+	cmd.Flags().StringVar(&txnID, "txn-id", "", "transaction id (default from "+envTxnID+")")
 	cmd.Flags().StringVarP(&namespace, "namespace", "n", "", "namespace for the key (defaults to server configuration)")
 	cmd.Flags().StringVar(&output, "output", string(outputJSON), "output format (text|json)")
 	return cmd
@@ -1670,6 +1702,7 @@ func newClientSetCommand(cfg *clientCLIConfig) *cobra.Command {
 	var output string
 	var keyFlag string
 	var namespace string
+	var txnID string
 	cmd := &cobra.Command{
 		Use:   "set mutation [mutation...]",
 		Short: "Mutate JSON state fields for an active lease",
@@ -1703,6 +1736,10 @@ func newClientSetCommand(cfg *clientCLIConfig) *cobra.Command {
 				return err
 			}
 			token, err := resolveFencing(fencing)
+			if err != nil {
+				return err
+			}
+			txn, err := resolveTxn(txnID)
 			if err != nil {
 				return err
 			}
@@ -1747,7 +1784,7 @@ func newClientSetCommand(cfg *clientCLIConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			opts := lockdclient.UpdateOptions{Namespace: ns, FencingToken: token}
+			opts := lockdclient.UpdateOptions{Namespace: ns, FencingToken: token, TxnID: txn}
 			if !noCAS {
 				opts.IfVersion = version
 				opts.IfETag = etag
@@ -1783,6 +1820,7 @@ func newClientSetCommand(cfg *clientCLIConfig) *cobra.Command {
 	cmd.Flags().StringVar(&ifVersion, "if-version", "", "override version used for CAS (default from fetched state)")
 	cmd.Flags().StringVar(&ifETag, "if-etag", "", "override ETag used for CAS (default from fetched state)")
 	cmd.Flags().BoolVar(&noCAS, "no-cas", false, "skip conditional update using fetched version/etag (fencing token still required)")
+	cmd.Flags().StringVar(&txnID, "txn-id", "", "transaction id (default from "+envTxnID+")")
 	cmd.Flags().StringVar(&output, "output", string(outputJSON), "output format (text|json)")
 	cmd.Flags().StringVarP(&namespace, "namespace", "n", "", "namespace for the key (defaults to server configuration)")
 	return cmd

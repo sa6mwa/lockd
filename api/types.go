@@ -19,6 +19,7 @@ const (
 type AcquireResponse struct {
 	Namespace     string `json:"namespace"`
 	LeaseID       string `json:"lease_id"`
+	TxnID         string `json:"txn_id,omitempty"`
 	Key           string `json:"key"`
 	Owner         string `json:"owner"`
 	ExpiresAt     int64  `json:"expires_at_unix"`
@@ -55,6 +56,8 @@ type ReleaseRequest struct {
 	Namespace string `json:"namespace,omitempty"`
 	Key       string `json:"key"`
 	LeaseID   string `json:"lease_id"`
+	TxnID     string `json:"txn_id"`
+	Rollback  bool   `json:"rollback,omitempty"`
 }
 
 // ReleaseResponse indicates release status.

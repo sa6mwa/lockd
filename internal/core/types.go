@@ -26,6 +26,7 @@ type AcquireCommand struct {
 type AcquireResult struct {
 	Namespace     string
 	LeaseID       string
+	TxnID         string
 	Key           string
 	Owner         string
 	ExpiresAt     int64
@@ -65,6 +66,8 @@ type ReleaseCommand struct {
 	Namespace     string
 	Key           string
 	LeaseID       string
+	TxnID         string
+	Rollback      bool
 	FencingToken  int64
 	KnownMeta     *storage.Meta
 	KnownMetaETag string
@@ -129,6 +132,7 @@ type MetadataCommand struct {
 	Key           string
 	LeaseID       string
 	FencingToken  int64
+	TxnID         string
 	Mutation      MetadataMutation
 	KnownMeta     *storage.Meta
 	KnownMetaETag string
@@ -150,6 +154,7 @@ type RemoveCommand struct {
 	Key           string
 	LeaseID       string
 	FencingToken  int64
+	TxnID         string
 	KnownMeta     *storage.Meta
 	KnownMetaETag string
 	IfStateETag   string

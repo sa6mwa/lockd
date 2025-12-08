@@ -2,6 +2,12 @@
 
 This note tracks the state of *AcquireForUpdate* inside the repo now that the streaming implementation has been removed and only the callback helper remains.
 
+## Transactional default (XA Phase 0)
+
+- A normal Acquire now starts a transaction and returns a `txn_id`; updates are staged until Release.
+- Release commits by default; `rollback` on Release discards staged updates. Lease expiry implies rollback.
+- The helper surfaces the `txn_id` via `LeaseSession` so handlers can decide to commit or rollback.
+
 ## 1. Server behaviour
 
 - The server **no longer exposes** `POST /v1/acquire-for-update`. All streaming-specific code paths, trackers, and configuration knobs were dropped in favour of the normal acquire → get → update workflow.

@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"strconv"
 	"testing"
 	"time"
 
@@ -115,10 +114,8 @@ func markKeyHidden(ctx context.Context, t testing.TB, cli *client.Client, namesp
 		t.Fatalf("acquire %s/%s: %v", namespace, key, err)
 	}
 	defer lease.Release(ctx)
-	_, err = cli.UpdateMetadata(ctx, key, lease.LeaseID, client.UpdateOptions{
-		Namespace: namespace,
-		IfVersion: strconv.FormatInt(lease.Version, 10),
-		Metadata:  client.MetadataOptions{QueryHidden: client.Bool(true)},
+	_, err = lease.UpdateMetadata(ctx, client.MetadataOptions{
+		QueryHidden: client.Bool(true),
 	})
 	if err != nil {
 		t.Fatalf("update metadata: %v", err)

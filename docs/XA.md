@@ -66,6 +66,7 @@ This document outlines a staged path from today’s CAS/lease semantics to a pra
 
 ## Minimal first milestone (actionable next)
 - Implement Phase 0 + Phase 1 semantics (just do it, no feature flag, we are not on a stable release yet).
+- Acquire always starts a transaction and returns txn_id; Release must include txn_id and choose commit vs rollback (rollback flag) with lease expiry implying rollback.
 - Add txn record type, staging layout, and sweeper support.
 - Extend integration suites (disk, mem) with multi-key commit/rollback and restart recovery cases.
 - Document client/CLI UX for `Release(commit|rollback)`; keep `AcquireForUpdate` as a convenience wrapper.

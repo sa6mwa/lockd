@@ -11,11 +11,16 @@ func (m MetadataMutation) empty() bool {
 	return m.QueryHidden == nil
 }
 
-func (m MetadataMutation) apply(meta *storage.Meta) {
+// apply mutates metadata either immediately or in the staged attribute set.
+func (m MetadataMutation) apply(meta *storage.Meta, staged bool) {
 	if meta == nil {
 		return
 	}
 	if m.QueryHidden != nil {
-		meta.SetQueryHidden(*m.QueryHidden)
+		if staged {
+			meta.SetStagedQueryHidden(m.QueryHidden)
+		} else {
+			meta.SetQueryHidden(*m.QueryHidden)
+		}
 	}
 }

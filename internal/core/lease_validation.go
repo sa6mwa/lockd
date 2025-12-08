@@ -7,7 +7,7 @@ import (
 	"pkt.systems/lockd/internal/storage"
 )
 
-func validateLease(meta *storage.Meta, leaseID string, fencingToken int64, now time.Time) error {
+func validateLease(meta *storage.Meta, leaseID string, fencingToken int64, txnID string, now time.Time) error {
 	if meta.Lease == nil || meta.Lease.ID != leaseID {
 		return Failure{
 			HTTPStatus: http.StatusForbidden,
@@ -31,6 +31,24 @@ func validateLease(meta *storage.Meta, leaseID string, fencingToken int64, now t
 			HTTPStatus: http.StatusForbidden,
 			Code:       "fencing_mismatch",
 			Detail:     "fencing token mismatch",
+			Version:    meta.Version,
+			ETag:       meta.StateETag,
+		}
+	}
+	if meta.Lease.TxnID != "" && txnID == "" {
+		return Failure{
+			HTTPStatus: http.StatusBadRequest,
+			Code:       "missing_txn",
+			Detail:     "transaction id required",
+			Version:    meta.Version,
+			ETag:       meta.StateETag,
+		}
+	}
+	if meta.Lease.TxnID != "" && txnID != "" && meta.Lease.TxnID != txnID {
+		return Failure{
+			HTTPStatus: http.StatusConflict,
+			Code:       "txn_mismatch",
+			Detail:     "transaction mismatch",
 			Version:    meta.Version,
 			ETag:       meta.StateETag,
 		}

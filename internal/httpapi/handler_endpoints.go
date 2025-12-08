@@ -95,6 +95,7 @@ func (h *Handler) handleAcquire(w http.ResponseWriter, r *http.Request) error {
 	h.writeJSON(w, http.StatusOK, api.AcquireResponse{
 		Namespace:     res.Namespace,
 		LeaseID:       res.LeaseID,
+		TxnID:         res.TxnID,
 		Key:           res.Key,
 		Owner:         res.Owner,
 		ExpiresAt:     res.ExpiresAt,
@@ -259,9 +260,8 @@ func (h *Handler) handleRelease(w http.ResponseWriter, r *http.Request) error {
 	if payload.LeaseID == "" {
 		return httpError{Status: http.StatusBadRequest, Code: "missing_lease", Detail: "lease_id required"}
 	}
-	storageKey, err := h.namespacedKey(namespace, payload.Key)
-	if err != nil {
-		return httpError{Status: http.StatusBadRequest, Code: "invalid_key", Detail: err.Error()}
+	if strings.TrimSpace(payload.TxnID) == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_txn", Detail: "txn_id required"}
 	}
 	logger := pslog.LoggerFromContext(ctx)
 	if logger == nil {
@@ -271,14 +271,12 @@ func (h *Handler) handleRelease(w http.ResponseWriter, r *http.Request) error {
 	verbose.Debug("release.begin", "namespace", namespace, "key", payload.Key, "lease_id", payload.LeaseID)
 	var knownMeta *storage.Meta
 	knownETag := ""
-	if cachedMeta, cachedETag, cachedKey, ok := h.leaseSnapshot(payload.LeaseID); ok && cachedKey == storageKey {
-		knownMeta = &cachedMeta
-		knownETag = cachedETag
-	}
 	res, err := h.core.Release(ctx, core.ReleaseCommand{
 		Namespace:     namespace,
 		Key:           payload.Key,
 		LeaseID:       payload.LeaseID,
+		TxnID:         payload.TxnID,
+		Rollback:      payload.Rollback,
 		FencingToken:  fencingToken,
 		KnownMeta:     knownMeta,
 		KnownMetaETag: knownETag,
@@ -643,6 +641,7 @@ func (h *Handler) handleIndexFlush(w http.ResponseWriter, r *http.Request) error
 // @Param        namespace          query   string  false  "Namespace override (defaults to server setting)"
 // @Param        key                query   string  true   "Lease key"
 // @Param        X-Lease-ID         header  string  true   "Lease identifier"
+// @Param        X-Txn-ID           header  string  true   "Transaction identifier"
 // @Param        X-Fencing-Token    header  string  false  "Optional fencing token proof"
 // @Param        X-If-Version       header  string  false  "Conditionally update when the current version matches"
 // @Param        X-If-State-ETag    header  string  false  "Conditionally update when the state ETag matches"
@@ -672,6 +671,10 @@ func (h *Handler) handleUpdate(w http.ResponseWriter, r *http.Request) error {
 	if leaseID == "" {
 		return httpError{Status: http.StatusBadRequest, Code: "missing_lease", Detail: "X-Lease-ID required"}
 	}
+	txnID := strings.TrimSpace(r.Header.Get("X-Txn-ID"))
+	if txnID == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_txn", Detail: "X-Txn-ID required"}
+	}
 	fencingToken, err := parseFencingToken(r)
 	if err != nil {
 		return err
@@ -700,6 +703,7 @@ func (h *Handler) handleUpdate(w http.ResponseWriter, r *http.Request) error {
 		Namespace:      r.URL.Query().Get("namespace"),
 		Key:            key,
 		LeaseID:        leaseID,
+		TxnID:          txnID,
 		FencingToken:   fencingToken,
 		IfVersion:      expectVersion,
 		IfStateETag:    expectETag,
@@ -738,6 +742,7 @@ func (h *Handler) handleUpdate(w http.ResponseWriter, r *http.Request) error {
 // @Param        namespace          query   string  false  "Namespace override (defaults to server setting)"
 // @Param        key                query   string  true   "Lease key"
 // @Param        X-Lease-ID         header  string  true   "Lease identifier"
+// @Param        X-Txn-ID           header  string  true   "Transaction identifier"
 // @Param        X-Fencing-Token    header  string  false  "Optional fencing token proof"
 // @Param        X-If-Version       header  string  false  "Conditionally update when the current version matches"
 // @Param        metadata           body    metadataMutation  true  "Metadata payload"
@@ -755,6 +760,10 @@ func (h *Handler) handleMetadata(w http.ResponseWriter, r *http.Request) error {
 	leaseID := r.Header.Get("X-Lease-ID")
 	if leaseID == "" {
 		return httpError{Status: http.StatusBadRequest, Code: "missing_lease", Detail: "X-Lease-ID required"}
+	}
+	txnID := strings.TrimSpace(r.Header.Get("X-Txn-ID"))
+	if txnID == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_txn", Detail: "X-Txn-ID required"}
 	}
 	fencingToken, err := parseFencingToken(r)
 	if err != nil {
@@ -804,6 +813,7 @@ func (h *Handler) handleMetadata(w http.ResponseWriter, r *http.Request) error {
 		Namespace:     ns,
 		Key:           key,
 		LeaseID:       leaseID,
+		TxnID:         txnID,
 		FencingToken:  fencingToken,
 		Mutation:      core.MetadataMutation{QueryHidden: patch.QueryHidden},
 		KnownMeta:     knownMeta,
@@ -839,6 +849,7 @@ func (h *Handler) handleMetadata(w http.ResponseWriter, r *http.Request) error {
 // @Param        namespace        query   string  false  "Namespace override (defaults to server setting)"
 // @Param        key              query   string  true   "Lease key"
 // @Param        X-Lease-ID       header  string  true   "Lease identifier"
+// @Param        X-Txn-ID         header  string  true   "Transaction identifier"
 // @Param        X-Fencing-Token  header  string  false  "Optional fencing token proof"
 // @Param        X-If-Version     header  string  false  "Conditionally remove when version matches"
 // @Param        X-If-State-ETag  header  string  false  "Conditionally remove when state ETag matches"
@@ -866,6 +877,10 @@ func (h *Handler) handleRemove(w http.ResponseWriter, r *http.Request) error {
 	if leaseID == "" {
 		return httpError{Status: http.StatusBadRequest, Code: "missing_lease", Detail: "X-Lease-ID required"}
 	}
+	txnID := strings.TrimSpace(r.Header.Get("X-Txn-ID"))
+	if txnID == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_txn", Detail: "X-Txn-ID required"}
+	}
 	fencingToken, err := parseFencingToken(r)
 	if err != nil {
 		return err
@@ -890,6 +905,7 @@ func (h *Handler) handleRemove(w http.ResponseWriter, r *http.Request) error {
 		Namespace:     namespace,
 		Key:           key,
 		LeaseID:       leaseID,
+		TxnID:         txnID,
 		FencingToken:  fencingToken,
 		IfStateETag:   ifMatch,
 		IfVersion:     versionVal,

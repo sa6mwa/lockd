@@ -602,6 +602,7 @@ func (s *Service) acquireLeaseForKey(ctx context.Context, params acquireParams) 
 	resp := api.AcquireResponse{
 		Namespace:     res.Namespace,
 		LeaseID:       res.LeaseID,
+		TxnID:         res.TxnID,
 		Key:           relativeKey(res.Namespace, res.Key),
 		Owner:         res.Owner,
 		ExpiresAt:     res.ExpiresAt,

@@ -35,6 +35,15 @@ type Meta struct {
 	StateDescriptor     []byte            `json:"state_descriptor,omitempty"`
 	StatePlaintextBytes int64             `json:"state_plaintext_bytes,omitempty"`
 	Attributes          map[string]string `json:"attributes,omitempty"`
+	// Staged* capture pending transactional changes that will be committed or
+	// rolled back by Release.
+	StagedTxnID              string            `json:"staged_txn_id,omitempty"`
+	StagedVersion            int64             `json:"staged_version,omitempty"`
+	StagedStateETag          string            `json:"staged_state_etag,omitempty"`
+	StagedStateDescriptor    []byte            `json:"staged_state_descriptor,omitempty"`
+	StagedStatePlaintextBytes int64            `json:"staged_state_plaintext_bytes,omitempty"`
+	StagedAttributes         map[string]string `json:"staged_attributes,omitempty"`
+	StagedRemove             bool              `json:"staged_remove,omitempty"`
 }
 
 // Lease captures the server-side view of an active lease.
@@ -43,6 +52,7 @@ type Lease struct {
 	Owner         string `json:"owner"`
 	ExpiresAtUnix int64  `json:"expires_at_unix"`
 	FencingToken  int64  `json:"fencing_token,omitempty"`
+	TxnID         string `json:"txn_id,omitempty"`
 }
 
 // StateInfo provides metadata about a stored state blob.

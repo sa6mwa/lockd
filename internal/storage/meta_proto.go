@@ -85,12 +85,18 @@ func metaToProto(meta *Meta) *lockdproto.LockMeta {
 		return &lockdproto.LockMeta{}
 	}
 	pm := &lockdproto.LockMeta{
-		Version:             meta.Version,
-		PublishedVersion:    meta.PublishedVersion,
-		StateEtag:           meta.StateETag,
-		UpdatedAtUnix:       meta.UpdatedAtUnix,
-		FencingToken:        meta.FencingToken,
-		StatePlaintextBytes: meta.StatePlaintextBytes,
+		Version:                   meta.Version,
+		PublishedVersion:          meta.PublishedVersion,
+		StateEtag:                 meta.StateETag,
+		UpdatedAtUnix:             meta.UpdatedAtUnix,
+		FencingToken:              meta.FencingToken,
+		StatePlaintextBytes:       meta.StatePlaintextBytes,
+		StagedTxnId:               meta.StagedTxnID,
+		StagedStateEtag:           meta.StagedStateETag,
+		StagedStateDescriptor:     meta.StagedStateDescriptor,
+		StagedStatePlaintextBytes: meta.StagedStatePlaintextBytes,
+		StagedVersion:             meta.StagedVersion,
+		StagedRemove:              meta.StagedRemove,
 	}
 	if meta.Lease != nil {
 		pm.Lease = &lockdproto.Lease{
@@ -98,6 +104,7 @@ func metaToProto(meta *Meta) *lockdproto.LockMeta {
 			Owner:         meta.Lease.Owner,
 			ExpiresAtUnix: meta.Lease.ExpiresAtUnix,
 			FencingToken:  meta.Lease.FencingToken,
+			TxnId:         meta.Lease.TxnID,
 		}
 	}
 	if len(meta.StateDescriptor) > 0 {
@@ -112,6 +119,12 @@ func metaToProto(meta *Meta) *lockdproto.LockMeta {
 			pm.Attributes = s
 		}
 	}
+	if len(meta.StagedAttributes) > 0 {
+		pm.StagedAttributes = make(map[string]string, len(meta.StagedAttributes))
+		for k, v := range meta.StagedAttributes {
+			pm.StagedAttributes[k] = v
+		}
+	}
 	return pm
 }
 
@@ -120,11 +133,17 @@ func metaFromProto(pm *lockdproto.LockMeta) *Meta {
 		return &Meta{}
 	}
 	meta := &Meta{
-		Version:          pm.GetVersion(),
-		PublishedVersion: pm.GetPublishedVersion(),
-		StateETag:        pm.GetStateEtag(),
-		UpdatedAtUnix:    pm.GetUpdatedAtUnix(),
-		FencingToken:     pm.GetFencingToken(),
+		Version:                   pm.GetVersion(),
+		PublishedVersion:          pm.GetPublishedVersion(),
+		StateETag:                 pm.GetStateEtag(),
+		UpdatedAtUnix:             pm.GetUpdatedAtUnix(),
+		FencingToken:              pm.GetFencingToken(),
+		StagedTxnID:               pm.GetStagedTxnId(),
+		StagedStateETag:           pm.GetStagedStateEtag(),
+		StagedStateDescriptor:     pm.GetStagedStateDescriptor(),
+		StagedStatePlaintextBytes: pm.GetStagedStatePlaintextBytes(),
+		StagedVersion:             pm.GetStagedVersion(),
+		StagedRemove:              pm.GetStagedRemove(),
 	}
 	if lease := pm.GetLease(); lease != nil {
 		meta.Lease = &Lease{
@@ -132,6 +151,7 @@ func metaFromProto(pm *lockdproto.LockMeta) *Meta {
 			Owner:         lease.GetOwner(),
 			ExpiresAtUnix: lease.GetExpiresAtUnix(),
 			FencingToken:  lease.GetFencingToken(),
+			TxnID:         lease.GetTxnId(),
 		}
 	}
 	if desc := pm.GetStateDescriptor(); len(desc) > 0 {
@@ -142,6 +162,12 @@ func metaFromProto(pm *lockdproto.LockMeta) *Meta {
 		meta.Attributes = make(map[string]string, len(attrs.Fields))
 		for k, v := range attrs.Fields {
 			meta.Attributes[k] = v.GetStringValue()
+		}
+	}
+	if attrs := pm.GetStagedAttributes(); attrs != nil {
+		meta.StagedAttributes = make(map[string]string, len(attrs))
+		for k, v := range attrs {
+			meta.StagedAttributes[k] = v
 		}
 	}
 	return meta

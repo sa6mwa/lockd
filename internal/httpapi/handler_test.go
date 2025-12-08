@@ -89,6 +89,7 @@ func TestAcquireLifecycle(t *testing.T) {
 	stateHeaders := map[string]string{
 		"X-Lease-ID":      acquireResp.LeaseID,
 		"X-Fencing-Token": fencingToken,
+		"X-Txn-ID":        acquireResp.TxnID,
 	}
 	updateBody := map[string]any{"cursor": 42}
 	status = doJSON(t, server, http.MethodPost, "/v1/update?key=orders", stateHeaders, updateBody, nil)
@@ -118,6 +119,7 @@ func TestAcquireLifecycle(t *testing.T) {
 	releaseReq := api.ReleaseRequest{
 		Key:     "orders",
 		LeaseID: acquireResp.LeaseID,
+		TxnID:   acquireResp.TxnID,
 	}
 	var releaseResp api.ReleaseResponse
 	status = doJSON(t, server, http.MethodPost, "/v1/release", map[string]string{"X-Fencing-Token": fencingToken}, releaseReq, &releaseResp)
@@ -482,11 +484,23 @@ func TestGetPublicWithoutLease(t *testing.T) {
 	stateHeaders := map[string]string{
 		"X-Lease-ID":      acquireResp.LeaseID,
 		"X-Fencing-Token": strconv.FormatInt(acquireResp.FencingToken, 10),
+		"X-Txn-ID":        acquireResp.TxnID,
 	}
 	updateBody := map[string]any{"cursor": 99}
 	status = doJSON(t, server, http.MethodPost, "/v1/update?key=orders", stateHeaders, updateBody, nil)
 	if status != http.StatusOK {
 		t.Fatalf("expected update state 200, got %d", status)
+	}
+
+	releaseReq := api.ReleaseRequest{
+		Namespace: acquireResp.Namespace,
+		Key:       "orders",
+		LeaseID:   acquireResp.LeaseID,
+		TxnID:     acquireResp.TxnID,
+	}
+	status = doJSON(t, server, http.MethodPost, "/v1/release", map[string]string{"X-Fencing-Token": strconv.FormatInt(acquireResp.FencingToken, 10)}, releaseReq, nil)
+	if status != http.StatusOK {
+		t.Fatalf("expected release 200, got %d", status)
 	}
 
 	publicReq, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/get?key=orders&public=1", http.NoBody)
@@ -560,6 +574,7 @@ func TestAcquireAutoGeneratesKey(t *testing.T) {
 	stateHeaders := map[string]string{
 		"X-Lease-ID":      autoResp.LeaseID,
 		"X-Fencing-Token": strconv.FormatInt(autoResp.FencingToken, 10),
+		"X-Txn-ID":        autoResp.TxnID,
 	}
 	updateBody := map[string]any{"auto": true}
 	status = doJSON(t, server, http.MethodPost, "/v1/update?key="+autoResp.Key, stateHeaders, updateBody, nil)
@@ -567,7 +582,7 @@ func TestAcquireAutoGeneratesKey(t *testing.T) {
 		t.Fatalf("expected update state 200, got %d", status)
 	}
 	var releaseResp api.ReleaseResponse
-	status = doJSON(t, server, http.MethodPost, "/v1/release", stateHeaders, api.ReleaseRequest{Key: autoResp.Key, LeaseID: autoResp.LeaseID}, &releaseResp)
+	status = doJSON(t, server, http.MethodPost, "/v1/release", stateHeaders, api.ReleaseRequest{Key: autoResp.Key, LeaseID: autoResp.LeaseID, TxnID: autoResp.TxnID}, &releaseResp)
 	if status != http.StatusOK || !releaseResp.Released {
 		t.Fatalf("release failed: status=%d resp=%+v", status, releaseResp)
 	}
@@ -743,12 +758,23 @@ func TestUpdateVersionMismatch(t *testing.T) {
 	doJSON(t, server, http.MethodPost, "/v1/acquire", nil, req, &acquire)
 
 	token := strconv.FormatInt(acquire.FencingToken, 10)
-	headers := map[string]string{"X-Lease-ID": acquire.LeaseID, "X-Fencing-Token": token}
+	headers := map[string]string{"X-Lease-ID": acquire.LeaseID, "X-Fencing-Token": token, "X-Txn-ID": acquire.TxnID}
 	doJSON(t, server, http.MethodPost, "/v1/update?key=stream", headers, map[string]int{"pos": 1}, nil)
 
-	headers["X-If-Version"] = "0"
+	// Commit the staged update to bump the version.
+	releaseReq := api.ReleaseRequest{Key: "stream", LeaseID: acquire.LeaseID, TxnID: acquire.TxnID}
+	status := doJSON(t, server, http.MethodPost, "/v1/release", map[string]string{"X-Fencing-Token": token}, releaseReq, nil)
+	if status != http.StatusOK {
+		t.Fatalf("release: expected 200, got %d", status)
+	}
+
+	// Reacquire and attempt an update with a stale version to trigger conflict.
+	var reacquire api.AcquireResponse
+	doJSON(t, server, http.MethodPost, "/v1/acquire", nil, req, &reacquire)
+	token = strconv.FormatInt(reacquire.FencingToken, 10)
+	headers = map[string]string{"X-Lease-ID": reacquire.LeaseID, "X-Fencing-Token": token, "X-Txn-ID": reacquire.TxnID, "X-If-Version": "0"}
 	var errResp api.ErrorResponse
-	status := doJSON(t, server, http.MethodPost, "/v1/update?key=stream", headers, map[string]int{"pos": 2}, &errResp)
+	status = doJSON(t, server, http.MethodPost, "/v1/update?key=stream", headers, map[string]int{"pos": 2}, &errResp)
 	if status != http.StatusConflict {
 		t.Fatalf("expected 409 conflict, got %d", status)
 	}
@@ -777,7 +803,7 @@ func TestGetRequiresLease(t *testing.T) {
 	var acquire api.AcquireResponse
 	doJSON(t, server, http.MethodPost, "/v1/acquire", nil, acq, &acquire)
 	token := strconv.FormatInt(acquire.FencingToken, 10)
-	headers := map[string]string{"X-Lease-ID": acquire.LeaseID, "X-Fencing-Token": token}
+	headers := map[string]string{"X-Lease-ID": acquire.LeaseID, "X-Fencing-Token": token, "X-Txn-ID": acquire.TxnID}
 	doJSON(t, server, http.MethodPost, "/v1/update?key=alpha", headers, map[string]int{"pos": 1}, nil)
 
 	getReq, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/get?key=alpha", http.NoBody)
@@ -815,6 +841,7 @@ func TestMetadataUpdateTogglesQueryHidden(t *testing.T) {
 	headers := map[string]string{
 		"X-Lease-ID":      acquireResp.LeaseID,
 		"X-Fencing-Token": token,
+		"X-Txn-ID":        acquireResp.TxnID,
 	}
 	doJSON(t, server, http.MethodPost, "/v1/update?key=orders", headers, map[string]any{"cursor": 1}, nil)
 
@@ -826,6 +853,13 @@ func TestMetadataUpdateTogglesQueryHidden(t *testing.T) {
 	if metaResp.Metadata.QueryHidden == nil || !*metaResp.Metadata.QueryHidden {
 		t.Fatalf("expected query_hidden metadata, got %+v", metaResp.Metadata)
 	}
+
+	// Commit and reacquire before clearing.
+	releaseReq := api.ReleaseRequest{Key: "orders", LeaseID: acquireResp.LeaseID, TxnID: acquireResp.TxnID}
+	status = doJSON(t, server, http.MethodPost, "/v1/release", map[string]string{"X-Fencing-Token": token}, releaseReq, nil)
+	if status != http.StatusOK {
+		t.Fatalf("release commit failed: %d", status)
+	}
 	meta, _, err := store.LoadMeta(context.Background(), namespaces.Default, "orders")
 	if err != nil {
 		t.Fatalf("load meta: %v", err)
@@ -834,9 +868,14 @@ func TestMetadataUpdateTogglesQueryHidden(t *testing.T) {
 		t.Fatalf("expected meta to be query excluded")
 	}
 
+	var reacquire api.AcquireResponse
+	doJSON(t, server, http.MethodPost, "/v1/acquire", nil, acquireReq, &reacquire)
+	token = strconv.FormatInt(reacquire.FencingToken, 10)
+
 	clearHeaders := map[string]string{
-		"X-Lease-ID":              acquireResp.LeaseID,
+		"X-Lease-ID":              reacquire.LeaseID,
 		"X-Fencing-Token":         token,
+		"X-Txn-ID":                reacquire.TxnID,
 		headerMetadataQueryHidden: "false",
 	}
 	metaResp = api.MetadataUpdateResponse{}
@@ -846,6 +885,11 @@ func TestMetadataUpdateTogglesQueryHidden(t *testing.T) {
 	}
 	if metaResp.Metadata.QueryHidden != nil {
 		t.Fatalf("expected metadata to omit query_hidden, got %+v", metaResp.Metadata)
+	}
+	releaseReq = api.ReleaseRequest{Key: "orders", LeaseID: reacquire.LeaseID, TxnID: reacquire.TxnID}
+	status = doJSON(t, server, http.MethodPost, "/v1/release", map[string]string{"X-Fencing-Token": token}, releaseReq, nil)
+	if status != http.StatusOK {
+		t.Fatalf("release clear failed: %d", status)
 	}
 	meta, _, err = store.LoadMeta(context.Background(), namespaces.Default, "orders")
 	if err != nil {
@@ -878,6 +922,7 @@ func TestMetadataUpdateValidations(t *testing.T) {
 	headers := map[string]string{
 		"X-Lease-ID":      acquireResp.LeaseID,
 		"X-Fencing-Token": token,
+		"X-Txn-ID":        acquireResp.TxnID,
 	}
 	// Seed metadata via update so version is >0.
 	doJSON(t, server, http.MethodPost, "/v1/update?key=alpha", headers, map[string]int{"cursor": 5}, nil)
@@ -886,6 +931,7 @@ func TestMetadataUpdateValidations(t *testing.T) {
 		badHeaders := map[string]string{
 			"X-Lease-ID":              acquireResp.LeaseID,
 			"X-Fencing-Token":         token,
+			"X-Txn-ID":                acquireResp.TxnID,
 			headerMetadataQueryHidden: "definitely-not-bool",
 		}
 		var errResp api.ErrorResponse
@@ -913,6 +959,7 @@ func TestMetadataUpdateValidations(t *testing.T) {
 		conflictHeaders := map[string]string{
 			"X-Lease-ID":      acquireResp.LeaseID,
 			"X-Fencing-Token": token,
+			"X-Txn-ID":        acquireResp.TxnID,
 			"X-If-Version":    "999",
 		}
 		var errResp api.ErrorResponse

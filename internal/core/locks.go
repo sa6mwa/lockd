@@ -107,6 +107,7 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (*AcquireResu
 	}
 
 	leaseID := uuidv7.NewString()
+	txnID := uuidv7.NewString()
 	backoff := newAcquireBackoff()
 	for {
 		now := s.clock.Now()
@@ -165,6 +166,7 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (*AcquireResu
 			Owner:         cmd.Owner,
 			ExpiresAtUnix: expiresAt,
 			FencingToken:  newFencing,
+			TxnID:         txnID,
 		}
 		meta.UpdatedAtUnix = now.Unix()
 
@@ -186,6 +188,7 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (*AcquireResu
 		res := &AcquireResult{
 			Namespace:     namespace,
 			LeaseID:       leaseID,
+			TxnID:         txnID,
 			Key:           key,
 			Owner:         cmd.Owner,
 			ExpiresAt:     expiresAt,
@@ -242,7 +245,11 @@ func (s *Service) KeepAlive(ctx context.Context, cmd KeepAliveCommand) (*KeepAli
 		if err != nil {
 			return nil, err
 		}
-		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, now); err != nil {
+		txnID := ""
+		if meta.Lease != nil {
+			txnID = meta.Lease.TxnID
+		}
+		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, txnID, now); err != nil {
 			return nil, err
 		}
 		meta.Lease.ExpiresAtUnix = now.Add(ttl).Unix()
@@ -289,6 +296,9 @@ func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (*ReleaseResu
 	if strings.TrimSpace(cmd.LeaseID) == "" {
 		return nil, Failure{Code: "missing_lease", Detail: "lease_id required", HTTPStatus: http.StatusBadRequest}
 	}
+	if strings.TrimSpace(cmd.TxnID) == "" {
+		return nil, Failure{Code: "missing_txn", Detail: "txn_id required", HTTPStatus: http.StatusBadRequest}
+	}
 	storageKey, err := s.namespacedKey(namespace, cmd.Key)
 	if err != nil {
 		return nil, Failure{Code: "invalid_key", Detail: err.Error(), HTTPStatus: http.StatusBadRequest}
@@ -301,7 +311,7 @@ func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (*ReleaseResu
 		if err != nil {
 			return nil, err
 		}
-		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, now); err != nil {
+		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now); err != nil {
 			// Idempotent: mismatched/expired/fencing issues are treated as already released.
 			var failure Failure
 			if errors.As(err, &failure) {
@@ -312,8 +322,118 @@ func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (*ReleaseResu
 			}
 			return nil, err
 		}
+
+		if cmd.TxnID == "" {
+			meta.Lease = nil
+			meta.UpdatedAtUnix = now.Unix()
+			newMetaETag, err := s.store.StoreMeta(ctx, namespace, keyComponent, meta, metaETag)
+			if err != nil {
+				if errors.Is(err, storage.ErrCASMismatch) {
+					continue
+				}
+				return nil, fmt.Errorf("store meta: %w", err)
+			}
+			return &ReleaseResult{Released: true, MetaETag: newMetaETag, MetaCleared: true}, nil
+		}
+		if meta.StagedTxnID != "" && meta.StagedTxnID != cmd.TxnID {
+			return nil, Failure{
+				Code:       "txn_mismatch",
+				Detail:     "different transaction already staged",
+				Version:    meta.Version,
+				ETag:       meta.StateETag,
+				HTTPStatus: http.StatusConflict,
+			}
+		}
+
+		commit := !cmd.Rollback
+		if meta.StagedTxnID == "" && meta.StagedStateETag == "" && !meta.StagedRemove && len(meta.StagedAttributes) == 0 {
+			commit = false // nothing staged; just clear lease
+		}
+
+		if !commit {
+			// rollback path
+			if meta.StagedStateETag != "" {
+				_ = s.staging.DiscardStagedState(ctx, namespace, keyComponent, meta.StagedTxnID, storage.DiscardStagedOptions{IgnoreNotFound: true})
+			}
+			meta.StagedTxnID = ""
+			meta.StagedVersion = 0
+			meta.StagedStateETag = ""
+			meta.StagedStateDescriptor = nil
+			meta.StagedStatePlaintextBytes = 0
+			meta.StagedAttributes = nil
+			meta.StagedRemove = false
+			meta.Lease = nil
+			meta.UpdatedAtUnix = now.Unix()
+			newMetaETag, err := s.store.StoreMeta(ctx, namespace, keyComponent, meta, metaETag)
+			if err != nil {
+				if errors.Is(err, storage.ErrCASMismatch) {
+					continue
+				}
+				return nil, fmt.Errorf("store meta: %w", err)
+			}
+			return &ReleaseResult{Released: true, MetaETag: newMetaETag, MetaCleared: true}, nil
+		}
+
+		// commit staged changes
+		if meta.StagedRemove {
+			// delete state
+			_ = s.staging.DiscardStagedState(ctx, namespace, keyComponent, meta.StagedTxnID, storage.DiscardStagedOptions{IgnoreNotFound: true})
+			if err := s.store.Remove(ctx, namespace, keyComponent, meta.StateETag); err != nil && !errors.Is(err, storage.ErrNotFound) {
+				if errors.Is(err, storage.ErrCASMismatch) {
+					continue
+				}
+				return nil, fmt.Errorf("remove state: %w", err)
+			}
+			meta.StateETag = ""
+			meta.StateDescriptor = nil
+			meta.StatePlaintextBytes = 0
+			meta.Version = pickStagedVersion(meta)
+			meta.PublishedVersion = meta.Version
+		} else if meta.StagedStateETag != "" {
+			result, err := s.staging.PromoteStagedState(ctx, namespace, keyComponent, meta.StagedTxnID, storage.PromoteStagedOptions{ExpectedHeadETag: meta.StateETag})
+			if err != nil {
+				if errors.Is(err, storage.ErrCASMismatch) {
+					continue
+				}
+				return nil, fmt.Errorf("promote staged state: %w", err)
+			}
+			meta.StateETag = result.NewETag
+			meta.StateDescriptor = result.Descriptor
+			meta.StatePlaintextBytes = result.BytesWritten
+			meta.Version = pickStagedVersion(meta)
+			meta.PublishedVersion = meta.Version
+			// Update index with the committed state.
+			if s.indexManager != nil {
+				if rdr, _, rerr := s.store.ReadState(ctx, namespace, keyComponent); rerr == nil {
+					defer rdr.Close()
+					if doc, derr := buildDocumentFromJSON(keyComponent, rdr); derr == nil {
+						_ = s.indexManager.Insert(namespace, doc)
+					}
+				}
+			}
+		}
+
+		// apply staged attributes
+		if len(meta.StagedAttributes) > 0 {
+			if meta.Attributes == nil {
+				meta.Attributes = make(map[string]string, len(meta.StagedAttributes))
+			}
+			for k, v := range meta.StagedAttributes {
+				meta.Attributes[k] = v
+			}
+		}
+
+		// clear staging and lease
+		meta.StagedTxnID = ""
+		meta.StagedVersion = 0
+		meta.StagedStateETag = ""
+		meta.StagedStateDescriptor = nil
+		meta.StagedStatePlaintextBytes = 0
+		meta.StagedAttributes = nil
+		meta.StagedRemove = false
 		meta.Lease = nil
 		meta.UpdatedAtUnix = now.Unix()
+
 		newMetaETag, err := s.store.StoreMeta(ctx, namespace, keyComponent, meta, metaETag)
 		if err != nil {
 			if errors.Is(err, storage.ErrCASMismatch) {
@@ -538,6 +658,16 @@ func durationToSeconds(d time.Duration) int64 {
 		return 0
 	}
 	return int64(math.Ceil(d.Seconds()))
+}
+
+func pickStagedVersion(meta *storage.Meta) int64 {
+	if meta == nil {
+		return 0
+	}
+	if meta.StagedVersion > 0 {
+		return meta.StagedVersion
+	}
+	return meta.Version + 1
 }
 
 // acquire backoff (simplified copy)

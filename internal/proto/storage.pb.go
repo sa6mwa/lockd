@@ -28,6 +28,7 @@ type Lease struct {
 	Owner         string                 `protobuf:"bytes,2,opt,name=owner,proto3" json:"owner,omitempty"`
 	ExpiresAtUnix int64                  `protobuf:"varint,3,opt,name=expires_at_unix,json=expiresAtUnix,proto3" json:"expires_at_unix,omitempty"`
 	FencingToken  int64                  `protobuf:"varint,4,opt,name=fencing_token,json=fencingToken,proto3" json:"fencing_token,omitempty"`
+	TxnId         string                 `protobuf:"bytes,5,opt,name=txn_id,json=txnId,proto3" json:"txn_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -90,19 +91,33 @@ func (x *Lease) GetFencingToken() int64 {
 	return 0
 }
 
+func (x *Lease) GetTxnId() string {
+	if x != nil {
+		return x.TxnId
+	}
+	return ""
+}
+
 type LockMeta struct {
-	state               protoimpl.MessageState `protogen:"open.v1"`
-	Lease               *Lease                 `protobuf:"bytes,1,opt,name=lease,proto3" json:"lease,omitempty"`
-	Version             int64                  `protobuf:"varint,2,opt,name=version,proto3" json:"version,omitempty"`
-	StateEtag           string                 `protobuf:"bytes,3,opt,name=state_etag,json=stateEtag,proto3" json:"state_etag,omitempty"`
-	UpdatedAtUnix       int64                  `protobuf:"varint,4,opt,name=updated_at_unix,json=updatedAtUnix,proto3" json:"updated_at_unix,omitempty"`
-	FencingToken        int64                  `protobuf:"varint,5,opt,name=fencing_token,json=fencingToken,proto3" json:"fencing_token,omitempty"`
-	StateDescriptor     []byte                 `protobuf:"bytes,6,opt,name=state_descriptor,json=stateDescriptor,proto3" json:"state_descriptor,omitempty"`
-	StatePlaintextBytes int64                  `protobuf:"varint,7,opt,name=state_plaintext_bytes,json=statePlaintextBytes,proto3" json:"state_plaintext_bytes,omitempty"`
-	PublishedVersion    int64                  `protobuf:"varint,8,opt,name=published_version,json=publishedVersion,proto3" json:"published_version,omitempty"`
-	Attributes          *structpb.Struct       `protobuf:"bytes,9,opt,name=attributes,proto3" json:"attributes,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	state                     protoimpl.MessageState `protogen:"open.v1"`
+	Lease                     *Lease                 `protobuf:"bytes,1,opt,name=lease,proto3" json:"lease,omitempty"`
+	Version                   int64                  `protobuf:"varint,2,opt,name=version,proto3" json:"version,omitempty"`
+	StateEtag                 string                 `protobuf:"bytes,3,opt,name=state_etag,json=stateEtag,proto3" json:"state_etag,omitempty"`
+	UpdatedAtUnix             int64                  `protobuf:"varint,4,opt,name=updated_at_unix,json=updatedAtUnix,proto3" json:"updated_at_unix,omitempty"`
+	FencingToken              int64                  `protobuf:"varint,5,opt,name=fencing_token,json=fencingToken,proto3" json:"fencing_token,omitempty"`
+	StateDescriptor           []byte                 `protobuf:"bytes,6,opt,name=state_descriptor,json=stateDescriptor,proto3" json:"state_descriptor,omitempty"`
+	StatePlaintextBytes       int64                  `protobuf:"varint,7,opt,name=state_plaintext_bytes,json=statePlaintextBytes,proto3" json:"state_plaintext_bytes,omitempty"`
+	PublishedVersion          int64                  `protobuf:"varint,8,opt,name=published_version,json=publishedVersion,proto3" json:"published_version,omitempty"`
+	Attributes                *structpb.Struct       `protobuf:"bytes,9,opt,name=attributes,proto3" json:"attributes,omitempty"`
+	StagedTxnId               string                 `protobuf:"bytes,10,opt,name=staged_txn_id,json=stagedTxnId,proto3" json:"staged_txn_id,omitempty"`
+	StagedStateEtag           string                 `protobuf:"bytes,11,opt,name=staged_state_etag,json=stagedStateEtag,proto3" json:"staged_state_etag,omitempty"`
+	StagedStateDescriptor     []byte                 `protobuf:"bytes,12,opt,name=staged_state_descriptor,json=stagedStateDescriptor,proto3" json:"staged_state_descriptor,omitempty"`
+	StagedStatePlaintextBytes int64                  `protobuf:"varint,13,opt,name=staged_state_plaintext_bytes,json=stagedStatePlaintextBytes,proto3" json:"staged_state_plaintext_bytes,omitempty"`
+	StagedVersion             int64                  `protobuf:"varint,14,opt,name=staged_version,json=stagedVersion,proto3" json:"staged_version,omitempty"`
+	StagedAttributes          map[string]string      `protobuf:"bytes,15,rep,name=staged_attributes,json=stagedAttributes,proto3" json:"staged_attributes,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	StagedRemove              bool                   `protobuf:"varint,16,opt,name=staged_remove,json=stagedRemove,proto3" json:"staged_remove,omitempty"`
+	unknownFields             protoimpl.UnknownFields
+	sizeCache                 protoimpl.SizeCache
 }
 
 func (x *LockMeta) Reset() {
@@ -196,6 +211,55 @@ func (x *LockMeta) GetAttributes() *structpb.Struct {
 		return x.Attributes
 	}
 	return nil
+}
+
+func (x *LockMeta) GetStagedTxnId() string {
+	if x != nil {
+		return x.StagedTxnId
+	}
+	return ""
+}
+
+func (x *LockMeta) GetStagedStateEtag() string {
+	if x != nil {
+		return x.StagedStateEtag
+	}
+	return ""
+}
+
+func (x *LockMeta) GetStagedStateDescriptor() []byte {
+	if x != nil {
+		return x.StagedStateDescriptor
+	}
+	return nil
+}
+
+func (x *LockMeta) GetStagedStatePlaintextBytes() int64 {
+	if x != nil {
+		return x.StagedStatePlaintextBytes
+	}
+	return 0
+}
+
+func (x *LockMeta) GetStagedVersion() int64 {
+	if x != nil {
+		return x.StagedVersion
+	}
+	return 0
+}
+
+func (x *LockMeta) GetStagedAttributes() map[string]string {
+	if x != nil {
+		return x.StagedAttributes
+	}
+	return nil
+}
+
+func (x *LockMeta) GetStagedRemove() bool {
+	if x != nil {
+		return x.StagedRemove
+	}
+	return false
 }
 
 type MetaRecord struct {
@@ -522,12 +586,13 @@ var File_storage_proto protoreflect.FileDescriptor
 
 const file_storage_proto_rawDesc = "" +
 	"\n" +
-	"\rstorage.proto\x12\x0elockd.internal\x1a\x1cgoogle/protobuf/struct.proto\"\x85\x01\n" +
+	"\rstorage.proto\x12\x0elockd.internal\x1a\x1cgoogle/protobuf/struct.proto\"\x9c\x01\n" +
 	"\x05Lease\x12\x19\n" +
 	"\blease_id\x18\x01 \x01(\tR\aleaseId\x12\x14\n" +
 	"\x05owner\x18\x02 \x01(\tR\x05owner\x12&\n" +
 	"\x0fexpires_at_unix\x18\x03 \x01(\x03R\rexpiresAtUnix\x12#\n" +
-	"\rfencing_token\x18\x04 \x01(\x03R\ffencingToken\"\x82\x03\n" +
+	"\rfencing_token\x18\x04 \x01(\x03R\ffencingToken\x12\x15\n" +
+	"\x06txn_id\x18\x05 \x01(\tR\x05txnId\"\xb9\x06\n" +
 	"\bLockMeta\x12+\n" +
 	"\x05lease\x18\x01 \x01(\v2\x15.lockd.internal.LeaseR\x05lease\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\x03R\aversion\x12\x1d\n" +
@@ -540,7 +605,18 @@ const file_storage_proto_rawDesc = "" +
 	"\x11published_version\x18\b \x01(\x03R\x10publishedVersion\x127\n" +
 	"\n" +
 	"attributes\x18\t \x01(\v2\x17.google.protobuf.StructR\n" +
-	"attributes\"N\n" +
+	"attributes\x12\"\n" +
+	"\rstaged_txn_id\x18\n" +
+	" \x01(\tR\vstagedTxnId\x12*\n" +
+	"\x11staged_state_etag\x18\v \x01(\tR\x0fstagedStateEtag\x126\n" +
+	"\x17staged_state_descriptor\x18\f \x01(\fR\x15stagedStateDescriptor\x12?\n" +
+	"\x1cstaged_state_plaintext_bytes\x18\r \x01(\x03R\x19stagedStatePlaintextBytes\x12%\n" +
+	"\x0estaged_version\x18\x0e \x01(\x03R\rstagedVersion\x12[\n" +
+	"\x11staged_attributes\x18\x0f \x03(\v2..lockd.internal.LockMeta.StagedAttributesEntryR\x10stagedAttributes\x12#\n" +
+	"\rstaged_remove\x18\x10 \x01(\bR\fstagedRemove\x1aC\n" +
+	"\x15StagedAttributesEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"N\n" +
 	"\n" +
 	"MetaRecord\x12\x12\n" +
 	"\x04etag\x18\x01 \x01(\tR\x04etag\x12,\n" +
@@ -586,7 +662,7 @@ func file_storage_proto_rawDescGZIP() []byte {
 	return file_storage_proto_rawDescData
 }
 
-var file_storage_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_storage_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_storage_proto_goTypes = []any{
 	(*Lease)(nil),                // 0: lockd.internal.Lease
 	(*LockMeta)(nil),             // 1: lockd.internal.LockMeta
@@ -594,21 +670,23 @@ var file_storage_proto_goTypes = []any{
 	(*NamespaceQueryConfig)(nil), // 3: lockd.internal.NamespaceQueryConfig
 	(*NamespaceConfig)(nil),      // 4: lockd.internal.NamespaceConfig
 	(*QueueMessageMeta)(nil),     // 5: lockd.internal.QueueMessageMeta
-	(*structpb.Struct)(nil),      // 6: google.protobuf.Struct
-	(*structpb.Value)(nil),       // 7: google.protobuf.Value
+	nil,                          // 6: lockd.internal.LockMeta.StagedAttributesEntry
+	(*structpb.Struct)(nil),      // 7: google.protobuf.Struct
+	(*structpb.Value)(nil),       // 8: google.protobuf.Value
 }
 var file_storage_proto_depIdxs = []int32{
 	0, // 0: lockd.internal.LockMeta.lease:type_name -> lockd.internal.Lease
-	6, // 1: lockd.internal.LockMeta.attributes:type_name -> google.protobuf.Struct
-	1, // 2: lockd.internal.MetaRecord.meta:type_name -> lockd.internal.LockMeta
-	3, // 3: lockd.internal.NamespaceConfig.query:type_name -> lockd.internal.NamespaceQueryConfig
-	6, // 4: lockd.internal.QueueMessageMeta.attributes:type_name -> google.protobuf.Struct
-	7, // 5: lockd.internal.QueueMessageMeta.last_error:type_name -> google.protobuf.Value
-	6, // [6:6] is the sub-list for method output_type
-	6, // [6:6] is the sub-list for method input_type
-	6, // [6:6] is the sub-list for extension type_name
-	6, // [6:6] is the sub-list for extension extendee
-	0, // [0:6] is the sub-list for field type_name
+	7, // 1: lockd.internal.LockMeta.attributes:type_name -> google.protobuf.Struct
+	6, // 2: lockd.internal.LockMeta.staged_attributes:type_name -> lockd.internal.LockMeta.StagedAttributesEntry
+	1, // 3: lockd.internal.MetaRecord.meta:type_name -> lockd.internal.LockMeta
+	3, // 4: lockd.internal.NamespaceConfig.query:type_name -> lockd.internal.NamespaceQueryConfig
+	7, // 5: lockd.internal.QueueMessageMeta.attributes:type_name -> google.protobuf.Struct
+	8, // 6: lockd.internal.QueueMessageMeta.last_error:type_name -> google.protobuf.Value
+	7, // [7:7] is the sub-list for method output_type
+	7, // [7:7] is the sub-list for method input_type
+	7, // [7:7] is the sub-list for extension type_name
+	7, // [7:7] is the sub-list for extension extendee
+	0, // [0:7] is the sub-list for field type_name
 }
 
 func init() { file_storage_proto_init() }
@@ -623,7 +701,7 @@ func file_storage_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_storage_proto_rawDesc), len(file_storage_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   6,
+			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

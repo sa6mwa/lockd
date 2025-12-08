@@ -80,7 +80,11 @@ func (s *Service) Ack(ctx context.Context, cmd QueueAckCommand) (*QueueAckResult
 	}
 
 	now := s.clock.Now()
-	if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, now); err != nil {
+	txnID := ""
+	if meta.Lease != nil {
+		txnID = meta.Lease.TxnID
+	}
+	if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, txnID, now); err != nil {
 		// Allow transparent lease upgrade when a fresher lease exists.
 		var fail Failure
 		if errors.As(err, &fail) && fail.Code == "lease_required" && meta.Lease != nil && meta.Lease.Owner != "" {
@@ -123,7 +127,8 @@ func (s *Service) Ack(ctx context.Context, cmd QueueAckCommand) (*QueueAckResult
 			stateRel := relativeKey(namespace, stateKey)
 			stateMeta, stateMetaETag, loadErr := s.ensureMeta(ctx, namespace, stateKey)
 			if loadErr == nil && stateMeta.Lease != nil {
-				if err := validateLease(stateMeta, cmd.StateLeaseID, cmd.StateFencingToken, s.clock.Now()); err == nil {
+				stateTxn := stateMeta.Lease.TxnID
+				if err := validateLease(stateMeta, cmd.StateLeaseID, cmd.StateFencingToken, stateTxn, s.clock.Now()); err == nil {
 					_ = s.releaseLeaseWithMeta(ctx, namespace, stateRel, cmd.StateLeaseID, stateMeta, stateMetaETag)
 				}
 			}
@@ -170,7 +175,11 @@ func (s *Service) Nack(ctx context.Context, cmd QueueNackCommand) (*QueueNackRes
 		}
 		return nil, err
 	}
-	if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, s.clock.Now()); err != nil {
+	txnID := ""
+	if meta.Lease != nil {
+		txnID = meta.Lease.TxnID
+	}
+	if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, txnID, s.clock.Now()); err != nil {
 		return nil, err
 	}
 
@@ -210,7 +219,8 @@ func (s *Service) Nack(ctx context.Context, cmd QueueNackCommand) (*QueueNackRes
 			stateRel := relativeKey(namespace, stateKey)
 			stateMeta, stateMetaETag, loadErr := s.ensureMeta(ctx, namespace, stateKey)
 			if loadErr == nil && stateMeta.Lease != nil {
-				if err := validateLease(stateMeta, cmd.StateLeaseID, cmd.StateFencingToken, s.clock.Now()); err == nil {
+				stateTxn := stateMeta.Lease.TxnID
+				if err := validateLease(stateMeta, cmd.StateLeaseID, cmd.StateFencingToken, stateTxn, s.clock.Now()); err == nil {
 					_ = s.releaseLeaseWithMeta(ctx, namespace, stateRel, cmd.StateLeaseID, stateMeta, stateMetaETag)
 				}
 			}
@@ -261,7 +271,11 @@ func (s *Service) Extend(ctx context.Context, cmd QueueExtendCommand) (*QueueExt
 		}
 		return nil, err
 	}
-	if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, s.clock.Now()); err != nil {
+	txnID := ""
+	if meta.Lease != nil {
+		txnID = meta.Lease.TxnID
+	}
+	if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, txnID, s.clock.Now()); err != nil {
 		return nil, err
 	}
 
@@ -322,7 +336,11 @@ func (s *Service) Extend(ctx context.Context, cmd QueueExtendCommand) (*QueueExt
 			}
 			return nil, err
 		}
-		if err := validateLease(stateMeta, cmd.StateLeaseID, cmd.StateFencingToken, now); err != nil {
+		stateTxn := ""
+		if stateMeta.Lease != nil {
+			stateTxn = stateMeta.Lease.TxnID
+		}
+		if err := validateLease(stateMeta, cmd.StateLeaseID, cmd.StateFencingToken, stateTxn, now); err != nil {
 			return nil, err
 		}
 		if stateMeta.Lease == nil {

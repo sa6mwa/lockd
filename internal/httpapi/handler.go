@@ -836,6 +836,7 @@ func (h *Handler) acquireLeaseForKey(ctx context.Context, _ pslog.Logger, params
 	resp := api.AcquireResponse{
 		Namespace:     res.Namespace,
 		LeaseID:       res.LeaseID,
+		TxnID:         res.TxnID,
 		Key:           relativeKey(res.Namespace, res.Key),
 		Owner:         res.Owner,
 		ExpiresAt:     res.ExpiresAt,

@@ -55,6 +55,8 @@ definitions:
         type: string
       lease_id:
         type: string
+      txn_id:
+        type: string
       namespace:
         type: string
       owner:
@@ -327,6 +329,10 @@ definitions:
       key:
         type: string
       lease_id:
+        type: string
+      rollback:
+        type: boolean
+      txn_id:
         type: string
       namespace:
         type: string

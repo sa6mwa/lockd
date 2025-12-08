@@ -77,6 +77,7 @@ func TestCLIClientStateLifecycle(t *testing.T) {
 	if err := json.Unmarshal([]byte(acquireOut), &acquireResp); err != nil {
 		t.Fatalf("decode acquire response: %v", err)
 	}
+	t.Setenv(envTxnID, acquireResp.TxnID)
 
 	runCLICommand(t,
 		"client",

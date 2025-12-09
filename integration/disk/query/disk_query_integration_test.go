@@ -43,6 +43,10 @@ func TestDiskQueryDomainDatasets(t *testing.T) {
 	queriesuite.RunDomainDatasets(t, startDiskQueryServer)
 }
 
+func TestDiskQueryTxSmoke(t *testing.T) {
+	queriesuite.RunTxSmoke(t, startDiskQueryServer)
+}
+
 func startDiskQueryServer(t testing.TB) *lockd.TestServer {
 	t.Helper()
 	root := prepareDiskQueryRoot(t)

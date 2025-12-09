@@ -191,13 +191,9 @@ func getStateJSON(ctx context.Context, cli *lockdclient.Client, key, leaseID str
 	return payload, resp.ETag, resp.Version, nil
 }
 
-func releaseLease(t *testing.T, ctx context.Context, cli *lockdclient.Client, key, leaseID string) bool {
-	resp, err := cli.Release(ctx, api.ReleaseRequest{Key: key, LeaseID: leaseID})
-	if err != nil {
+func releaseLease(t *testing.T, ctx context.Context, lease *lockdclient.LeaseSession) bool {
+	if err := lease.Release(ctx); err != nil {
 		t.Fatalf("release: %v", err)
-	}
-	if !resp.Released {
-		return false
 	}
 	return true
 }
@@ -294,16 +290,23 @@ func cleanupNamespaceKeys(tb testing.TB, store storage.Backend, ctx context.Cont
 }
 
 func cleanupIndexArtifacts(tb testing.TB, store storage.Backend, ctx context.Context, namespace string) {
-	listOpts := storage.ListOptions{Prefix: "index/", Limit: 1000}
+	removePrefix(tb, store, ctx, namespace, "index/")
+	removePrefix(tb, store, ctx, namespace, ".staging/")
+}
+
+// removePrefix best-effort deletes all objects under the prefix within a namespace.
+func removePrefix(tb testing.TB, store storage.Backend, ctx context.Context, namespace, prefix string) {
+	tb.Helper()
+	listOpts := storage.ListOptions{Prefix: prefix, Limit: 1000}
 	for {
 		res, err := store.ListObjects(ctx, namespace, listOpts)
 		if err != nil {
-			tb.Logf("aws cleanup list index (%s): %v", namespace, err)
+			tb.Logf("aws cleanup list prefix (%s/%s): %v", namespace, prefix, err)
 			return
 		}
 		for _, obj := range res.Objects {
 			if err := store.DeleteObject(ctx, namespace, obj.Key, storage.DeleteObjectOptions{}); err != nil && !errors.Is(err, storage.ErrNotFound) {
-				tb.Logf("aws cleanup index %s/%s: %v", namespace, obj.Key, err)
+				tb.Logf("aws cleanup delete %s/%s: %v", namespace, obj.Key, err)
 			}
 		}
 		if !res.Truncated || res.NextStartAfter == "" {
@@ -387,6 +390,9 @@ func cleanupAWSKey(tb testing.TB, cfg lockd.Config, namespace, key string) error
 	if err := store.Remove(ctx, namespace, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 		return fmt.Errorf("remove state %s/%s: %w", namespace, key, err)
 	}
+	if err := cleanupPrefix(store, ctx, namespace, path.Join("state", key, ".staging")+"/"); err != nil {
+		return fmt.Errorf("cleanup staging %s/%s: %w", namespace, key, err)
+	}
 	if err := store.DeleteMeta(ctx, namespace, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 		return fmt.Errorf("delete meta %s/%s: %w", namespace, key, err)
 	}
@@ -426,6 +432,26 @@ func sampleKeys(keys []string) []string {
 	out := make([]string, 3)
 	copy(out, keys[:3])
 	return out
+}
+
+// cleanupPrefix deletes all objects under the provided prefix, returning the first error encountered.
+func cleanupPrefix(store storage.Backend, ctx context.Context, namespace, prefix string) error {
+	listOpts := storage.ListOptions{Prefix: prefix, Limit: 1000}
+	for {
+		res, err := store.ListObjects(ctx, namespace, listOpts)
+		if err != nil {
+			return fmt.Errorf("list objects %s/%s: %w", namespace, prefix, err)
+		}
+		for _, obj := range res.Objects {
+			if err := store.DeleteObject(ctx, namespace, obj.Key, storage.DeleteObjectOptions{}); err != nil && !errors.Is(err, storage.ErrNotFound) {
+				return fmt.Errorf("delete object %s/%s: %w", namespace, obj.Key, err)
+			}
+		}
+		if !res.Truncated || res.NextStartAfter == "" {
+			return nil
+		}
+		listOpts.StartAfter = res.NextStartAfter
+	}
 }
 
 // CleanupNamespaceIndexes removes index manifests and segments for the provided namespaces.

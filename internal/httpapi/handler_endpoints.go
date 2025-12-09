@@ -173,19 +173,24 @@ func (h *Handler) handleKeepAlive(w http.ResponseWriter, r *http.Request) error 
 		logger = h.logger
 	}
 	verbose := logger
-	verbose.Debug("keepalive.begin",
-		"namespace", namespace,
-		"key", key,
-		"lease_id", payload.LeaseID,
-		"ttl_seconds", ttl.Seconds(),
-	)
+	txnID := ""
 	// Prefer cached meta to avoid extra LoadMeta round-trips.
 	var knownMeta *storage.Meta
 	knownETag := ""
 	if cachedMeta, cachedETag, cachedKey, ok := h.leaseSnapshot(payload.LeaseID); ok && cachedKey == storageKey {
 		knownMeta = &cachedMeta
 		knownETag = cachedETag
+		if cachedMeta.Lease != nil {
+			txnID = cachedMeta.Lease.TxnID
+		}
 	}
+	verbose.Debug("keepalive.begin",
+		"namespace", namespace,
+		"key", key,
+		"lease_id", payload.LeaseID,
+		"txn_id", txnID,
+		"ttl_seconds", ttl.Seconds(),
+	)
 	res, err := h.core.KeepAlive(ctx, core.KeepAliveCommand{
 		Namespace:     namespace,
 		Key:           key,
@@ -203,6 +208,9 @@ func (h *Handler) handleKeepAlive(w http.ResponseWriter, r *http.Request) error 
 	}
 	if res.Meta != nil {
 		h.cacheLease(payload.LeaseID, storageKey, *res.Meta, res.MetaETag)
+		if res.Meta.Lease != nil && res.Meta.Lease.TxnID != "" {
+			txnID = res.Meta.Lease.TxnID
+		}
 	}
 	w.Header().Set(headerFencingToken, strconv.FormatInt(res.FencingToken, 10))
 	h.writeJSON(w, http.StatusOK, api.KeepAliveResponse{ExpiresAt: res.ExpiresAt}, nil)
@@ -210,6 +218,7 @@ func (h *Handler) handleKeepAlive(w http.ResponseWriter, r *http.Request) error 
 		"namespace", namespace,
 		"key", key,
 		"lease_id", payload.LeaseID,
+		"txn_id", txnID,
 		"expires_at", res.ExpiresAt,
 		"fencing", res.FencingToken,
 	)
@@ -268,7 +277,7 @@ func (h *Handler) handleRelease(w http.ResponseWriter, r *http.Request) error {
 		logger = h.logger
 	}
 	verbose := logger
-	verbose.Debug("release.begin", "namespace", namespace, "key", payload.Key, "lease_id", payload.LeaseID)
+	verbose.Debug("release.begin", "namespace", namespace, "key", payload.Key, "lease_id", payload.LeaseID, "txn_id", payload.TxnID)
 	var knownMeta *storage.Meta
 	knownETag := ""
 	res, err := h.core.Release(ctx, core.ReleaseCommand{
@@ -289,7 +298,7 @@ func (h *Handler) handleRelease(w http.ResponseWriter, r *http.Request) error {
 	}
 	h.dropLease(payload.LeaseID)
 	h.writeJSON(w, http.StatusOK, api.ReleaseResponse{Released: res.Released}, nil)
-	verbose.Debug("release.success", "namespace", namespace, "key", payload.Key, "lease_id", payload.LeaseID)
+	verbose.Debug("release.success", "namespace", namespace, "key", payload.Key, "lease_id", payload.LeaseID, "txn_id", payload.TxnID)
 	return nil
 }
 

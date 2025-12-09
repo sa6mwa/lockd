@@ -2401,6 +2401,18 @@ func (c *Client) unregisterSession(leaseID string) {
 	c.sessions.Delete(leaseID)
 }
 
+func (c *Client) sessionByLease(leaseID string) *LeaseSession {
+	if leaseID == "" {
+		return nil
+	}
+	if sess, ok := c.sessions.Load(leaseID); ok {
+		if ls, ok := sess.(*LeaseSession); ok {
+			return ls
+		}
+	}
+	return nil
+}
+
 // UseNamespace updates the default namespace used when callers omit one.
 func (c *Client) UseNamespace(ns string) error {
 	if c == nil {
@@ -3039,7 +3051,7 @@ func (c *Client) Acquire(ctx context.Context, req api.AcquireRequest, opts ...Ac
 			}
 			session := newLeaseSession(c, resp, token, endpoint)
 			session.setCorrelation(resp.CorrelationID)
-			c.logInfoCtx(ctx, "client.acquire.success", "key", keyForLog, "lease_id", resp.LeaseID, "endpoint", c.lastEndpoint, "attempt", attempt)
+			c.logInfoCtx(ctx, "client.acquire.success", "key", keyForLog, "lease_id", resp.LeaseID, "txn_id", resp.TxnID, "endpoint", c.lastEndpoint, "attempt", attempt)
 			return session, nil
 		}
 
@@ -3300,7 +3312,7 @@ func (c *Client) AcquireForUpdate(ctx context.Context, req api.AcquireRequest, h
 		snapshot, snapErr := sess.Get(handshakeCtx)
 		if snapErr != nil {
 			handshakeCancel()
-			c.logWarnCtx(ctx, "client.acquire_for_update.snapshot_error", "key", keyForLog, "lease_id", sess.LeaseID, "error", snapErr)
+			c.logWarnCtx(ctx, "client.acquire_for_update.snapshot_error", "key", keyForLog, "lease_id", sess.LeaseID, "txn_id", sess.TxnID, "error", snapErr)
 			if releaseErr := sess.Release(ctx); releaseErr != nil && !isLeaseRequiredError(releaseErr) {
 				snapErr = errors.Join(snapErr, releaseErr)
 			}
@@ -3317,7 +3329,7 @@ func (c *Client) AcquireForUpdate(ctx context.Context, req api.AcquireRequest, h
 					sleep = retryHint
 				}
 				delay = sleep
-				c.logDebugCtx(ctx, "client.acquire_for_update.retry_after_snapshot_failure", "key", keyForLog, "lease_id", sess.LeaseID, "retries", retryCount, "delay", sleep, "retry_after", retryAfterFromError(snapErr), "qrf_state", qrfStateFromError(snapErr), "error", snapErr)
+				c.logDebugCtx(ctx, "client.acquire_for_update.retry_after_snapshot_failure", "key", keyForLog, "lease_id", sess.LeaseID, "txn_id", sess.TxnID, "retries", retryCount, "delay", sleep, "retry_after", retryAfterFromError(snapErr), "qrf_state", qrfStateFromError(snapErr), "error", snapErr)
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
@@ -3328,7 +3340,7 @@ func (c *Client) AcquireForUpdate(ctx context.Context, req api.AcquireRequest, h
 			return snapErr
 		}
 
-		c.logInfoCtx(ctx, "client.acquire_for_update.acquired", "key", keyForLog, "lease_id", sess.LeaseID, "endpoint", sess.endpoint)
+		c.logInfoCtx(ctx, "client.acquire_for_update.acquired", "key", keyForLog, "lease_id", sess.LeaseID, "txn_id", sess.TxnID, "endpoint", sess.endpoint)
 		cleanupHandshake := handshakeCancel
 
 		handlerCtx, handlerCancel := context.WithCancel(ctx)
@@ -3345,7 +3357,7 @@ func (c *Client) AcquireForUpdate(ctx context.Context, req api.AcquireRequest, h
 		handlerErr := handler(handlerCtx, userCtx)
 		if snapshot != nil {
 			if closeErr := snapshot.Close(); closeErr != nil {
-				c.logDebugCtx(ctx, "client.acquire_for_update.state_close_error", "key", keyForLog, "lease_id", sess.LeaseID, "error", closeErr)
+				c.logDebugCtx(ctx, "client.acquire_for_update.state_close_error", "key", keyForLog, "lease_id", sess.LeaseID, "txn_id", sess.TxnID, "error", closeErr)
 			}
 		}
 		handlerCancel()
@@ -3368,7 +3380,7 @@ func (c *Client) AcquireForUpdate(ctx context.Context, req api.AcquireRequest, h
 			if shouldRetryForUpdate(resultErr) {
 				retryCount++
 				if cfg.FailureRetries >= 0 && retryCount > cfg.FailureRetries {
-					c.logErrorCtx(ctx, "client.acquire_for_update.handler_error", "key", keyForLog, "lease_id", sess.LeaseID, "error", resultErr)
+					c.logErrorCtx(ctx, "client.acquire_for_update.handler_error", "key", keyForLog, "lease_id", sess.LeaseID, "txn_id", sess.TxnID, "error", resultErr)
 					return resultErr
 				}
 				sleep := acquireRetryDelay(delay, cfg)
@@ -3379,7 +3391,7 @@ func (c *Client) AcquireForUpdate(ctx context.Context, req api.AcquireRequest, h
 					sleep = retryHint
 				}
 				delay = sleep
-				c.logDebugCtx(ctx, "client.acquire_for_update.retry_after_handler_error", "key", keyForLog, "lease_id", sess.LeaseID, "retries", retryCount, "delay", sleep, "retry_after", retryAfterFromError(resultErr), "qrf_state", qrfStateFromError(resultErr), "error", resultErr)
+				c.logDebugCtx(ctx, "client.acquire_for_update.retry_after_handler_error", "key", keyForLog, "lease_id", sess.LeaseID, "txn_id", sess.TxnID, "retries", retryCount, "delay", sleep, "retry_after", retryAfterFromError(resultErr), "qrf_state", qrfStateFromError(resultErr), "error", resultErr)
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
@@ -3387,10 +3399,10 @@ func (c *Client) AcquireForUpdate(ctx context.Context, req api.AcquireRequest, h
 				}
 				continue
 			}
-			c.logErrorCtx(ctx, "client.acquire_for_update.handler_error", "key", keyForLog, "lease_id", sess.LeaseID, "error", resultErr)
+			c.logErrorCtx(ctx, "client.acquire_for_update.handler_error", "key", keyForLog, "lease_id", sess.LeaseID, "txn_id", sess.TxnID, "error", resultErr)
 			return resultErr
 		}
-		c.logInfoCtx(ctx, "client.acquire_for_update.success", "key", keyForLog, "lease_id", sess.LeaseID)
+		c.logInfoCtx(ctx, "client.acquire_for_update.success", "key", keyForLog, "lease_id", sess.LeaseID, "txn_id", sess.TxnID)
 		return nil
 	}
 }
@@ -3408,7 +3420,7 @@ func (c *Client) startForUpdateKeepAlive(ctx context.Context, cancel context.Can
 				return
 			case <-ticker.C:
 				if _, err := sess.KeepAlive(ctx, ttl); err != nil {
-					c.logWarnCtx(ctx, "client.acquire_for_update.keepalive_failed", "key", sess.Key, "lease_id", sess.LeaseID, "error", err)
+					c.logWarnCtx(ctx, "client.acquire_for_update.keepalive_failed", "key", sess.Key, "lease_id", sess.LeaseID, "txn_id", sess.TxnID, "error", err)
 					ch <- err
 					cancel()
 					return
@@ -3491,11 +3503,11 @@ func (c *Client) releaseInternal(ctx context.Context, req api.ReleaseRequest, pr
 		return nil, err
 	}
 	req.Namespace = namespace
-	c.logTraceCtx(ctx, "client.release.start", "key", req.Key, "lease_id", req.LeaseID)
+	c.logTraceCtx(ctx, "client.release.start", "key", req.Key, "lease_id", req.LeaseID, "txn_id", req.TxnID)
 	token, err := c.fencingToken(req.LeaseID, "")
 	if err != nil {
 		if errors.Is(err, ErrMissingFencingToken) {
-			c.logDebugCtx(ctx, "client.release.no_token", "key", req.Key, "lease_id", req.LeaseID)
+			c.logDebugCtx(ctx, "client.release.no_token", "key", req.Key, "lease_id", req.LeaseID, "txn_id", req.TxnID)
 			return &api.ReleaseResponse{Released: true}, nil
 		}
 		return nil, err
@@ -3506,17 +3518,17 @@ func (c *Client) releaseInternal(ctx context.Context, req api.ReleaseRequest, pr
 		headers.Set(headerCorrelationID, corr)
 	}
 	c.closeIdleConnections()
-	c.logTraceCtx(ctx, "client.release.headers", "key", req.Key, "lease_id", req.LeaseID, "fencing_token", token)
+	c.logTraceCtx(ctx, "client.release.headers", "key", req.Key, "lease_id", req.LeaseID, "txn_id", req.TxnID, "fencing_token", token)
 	var resp api.ReleaseResponse
 	endpoint, err := c.postJSON(ctx, "/v1/release", req, &resp, headers, preferred)
 	if err != nil {
 		if isLeaseRequiredError(err) {
-			c.logDebugCtx(ctx, "client.release.already_gone", "key", req.Key, "lease_id", req.LeaseID)
+			c.logDebugCtx(ctx, "client.release.already_gone", "key", req.Key, "lease_id", req.LeaseID, "txn_id", req.TxnID)
 			c.leaseTokens.Delete(req.LeaseID)
 			return &api.ReleaseResponse{Released: true}, nil
 		}
 		if errors.Is(err, context.DeadlineExceeded) && preferred != "" {
-			c.logWarnCtx(ctx, "client.release.retry_different_endpoint", "key", req.Key, "lease_id", req.LeaseID, "endpoint", preferred, "error", err)
+			c.logWarnCtx(ctx, "client.release.retry_different_endpoint", "key", req.Key, "lease_id", req.LeaseID, "txn_id", req.TxnID, "endpoint", preferred, "error", err)
 			for _, base := range c.endpoints {
 				if base == preferred {
 					continue
@@ -3542,17 +3554,17 @@ func (c *Client) releaseInternal(ctx context.Context, req api.ReleaseRequest, pr
 					break
 				}
 				if isLeaseRequiredError(altErr) {
-					c.logDebugCtx(ctx, "client.release.already_gone", "key", req.Key, "lease_id", req.LeaseID, "endpoint", base)
+					c.logDebugCtx(ctx, "client.release.already_gone", "key", req.Key, "lease_id", req.LeaseID, "txn_id", req.TxnID, "endpoint", base)
 					c.leaseTokens.Delete(req.LeaseID)
 					return &api.ReleaseResponse{Released: true}, nil
 				}
-				c.logWarnCtx(ctx, "client.release.backup_failed", "key", req.Key, "lease_id", req.LeaseID, "endpoint", base, "error", altErr)
+				c.logWarnCtx(ctx, "client.release.backup_failed", "key", req.Key, "lease_id", req.LeaseID, "txn_id", req.TxnID, "endpoint", base, "error", altErr)
 			}
 			if err != nil {
 				return nil, err
 			}
 		} else {
-			c.logErrorCtx(ctx, "client.release.error", "key", req.Key, "lease_id", req.LeaseID, "fencing_token", token, "error", err)
+			c.logErrorCtx(ctx, "client.release.error", "key", req.Key, "lease_id", req.LeaseID, "txn_id", req.TxnID, "fencing_token", token, "error", err)
 			return nil, err
 		}
 	}
@@ -3563,11 +3575,11 @@ func (c *Client) releaseInternal(ctx context.Context, req api.ReleaseRequest, pr
 			}
 			_, extraErr := c.postJSON(ctx, "/v1/release", req, nil, headers.Clone(), base)
 			if extraErr != nil && !isLeaseRequiredError(extraErr) {
-				c.logDebugCtx(ctx, "client.release.extra_endpoint_error", "key", req.Key, "lease_id", req.LeaseID, "endpoint", base, "error", extraErr)
+				c.logDebugCtx(ctx, "client.release.extra_endpoint_error", "key", req.Key, "lease_id", req.LeaseID, "txn_id", req.TxnID, "endpoint", base, "error", extraErr)
 			}
 		}
 	}
-	c.logTraceCtx(ctx, "client.release.success", "key", req.Key, "lease_id", req.LeaseID, "fencing_token", token)
+	c.logTraceCtx(ctx, "client.release.success", "key", req.Key, "lease_id", req.LeaseID, "txn_id", req.TxnID, "fencing_token", token)
 	c.leaseTokens.Delete(req.LeaseID)
 	return &resp, nil
 }
@@ -4264,11 +4276,16 @@ func (c *Client) Update(ctx context.Context, key, leaseID string, body io.Reader
 		return nil, err
 	}
 	opts.Namespace = namespace
+	if opts.TxnID == "" {
+		if sess := c.sessionByLease(leaseID); sess != nil {
+			opts.TxnID = sess.TxnID
+		}
+	}
 	token, err := c.fencingToken(leaseID, opts.FencingToken)
 	if err != nil {
 		return nil, err
 	}
-	c.logTraceCtx(ctx, "client.update.start", "key", key, "lease_id", leaseID, "endpoint", c.lastEndpoint, "fencing_token", token)
+	c.logTraceCtx(ctx, "client.update.start", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", c.lastEndpoint, "fencing_token", token)
 	bodyFactory, err := makeBodyFactory(body)
 	if err != nil {
 		return nil, err
@@ -4303,20 +4320,20 @@ func (c *Client) Update(ctx context.Context, key, leaseID string, body io.Reader
 	}
 	resp, cancel, endpoint, err := c.attemptEndpoints(builder, "")
 	if err != nil {
-		c.logErrorCtx(ctx, "client.update.transport_error", "key", key, "lease_id", leaseID, "endpoint", endpoint, "fencing_token", token, "error", err)
+		c.logErrorCtx(ctx, "client.update.transport_error", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", endpoint, "fencing_token", token, "error", err)
 		return nil, err
 	}
 	defer cancel()
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		c.logWarnCtx(ctx, "client.update.error", "key", key, "lease_id", leaseID, "endpoint", endpoint, "fencing_token", token, "status", resp.StatusCode)
+		c.logWarnCtx(ctx, "client.update.error", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", endpoint, "fencing_token", token, "status", resp.StatusCode)
 		return nil, c.decodeError(resp)
 	}
 	var result UpdateResult
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}
-	c.logTraceCtx(ctx, "client.update.success", "key", key, "lease_id", leaseID, "endpoint", endpoint, "fencing_token", token, "new_version", result.NewVersion, "new_etag", result.NewStateETag)
+	c.logTraceCtx(ctx, "client.update.success", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", endpoint, "fencing_token", token, "new_version", result.NewVersion, "new_etag", result.NewStateETag)
 	if newToken := resp.Header.Get(headerFencingToken); newToken != "" {
 		c.RegisterLeaseToken(leaseID, newToken)
 	}
@@ -4338,6 +4355,11 @@ func (c *Client) UpdateMetadata(ctx context.Context, key, leaseID string, opts U
 		return nil, err
 	}
 	opts.Namespace = namespace
+	if opts.TxnID == "" {
+		if sess := c.sessionByLease(leaseID); sess != nil {
+			opts.TxnID = sess.TxnID
+		}
+	}
 	token, err := c.fencingToken(leaseID, opts.FencingToken)
 	if err != nil {
 		return nil, err
@@ -4350,7 +4372,7 @@ func (c *Client) UpdateMetadata(ctx context.Context, key, leaseID string, opts U
 		return nil, err
 	}
 	path := fmt.Sprintf("/v1/metadata?key=%s&namespace=%s", url.QueryEscape(key), url.QueryEscape(namespace))
-	c.logTraceCtx(ctx, "client.metadata.start", "key", key, "lease_id", leaseID, "namespace", namespace)
+	c.logTraceCtx(ctx, "client.metadata.start", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "namespace", namespace)
 	builder := func(base string) (*http.Request, context.CancelFunc, error) {
 		reqCtx, cancel := c.requestContext(ctx)
 		req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, base+path, bytes.NewReader(body))
@@ -4372,13 +4394,13 @@ func (c *Client) UpdateMetadata(ctx context.Context, key, leaseID string, opts U
 	}
 	resp, cancel, endpoint, err := c.attemptEndpoints(builder, "")
 	if err != nil {
-		c.logErrorCtx(ctx, "client.metadata.transport_error", "key", key, "lease_id", leaseID, "namespace", namespace, "endpoint", endpoint, "error", err)
+		c.logErrorCtx(ctx, "client.metadata.transport_error", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "namespace", namespace, "endpoint", endpoint, "error", err)
 		return nil, err
 	}
 	defer cancel()
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		c.logWarnCtx(ctx, "client.metadata.error", "key", key, "lease_id", leaseID, "namespace", namespace, "endpoint", endpoint, "status", resp.StatusCode)
+		c.logWarnCtx(ctx, "client.metadata.error", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "namespace", namespace, "endpoint", endpoint, "status", resp.StatusCode)
 		return nil, c.decodeError(resp)
 	}
 	var apiResp api.MetadataUpdateResponse
@@ -4388,7 +4410,7 @@ func (c *Client) UpdateMetadata(ctx context.Context, key, leaseID string, opts U
 	if newToken := resp.Header.Get(headerFencingToken); newToken != "" {
 		c.RegisterLeaseToken(leaseID, newToken)
 	}
-	c.logTraceCtx(ctx, "client.metadata.success", "key", key, "lease_id", leaseID, "namespace", namespace, "endpoint", endpoint, "version", apiResp.Version)
+	c.logTraceCtx(ctx, "client.metadata.success", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "namespace", namespace, "endpoint", endpoint, "version", apiResp.Version)
 	return &MetadataResult{
 		Version:  apiResp.Version,
 		Metadata: apiResp.Metadata,
@@ -4403,11 +4425,16 @@ func (c *Client) Remove(ctx context.Context, key, leaseID string, opts RemoveOpt
 		return nil, err
 	}
 	opts.Namespace = namespace
+	if opts.TxnID == "" {
+		if sess := c.sessionByLease(leaseID); sess != nil {
+			opts.TxnID = sess.TxnID
+		}
+	}
 	token, err := c.fencingToken(leaseID, opts.FencingToken)
 	if err != nil {
 		return nil, err
 	}
-	c.logTraceCtx(ctx, "client.remove.start", "key", key, "lease_id", leaseID, "endpoint", c.lastEndpoint, "fencing_token", token)
+	c.logTraceCtx(ctx, "client.remove.start", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", c.lastEndpoint, "fencing_token", token)
 	path := fmt.Sprintf("/v1/remove?key=%s&namespace=%s", url.QueryEscape(key), url.QueryEscape(namespace))
 	builder := func(base string) (*http.Request, context.CancelFunc, error) {
 		reqCtx, cancel := c.requestContext(ctx)
@@ -4432,20 +4459,20 @@ func (c *Client) Remove(ctx context.Context, key, leaseID string, opts RemoveOpt
 	}
 	resp, cancel, endpoint, err := c.attemptEndpoints(builder, "")
 	if err != nil {
-		c.logErrorCtx(ctx, "client.remove.transport_error", "key", key, "lease_id", leaseID, "endpoint", endpoint, "fencing_token", token, "error", err)
+		c.logErrorCtx(ctx, "client.remove.transport_error", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", endpoint, "fencing_token", token, "error", err)
 		return nil, err
 	}
 	defer cancel()
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		c.logWarnCtx(ctx, "client.remove.error", "key", key, "lease_id", leaseID, "endpoint", endpoint, "fencing_token", token, "status", resp.StatusCode)
+		c.logWarnCtx(ctx, "client.remove.error", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", endpoint, "fencing_token", token, "status", resp.StatusCode)
 		return nil, c.decodeError(resp)
 	}
 	var result api.RemoveResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}
-	c.logTraceCtx(ctx, "client.remove.success", "key", key, "lease_id", leaseID, "endpoint", endpoint, "fencing_token", token, "removed", result.Removed, "new_version", result.NewVersion)
+	c.logTraceCtx(ctx, "client.remove.success", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", endpoint, "fencing_token", token, "removed", result.Removed, "new_version", result.NewVersion)
 	if newToken := resp.Header.Get(headerFencingToken); newToken != "" {
 		c.RegisterLeaseToken(leaseID, newToken)
 	}

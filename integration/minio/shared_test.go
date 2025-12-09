@@ -313,13 +313,9 @@ func getStateJSON(ctx context.Context, cli *lockdclient.Client, key, leaseID str
 	return payload, resp.ETag, resp.Version, nil
 }
 
-func releaseLease(t *testing.T, ctx context.Context, cli *lockdclient.Client, key, leaseID string) bool {
-	resp, err := cli.Release(ctx, api.ReleaseRequest{Key: key, LeaseID: leaseID})
-	if err != nil {
+func releaseLease(t *testing.T, ctx context.Context, lease *lockdclient.LeaseSession) bool {
+	if err := lease.Release(ctx); err != nil {
 		t.Fatalf("release: %v", err)
-	}
-	if !resp.Released {
-		return false
 	}
 	return true
 }

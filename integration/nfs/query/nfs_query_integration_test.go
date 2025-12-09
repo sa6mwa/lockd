@@ -43,6 +43,10 @@ func TestNFSQueryDomainDatasets(t *testing.T) {
 	queriesuite.RunDomainDatasets(t, startNFSQueryServer)
 }
 
+func TestNFSQueryTxSmoke(t *testing.T) {
+	queriesuite.RunTxSmoke(t, startNFSQueryServer)
+}
+
 func startNFSQueryServer(t testing.TB) *lockd.TestServer {
 	t.Helper()
 	root := prepareNFSQueryRoot(t)

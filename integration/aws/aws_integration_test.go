@@ -111,7 +111,7 @@ func TestAWSLockLifecycle(t *testing.T) {
 		t.Fatalf("expected cursor 42, got %v", state["cursor"])
 	}
 
-	if !releaseLease(t, ctx, cli, key, lease.LeaseID) {
+	if !releaseLease(t, ctx, lease) {
 		t.Fatalf("expected release success")
 	}
 
@@ -122,7 +122,7 @@ func TestAWSLockLifecycle(t *testing.T) {
 	if secondLease.LeaseID == lease.LeaseID {
 		t.Fatal("expected new lease id")
 	}
-	if !releaseLease(t, ctx, cli, key, secondLease.LeaseID) {
+	if !releaseLease(t, ctx, secondLease) {
 		t.Fatalf("expected release success")
 	}
 
@@ -151,13 +151,10 @@ func TestAWSLockConcurrency(t *testing.T) {
 				if err != nil {
 					t.Fatalf("worker %d acquire: %v", workerID, err)
 				}
-				state, etag, version, err := getStateJSON(ctx, cli, key, lease.LeaseID)
+				state, _, _, err := getStateJSON(ctx, cli, key, lease.LeaseID)
 				if err != nil {
-					_ = releaseLease(t, ctx, cli, key, lease.LeaseID)
+					_ = releaseLease(t, ctx, lease)
 					continue
-				}
-				if version == "" {
-					version = strconv.FormatInt(lease.Version, 10)
 				}
 				var counter float64
 				if state != nil {
@@ -166,11 +163,10 @@ func TestAWSLockConcurrency(t *testing.T) {
 					}
 				}
 				counter++
-				body, _ := json.Marshal(map[string]any{"counter": counter, "last": owner})
-				if _, err := cli.UpdateBytes(ctx, key, lease.LeaseID, body, lockdclient.UpdateOptions{IfETag: etag, IfVersion: version}); err != nil {
+				if err := lease.Save(ctx, map[string]any{"counter": counter, "last": owner}); err != nil {
 					t.Fatalf("update state: %v", err)
 				}
-				_ = releaseLease(t, ctx, cli, key, lease.LeaseID)
+				_ = releaseLease(t, ctx, lease)
 				iter++
 			}
 		}(id)
@@ -185,7 +181,7 @@ func TestAWSLockConcurrency(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get_state: %v", err)
 	}
-	if !releaseLease(t, ctx, cli, key, verifier.LeaseID) {
+	if !releaseLease(t, ctx, verifier) {
 		t.Fatalf("expected release success")
 	}
 	cleanupS3(t, cfg, key)
@@ -241,7 +237,7 @@ func TestAWSAutoKeyAcquire(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify get_state: %v", err)
 	}
-	if !releaseLease(t, ctx, cli, key, verifyLease.LeaseID) {
+	if !releaseLease(t, ctx, verifyLease) {
 		t.Fatalf("verify release failed")
 	}
 	if owner, ok := state["owner"].(string); !ok || owner != "aws-auto" {
@@ -283,7 +279,7 @@ func TestAWSRemoveSingleServer(t *testing.T) {
 		if state != nil {
 			t.Fatalf("expected nil state after remove, got %+v", state)
 		}
-		if !releaseLease(t, ctx, cli, key, lease.LeaseID) {
+		if !releaseLease(t, ctx, lease) {
 			t.Fatalf("release failed")
 		}
 
@@ -298,7 +294,7 @@ func TestAWSRemoveSingleServer(t *testing.T) {
 		if verify.Version != res.NewVersion {
 			t.Fatalf("expected version %d, got %d", res.NewVersion, verify.Version)
 		}
-		releaseLease(t, ctx, cli, key, verify.LeaseID)
+		releaseLease(t, ctx, verify)
 	})
 
 	t.Run("remove-without-state", func(t *testing.T) {
@@ -319,7 +315,7 @@ func TestAWSRemoveSingleServer(t *testing.T) {
 		if state != nil {
 			t.Fatalf("expected nil state, got %+v", state)
 		}
-		releaseLease(t, ctx, cli, key, lease.LeaseID)
+		releaseLease(t, ctx, lease)
 	})
 
 	t.Run("remove-after-reacquire", func(t *testing.T) {
@@ -329,7 +325,7 @@ func TestAWSRemoveSingleServer(t *testing.T) {
 		if err := writer.Save(ctx, map[string]any{"step": "written"}); err != nil {
 			t.Fatalf("writer save: %v", err)
 		}
-		releaseLease(t, ctx, cli, key, writer.LeaseID)
+		releaseLease(t, ctx, writer)
 
 		remover := acquireWithRetry(t, ctx, cli, key, "remover", 30, lockdclient.BlockWaitForever)
 		state, _, _, err := getStateJSON(ctx, cli, key, remover.LeaseID)
@@ -346,7 +342,7 @@ func TestAWSRemoveSingleServer(t *testing.T) {
 		if !res.Removed {
 			t.Fatalf("expected removal, got %+v", res)
 		}
-		releaseLease(t, ctx, cli, key, remover.LeaseID)
+		releaseLease(t, ctx, remover)
 
 		verify := acquireWithRetry(t, ctx, cli, key, "remover-verify", 30, lockdclient.BlockWaitForever)
 		state, _, _, err = getStateJSON(ctx, cli, key, verify.LeaseID)
@@ -356,7 +352,7 @@ func TestAWSRemoveSingleServer(t *testing.T) {
 		if state != nil {
 			t.Fatalf("expected empty state after remove, got %+v", state)
 		}
-		releaseLease(t, ctx, cli, key, verify.LeaseID)
+		releaseLease(t, ctx, verify)
 	})
 }
 
@@ -383,7 +379,7 @@ func TestAWSRemoveAcquireForUpdate(t *testing.T) {
 		if err := lease.Save(ctx, payload); err != nil {
 			t.Fatalf("seed save: %v", err)
 		}
-		releaseLease(t, ctx, cli, key, lease.LeaseID)
+		releaseLease(t, ctx, lease)
 	}
 
 	t.Run("remove-in-handler", func(t *testing.T) {
@@ -433,7 +429,7 @@ func TestAWSRemoveAcquireForUpdate(t *testing.T) {
 		if state != nil {
 			t.Fatalf("expected empty state after handler remove, got %+v", state)
 		}
-		releaseLease(t, ctx, cli, key, verify.LeaseID)
+		releaseLease(t, ctx, verify)
 	})
 
 	t.Run("remove-and-recreate", func(t *testing.T) {
@@ -474,7 +470,7 @@ func TestAWSRemoveAcquireForUpdate(t *testing.T) {
 		if count, ok := state["count"].(float64); !ok || count != 2.0 {
 			t.Fatalf("expected count 2.0, got %+v", state["count"])
 		}
-		releaseLease(t, ctx, cli, key, verify.LeaseID)
+		releaseLease(t, ctx, verify)
 	})
 }
 
@@ -558,7 +554,7 @@ func TestAWSAcquireForUpdateCallbackSingleServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify get_state: %v", err)
 	}
-	if !releaseLease(t, verifyCtx, cli, key, verifier.LeaseID) {
+	if !releaseLease(t, verifyCtx, verifier) {
 		t.Fatalf("expected release success")
 	}
 	if finalState == nil {
@@ -688,7 +684,7 @@ func TestAWSAcquireForUpdateCallbackFailover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify get_state: %v", err)
 	}
-	if !releaseLease(t, ctx, verifyClient, key, verifier.LeaseID) {
+	if !releaseLease(t, ctx, verifier) {
 		t.Fatalf("verify release failed")
 	}
 	if finalState == nil {
@@ -846,7 +842,7 @@ func TestAWSRemoveFailover(t *testing.T) {
 	if err := seedLease.Save(ctx, map[string]any{"payload": "seed", "count": 1.0}); err != nil {
 		t.Fatalf("seed save: %v", err)
 	}
-	releaseLease(t, ctx, seedClient, key, seedLease.LeaseID)
+	releaseLease(t, ctx, seedLease)
 
 	clientLogger, clientLogs := testlog.NewRecorder(t, pslog.TraceLevel)
 	clientOptions := []lockdclient.Option{
@@ -884,7 +880,7 @@ func TestAWSRemoveFailover(t *testing.T) {
 	if !res.Removed {
 		t.Fatalf("expected removal success, got %+v", res)
 	}
-	releaseLease(t, ctx, failoverClient, key, lease.LeaseID)
+	releaseLease(t, ctx, lease)
 
 	verifyClient := backup.Client
 	if verifyClient == nil {
@@ -902,7 +898,7 @@ func TestAWSRemoveFailover(t *testing.T) {
 	if state != nil {
 		t.Fatalf("expected empty state after failover remove, got %+v", state)
 	}
-	releaseLease(t, ctx, verifyClient, key, verifyLease.LeaseID)
+	releaseLease(t, ctx, verifyLease)
 
 	assertAWSRemoveFailoverLogs(t, clientLogs, primary.URL(), backup.URL())
 }
@@ -945,7 +941,7 @@ func TestAWSRemoveCASMismatch(t *testing.T) {
 	if !res.Removed {
 		t.Fatalf("expected removal, got %+v", res)
 	}
-	releaseLease(t, ctx, cli, key, lease.LeaseID)
+	releaseLease(t, ctx, lease)
 
 	verify := acquireWithRetry(t, ctx, cli, key, "cas-verify", 45, lockdclient.BlockWaitForever)
 	state, _, _, err := getStateJSON(ctx, cli, key, verify.LeaseID)
@@ -955,7 +951,7 @@ func TestAWSRemoveCASMismatch(t *testing.T) {
 	if state != nil {
 		t.Fatalf("expected empty state after remove, got %+v", state)
 	}
-	releaseLease(t, ctx, cli, key, verify.LeaseID)
+	releaseLease(t, ctx, verify)
 }
 
 func TestAWSRemoveKeepAlive(t *testing.T) {
@@ -1002,7 +998,7 @@ func TestAWSRemoveKeepAlive(t *testing.T) {
 		t.Fatalf("save after remove: %v", err)
 	}
 	finalVersion := lease.Version
-	releaseLease(t, ctx, cli, key, lease.LeaseID)
+	releaseLease(t, ctx, lease)
 
 	verify := acquireWithRetry(t, ctx, cli, key, "keepalive-verify", 45, lockdclient.BlockWaitForever)
 	state, _, _, err := getStateJSON(ctx, cli, key, verify.LeaseID)
@@ -1015,5 +1011,5 @@ func TestAWSRemoveKeepAlive(t *testing.T) {
 	if verify.Version != finalVersion {
 		t.Fatalf("expected version %d, got %d", finalVersion, verify.Version)
 	}
-	releaseLease(t, ctx, cli, key, verify.LeaseID)
+	releaseLease(t, ctx, verify)
 }

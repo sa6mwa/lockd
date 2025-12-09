@@ -36,6 +36,10 @@ func TestMinioQueryDomainDatasets(t *testing.T) {
 	queriesuite.RunDomainDatasets(t, startMinioQueryServer)
 }
 
+func TestMinioQueryTxSmoke(t *testing.T) {
+	queriesuite.RunTxSmoke(t, startMinioQueryServer)
+}
+
 func startMinioQueryServer(t testing.TB) *lockd.TestServer {
 	t.Helper()
 	cfg := loadMinioConfig(t)

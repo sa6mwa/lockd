@@ -470,6 +470,99 @@ and.eq{field=/telemetry/guidance/mode,value=manual}`)
 	})
 }
 
+// RunTxSmoke verifies staged commit and rollback for a single key using the default
+// acquire/release path. It keeps the payload small so it can run across all backends.
+func RunTxSmoke(t *testing.T, factory ServerFactory) {
+	withServer(t, factory, 20*time.Second, func(ctx context.Context, ts *lockd.TestServer, httpClient *http.Client) {
+		commitKey := fmt.Sprintf("tx-commit-%d", time.Now().UnixNano())
+		rollbackKey := fmt.Sprintf("tx-rollback-%d", time.Now().UnixNano())
+
+		// Commit: stage state + hidden metadata, then commit and verify state persisted.
+		lease, err := ts.Client.Acquire(ctx, api.AcquireRequest{
+			Namespace:  namespaces.Default,
+			Key:        commitKey,
+			Owner:      "tx-smoke",
+			TTLSeconds: 30,
+		})
+		if err != nil {
+			t.Fatalf("acquire commit key: %v", err)
+		}
+		if err := lease.Save(ctx, map[string]any{"status": "open", "counter": 1}); err != nil {
+			t.Fatalf("save commit payload: %v", err)
+		}
+		if _, err := lease.UpdateMetadata(ctx, lockdclient.MetadataOptions{QueryHidden: lockdclient.Bool(true)}); err != nil {
+			t.Fatalf("set query_hidden: %v", err)
+		}
+		if err := lease.Release(ctx); err != nil {
+			t.Fatalf("commit release: %v", err)
+		}
+		flushNamespaces(ctx, t, ts.Client, namespaces.Default)
+
+		resp, err := ts.Client.Get(ctx, commitKey, lockdclient.WithGetNamespace(namespaces.Default))
+		if err != nil {
+			t.Fatalf("get committed key: %v", err)
+		}
+		doc, err := resp.Document()
+		if err != nil {
+			t.Fatalf("decode committed document: %v", err)
+		}
+		if v := doc.Body["counter"]; v != float64(1) { // JSON numbers decode to float64
+			t.Fatalf("unexpected counter: %#v", v)
+		}
+
+		// Hidden metadata should suppress the key from selector queries.
+		selector, err := lql.ParseSelectorString(`eq{field=/status,value=open}`)
+		if err != nil || selector.IsEmpty() {
+			t.Fatalf("parse selector: %v", err)
+		}
+		qr := doQuery(t, httpClient, ts.URL(), api.QueryRequest{
+			Namespace: namespaces.Default,
+			Selector:  selector,
+			Limit:     10,
+		})
+		if len(qr.Keys) != 0 {
+			t.Fatalf("expected hidden key to be excluded, got %+v", qr.Keys)
+		}
+
+		// Rollback: stage state then rollback; key should disappear.
+		rlease, err := ts.Client.Acquire(ctx, api.AcquireRequest{
+			Namespace:  namespaces.Default,
+			Key:        rollbackKey,
+			Owner:      "tx-smoke",
+			TTLSeconds: 30,
+		})
+		if err != nil {
+			t.Fatalf("acquire rollback key: %v", err)
+		}
+		if err := rlease.Save(ctx, map[string]any{"status": "temp"}); err != nil {
+			t.Fatalf("save rollback payload: %v", err)
+		}
+		if err := rlease.ReleaseWithOptions(ctx, lockdclient.ReleaseOptions{Rollback: true}); err != nil {
+			t.Fatalf("rollback release: %v", err)
+		}
+		if rbResp, err := ts.Client.Get(ctx, rollbackKey, lockdclient.WithGetNamespace(namespaces.Default)); err == nil {
+			if rbResp.HasState {
+				t.Fatalf("expected rollback key to have no state")
+			}
+		}
+
+		// Cleanup committed key to avoid backend clutter.
+		cleanupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		if cl, err := ts.Client.Acquire(cleanupCtx, api.AcquireRequest{
+			Namespace:  namespaces.Default,
+			Key:        commitKey,
+			Owner:      "tx-smoke-cleanup",
+			TTLSeconds: 10,
+			BlockSecs:  1,
+		}); err == nil {
+			if _, rmErr := cl.Remove(cleanupCtx); rmErr != nil {
+				t.Logf("cleanup remove %s: %v", commitKey, rmErr)
+			}
+			_ = cl.Release(cleanupCtx)
+		}
+	})
+}
 func withServer(t testing.TB, factory ServerFactory, timeout time.Duration, fn func(ctx context.Context, ts *lockd.TestServer, httpClient *http.Client)) {
 	t.Helper()
 	ts := factory(t)

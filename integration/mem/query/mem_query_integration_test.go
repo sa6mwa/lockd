@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"strconv"
 	"testing"
 	"time"
 
@@ -43,6 +42,10 @@ func TestMemQueryDocumentStreaming(t *testing.T) {
 
 func TestMemQueryDomainDatasets(t *testing.T) {
 	queriesuite.RunDomainDatasets(t, startMemQueryServer)
+}
+
+func TestMemQueryTxSmoke(t *testing.T) {
+	queriesuite.RunTxSmoke(t, startMemQueryServer)
 }
 
 func TestMemNamespaceQueryConfig(t *testing.T) {
@@ -203,10 +206,8 @@ func markKeyHidden(ctx context.Context, t testing.TB, cli *lockdclient.Client, n
 		t.Fatalf("acquire %s/%s: %v", namespace, key, err)
 	}
 	defer lease.Release(ctx)
-	_, err = cli.UpdateMetadata(ctx, key, lease.LeaseID, lockdclient.UpdateOptions{
-		Namespace: namespace,
-		IfVersion: strconv.FormatInt(lease.Version, 10),
-		Metadata:  lockdclient.MetadataOptions{QueryHidden: lockdclient.Bool(true)},
+	_, err = lease.UpdateMetadata(ctx, lockdclient.MetadataOptions{
+		QueryHidden: lockdclient.Bool(true),
 	})
 	if err != nil {
 		t.Fatalf("update metadata: %v", err)

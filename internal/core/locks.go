@@ -201,6 +201,15 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (*AcquireResu
 			MetaETag:      metaETag,
 			Meta:          meta,
 		}
+		logger.Info("lease.acquire.success",
+			"namespace", namespace,
+			"key", key,
+			"owner", cmd.Owner,
+			"lease_id", leaseID,
+			"txn_id", txnID,
+			"fencing_token", newFencing,
+			"expires_at", expiresAt,
+		)
 		return res, nil
 	}
 }

@@ -37,6 +37,10 @@ func TestAzureQueryDomainDatasets(t *testing.T) {
 	queriesuite.RunDomainDatasets(t, startAzureQueryServer, queriesuite.WithReducedDataset())
 }
 
+func TestAzureQueryTxSmoke(t *testing.T) {
+	queriesuite.RunTxSmoke(t, startAzureQueryServer)
+}
+
 func startAzureQueryServer(t testing.TB) *lockd.TestServer {
 	t.Helper()
 	cfg := loadAzureConfig(t)

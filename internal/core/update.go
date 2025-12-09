@@ -143,10 +143,12 @@ func (s *Service) Update(ctx context.Context, cmd UpdateCommand) (*UpdateResult,
 			}
 		}
 
-		stateCtx := storage.ContextWithStateDescriptor(ctx, meta.StateDescriptor)
-		result, err := s.staging.StageState(stateCtx, namespace, keyComponent, cmd.TxnID, reader, storage.PutStateOptions{
-			Descriptor: meta.StateDescriptor,
-		})
+		// Always mint fresh encryption material for staged writes. Reusing the
+		// committed state's descriptor would fail on backends that bind crypto
+		// material to the object path (staging writes live under a different
+		// key such as <key>/.staging/<txn>). Let the backend generate a
+		// descriptor tied to the staging object instead.
+		result, err := s.staging.StageState(ctx, namespace, keyComponent, cmd.TxnID, reader, storage.PutStateOptions{})
 		if err != nil {
 			return nil, fmt.Errorf("stage state: %w", err)
 		}
@@ -247,17 +249,33 @@ func (s *Service) Remove(ctx context.Context, cmd RemoveCommand) (*RemoveResult,
 			}
 		}
 
-		// Stage a remove operation.
+		hasStagedState := meta.StagedTxnID == cmd.TxnID && (meta.StagedStateETag != "" || meta.StagedRemove)
+		hasCommittedState := meta.StateETag != ""
+		if !hasStagedState && !hasCommittedState {
+			// Nothing to remove; no version bump.
+			return &RemoveResult{
+				Removed:    false,
+				NewVersion: meta.Version,
+				Meta:       meta,
+				MetaETag:   metaETag,
+			}, nil
+		}
+
 		_ = s.staging.DiscardStagedState(ctx, namespace, keyComponent, cmd.TxnID, storage.DiscardStagedOptions{IgnoreNotFound: true})
 		meta.StagedTxnID = cmd.TxnID
 		meta.StagedRemove = true
 		meta.StagedStateETag = ""
 		meta.StagedStateDescriptor = nil
 		meta.StagedStatePlaintextBytes = 0
-		if meta.StagedVersion == 0 {
-			meta.StagedVersion = meta.Version + 1
+		meta.StagedAttributes = nil
+
+		versionBase := meta.Version
+		if meta.StagedTxnID == cmd.TxnID && meta.StagedVersion > 0 {
+			versionBase = meta.StagedVersion
 		}
+		meta.StagedVersion = versionBase + 1
 		meta.UpdatedAtUnix = now.Unix()
+
 		newMetaETag, err := s.store.StoreMeta(ctx, namespace, keyComponent, meta, metaETag)
 		if err != nil {
 			if errors.Is(err, storage.ErrCASMismatch) {

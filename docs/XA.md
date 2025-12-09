@@ -65,6 +65,13 @@ This document outlines a staged path from today’s CAS/lease semantics to a pra
 - Read-your-own-writes for streaming queries during a transaction is out of scope; readers continue to see last committed heads.
 - Retention policy for old versions if we keep versioned commits; ensure sweeper bounds storage growth.
 
+## Status (2025-12-09)
+- Local TX path shipped: Acquire mints txn_id (xid), Update/Remove/Metadata require txn_id, Release commits by default or rollbacks with `rollback=true`; lease expiry rolls back staging.
+- Integration suites green across backends (mem/disk/minio/aws/azure/nfs, incl. lq/query/crypto where applicable) after staging and txn_id fixes.
+- Transaction/lease IDs now use `github.com/rs/xid`; uuidv7 retained only for key/storage identifiers (auto-keys, manifests, segments).
+- Logging: txn_id now emitted alongside lease_id for acquire/release/update/remove; keepalive lacks txn_id header by design. Need to extend info/warn/error surfaces (queue ack/extend, metadata) to always include txn_id when lease_id is logged.
+- Remaining local-TX hygiene: restart/recovery sweeper coverage, crypto-tagged variants if any, and targeted raw-client txn tests to ensure `missing_txn` stays enforced.
+
 ## Minimal first milestone (actionable next)
 - Implement Phase 0 + Phase 1 semantics (just do it, no feature flag, we are not on a stable release yet).
 - Acquire always starts a transaction and returns txn_id; Release must include txn_id and choose commit vs rollback (rollback flag) with lease expiry implying rollback.

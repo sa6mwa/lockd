@@ -36,6 +36,10 @@ func TestAWSQueryDomainDatasets(t *testing.T) {
 	queriesuite.RunDomainDatasets(t, startAWSQueryServer, queriesuite.WithReducedDataset())
 }
 
+func TestAWSQueryTxSmoke(t *testing.T) {
+	queriesuite.RunTxSmoke(t, startAWSQueryServer)
+}
+
 func startAWSQueryServer(t testing.TB) *lockd.TestServer {
 	t.Helper()
 	cfg := loadAWSConfig(t)

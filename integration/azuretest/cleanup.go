@@ -118,6 +118,8 @@ func CleanupQueryNamespaces(tb testing.TB, cfg lockd.Config) {
 
 func cleanupNamespace(tb testing.TB, store storage.Backend, ctx context.Context, namespace string) {
 	cleanupIndex(tb, store, ctx, namespace)
+	// Clean staged payloads
+	removePrefix(tb, store, ctx, namespace, ".staging/")
 	keys, err := store.ListMetaKeys(ctx, namespace)
 	if err != nil {
 		tb.Logf("azure cleanup list meta (%s): %v", namespace, err)
@@ -144,6 +146,26 @@ func cleanupIndex(tb testing.TB, store storage.Backend, ctx context.Context, nam
 		for _, obj := range res.Objects {
 			if err := store.DeleteObject(ctx, namespace, obj.Key, storage.DeleteObjectOptions{}); err != nil && !errors.Is(err, storage.ErrNotFound) {
 				tb.Logf("azure cleanup index %s/%s: %v", namespace, obj.Key, err)
+			}
+		}
+		if !res.Truncated || res.NextStartAfter == "" {
+			break
+		}
+		listOpts.StartAfter = res.NextStartAfter
+	}
+}
+
+func removePrefix(tb testing.TB, store storage.Backend, ctx context.Context, namespace, prefix string) {
+	listOpts := storage.ListOptions{Prefix: prefix, Limit: 1000}
+	for {
+		res, err := store.ListObjects(ctx, namespace, listOpts)
+		if err != nil {
+			tb.Logf("azure cleanup list prefix (%s/%s): %v", namespace, prefix, err)
+			return
+		}
+		for _, obj := range res.Objects {
+			if err := store.DeleteObject(ctx, namespace, obj.Key, storage.DeleteObjectOptions{}); err != nil && !errors.Is(err, storage.ErrNotFound) {
+				tb.Logf("azure cleanup delete %s/%s: %v", namespace, obj.Key, err)
 			}
 		}
 		if !res.Truncated || res.NextStartAfter == "" {
@@ -240,6 +262,23 @@ func CleanupNamespaceIndexes(tb testing.TB, cfg lockd.Config, namespaces ...stri
 	}
 	defer store.Close()
 
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	for _, ns := range namespaces {
+		tb.Logf("azure cleanup: removing index artifacts for namespace %s", ns)
+		cleanupIndex(tb, store, ctx, ns)
+	}
+}
+
+// CleanupNamespaceIndexesWithStore removes index artifacts using an existing store.
+func CleanupNamespaceIndexesWithStore(tb testing.TB, store storage.Backend, namespaces ...string) {
+	tb.Helper()
+	if store == nil {
+		tb.Fatalf("cleanup azure indexes: store required")
+	}
+	if len(namespaces) == 0 {
+		namespaces = []string{locknamespaces.Default}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	for _, ns := range namespaces {

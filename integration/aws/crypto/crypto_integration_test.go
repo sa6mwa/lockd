@@ -148,7 +148,7 @@ func buildAWSConfig(t testing.TB) lockd.Config {
 	t.Helper()
 	store := strings.TrimSpace(os.Getenv("LOCKD_STORE"))
 	if store == "" {
-		t.Skip("LOCKD_STORE not configured for AWS tests")
+		t.Fatalf("LOCKD_STORE not configured for AWS tests")
 	}
 	if !strings.HasPrefix(store, "aws://") {
 		t.Fatalf("LOCKD_STORE must reference an aws:// URI, got %q", store)
@@ -191,10 +191,11 @@ func ensureStoreReady(t *testing.T, ctx context.Context, cfg lockd.Config) {
 
 func cleanupAWSLock(tb testing.TB, cfg lockd.Config, key string) {
 	tb.Helper()
-	awsCfg, _, err := lockd.BuildAWSConfig(cfg)
+	awsResult, err := lockd.BuildAWSConfig(cfg)
 	if err != nil {
 		tb.Fatalf("build aws config: %v", err)
 	}
+	awsCfg := awsResult.Config
 	store, err := s3.New(awsCfg)
 	if err != nil {
 		tb.Fatalf("new aws store: %v", err)
@@ -211,10 +212,11 @@ func cleanupAWSLock(tb testing.TB, cfg lockd.Config, key string) {
 
 func cleanupAWSQueue(tb testing.TB, cfg lockd.Config, queue string) {
 	tb.Helper()
-	awsCfg, _, err := lockd.BuildAWSConfig(cfg)
+	awsResult, err := lockd.BuildAWSConfig(cfg)
 	if err != nil {
 		tb.Fatalf("build aws config: %v", err)
 	}
+	awsCfg := awsResult.Config
 	store, err := s3.New(awsCfg)
 	if err != nil {
 		tb.Fatalf("new aws store: %v", err)

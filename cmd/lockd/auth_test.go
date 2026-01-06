@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -148,7 +149,48 @@ func TestAuthWorkflowSplitCA(t *testing.T) {
 	if len(clientBundle.CACerts) == 0 {
 		t.Fatalf("expected ca certificate embedded in client bundle")
 	}
+	expectedSDKURI, err := lockd.SPIFFEURIForRole(lockd.ClientBundleRoleSDK, "lockd-client-test")
+	if err != nil {
+		t.Fatalf("spiffe uri: %v", err)
+	}
+	if !containsURI(clientBundle.ClientCert.URIs, expectedSDKURI) {
+		t.Fatalf("expected sdk spiffe uri %s in client bundle", expectedSDKURI.String())
+	}
 	clientSerial := strings.ToLower(clientBundle.ClientCert.SerialNumber.Text(16))
+
+	tcOut := runAuthCommand(t, "new", "tcclient", "--cn", "lockd-tc-client-test")
+	tcPath := filepath.Join(configDir, "tc-client.pem")
+	if _, err := os.Stat(tcPath); err != nil {
+		t.Fatalf("expected tc client bundle at %s: %v", tcPath, err)
+	}
+	if !strings.Contains(tcOut, tcPath) {
+		t.Fatalf("expected command output to reference %s, got %q", tcPath, tcOut)
+	}
+	tcBundle, err := tlsutil.LoadClientBundle(tcPath)
+	if err != nil {
+		t.Fatalf("load tc client bundle: %v", err)
+	}
+	expectedTCURI, err := lockd.SPIFFEURIForRole(lockd.ClientBundleRoleTC, "lockd-tc-client-test")
+	if err != nil {
+		t.Fatalf("spiffe uri: %v", err)
+	}
+	if !containsURI(tcBundle.ClientCert.URIs, expectedTCURI) {
+		t.Fatalf("expected tc spiffe uri %s in client bundle", expectedTCURI.String())
+	}
+	resolvedSDK, err := lockd.ResolveClientBundlePath(lockd.ClientBundleRoleSDK, "")
+	if err != nil {
+		t.Fatalf("resolve sdk bundle: %v", err)
+	}
+	if resolvedSDK != clientPath {
+		t.Fatalf("expected sdk bundle %s, got %s", clientPath, resolvedSDK)
+	}
+	resolvedTC, err := lockd.ResolveClientBundlePath(lockd.ClientBundleRoleTC, "")
+	if err != nil {
+		t.Fatalf("resolve tc bundle: %v", err)
+	}
+	if resolvedTC != tcPath {
+		t.Fatalf("expected tc bundle %s, got %s", tcPath, resolvedTC)
+	}
 
 	nextClientOut := runAuthCommand(t, "new", "client", "--cn", "lockd-client-test")
 	nextClientPath := filepath.Join(configDir, "client02.pem")
@@ -262,4 +304,20 @@ func TestAuthNewServerMissingCA(t *testing.T) {
 	if !strings.Contains(buf.String(), "lockd auth new ca") {
 		t.Fatalf("expected error output to hint at creating a CA, got %q", buf.String())
 	}
+}
+
+func containsURI(uris []*url.URL, expected *url.URL) bool {
+	if expected == nil {
+		return false
+	}
+	expectedStr := expected.String()
+	for _, uri := range uris {
+		if uri == nil {
+			continue
+		}
+		if uri.String() == expectedStr {
+			return true
+		}
+	}
+	return false
 }

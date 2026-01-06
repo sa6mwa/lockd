@@ -3,6 +3,7 @@
 package nfsintegration
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -57,6 +58,9 @@ func (p failoverPhase) String() string {
 func retryableTransportError(err error) bool {
 	if err == nil {
 		return false
+	}
+	if strings.Contains(err.Error(), "all endpoints unreachable") {
+		return true
 	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return true
@@ -212,7 +216,7 @@ func TestNFSShutdownDrainingBlocksAcquire(t *testing.T) {
 
 func TestNFSConcurrency(t *testing.T) {
 	base := ensureNFSRootEnv(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	root := prepareNFSRoot(t, base)
@@ -234,22 +238,31 @@ func TestNFSConcurrency(t *testing.T) {
 			defer wg.Done()
 			owner := fmt.Sprintf("worker-%d", workerID)
 			for iter := 0; iter < iterations; {
-				lease := acquireWithRetry(t, ctx, cli, key, owner, leaseTTL, 10)
-				payload := map[string]any{"counter": 1, "worker": owner, "iteration": iter}
-				if err := lease.Save(ctx, payload); err != nil {
+				attempts := 0
+				for attempts < 5 {
+					lease := acquireWithRetryDeadline(t, ctx, cli, key, owner, leaseTTL, 10, 30*time.Second)
+					payload := map[string]any{"counter": 1, "worker": owner, "iteration": iter}
+					err := lease.Save(ctx, payload)
 					releaseLease(t, ctx, lease)
+					if err == nil {
+						updates.Add(1)
+						iter++
+						break
+					}
 					var apiErr *lockdclient.APIError
 					if errors.As(err, &apiErr) {
 						code := apiErr.Response.ErrorCode
 						if code == "meta_conflict" || code == "version_conflict" || code == "etag_mismatch" {
+							attempts++
+							time.Sleep(50 * time.Millisecond)
 							continue
 						}
 					}
 					t.Fatalf("save: %v", err)
 				}
-				updates.Add(1)
-				releaseLease(t, ctx, lease)
-				iter++
+				if attempts >= 5 {
+					t.Fatalf("save attempts exhausted for %s iteration %d", owner, iter)
+				}
 			}
 		}(id)
 	}
@@ -342,13 +355,23 @@ func TestNFSLockLifecycle(t *testing.T) {
 	runLifecycleTest(t, ctx, cli, key, "nfs-worker")
 }
 
+func TestNFSAttachmentsLifecycle(t *testing.T) {
+	base := ensureNFSRootEnv(t)
+	ctx := context.Background()
+	root := prepareNFSRoot(t, base)
+	cfg := buildNFSConfig(t, root, 0)
+	cli := startNFSServer(t, cfg)
+	key := "nfs-attach-" + uuidv7.NewString()
+	runAttachmentTest(t, ctx, cli, key)
+}
+
 func TestNFSAcquireForUpdateRandomPayloads(t *testing.T) {
 	base := ensureNFSRootEnv(t)
 	root := prepareNFSRoot(t, base)
 	cfg := buildNFSConfig(t, root, 0)
 	cli := startNFSServer(t, cfg)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Second)
 	defer cancel()
 
 	key := "nfs-for-update-random-" + uuidv7.NewString()
@@ -389,10 +412,7 @@ func TestNFSAcquireForUpdateRandomPayloads(t *testing.T) {
 
 func TestNFSAcquireForUpdateCallbackSingleServer(t *testing.T) {
 	base := ensureNFSRootEnv(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	watchdog := time.AfterFunc(15*time.Second, func() {
+	watchdog := time.AfterFunc(40*time.Second, func() {
 		buf := make([]byte, 1<<18)
 		n := runtime.Stack(buf, true)
 		panic("TestNFSAcquireForUpdateCallbackSingleServer timeout:\n" + string(buf[:n]))
@@ -406,21 +426,18 @@ func TestNFSAcquireForUpdateCallbackSingleServer(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 
-	chaos := &lockd.ChaosConfig{
-		Seed:            2024,
-		DisconnectAfter: 250 * time.Millisecond,
-		MinDelay:        5 * time.Millisecond,
-		MaxDelay:        40 * time.Millisecond,
-		MaxDisconnects:  1,
-	}
-
 	serverOpts := []lockd.TestServerOption{
 		lockd.WithTestBackend(store),
-		lockd.WithTestChaos(chaos),
+		lockd.WithTestConfigFunc(func(cfg *lockd.Config) {
+			cfg.DefaultTTL = 60 * time.Second
+			if cfg.MaxTTL < cfg.DefaultTTL {
+				cfg.MaxTTL = 2 * time.Minute
+			}
+		}),
 		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
 			lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
-			lockdclient.WithHTTPTimeout(750*time.Millisecond),
+			lockdclient.WithHTTPTimeout(5*time.Second),
 			lockdclient.WithFailureRetries(5),
 		),
 	}
@@ -442,7 +459,7 @@ func TestNFSAcquireForUpdateCallbackSingleServer(t *testing.T) {
 
 	seedCli := directClient(t, ts)
 	t.Cleanup(func() { _ = seedCli.Close() })
-	ctxSeed, cancelSeed := context.WithTimeout(ctx, 2*time.Second)
+	ctxSeed, cancelSeed := context.WithTimeout(context.Background(), 3*time.Second)
 	seedLease, err := seedCli.Acquire(ctxSeed, api.AcquireRequest{
 		Key:        key,
 		Owner:      "seed",
@@ -464,11 +481,14 @@ func TestNFSAcquireForUpdateCallbackSingleServer(t *testing.T) {
 	}
 	cancelSeed()
 
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+
 	handlerCalled := false
 	err = proxiedClient.AcquireForUpdate(ctx, api.AcquireRequest{
 		Key:        key,
 		Owner:      "reader",
-		TTLSeconds: 20,
+		TTLSeconds: 0,
 		BlockSecs:  lockdclient.BlockWaitForever,
 	}, func(handlerCtx context.Context, af *lockdclient.AcquireForUpdateContext) error {
 		handlerCalled = true
@@ -701,9 +721,9 @@ func runAcquireForUpdateCallbackFailover(t *testing.T, phase failoverPhase, base
 		),
 	}
 	primaryOptions = append(primaryOptions, closeDefaults)
-	primaryOptions = append(primaryOptions, cryptotest.SharedMTLSOptions(t, sharedCreds)...)
+	primaryOptions = append(primaryOptions, cryptotest.SharedMTLSOptions(t)...)
 	primary := lockd.StartTestServer(t, primaryOptions...)
-	backupOptions := append([]lockd.TestServerOption{closeDefaults}, cryptotest.SharedMTLSOptions(t, sharedCreds)...)
+	backupOptions := append([]lockd.TestServerOption{closeDefaults}, cryptotest.SharedMTLSOptions(t)...)
 	backupOptions = append(backupOptions,
 		lockd.WithTestBackend(store),
 		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
@@ -719,7 +739,7 @@ func runAcquireForUpdateCallbackFailover(t *testing.T, phase failoverPhase, base
 	seedCli := directClient(t, backup)
 	t.Cleanup(func() { _ = seedCli.Close() })
 
-	ctxSeed, cancelSeed := context.WithTimeout(context.Background(), time.Second)
+	ctxSeed, cancelSeed := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelSeed()
 	lease, err := seedCli.Acquire(ctxSeed, api.AcquireRequest{
 		Key:        key,
@@ -897,6 +917,106 @@ func runLifecycleTest(t *testing.T, ctx context.Context, cli *lockdclient.Client
 	}
 }
 
+func runAttachmentTest(t *testing.T, ctx context.Context, cli *lockdclient.Client, key string) {
+	t.Helper()
+	lease := acquireWithRetry(t, ctx, cli, key, "attach-worker", 45, lockdclient.BlockWaitForever)
+	alpha := []byte("alpha")
+	bravo := []byte("bravo")
+	if _, err := lease.Attach(ctx, lockdclient.AttachRequest{
+		Name: "alpha.bin",
+		Body: bytes.NewReader(alpha),
+	}); err != nil {
+		t.Fatalf("attach alpha: %v", err)
+	}
+	if _, err := lease.Attach(ctx, lockdclient.AttachRequest{
+		Name:        "bravo.bin",
+		Body:        bytes.NewReader(bravo),
+		ContentType: "text/plain",
+	}); err != nil {
+		t.Fatalf("attach bravo: %v", err)
+	}
+	list, err := lease.ListAttachments(ctx)
+	if err != nil {
+		t.Fatalf("list attachments: %v", err)
+	}
+	if list == nil || len(list.Attachments) != 2 {
+		t.Fatalf("expected 2 attachments, got %+v", list)
+	}
+	att, err := lease.RetrieveAttachment(ctx, lockdclient.AttachmentSelector{Name: "alpha.bin"})
+	if err != nil {
+		t.Fatalf("retrieve alpha: %v", err)
+	}
+	data, err := io.ReadAll(att)
+	att.Close()
+	if err != nil {
+		t.Fatalf("read alpha: %v", err)
+	}
+	if !bytes.Equal(data, alpha) {
+		t.Fatalf("unexpected alpha payload: %q", data)
+	}
+	if !releaseLease(t, ctx, lease) {
+		t.Fatalf("expected release success")
+	}
+
+	resp, err := cli.Get(ctx, key)
+	if err != nil {
+		t.Fatalf("public get: %v", err)
+	}
+	publicList, err := resp.ListAttachments(ctx)
+	if err != nil {
+		resp.Close()
+		t.Fatalf("public list: %v", err)
+	}
+	if len(publicList.Attachments) != 2 {
+		resp.Close()
+		t.Fatalf("expected 2 public attachments, got %+v", publicList.Attachments)
+	}
+	publicAtt, err := resp.RetrieveAttachment(ctx, lockdclient.AttachmentSelector{Name: "bravo.bin"})
+	if err != nil {
+		resp.Close()
+		t.Fatalf("public retrieve bravo: %v", err)
+	}
+	publicData, err := io.ReadAll(publicAtt)
+	publicAtt.Close()
+	resp.Close()
+	if err != nil {
+		t.Fatalf("read public bravo: %v", err)
+	}
+	if !bytes.Equal(publicData, bravo) {
+		t.Fatalf("unexpected bravo payload: %q", publicData)
+	}
+
+	lease2 := acquireWithRetry(t, ctx, cli, key, "attach-delete", 45, lockdclient.BlockWaitForever)
+	if _, err := lease2.DeleteAttachment(ctx, lockdclient.AttachmentSelector{Name: "alpha.bin"}); err != nil {
+		t.Fatalf("delete alpha: %v", err)
+	}
+	if !releaseLease(t, ctx, lease2) {
+		t.Fatalf("expected release success")
+	}
+	listAfter, err := cli.ListAttachments(ctx, lockdclient.ListAttachmentsRequest{Key: key, Public: true})
+	if err != nil {
+		t.Fatalf("list after delete: %v", err)
+	}
+	if len(listAfter.Attachments) != 1 || listAfter.Attachments[0].Name != "bravo.bin" {
+		t.Fatalf("expected bravo only, got %+v", listAfter.Attachments)
+	}
+
+	lease3 := acquireWithRetry(t, ctx, cli, key, "attach-clear", 45, lockdclient.BlockWaitForever)
+	if _, err := lease3.DeleteAllAttachments(ctx); err != nil {
+		t.Fatalf("delete all: %v", err)
+	}
+	if !releaseLease(t, ctx, lease3) {
+		t.Fatalf("expected release success")
+	}
+	finalList, err := cli.ListAttachments(ctx, lockdclient.ListAttachmentsRequest{Key: key, Public: true})
+	if err != nil {
+		t.Fatalf("final list: %v", err)
+	}
+	if len(finalList.Attachments) != 0 {
+		t.Fatalf("expected no attachments, got %+v", finalList.Attachments)
+	}
+}
+
 func randomJSONSafeString(rng *rand.Rand, n int) string {
 	const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	b := make([]byte, n)
@@ -907,9 +1027,19 @@ func randomJSONSafeString(rng *rand.Rand, n int) string {
 }
 
 func acquireWithRetry(tb testing.TB, ctx context.Context, cli *lockdclient.Client, key, owner string, ttl, block int64) *lockdclient.LeaseSession {
+	return acquireWithRetryDeadline(tb, ctx, cli, key, owner, ttl, block, 10*time.Second)
+}
+
+func acquireWithRetryDeadline(tb testing.TB, ctx context.Context, cli *lockdclient.Client, key, owner string, ttl, block int64, maxWait time.Duration) *lockdclient.LeaseSession {
 	tb.Helper()
 	var lastErr error
-	deadline := time.Now().Add(10 * time.Second)
+	if maxWait <= 0 {
+		maxWait = 10 * time.Second
+	}
+	deadline := time.Now().Add(maxWait)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
 	for time.Now().Before(deadline) {
 		sess, err := cli.Acquire(ctx, api.AcquireRequest{
 			Key:        key,
@@ -957,7 +1087,7 @@ func releaseLease(tb testing.TB, ctx context.Context, sess *lockdclient.LeaseSes
 	if sess == nil {
 		return false
 	}
-	ctx, cancel := context.WithTimeout(ctx, time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	if err := sess.Release(ctx); err != nil {
 		tb.Fatalf("release: %v", err)

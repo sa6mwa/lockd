@@ -3,10 +3,12 @@
 package awsintegration
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path"
@@ -120,6 +122,7 @@ func startAWSTestServer(t testing.TB, cfg lockd.Config, opts ...lockd.TestServer
 	if cfgCopy.StorageRetryMaxDelay < 15*time.Second {
 		cfgCopy.StorageRetryMaxDelay = 15 * time.Second
 	}
+	cryptotest.ConfigureTCAuth(t, &cfgCopy)
 
 	options := []lockd.TestServerOption{
 		lockd.WithTestConfig(cfgCopy),
@@ -191,15 +194,111 @@ func getStateJSON(ctx context.Context, cli *lockdclient.Client, key, leaseID str
 	return payload, resp.ETag, resp.Version, nil
 }
 
-func releaseLease(t *testing.T, ctx context.Context, cli *lockdclient.Client, key, leaseID string) bool {
-	resp, err := cli.Release(ctx, api.ReleaseRequest{Key: key, LeaseID: leaseID})
-	if err != nil {
+func releaseLease(t *testing.T, ctx context.Context, lease *lockdclient.LeaseSession) bool {
+	if err := lease.Release(ctx); err != nil {
 		t.Fatalf("release: %v", err)
 	}
-	if !resp.Released {
-		return false
-	}
 	return true
+}
+
+func runAttachmentTest(t *testing.T, ctx context.Context, cli *lockdclient.Client, key string) {
+	t.Helper()
+	lease := acquireWithRetry(t, ctx, cli, key, "attach-worker", 45, lockdclient.BlockWaitForever)
+	alpha := []byte("alpha")
+	bravo := []byte("bravo")
+	if _, err := lease.Attach(ctx, lockdclient.AttachRequest{
+		Name: "alpha.bin",
+		Body: bytes.NewReader(alpha),
+	}); err != nil {
+		t.Fatalf("attach alpha: %v", err)
+	}
+	if _, err := lease.Attach(ctx, lockdclient.AttachRequest{
+		Name:        "bravo.bin",
+		Body:        bytes.NewReader(bravo),
+		ContentType: "text/plain",
+	}); err != nil {
+		t.Fatalf("attach bravo: %v", err)
+	}
+	list, err := lease.ListAttachments(ctx)
+	if err != nil {
+		t.Fatalf("list attachments: %v", err)
+	}
+	if list == nil || len(list.Attachments) != 2 {
+		t.Fatalf("expected 2 attachments, got %+v", list)
+	}
+	att, err := lease.RetrieveAttachment(ctx, lockdclient.AttachmentSelector{Name: "alpha.bin"})
+	if err != nil {
+		t.Fatalf("retrieve alpha: %v", err)
+	}
+	data, err := io.ReadAll(att)
+	att.Close()
+	if err != nil {
+		t.Fatalf("read alpha: %v", err)
+	}
+	if !bytes.Equal(data, alpha) {
+		t.Fatalf("unexpected alpha payload: %q", data)
+	}
+	if !releaseLease(t, ctx, lease) {
+		t.Fatalf("expected release success")
+	}
+
+	resp, err := cli.Get(ctx, key)
+	if err != nil {
+		t.Fatalf("public get: %v", err)
+	}
+	publicList, err := resp.ListAttachments(ctx)
+	if err != nil {
+		resp.Close()
+		t.Fatalf("public list: %v", err)
+	}
+	if len(publicList.Attachments) != 2 {
+		resp.Close()
+		t.Fatalf("expected 2 public attachments, got %+v", publicList.Attachments)
+	}
+	publicAtt, err := resp.RetrieveAttachment(ctx, lockdclient.AttachmentSelector{Name: "bravo.bin"})
+	if err != nil {
+		resp.Close()
+		t.Fatalf("public retrieve bravo: %v", err)
+	}
+	publicData, err := io.ReadAll(publicAtt)
+	publicAtt.Close()
+	resp.Close()
+	if err != nil {
+		t.Fatalf("read public bravo: %v", err)
+	}
+	if !bytes.Equal(publicData, bravo) {
+		t.Fatalf("unexpected bravo payload: %q", publicData)
+	}
+
+	lease2 := acquireWithRetry(t, ctx, cli, key, "attach-delete", 45, lockdclient.BlockWaitForever)
+	if _, err := lease2.DeleteAttachment(ctx, lockdclient.AttachmentSelector{Name: "alpha.bin"}); err != nil {
+		t.Fatalf("delete alpha: %v", err)
+	}
+	if !releaseLease(t, ctx, lease2) {
+		t.Fatalf("expected release success")
+	}
+	listAfter, err := cli.ListAttachments(ctx, lockdclient.ListAttachmentsRequest{Key: key, Public: true})
+	if err != nil {
+		t.Fatalf("list after delete: %v", err)
+	}
+	if len(listAfter.Attachments) != 1 || listAfter.Attachments[0].Name != "bravo.bin" {
+		t.Fatalf("expected bravo only, got %+v", listAfter.Attachments)
+	}
+
+	lease3 := acquireWithRetry(t, ctx, cli, key, "attach-clear", 45, lockdclient.BlockWaitForever)
+	if _, err := lease3.DeleteAllAttachments(ctx); err != nil {
+		t.Fatalf("delete all: %v", err)
+	}
+	if !releaseLease(t, ctx, lease3) {
+		t.Fatalf("expected release success")
+	}
+	finalList, err := cli.ListAttachments(ctx, lockdclient.ListAttachmentsRequest{Key: key, Public: true})
+	if err != nil {
+		t.Fatalf("final list: %v", err)
+	}
+	if len(finalList.Attachments) != 0 {
+		t.Fatalf("expected no attachments, got %+v", finalList.Attachments)
+	}
 }
 
 func cleanupS3(t *testing.T, cfg lockd.Config, key string) {
@@ -213,10 +312,11 @@ func ResetAWSBucketForCrypto(tb testing.TB, cfg lockd.Config) {
 	if os.Getenv(cryptotest.EnvVar) != "1" {
 		return
 	}
-	s3cfg, _, err := lockd.BuildAWSConfig(cfg)
+	awsResult, err := lockd.BuildAWSConfig(cfg)
 	if err != nil {
 		tb.Fatalf("build aws config: %v", err)
 	}
+	s3cfg := awsResult.Config
 	store, err := s3.New(s3cfg)
 	if err != nil {
 		tb.Fatalf("new aws store: %v", err)
@@ -259,10 +359,11 @@ func CleanupQueryNamespaces(tb testing.TB, cfg lockd.Config) {
 	if len(names) == 0 {
 		return
 	}
-	s3cfg, _, err := lockd.BuildAWSConfig(cfg)
+	awsResult, err := lockd.BuildAWSConfig(cfg)
 	if err != nil {
 		tb.Fatalf("build aws config: %v", err)
 	}
+	s3cfg := awsResult.Config
 	store, err := s3.New(s3cfg)
 	if err != nil {
 		tb.Fatalf("new aws store: %v", err)
@@ -294,16 +395,23 @@ func cleanupNamespaceKeys(tb testing.TB, store storage.Backend, ctx context.Cont
 }
 
 func cleanupIndexArtifacts(tb testing.TB, store storage.Backend, ctx context.Context, namespace string) {
-	listOpts := storage.ListOptions{Prefix: "index/", Limit: 1000}
+	removePrefix(tb, store, ctx, namespace, "index/")
+	removePrefix(tb, store, ctx, namespace, ".staging/")
+}
+
+// removePrefix best-effort deletes all objects under the prefix within a namespace.
+func removePrefix(tb testing.TB, store storage.Backend, ctx context.Context, namespace, prefix string) {
+	tb.Helper()
+	listOpts := storage.ListOptions{Prefix: prefix, Limit: 1000}
 	for {
 		res, err := store.ListObjects(ctx, namespace, listOpts)
 		if err != nil {
-			tb.Logf("aws cleanup list index (%s): %v", namespace, err)
+			tb.Logf("aws cleanup list prefix (%s/%s): %v", namespace, prefix, err)
 			return
 		}
 		for _, obj := range res.Objects {
 			if err := store.DeleteObject(ctx, namespace, obj.Key, storage.DeleteObjectOptions{}); err != nil && !errors.Is(err, storage.ErrNotFound) {
-				tb.Logf("aws cleanup index %s/%s: %v", namespace, obj.Key, err)
+				tb.Logf("aws cleanup delete %s/%s: %v", namespace, obj.Key, err)
 			}
 		}
 		if !res.Truncated || res.NextStartAfter == "" {
@@ -316,10 +424,11 @@ func cleanupIndexArtifacts(tb testing.TB, store storage.Backend, ctx context.Con
 // CleanupQueue removes queue blobs and metadata for the given queue.
 func CleanupQueue(tb testing.TB, cfg lockd.Config, namespace, queue string) {
 	tb.Helper()
-	s3cfg, _, err := lockd.BuildAWSConfig(cfg)
+	awsResult, err := lockd.BuildAWSConfig(cfg)
 	if err != nil {
 		tb.Fatalf("build aws config: %v", err)
 	}
+	s3cfg := awsResult.Config
 	store, err := s3.New(s3cfg)
 	if err != nil {
 		tb.Fatalf("new aws store: %v", err)
@@ -372,10 +481,11 @@ func CleanupKey(tb testing.TB, cfg lockd.Config, namespace, key string) {
 
 func cleanupAWSKey(tb testing.TB, cfg lockd.Config, namespace, key string) error {
 	tb.Helper()
-	s3cfg, _, err := lockd.BuildAWSConfig(cfg)
+	awsResult, err := lockd.BuildAWSConfig(cfg)
 	if err != nil {
 		return fmt.Errorf("build aws config: %w", err)
 	}
+	s3cfg := awsResult.Config
 	store, err := s3.New(s3cfg)
 	if err != nil {
 		return fmt.Errorf("new aws store: %w", err)
@@ -386,6 +496,9 @@ func cleanupAWSKey(tb testing.TB, cfg lockd.Config, namespace, key string) error
 	defer cancel()
 	if err := store.Remove(ctx, namespace, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 		return fmt.Errorf("remove state %s/%s: %w", namespace, key, err)
+	}
+	if err := cleanupPrefix(store, ctx, namespace, path.Join("state", key, ".staging")+"/"); err != nil {
+		return fmt.Errorf("cleanup staging %s/%s: %w", namespace, key, err)
 	}
 	if err := store.DeleteMeta(ctx, namespace, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 		return fmt.Errorf("delete meta %s/%s: %w", namespace, key, err)
@@ -428,16 +541,37 @@ func sampleKeys(keys []string) []string {
 	return out
 }
 
+// cleanupPrefix deletes all objects under the provided prefix, returning the first error encountered.
+func cleanupPrefix(store storage.Backend, ctx context.Context, namespace, prefix string) error {
+	listOpts := storage.ListOptions{Prefix: prefix, Limit: 1000}
+	for {
+		res, err := store.ListObjects(ctx, namespace, listOpts)
+		if err != nil {
+			return fmt.Errorf("list objects %s/%s: %w", namespace, prefix, err)
+		}
+		for _, obj := range res.Objects {
+			if err := store.DeleteObject(ctx, namespace, obj.Key, storage.DeleteObjectOptions{}); err != nil && !errors.Is(err, storage.ErrNotFound) {
+				return fmt.Errorf("delete object %s/%s: %w", namespace, obj.Key, err)
+			}
+		}
+		if !res.Truncated || res.NextStartAfter == "" {
+			return nil
+		}
+		listOpts.StartAfter = res.NextStartAfter
+	}
+}
+
 // CleanupNamespaceIndexes removes index manifests and segments for the provided namespaces.
 func CleanupNamespaceIndexes(tb testing.TB, cfg lockd.Config, nsList ...string) {
 	tb.Helper()
 	if len(nsList) == 0 {
 		nsList = []string{namespaces.Default}
 	}
-	s3cfg, _, err := lockd.BuildAWSConfig(cfg)
+	awsResult, err := lockd.BuildAWSConfig(cfg)
 	if err != nil {
 		tb.Fatalf("build aws config: %v", err)
 	}
+	s3cfg := awsResult.Config
 	store, err := s3.New(s3cfg)
 	if err != nil {
 		tb.Fatalf("new aws store: %v", err)

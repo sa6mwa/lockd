@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"pkt.systems/lockd/internal/clock"
-	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/namespaces"
 	"pkt.systems/pslog"
@@ -37,9 +36,12 @@ func Wrap(inner storage.Backend, logger pslog.Logger, clk clock.Clock, cfg Confi
 	if cfg.MaxDelay <= 0 {
 		cfg.MaxDelay = 2 * time.Second
 	}
+	if logger == nil {
+		logger = pslog.NoopLogger()
+	}
 	return &backend{
 		inner:  inner,
-		logger: loggingutil.EnsureLogger(logger),
+		logger: logger,
 		clock:  clk,
 		cfg:    cfg,
 	}
@@ -52,15 +54,14 @@ type backend struct {
 	cfg    Config
 }
 
-func (b *backend) LoadMeta(ctx context.Context, namespace, key string) (*storage.Meta, string, error) {
-	var meta *storage.Meta
-	var etag string
+func (b *backend) LoadMeta(ctx context.Context, namespace, key string) (storage.LoadMetaResult, error) {
+	var result storage.LoadMetaResult
 	err := b.withRetry(ctx, "load_meta", namespace, key, func(ctx context.Context) error {
 		var err error
-		meta, etag, err = b.inner.LoadMeta(ctx, namespace, key)
+		result, err = b.inner.LoadMeta(ctx, namespace, key)
 		return err
 	})
-	return meta, etag, err
+	return result, err
 }
 
 func (b *backend) StoreMeta(ctx context.Context, namespace, key string, meta *storage.Meta, expectedETag string) (string, error) {
@@ -89,17 +90,14 @@ func (b *backend) ListMetaKeys(ctx context.Context, namespace string) ([]string,
 	return keys, err
 }
 
-func (b *backend) ReadState(ctx context.Context, namespace, key string) (io.ReadCloser, *storage.StateInfo, error) {
-	var (
-		r    io.ReadCloser
-		info *storage.StateInfo
-	)
+func (b *backend) ReadState(ctx context.Context, namespace, key string) (storage.ReadStateResult, error) {
+	var result storage.ReadStateResult
 	err := b.withRetry(ctx, "read_state", namespace, key, func(ctx context.Context) error {
 		var err error
-		r, info, err = b.inner.ReadState(ctx, namespace, key)
+		result, err = b.inner.ReadState(ctx, namespace, key)
 		return err
 	})
-	return r, info, err
+	return result, err
 }
 
 func (b *backend) WriteState(ctx context.Context, namespace, key string, body io.Reader, opts storage.PutStateOptions) (*storage.PutStateResult, error) {
@@ -128,17 +126,14 @@ func (b *backend) ListObjects(ctx context.Context, namespace string, opts storag
 	return res, err
 }
 
-func (b *backend) GetObject(ctx context.Context, namespace, key string) (io.ReadCloser, *storage.ObjectInfo, error) {
-	var (
-		r    io.ReadCloser
-		info *storage.ObjectInfo
-	)
+func (b *backend) GetObject(ctx context.Context, namespace, key string) (storage.GetObjectResult, error) {
+	var result storage.GetObjectResult
 	err := b.withRetry(ctx, "get_object", namespace, key, func(ctx context.Context) error {
 		var err error
-		r, info, err = b.inner.GetObject(ctx, namespace, key)
+		result, err = b.inner.GetObject(ctx, namespace, key)
 		return err
 	})
-	return r, info, err
+	return result, err
 }
 
 func (b *backend) PutObject(ctx context.Context, namespace, key string, body io.Reader, opts storage.PutObjectOptions) (*storage.ObjectInfo, error) {
@@ -155,6 +150,10 @@ func (b *backend) DeleteObject(ctx context.Context, namespace, key string, opts 
 	return b.withRetry(ctx, "delete_object", namespace, key, func(ctx context.Context) error {
 		return b.inner.DeleteObject(ctx, namespace, key, opts)
 	})
+}
+
+func (b *backend) BackendHash(ctx context.Context) (string, error) {
+	return b.inner.BackendHash(ctx)
 }
 
 func (b *backend) Close() error {
@@ -175,11 +174,11 @@ func (b *backend) SubscribeQueueChanges(namespace, queue string) (storage.QueueC
 	return nil, storage.ErrNotImplemented
 }
 
-func (b *backend) QueueWatchStatus() (bool, string, string) {
+func (b *backend) QueueWatchStatus() storage.QueueWatchStatus {
 	if provider, ok := b.inner.(storage.QueueWatchStatusProvider); ok {
 		return provider.QueueWatchStatus()
 	}
-	return false, "unknown", "backend_does_not_report"
+	return storage.QueueWatchStatus{Enabled: false, Mode: "unknown", Reason: "backend_does_not_report"}
 }
 
 func (b *backend) withRetry(ctx context.Context, op, namespace, key string, fn func(context.Context) error) error {

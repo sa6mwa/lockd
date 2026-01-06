@@ -1,71 +1,205 @@
-# XA-ish Roadmap for lockd
+# Lockd XA Transactions
 
-This document outlines a staged path from today’s CAS/lease semantics to a practical XA-compatible Transaction Coordinator (TC) where every lockd node can act as both Resource Manager (RM) and TC, plus adapters for non-lockd participants (e.g., Postgres). The goal is to stay idiomatic to lockd: leases, CAS, namespaced storage, and manifest-driven indexing.
+Lockd provides XA-style, two-phase transactions across keys and queue messages. Every lockd node acts as both a TC and an RM (resource manager). A single TC leader is elected via quorum leases; the leader records durable decisions and fans out apply requests to RMs.
 
-## Guiding constraints
-- Keep current lockd semantics intact: leases prevent concurrent writers; CAS remains the conflict detector; observed-key warm-up stays.
-- Transactions must span keys and namespaces; namespace boundaries are not transaction boundaries.
-- Idempotent, replay-safe operations; decisions are durable before fan-out.
-- Prefer storage-native moves/CAS over heavyweight logs; background sweepers remain responsible for orphaned artifacts.
+This document is the current, user-facing behavior (not a roadmap).
 
-## Phase 0: Single-key transactional release (foundation)
-- Add `ReleaseDecision` (`commit`, `rollback`) to the ordinary `Acquire` flow.
-- Staging layout: `/<ns>/<key>/.staging/<txn-id>` plus optional undo blob; commit = CAS head → staged, rollback = delete staged.
-- Lease expiry implies rollback; sweeper deletes stale staging.
-- Tests: unit + `integration/.../disk/query` for staged commit/rollback, CAS conflicts, expiry rollback.
+## Scope and constraints
 
-## Phase 1: Multi-key on one node (deterministic 2PC, no external TC)
-- Shared txn record `/.txns/<txn-id>` (state: pending|commit|rollback, participants[], ttl, decision_etag).
-- Prepare: acquire keys in sorted order, stage blobs with ExpectedETag=head, register participants in the txn record.
-- Any participant can decide: if all prepared, CAS decision to `commit`; on failure/timeout, CAS to `rollback`. First wins; idempotent.
-- Fan-out: participants watch the txn record; commit = CAS head→staged, rollback = delete staged.
-- Recovery: on startup, scan txn records; replay commit CAS or roll back expired pending.
-- Tests: add focused suite for concurrent prepares, partial failures, restart recovery.
+- **Multi-key, multi-namespace** transactions are supported.
+- **Transaction IDs and lease IDs** are compact xid strings.
+- **Staging layout**: staged state lives under `/<ns>/state/<key>/.staging/<txn-id>`;
+  staged attachments live under `/<ns>/state/<key>/.staging/<txn-id>/attachments/<uuidv7>`.
+- **Decision records** live under the reserved `.txns` namespace.
+- **Backend islands** are identified by `backend_hash` (persisted under `.lockd/backend-id`).
+- **Queue dequeue enlistment** is supported; the message (and optional state sidecar) become txn participants.
+- **Queue enqueue is not XA-aware** yet (no `txn_id` on enqueue).
+- **Namespaces starting with `.` are reserved** for lockd internals.
 
-## Phase 2: Multi-node, shared backend (lockd node can be TC+RM)
-- Each node exposes an RM API (prepare/commit/rollback) backed by the Phase 1 primitives.
-- TC role can be co-located: node that receives the client request writes the txn record and coordinates.
-- Use backend as the durability surface: txn decision persisted before Phase-2 fan-out.
-- Node liveness: lease timeouts + txn TTL handle lost coordinators; peers can read the decision record and complete.
-- Tests: multi-process integration targeting `mem` and `disk` with shared FS to prove fan-out and replay.
+## Terminology
 
-## Phase 2.5: Queues as first-class participants (shared-backend constraint)
-- Dequeue enlists at the ACK/NACK level (JMS/XA style). The queue resource joins the txn; the message body is not staged elsewhere.
-- Prepare: dequeue marks the message “in-flight” with a visibility lease/hold on the queue backend (must be the same backend that stored the message).
-- Commit: XA decision = ACK → delete/advance head under queue CAS guarantees.
-- Rollback: XA decision = NACK → clear hold / restore visibility; message becomes available again. No staged delete list required.
-- Enqueue-in-XA (optional): producer can stage enqueue data and publish on commit; rollback drops the staged segment. Useful when producer and consumer are in the same txn.
-- Ordering guarantees: apply commit deletions in queue order on that backend; cross-island coordination still uses the global txn record, but dequeue/ACK remains backend-local.
-- Tests: dequeue enlisted in XA (commit=ACK, rollback=NACK), mixed Acquire + queue txn, enqueue+dequeue in one txn, restart recovery of held messages.
+- **Participant**: a `(namespace, key)` pair, optionally with `backend_hash`.
+- **TC**: the elected leader that records decisions in `.txns` and fans out to RMs (non-leaders forward).
+- **RM**: applies commit/rollback for local participants.
 
-## Phase 3: Island-aware TC (multiple backends, still within one “cluster”)
-- Each RM publishes a stable `backend_hash` derived from storage endpoint + bucket/path + crypto params; collision-resistant enough to treat as island ID. If derivation is impossible or unstable, generate a UUIDv7 (or similar) once and persist it in the backend (e.g., `/.lockd/backend-id`) with CAS/ETag guard. Only regenerate when the marker is missing so all RMs that share the backend converge on the same id across restarts.
-- TC groups participants by backend_hash. If all participants share a hash, it can use a single txn record on that backend; otherwise it must create per-island txn records plus a small global decision record.
-- Commit protocol: decide once globally, then fan-out to each island’s txn record; per-island commit uses the same Phase 2PC. Rollback similarly.
-- Optimization: islands that share a backend can short-circuit fan-out to a single CAS batch.
-- Tests: simulated two-backend setup (e.g., disk + minio) verifying mixed-island commits and partial failures.
+## Transaction lifecycle (state keys)
 
-## Phase 4: External adapters (Postgres example)
-- Adapter acts as an RM shim implementing lockd’s RM API: prepare = `BEGIN; PREPARE TRANSACTION '<id>'`, commit = `COMMIT PREPARED`, rollback = `ROLLBACK PREPARED`.
-- Credentials/config stored in TC config; participant registry lists adapter type + endpoint + backend_hash (real storage hash unknown, so adapter supplies a synthetic one to force island fan-out).
-- Durability: TC records decisions; adapter replays on recovery by reading the txn record.
-- Add conformance tests with a local Postgres container; cover lost TC, lost adapter, and idempotent prepare/commit calls.
+1. **Acquire**: `Acquire` mints a `txn_id` if you do not supply one. Use the same `txn_id` to join multiple keys.
+2. **Stage**: `Update`/`Remove`/`UpdateMetadata`/attachment operations with the `txn_id` write staged data and register participants.
+3. **Decide**:
+   - **Local flow**: `Release` with `rollback=false` commits; `rollback=true` rolls back.
+   - **Coordinated flow**: the core decider records `pending|commit|rollback` via the TC leader and fans out to RMs (non-leader TC endpoints forward to the leader). Normal client SDK flows do not call `/v1/txn/decide` directly.
+4. **Apply**: RMs promote staged state/attachments (commit) or discard staging (rollback), clear leases, and clean metadata.
+5. **Recovery**: the sweeper replays committed/rolled back decisions and rolls back expired pending decisions. `/v1/txn/replay` forces replay.
 
-## Phase 5: XA surface polish
-- Expose XA-like API: `xa_start`, `xa_end`, `xa_prepare`, `xa_commit`, `xa_rollback`, mapped to the TC endpoints; keep lockd-native `Acquire`/`Release` path intact.
-- Allow TC-only deployments (no local storage) and TC+RM hybrid nodes.
-- Observability: decision logs, per-island timing, watchdogs for long prepares.
-- Docs: adapter authoring guide, storage hash spec, failure matrix.
+## TC and RM endpoints
 
-## Open questions / caveats
-- Storage capabilities differ (rename vs copy+delete). Shadow-write layout must work on backends without atomic rename; CAS head swap is the fallback.
-- Island hash stability: config changes (bucket rename, encryption key rotation) must regenerate the hash; TC needs a migration story. If using a persisted UUID backend-id, regen only when the marker is missing; when regeneration is unavoidable, TC must treat old txn records from the prior id as completed-orphan and sweep them.
-- Queue semantics: dequeues are backend-local; cross-island txns can combine queues and key ops, but visibility/ordering must stay consistent with queue CAS invariants. Need a rule for conflicting dequeue prepares when leases expire mid-txn; ACK/NACK binding to XA decision simplifies this but still needs lease-expiry handling.
-- Read-your-own-writes for streaming queries during a transaction is out of scope; readers continue to see last committed heads.
-- Retention policy for old versions if we keep versioned commits; ensure sweeper bounds storage growth.
+- **TC decision endpoint**: `POST /v1/txn/decide` (`state` = `pending|commit|rollback`). TC-auth only; called by lockd RMs and TC tooling. Any TC endpoint can receive it; non-leaders forward to the leader.
+- **RM apply endpoints**: `POST /v1/txn/commit`, `POST /v1/txn/rollback` (include `tc_term`, the TC leader term).
+- **Replay**: `POST /v1/txn/replay` applies the recorded decision again.
 
-## Minimal first milestone (actionable next)
-- Implement Phase 0 + Phase 1 semantics (just do it, no feature flag, we are not on a stable release yet).
-- Add txn record type, staging layout, and sweeper support.
-- Extend integration suites (disk, mem) with multi-key commit/rollback and restart recovery cases.
-- Document client/CLI UX for `Release(commit|rollback)`; keep `AcquireForUpdate` as a convenience wrapper.
+When mTLS is enabled (and `tc-disable-auth` is not set):
+
+- **TC client endpoints** (`/v1/tc/leader`, `/v1/tc/lease/*`, `/v1/tc/cluster/list`,
+  `/v1/tc/rm/list`, `/v1/txn/decide`) require a TC client cert.
+- **TC server endpoints** (`/v1/tc/cluster/announce`, `/v1/tc/cluster/leave`,
+  `/v1/tc/rm/register`, `/v1/tc/rm/unregister`) require a server cert.
+
+Use the TC trust bundle commands (`lockd tc trust add`, `lockd tc trust list`)
+to configure which CAs can call TC/RM endpoints.
+
+`tc_term` is set by the TC leader; normal client SDK callers should omit it.
+
+`/v1/txn/decide` merges participants with any existing txn record. If the TC does not share the backend with the participants, supply the full participant list (with `backend_hash`) so fan-out can target the correct RM. The TC leader stamps the decision with `tc_term`; RMs reject stale terms.
+
+## Backend islands (multi-backend)
+
+Each backend exposes a stable `backend_hash`. The TC groups participants by `backend_hash` and fans out apply requests to the corresponding RMs. RMs reject mismatched requests with `409 txn_backend_mismatch`.
+
+If all participants share the same backend hash, fan-out is skipped after the local apply.
+
+## TC configuration (cluster + fan-out + auth)
+
+Core knobs (CLI flags shown; each has a `LOCKD_` env var equivalent via Viper):
+
+- `--self` this node's endpoint (used for TC leadership and RM registration).
+- `--join` (config key `tc-join`) bootstrap endpoints only; never a static TC list.
+  If `--join` includes any non-self endpoints, mTLS must be enabled at startup.
+- `--tc-fanout-timeout`, `--tc-fanout-attempts`, `--tc-fanout-base-delay`, `--tc-fanout-max-delay`, `--tc-fanout-multiplier` for retry behavior.
+- `--tc-decision-retention` to keep decisions for late replays.
+- `--tc-disable-auth` to disable TC/RM endpoint certificate enforcement (mTLS still applies).
+- `--tc-trust-dir` and `--tc-allow-default-ca` to control which CAs are trusted for TC/RM endpoints (default CA is not trusted unless explicitly allowed).
+- `--tc-client-bundle` for outbound fan-out mTLS when the TC calls remote RMs.
+
+Cluster membership leases are stored under `.lockd/tc-cluster/leases/<identity>` and managed via:
+
+- `lockd tc announce --self ... --endpoint ...`
+- `lockd tc leave --endpoint ...`
+- `lockd tc list --endpoint ...`
+
+RM registrations are stored under `.lockd/tc-rm-members` and managed via `/v1/tc/rm/register` and `/v1/tc/rm/unregister` (server cert required when mTLS is enabled). Registry updates replicate across the TC cluster; replication failures return `502 tc_rm_replication_failed`. Ensure the TC trust includes the server CA or enable `--tc-allow-default-ca`.
+
+Startup requirement: if `--join` is configured, the node must successfully
+announce to at least one join target at startup or fail hard. Including the
+node's own endpoint in `--join` satisfies this check.
+
+## Queue enlistment (dequeue in XA)
+
+When you call dequeue with a `txn_id`, lockd enlists the queue message as a participant. For `DequeueWithState`, the state sidecar is also enlisted.
+
+Decision semantics:
+- **Commit** => ACK (message removed), delete state sidecar (if stateful).
+- **Rollback** => NACK (message becomes visible again), state sidecar retained.
+
+Queue lease fencing is strict. Stale ACK/NACK/txn applies return `409 queue_message_lease_mismatch`.
+
+## SDK examples
+
+### Multi-key transaction (local)
+
+```go
+ctx := context.Background()
+txn := xid.New().String()
+
+leaseA, _ := cli.Acquire(ctx, api.AcquireRequest{
+    Namespace:  namespaces.Default,
+    Key:        "xa-a",
+    Owner:      "worker-1",
+    TTLSeconds: 30,
+    TxnID:      txn,
+})
+leaseB, _ := cli.Acquire(ctx, api.AcquireRequest{
+    Namespace:  "beta",
+    Key:        "xa-b",
+    Owner:      "worker-1",
+    TTLSeconds: 30,
+    TxnID:      txn,
+})
+_ = leaseA.Save(ctx, map[string]any{"status": "ready-a"})
+_ = leaseB.Save(ctx, map[string]any{"status": "ready-b"})
+
+// Commit the txn. Rollback by passing Rollback: true.
+_ = leaseA.Release(ctx)
+```
+
+### Queue dequeue in a transaction
+
+```go
+opts := lockdclient.DequeueOptions{
+    Namespace: namespaces.Default,
+    Owner:     "worker-1",
+    TxnID:     txn,
+}
+msg, _ := cli.Dequeue(ctx, "orders", opts)
+
+// Work with the message, then ACK/NACK to commit/rollback.
+// ACK/NACK triggers the TC decider when a txn_id is present.
+```
+
+If you are coordinating across multiple backends, pass the queue message participant explicitly: `q/<queue>/msg/<message_id>` (and `q/<queue>/state/<message_id>` for stateful dequeues) along with the correct `backend_hash`.
+
+## TC tooling (TC-auth only)
+
+### TC decision (multi-backend)
+
+```go
+parts := []api.TxnParticipant{
+    {Namespace: "default", Key: "orders/alpha", BackendHash: "backend-a"},
+    {Namespace: "default", Key: "orders/beta", BackendHash: "backend-b"},
+}
+resp, err := cli.TxnCommit(ctx, api.TxnDecisionRequest{TxnID: txn, Participants: parts})
+_ = resp
+_ = err
+```
+
+## CLI examples
+
+### Multi-key transaction (local)
+
+```sh
+# Acquire key A (exports LOCKD_CLIENT_TXN_ID and lease info)
+eval "$(lockd client acquire --key xa-a --ttl 30s)"
+txn=$LOCKD_CLIENT_TXN_ID
+leaseA=$LOCKD_CLIENT_LEASE
+fenceA=$LOCKD_CLIENT_FENCING_TOKEN
+
+# Join key B in the same txn
+LOCKD_CLIENT_TXN_ID=$txn eval "$(lockd client acquire --key xa-b --ttl 30s)"
+leaseB=$LOCKD_CLIENT_LEASE
+fenceB=$LOCKD_CLIENT_FENCING_TOKEN
+
+# Stage updates
+printf '{"status":"ready"}' | lockd client update --key xa-a --lease "$leaseA" --fencing-token "$fenceA" --txn-id "$txn"
+printf '{"status":"ready"}' | lockd client update --key xa-b --lease "$leaseB" --fencing-token "$fenceB" --txn-id "$txn"
+
+# Commit (rollback with --rollback)
+lockd client release --key xa-a --lease "$leaseA" --fencing-token "$fenceA" --txn-id "$txn"
+```
+
+### TC decision (TC-auth only)
+
+```sh
+lockd txn commit \
+  --txn-id "$LOCKD_CLIENT_TXN_ID" \
+  --participant default:orders/alpha@backend-a \
+  --participant default:orders/beta@backend-b
+```
+
+Queue dequeue with `txn_id` is currently exposed via the SDK; the CLI does not yet accept a `--txn-id` for queue dequeue.
+
+## Failure modes and recovery
+
+- **Lease expiry**: pending transactions roll back when the lease TTL expires.
+- **Pending decision**: RM apply without a decision record returns `409 txn_pending`.
+- **Backend mismatch**: RM apply with a mismatched `target_backend_hash` returns `409 txn_backend_mismatch`.
+- **Queue lease mismatch**: stale ACK/NACK or txn apply returns `409 queue_message_lease_mismatch`.
+- **Fan-out failures**: TC returns `502 txn_fanout_failed` if remote apply fails. The decision is still recorded; retry or call `/v1/txn/replay` after fixing the RM endpoint.
+
+## Diagrams
+
+PlantUML sources live under `docs/diagrams/`:
+
+- `xa-happy-path.puml` - multi-key commit on a single backend.
+- `xa-rollback-timeout.puml` - rollback after lease/decision expiry.
+- `xa-tc-rm-fanout.puml` - TC decision + RM fan-out across backends.
+- `xa-queue-dequeue.puml` - queue dequeue enlisted in a transaction.

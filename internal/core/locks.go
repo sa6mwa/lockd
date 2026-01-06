@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rs/xid"
 	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/internal/correlation"
 	"pkt.systems/lockd/internal/qrf"
@@ -97,7 +98,6 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (*AcquireResu
 		"owner", cmd.Owner,
 		"ttl_seconds", ttl.Seconds(),
 		"block_seconds", cmd.BlockSeconds,
-		"idempotent", cmd.Idempotency != "",
 		"generated_key", autoKey,
 	)
 
@@ -106,7 +106,16 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (*AcquireResu
 		deadline = s.clock.Now().Add(block)
 	}
 
-	leaseID := uuidv7.NewString()
+	txnID := strings.TrimSpace(cmd.TxnID)
+	if txnID != "" {
+		if _, err := xid.FromString(txnID); err != nil {
+			return nil, Failure{Code: "invalid_txn", Detail: "txn_id must be a valid xid", HTTPStatus: http.StatusBadRequest}
+		}
+	}
+	leaseID := xid.New().String()
+	if txnID == "" {
+		txnID = xid.New().String()
+	}
 	backoff := newAcquireBackoff()
 	for {
 		now := s.clock.Now()
@@ -124,6 +133,26 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (*AcquireResu
 		}
 		if meta.Lease != nil && meta.Lease.ExpiresAtUnix <= now.Unix() {
 			meta.Lease = nil
+		}
+		// If the lease is gone but staging remains, roll it back before granting
+		// a new lease to avoid resurfacing stale staged payloads after restarts.
+		if meta.Lease == nil && meta.StagedTxnID != "" {
+			if meta.StagedStateETag != "" {
+				_ = s.staging.DiscardStagedState(ctx, namespace, keyComponent, meta.StagedTxnID, storage.DiscardStagedOptions{IgnoreNotFound: true})
+			}
+			if len(meta.StagedAttachments) > 0 {
+				discardStagedAttachments(ctx, s.store, namespace, keyComponent, meta.StagedTxnID, meta.StagedAttachments)
+			}
+			meta.StagedTxnID = ""
+			meta.StagedVersion = 0
+			meta.StagedStateETag = ""
+			meta.StagedStateDescriptor = nil
+			meta.StagedStatePlaintextBytes = 0
+			meta.StagedAttributes = nil
+			meta.StagedRemove = false
+			meta.StagedAttachments = nil
+			meta.StagedAttachmentDeletes = nil
+			meta.StagedAttachmentsClear = false
 		}
 		if meta.Lease != nil && meta.Lease.ExpiresAtUnix > now.Unix() {
 			if creationMu != nil {
@@ -165,6 +194,7 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (*AcquireResu
 			Owner:         cmd.Owner,
 			ExpiresAtUnix: expiresAt,
 			FencingToken:  newFencing,
+			TxnID:         txnID,
 		}
 		meta.UpdatedAtUnix = now.Unix()
 
@@ -186,6 +216,7 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (*AcquireResu
 		res := &AcquireResult{
 			Namespace:     namespace,
 			LeaseID:       leaseID,
+			TxnID:         txnID,
 			Key:           key,
 			Owner:         cmd.Owner,
 			ExpiresAt:     expiresAt,
@@ -197,6 +228,15 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (*AcquireResu
 			MetaETag:      metaETag,
 			Meta:          meta,
 		}
+		logger.Info("lease.acquire.success",
+			"namespace", namespace,
+			"key", key,
+			"owner", cmd.Owner,
+			"lease_id", leaseID,
+			"txn_id", txnID,
+			"fencing_token", newFencing,
+			"expires_at", expiresAt,
+		)
 		return res, nil
 	}
 }
@@ -236,13 +276,18 @@ func (s *Service) KeepAlive(ctx context.Context, cmd KeepAliveCommand) (*KeepAli
 		logger = s.logger
 	}
 
+	requestTxn := strings.TrimSpace(cmd.TxnID)
 	for {
 		now := s.clock.Now()
 		meta, metaETag, err := s.loadMetaMaybeCached(ctx, namespace, storageKey, cmd.KnownMeta, cmd.KnownMetaETag)
 		if err != nil {
 			return nil, err
 		}
-		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, now); err != nil {
+		metaTxn := ""
+		if meta.Lease != nil {
+			metaTxn = meta.Lease.TxnID
+		}
+		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, requestTxn, now); err != nil {
 			return nil, err
 		}
 		meta.Lease.ExpiresAtUnix = now.Add(ttl).Unix()
@@ -259,6 +304,7 @@ func (s *Service) KeepAlive(ctx context.Context, cmd KeepAliveCommand) (*KeepAli
 			"namespace", namespace,
 			"key", keyComponent,
 			"lease_id", cmd.LeaseID,
+			"txn_id", metaTxn,
 			"expires_at", meta.Lease.ExpiresAtUnix,
 			"fencing", meta.Lease.FencingToken,
 		)
@@ -289,6 +335,9 @@ func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (*ReleaseResu
 	if strings.TrimSpace(cmd.LeaseID) == "" {
 		return nil, Failure{Code: "missing_lease", Detail: "lease_id required", HTTPStatus: http.StatusBadRequest}
 	}
+	if strings.TrimSpace(cmd.TxnID) == "" {
+		return nil, Failure{Code: "missing_txn", Detail: "txn_id required", HTTPStatus: http.StatusBadRequest}
+	}
 	storageKey, err := s.namespacedKey(namespace, cmd.Key)
 	if err != nil {
 		return nil, Failure{Code: "invalid_key", Detail: err.Error(), HTTPStatus: http.StatusBadRequest}
@@ -301,7 +350,7 @@ func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (*ReleaseResu
 		if err != nil {
 			return nil, err
 		}
-		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, now); err != nil {
+		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now); err != nil {
 			// Idempotent: mismatched/expired/fencing issues are treated as already released.
 			var failure Failure
 			if errors.As(err, &failure) {
@@ -312,18 +361,92 @@ func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (*ReleaseResu
 			}
 			return nil, err
 		}
-		meta.Lease = nil
-		meta.UpdatedAtUnix = now.Unix()
-		newMetaETag, err := s.store.StoreMeta(ctx, namespace, keyComponent, meta, metaETag)
+
+		if meta.StagedTxnID != "" && meta.StagedTxnID != cmd.TxnID {
+			return nil, Failure{
+				Code:       "txn_mismatch",
+				Detail:     "different transaction already staged",
+				Version:    meta.Version,
+				ETag:       meta.StateETag,
+				HTTPStatus: http.StatusConflict,
+			}
+		}
+
+		commit := !cmd.Rollback
+		if meta.StagedTxnID == "" && meta.StagedStateETag == "" && !meta.StagedRemove && len(meta.StagedAttributes) == 0 && len(meta.StagedAttachments) == 0 && len(meta.StagedAttachmentDeletes) == 0 && !meta.StagedAttachmentsClear {
+			commit = false // nothing staged; just clear lease
+		}
+
+		decision := TxnStateCommit
+		if !commit {
+			decision = TxnStateRollback
+		}
+		if s.tcDecider != nil {
+			rec := TxnRecord{
+				TxnID:         cmd.TxnID,
+				State:         decision,
+				ExpiresAtUnix: meta.Lease.ExpiresAtUnix,
+				Participants: []TxnParticipant{{
+					Namespace:   namespace,
+					Key:         keyComponent,
+					BackendHash: s.backendHash,
+				}},
+			}
+			applyCtx := withTxnApplyHint(ctx, namespace, keyComponent, meta, metaETag)
+			state, err := s.tcDecider.Decide(applyCtx, rec)
+			if err != nil {
+				return nil, err
+			}
+			if state == TxnStatePending {
+				return nil, Failure{Code: "txn_pending", Detail: "transaction decision not recorded", HTTPStatus: http.StatusConflict}
+			}
+			return &ReleaseResult{
+				Released:    true,
+				MetaCleared: true,
+			}, nil
+		}
+		if _, _, err := s.registerTxnParticipant(ctx, cmd.TxnID, namespace, keyComponent, meta.Lease.ExpiresAtUnix); err != nil {
+			return nil, fmt.Errorf("register txn participant: %w", err)
+		}
+		rec, err := s.decideTxn(ctx, cmd.TxnID, decision)
 		if err != nil {
-			if errors.Is(err, storage.ErrCASMismatch) {
+			return nil, fmt.Errorf("txn decide: %w", err)
+		}
+		// Ensure the current participant is recorded even if the txn record pre-existed.
+		currentParticipant := TxnParticipant{Namespace: namespace, Key: keyComponent, BackendHash: s.backendHash}
+		if idx := participantIndex(rec.Participants, currentParticipant); idx == -1 {
+			rec.Participants = append(rec.Participants, currentParticipant)
+			sortParticipants(rec.Participants)
+			_, _ = s.putTxnRecord(ctx, rec, "")
+		} else if rec.Participants[idx].BackendHash == "" && s.backendHash != "" {
+			rec.Participants[idx].BackendHash = s.backendHash
+			sortParticipants(rec.Participants)
+			_, _ = s.putTxnRecord(ctx, rec, "")
+		}
+		decisionCommit := rec.State == TxnStateCommit
+		// Apply to the current participant using the already loaded meta to avoid extra reads.
+		if err := s.applyTxnDecisionForMeta(ctx, namespace, keyComponent, rec.TxnID, decisionCommit, meta, metaETag); err != nil {
+			return nil, err
+		}
+		// Fan-out to remaining participants.
+		for _, p := range rec.Participants {
+			if p.BackendHash != "" && s.backendHash != "" && p.BackendHash != s.backendHash {
 				continue
 			}
-			return nil, fmt.Errorf("store meta: %w", err)
+			if p.Namespace == namespace && p.Key == keyComponent && (p.BackendHash == "" || p.BackendHash == s.backendHash) {
+				continue
+			}
+			if err := s.applyTxnDecisionToKey(ctx, p.Namespace, p.Key, rec.TxnID, decisionCommit); err != nil && s.logger != nil {
+				s.logger.Warn("txn.apply.failed",
+					"namespace", p.Namespace,
+					"key", p.Key,
+					"txn_id", rec.TxnID,
+					"decision", rec.State,
+					"error", err)
+			}
 		}
 		return &ReleaseResult{
 			Released:    true,
-			MetaETag:    newMetaETag,
 			MetaCleared: true,
 		}, nil
 	}
@@ -333,9 +456,16 @@ func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (*ReleaseResu
 
 func (s *Service) resolveNamespace(ns string) (string, error) {
 	if strings.TrimSpace(ns) == "" {
-		return s.defaultNamespace, nil
+		ns = s.defaultNamespace
 	}
-	return namespaces.Normalize(ns, s.defaultNamespace)
+	normalized, err := namespaces.Normalize(ns, s.defaultNamespace)
+	if err != nil {
+		return "", err
+	}
+	if strings.HasPrefix(normalized, ".") {
+		return "", fmt.Errorf("namespace %q is reserved", normalized)
+	}
+	return normalized, nil
 }
 
 func (s *Service) observeNamespace(ns string) {
@@ -414,9 +544,9 @@ func (s *Service) ensureMeta(ctx context.Context, namespace, key string) (*stora
 		logger = s.logger
 	}
 	relKey := relativeKey(namespace, key)
-	meta, etag, err := s.store.LoadMeta(ctx, namespace, relKey)
+	res, err := s.store.LoadMeta(ctx, namespace, relKey)
 	if err == nil {
-		return meta, etag, nil
+		return res.Meta, res.ETag, nil
 	}
 	if errors.Is(err, storage.ErrNotFound) {
 		return &storage.Meta{}, "", nil
@@ -440,6 +570,37 @@ func cloneMeta(meta storage.Meta) storage.Meta {
 	}
 	if len(meta.StateDescriptor) > 0 {
 		clone.StateDescriptor = append([]byte(nil), meta.StateDescriptor...)
+	}
+	if len(meta.Attachments) > 0 {
+		clone.Attachments = make([]storage.Attachment, len(meta.Attachments))
+		for i, att := range meta.Attachments {
+			clone.Attachments[i] = cloneAttachment(att)
+		}
+	}
+	if len(meta.StagedAttachments) > 0 {
+		clone.StagedAttachments = make([]storage.StagedAttachment, len(meta.StagedAttachments))
+		for i, att := range meta.StagedAttachments {
+			clone.StagedAttachments[i] = cloneStagedAttachment(att)
+		}
+	}
+	if len(meta.StagedAttachmentDeletes) > 0 {
+		clone.StagedAttachmentDeletes = append([]string(nil), meta.StagedAttachmentDeletes...)
+	}
+	return clone
+}
+
+func cloneAttachment(att storage.Attachment) storage.Attachment {
+	clone := att
+	if len(att.Descriptor) > 0 {
+		clone.Descriptor = append([]byte(nil), att.Descriptor...)
+	}
+	return clone
+}
+
+func cloneStagedAttachment(att storage.StagedAttachment) storage.StagedAttachment {
+	clone := att
+	if len(att.StagedDescriptor) > 0 {
+		clone.StagedDescriptor = append([]byte(nil), att.StagedDescriptor...)
 	}
 	return clone
 }
@@ -499,7 +660,7 @@ func (s *Service) generateUniqueKey(ctx context.Context, namespace string) (stri
 		if _, err = s.namespacedKey(namespace, candidate); err != nil {
 			return "", err
 		}
-		_, _, err = s.store.LoadMeta(ctx, namespace, candidate)
+		_, err = s.store.LoadMeta(ctx, namespace, candidate)
 		if errors.Is(err, storage.ErrNotFound) {
 			return candidate, nil
 		}
@@ -538,6 +699,16 @@ func durationToSeconds(d time.Duration) int64 {
 		return 0
 	}
 	return int64(math.Ceil(d.Seconds()))
+}
+
+func pickStagedVersion(meta *storage.Meta) int64 {
+	if meta == nil {
+		return 0
+	}
+	if meta.StagedVersion > 0 {
+		return meta.StagedVersion
+	}
+	return meta.Version + 1
 }
 
 // acquire backoff (simplified copy)

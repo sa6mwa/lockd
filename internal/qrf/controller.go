@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"pkt.systems/lockd/internal/loggingutil"
+	"pkt.systems/lockd/internal/svcfields"
 	"pkt.systems/pslog"
 )
 
@@ -113,6 +113,13 @@ type Snapshot struct {
 	CollectedAt                     time.Time
 }
 
+// Status reports the current controller state and snapshot.
+type Status struct {
+	State    State
+	Reason   string
+	Snapshot Snapshot
+}
+
 // Decision reports whether an operation should be throttled.
 type Decision struct {
 	Throttle   bool
@@ -135,10 +142,13 @@ type Controller struct {
 
 // NewController constructs a QRF controller using the supplied configuration.
 func NewController(cfg Config) *Controller {
-	logger := loggingutil.EnsureLogger(cfg.Logger)
+	logger := cfg.Logger
+	if logger == nil {
+		logger = pslog.NoopLogger()
+	}
 	return &Controller{
 		cfg:    cfg,
-		logger: loggingutil.WithSubsystem(logger, "control.qrf.controller"),
+		logger: svcfields.WithSubsystem(logger, "control.qrf.controller"),
 		state:  StateDisengaged,
 	}
 }
@@ -392,10 +402,10 @@ func (c *Controller) Snapshot() Snapshot {
 }
 
 // Status returns the current state, reason, and snapshot without mutating controller state.
-func (c *Controller) Status() (State, string, Snapshot) {
+func (c *Controller) Status() Status {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.state, c.lastReason, c.lastSnapshot
+	return Status{State: c.state, Reason: c.lastReason, Snapshot: c.lastSnapshot}
 }
 
 func (c *Controller) hardBreach(totalQueue int64, s Snapshot) (bool, string) {

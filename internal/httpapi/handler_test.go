@@ -18,7 +18,6 @@ import (
 
 	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/internal/correlation"
-	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/queue"
 	"pkt.systems/lockd/internal/search"
 	"pkt.systems/lockd/internal/storage"
@@ -76,9 +75,10 @@ func TestAcquireLifecycle(t *testing.T) {
 		Key:        "orders",
 		LeaseID:    acquireResp.LeaseID,
 		TTLSeconds: 20,
+		TxnID:      acquireResp.TxnID,
 	}
 	var keepResp api.KeepAliveResponse
-	status = doJSON(t, server, http.MethodPost, "/v1/keepalive", map[string]string{"X-Fencing-Token": fencingToken}, keepReq, &keepResp)
+	status = doJSON(t, server, http.MethodPost, "/v1/keepalive", map[string]string{"X-Fencing-Token": fencingToken, "X-Txn-ID": acquireResp.TxnID}, keepReq, &keepResp)
 	if status != http.StatusOK {
 		t.Fatalf("expected keepalive 200, got %d", status)
 	}
@@ -89,6 +89,7 @@ func TestAcquireLifecycle(t *testing.T) {
 	stateHeaders := map[string]string{
 		"X-Lease-ID":      acquireResp.LeaseID,
 		"X-Fencing-Token": fencingToken,
+		"X-Txn-ID":        acquireResp.TxnID,
 	}
 	updateBody := map[string]any{"cursor": 42}
 	status = doJSON(t, server, http.MethodPost, "/v1/update?key=orders", stateHeaders, updateBody, nil)
@@ -118,6 +119,7 @@ func TestAcquireLifecycle(t *testing.T) {
 	releaseReq := api.ReleaseRequest{
 		Key:     "orders",
 		LeaseID: acquireResp.LeaseID,
+		TxnID:   acquireResp.TxnID,
 	}
 	var releaseResp api.ReleaseResponse
 	status = doJSON(t, server, http.MethodPost, "/v1/release", map[string]string{"X-Fencing-Token": fencingToken}, releaseReq, &releaseResp)
@@ -126,6 +128,104 @@ func TestAcquireLifecycle(t *testing.T) {
 	}
 	if !releaseResp.Released {
 		t.Fatal("expected release to succeed")
+	}
+}
+
+func TestAttachmentContentLengthHeader(t *testing.T) {
+	store := memory.New()
+	clk := newStubClock(time.Unix(1_700_000_000, 0))
+	logger := pslog.NewStructured(io.Discard)
+
+	handler := New(Config{
+		Store:        store,
+		Logger:       logger,
+		Clock:        clk,
+		JSONMaxBytes: 1 << 20,
+		DefaultTTL:   15 * time.Second,
+		MaxTTL:       1 * time.Minute,
+		AcquireBlock: 10 * time.Second,
+	})
+	mux := http.NewServeMux()
+	handler.Register(mux)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	acquireReq := api.AcquireRequest{
+		Key:        "orders",
+		Owner:      "worker-1",
+		TTLSeconds: 10,
+	}
+	var acquireResp api.AcquireResponse
+	status := doJSON(t, server, http.MethodPost, "/v1/acquire", nil, acquireReq, &acquireResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected acquire 200, got %d", status)
+	}
+	token := strconv.FormatInt(acquireResp.FencingToken, 10)
+
+	payload := []byte("payload-bytes")
+	attachReq, err := http.NewRequest(http.MethodPost, server.URL+"/v1/attachments?key=orders&name=payload.bin", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("new attach request: %v", err)
+	}
+	attachReq.Header.Set("X-Lease-ID", acquireResp.LeaseID)
+	attachReq.Header.Set("X-Fencing-Token", token)
+	attachReq.Header.Set("X-Txn-ID", acquireResp.TxnID)
+	attachReq.Header.Set("Content-Type", "application/octet-stream")
+	attachResp, err := http.DefaultClient.Do(attachReq)
+	if err != nil {
+		t.Fatalf("attach request: %v", err)
+	}
+	defer attachResp.Body.Close()
+	if attachResp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(attachResp.Body)
+		t.Fatalf("attach status=%d body=%s", attachResp.StatusCode, strings.TrimSpace(string(data)))
+	}
+
+	releaseReq := api.ReleaseRequest{
+		Key:     "orders",
+		LeaseID: acquireResp.LeaseID,
+		TxnID:   acquireResp.TxnID,
+	}
+	status = doJSON(t, server, http.MethodPost, "/v1/release", map[string]string{"X-Fencing-Token": token}, releaseReq, nil)
+	if status != http.StatusOK {
+		t.Fatalf("expected release 200, got %d", status)
+	}
+
+	getReq, err := http.NewRequest(http.MethodGet, server.URL+"/v1/attachment?key=orders&name=payload.bin&public=1", http.NoBody)
+	if err != nil {
+		t.Fatalf("new get request: %v", err)
+	}
+	getResp, err := http.DefaultClient.Do(getReq)
+	if err != nil {
+		t.Fatalf("get attachment: %v", err)
+	}
+	defer getResp.Body.Close()
+	if getResp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(getResp.Body)
+		t.Fatalf("get attachment status=%d body=%s", getResp.StatusCode, strings.TrimSpace(string(data)))
+	}
+	size, err := strconv.ParseInt(getResp.Header.Get("Content-Length"), 10, 64)
+	if err != nil {
+		t.Fatalf("parse content-length: %v", err)
+	}
+	if size != int64(len(payload)) {
+		t.Fatalf("content-length %d want %d", size, len(payload))
+	}
+	if headerSize := getResp.Header.Get("X-Attachment-Size"); headerSize != "" {
+		declared, err := strconv.ParseInt(headerSize, 10, 64)
+		if err != nil {
+			t.Fatalf("parse x-attachment-size: %v", err)
+		}
+		if declared != int64(len(payload)) {
+			t.Fatalf("x-attachment-size %d want %d", declared, len(payload))
+		}
+	}
+	data, err := io.ReadAll(getResp.Body)
+	if err != nil {
+		t.Fatalf("read attachment body: %v", err)
+	}
+	if !bytes.Equal(data, payload) {
+		t.Fatalf("unexpected attachment payload %q", data)
 	}
 }
 
@@ -221,6 +321,45 @@ func TestQuerySuccess(t *testing.T) {
 	}
 	if adapter.last.Engine != search.EngineScan {
 		t.Fatalf("expected scan engine, got %s", adapter.last.Engine)
+	}
+}
+
+func TestTxnEndpointsRequireTCAuth(t *testing.T) {
+	store := memory.New()
+	handler := New(Config{
+		Store:         store,
+		Logger:        pslog.NewStructured(io.Discard),
+		Clock:         newStubClock(time.Unix(1_700_000_000, 0)),
+		JSONMaxBytes:  1 << 20,
+		TCAuthEnabled: true,
+	})
+	mux := http.NewServeMux()
+	handler.Register(mux)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	type tcCase struct {
+		name string
+		path string
+		body any
+	}
+	cases := []tcCase{
+		{name: "decide", path: "/v1/txn/decide", body: api.TxnDecisionRequest{}},
+		{name: "commit", path: "/v1/txn/commit", body: api.TxnDecisionRequest{}},
+		{name: "rollback", path: "/v1/txn/rollback", body: api.TxnDecisionRequest{}},
+		{name: "replay", path: "/v1/txn/replay", body: api.TxnReplayRequest{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var errResp api.ErrorResponse
+			status := doJSON(t, server, http.MethodPost, tc.path, nil, tc.body, &errResp)
+			if status != http.StatusForbidden {
+				t.Fatalf("expected 403, got %d", status)
+			}
+			if errResp.ErrorCode != "tc_client_required" {
+				t.Fatalf("expected tc_client_required, got %s", errResp.ErrorCode)
+			}
+		})
 	}
 }
 
@@ -362,7 +501,7 @@ func TestQueryReturnDocuments(t *testing.T) {
 	configStore := namespaces.NewConfigStore(store, nil, nil, defaultCfg)
 	handler := New(Config{
 		Store:                  store,
-		Logger:                 loggingutil.NoopLogger(),
+		Logger:                 pslog.NoopLogger(),
 		Clock:                  newStubClock(time.Unix(1_700_000_500, 0)),
 		SearchAdapter:          adapter,
 		NamespaceConfigs:       configStore,
@@ -482,11 +621,23 @@ func TestGetPublicWithoutLease(t *testing.T) {
 	stateHeaders := map[string]string{
 		"X-Lease-ID":      acquireResp.LeaseID,
 		"X-Fencing-Token": strconv.FormatInt(acquireResp.FencingToken, 10),
+		"X-Txn-ID":        acquireResp.TxnID,
 	}
 	updateBody := map[string]any{"cursor": 99}
 	status = doJSON(t, server, http.MethodPost, "/v1/update?key=orders", stateHeaders, updateBody, nil)
 	if status != http.StatusOK {
 		t.Fatalf("expected update state 200, got %d", status)
+	}
+
+	releaseReq := api.ReleaseRequest{
+		Namespace: acquireResp.Namespace,
+		Key:       "orders",
+		LeaseID:   acquireResp.LeaseID,
+		TxnID:     acquireResp.TxnID,
+	}
+	status = doJSON(t, server, http.MethodPost, "/v1/release", map[string]string{"X-Fencing-Token": strconv.FormatInt(acquireResp.FencingToken, 10)}, releaseReq, nil)
+	if status != http.StatusOK {
+		t.Fatalf("expected release 200, got %d", status)
 	}
 
 	publicReq, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/get?key=orders&public=1", http.NoBody)
@@ -549,10 +700,11 @@ func TestAcquireAutoGeneratesKey(t *testing.T) {
 		t.Fatal("expected server to generate key")
 	}
 	ctx := context.Background()
-	meta, _, err := store.LoadMeta(ctx, handler.defaultNamespace, autoResp.Key)
+	metaRes, err := store.LoadMeta(ctx, handler.defaultNamespace, autoResp.Key)
 	if err != nil {
 		t.Fatalf("load meta: %v", err)
 	}
+	meta := metaRes.Meta
 	if meta.Lease == nil || meta.Lease.Owner != autoReq.Owner {
 		t.Fatalf("unexpected lease stored: %+v", meta.Lease)
 	}
@@ -560,6 +712,7 @@ func TestAcquireAutoGeneratesKey(t *testing.T) {
 	stateHeaders := map[string]string{
 		"X-Lease-ID":      autoResp.LeaseID,
 		"X-Fencing-Token": strconv.FormatInt(autoResp.FencingToken, 10),
+		"X-Txn-ID":        autoResp.TxnID,
 	}
 	updateBody := map[string]any{"auto": true}
 	status = doJSON(t, server, http.MethodPost, "/v1/update?key="+autoResp.Key, stateHeaders, updateBody, nil)
@@ -567,7 +720,7 @@ func TestAcquireAutoGeneratesKey(t *testing.T) {
 		t.Fatalf("expected update state 200, got %d", status)
 	}
 	var releaseResp api.ReleaseResponse
-	status = doJSON(t, server, http.MethodPost, "/v1/release", stateHeaders, api.ReleaseRequest{Key: autoResp.Key, LeaseID: autoResp.LeaseID}, &releaseResp)
+	status = doJSON(t, server, http.MethodPost, "/v1/release", stateHeaders, api.ReleaseRequest{Key: autoResp.Key, LeaseID: autoResp.LeaseID, TxnID: autoResp.TxnID}, &releaseResp)
 	if status != http.StatusOK || !releaseResp.Released {
 		t.Fatalf("release failed: status=%d resp=%+v", status, releaseResp)
 	}
@@ -592,7 +745,7 @@ func TestAcquireAutoGeneratesKey(t *testing.T) {
 func newTestHTTPServer(t *testing.T) *httptest.Server {
 	store := memory.New()
 	clk := newStubClock(time.Unix(1_700_000_000, 0))
-	logger := loggingutil.NoopLogger()
+	logger := pslog.NoopLogger()
 	handler := New(Config{
 		Store:        store,
 		Logger:       logger,
@@ -677,7 +830,7 @@ func TestAcquireCorrelationInvalid(t *testing.T) {
 func TestAcquireConflictAndWaiting(t *testing.T) {
 	store := memory.New()
 	clk := newStubClock(time.Unix(1_700_000_000, 0))
-	logger := loggingutil.NoopLogger()
+	logger := pslog.NoopLogger()
 	handler := New(Config{
 		Store:        store,
 		Logger:       logger,
@@ -726,7 +879,7 @@ func TestUpdateVersionMismatch(t *testing.T) {
 	clk := newStubClock(time.Unix(1_700_000_000, 0))
 	handler := New(Config{
 		Store:        store,
-		Logger:       loggingutil.NoopLogger(),
+		Logger:       pslog.NoopLogger(),
 		Clock:        clk,
 		JSONMaxBytes: 1 << 20,
 		DefaultTTL:   10 * time.Second,
@@ -743,12 +896,23 @@ func TestUpdateVersionMismatch(t *testing.T) {
 	doJSON(t, server, http.MethodPost, "/v1/acquire", nil, req, &acquire)
 
 	token := strconv.FormatInt(acquire.FencingToken, 10)
-	headers := map[string]string{"X-Lease-ID": acquire.LeaseID, "X-Fencing-Token": token}
+	headers := map[string]string{"X-Lease-ID": acquire.LeaseID, "X-Fencing-Token": token, "X-Txn-ID": acquire.TxnID}
 	doJSON(t, server, http.MethodPost, "/v1/update?key=stream", headers, map[string]int{"pos": 1}, nil)
 
-	headers["X-If-Version"] = "0"
+	// Commit the staged update to bump the version.
+	releaseReq := api.ReleaseRequest{Key: "stream", LeaseID: acquire.LeaseID, TxnID: acquire.TxnID}
+	status := doJSON(t, server, http.MethodPost, "/v1/release", map[string]string{"X-Fencing-Token": token}, releaseReq, nil)
+	if status != http.StatusOK {
+		t.Fatalf("release: expected 200, got %d", status)
+	}
+
+	// Reacquire and attempt an update with a stale version to trigger conflict.
+	var reacquire api.AcquireResponse
+	doJSON(t, server, http.MethodPost, "/v1/acquire", nil, req, &reacquire)
+	token = strconv.FormatInt(reacquire.FencingToken, 10)
+	headers = map[string]string{"X-Lease-ID": reacquire.LeaseID, "X-Fencing-Token": token, "X-Txn-ID": reacquire.TxnID, "X-If-Version": "0"}
 	var errResp api.ErrorResponse
-	status := doJSON(t, server, http.MethodPost, "/v1/update?key=stream", headers, map[string]int{"pos": 2}, &errResp)
+	status = doJSON(t, server, http.MethodPost, "/v1/update?key=stream", headers, map[string]int{"pos": 2}, &errResp)
 	if status != http.StatusConflict {
 		t.Fatalf("expected 409 conflict, got %d", status)
 	}
@@ -761,7 +925,7 @@ func TestGetRequiresLease(t *testing.T) {
 	store := memory.New()
 	handler := New(Config{
 		Store:        store,
-		Logger:       loggingutil.NoopLogger(),
+		Logger:       pslog.NoopLogger(),
 		JSONMaxBytes: 1 << 20,
 		DefaultTTL:   5 * time.Second,
 		MaxTTL:       30 * time.Second,
@@ -777,7 +941,7 @@ func TestGetRequiresLease(t *testing.T) {
 	var acquire api.AcquireResponse
 	doJSON(t, server, http.MethodPost, "/v1/acquire", nil, acq, &acquire)
 	token := strconv.FormatInt(acquire.FencingToken, 10)
-	headers := map[string]string{"X-Lease-ID": acquire.LeaseID, "X-Fencing-Token": token}
+	headers := map[string]string{"X-Lease-ID": acquire.LeaseID, "X-Fencing-Token": token, "X-Txn-ID": acquire.TxnID}
 	doJSON(t, server, http.MethodPost, "/v1/update?key=alpha", headers, map[string]int{"pos": 1}, nil)
 
 	getReq, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/get?key=alpha", http.NoBody)
@@ -795,7 +959,7 @@ func TestMetadataUpdateTogglesQueryHidden(t *testing.T) {
 	store := memory.New()
 	handler := New(Config{
 		Store:        store,
-		Logger:       loggingutil.NoopLogger(),
+		Logger:       pslog.NoopLogger(),
 		Clock:        newStubClock(time.Unix(1_700_000_000, 0)),
 		JSONMaxBytes: 1 << 20,
 		DefaultTTL:   10 * time.Second,
@@ -815,6 +979,7 @@ func TestMetadataUpdateTogglesQueryHidden(t *testing.T) {
 	headers := map[string]string{
 		"X-Lease-ID":      acquireResp.LeaseID,
 		"X-Fencing-Token": token,
+		"X-Txn-ID":        acquireResp.TxnID,
 	}
 	doJSON(t, server, http.MethodPost, "/v1/update?key=orders", headers, map[string]any{"cursor": 1}, nil)
 
@@ -826,17 +991,30 @@ func TestMetadataUpdateTogglesQueryHidden(t *testing.T) {
 	if metaResp.Metadata.QueryHidden == nil || !*metaResp.Metadata.QueryHidden {
 		t.Fatalf("expected query_hidden metadata, got %+v", metaResp.Metadata)
 	}
-	meta, _, err := store.LoadMeta(context.Background(), namespaces.Default, "orders")
+
+	// Commit and reacquire before clearing.
+	releaseReq := api.ReleaseRequest{Key: "orders", LeaseID: acquireResp.LeaseID, TxnID: acquireResp.TxnID}
+	status = doJSON(t, server, http.MethodPost, "/v1/release", map[string]string{"X-Fencing-Token": token}, releaseReq, nil)
+	if status != http.StatusOK {
+		t.Fatalf("release commit failed: %d", status)
+	}
+	metaRes, err := store.LoadMeta(context.Background(), namespaces.Default, "orders")
 	if err != nil {
 		t.Fatalf("load meta: %v", err)
 	}
+	meta := metaRes.Meta
 	if !meta.QueryExcluded() {
 		t.Fatalf("expected meta to be query excluded")
 	}
 
+	var reacquire api.AcquireResponse
+	doJSON(t, server, http.MethodPost, "/v1/acquire", nil, acquireReq, &reacquire)
+	token = strconv.FormatInt(reacquire.FencingToken, 10)
+
 	clearHeaders := map[string]string{
-		"X-Lease-ID":              acquireResp.LeaseID,
+		"X-Lease-ID":              reacquire.LeaseID,
 		"X-Fencing-Token":         token,
+		"X-Txn-ID":                reacquire.TxnID,
 		headerMetadataQueryHidden: "false",
 	}
 	metaResp = api.MetadataUpdateResponse{}
@@ -847,10 +1025,16 @@ func TestMetadataUpdateTogglesQueryHidden(t *testing.T) {
 	if metaResp.Metadata.QueryHidden != nil {
 		t.Fatalf("expected metadata to omit query_hidden, got %+v", metaResp.Metadata)
 	}
-	meta, _, err = store.LoadMeta(context.Background(), namespaces.Default, "orders")
+	releaseReq = api.ReleaseRequest{Key: "orders", LeaseID: reacquire.LeaseID, TxnID: reacquire.TxnID}
+	status = doJSON(t, server, http.MethodPost, "/v1/release", map[string]string{"X-Fencing-Token": token}, releaseReq, nil)
+	if status != http.StatusOK {
+		t.Fatalf("release clear failed: %d", status)
+	}
+	metaRes, err = store.LoadMeta(context.Background(), namespaces.Default, "orders")
 	if err != nil {
 		t.Fatalf("load meta: %v", err)
 	}
+	meta = metaRes.Meta
 	if meta.QueryExcluded() {
 		t.Fatalf("expected query exclusion cleared")
 	}
@@ -860,7 +1044,7 @@ func TestMetadataUpdateValidations(t *testing.T) {
 	store := memory.New()
 	handler := New(Config{
 		Store:        store,
-		Logger:       loggingutil.NoopLogger(),
+		Logger:       pslog.NoopLogger(),
 		Clock:        newStubClock(time.Unix(1_700_000_000, 0)),
 		JSONMaxBytes: 1 << 20,
 		DefaultTTL:   15 * time.Second,
@@ -878,6 +1062,7 @@ func TestMetadataUpdateValidations(t *testing.T) {
 	headers := map[string]string{
 		"X-Lease-ID":      acquireResp.LeaseID,
 		"X-Fencing-Token": token,
+		"X-Txn-ID":        acquireResp.TxnID,
 	}
 	// Seed metadata via update so version is >0.
 	doJSON(t, server, http.MethodPost, "/v1/update?key=alpha", headers, map[string]int{"cursor": 5}, nil)
@@ -886,6 +1071,7 @@ func TestMetadataUpdateValidations(t *testing.T) {
 		badHeaders := map[string]string{
 			"X-Lease-ID":              acquireResp.LeaseID,
 			"X-Fencing-Token":         token,
+			"X-Txn-ID":                acquireResp.TxnID,
 			headerMetadataQueryHidden: "definitely-not-bool",
 		}
 		var errResp api.ErrorResponse
@@ -913,6 +1099,7 @@ func TestMetadataUpdateValidations(t *testing.T) {
 		conflictHeaders := map[string]string{
 			"X-Lease-ID":      acquireResp.LeaseID,
 			"X-Fencing-Token": token,
+			"X-Txn-ID":        acquireResp.TxnID,
 			"X-If-Version":    "999",
 		}
 		var errResp api.ErrorResponse
@@ -930,7 +1117,7 @@ func TestQueueStateAcquireDefaultsHidden(t *testing.T) {
 	store := memory.New()
 	handler := New(Config{
 		Store:        store,
-		Logger:       loggingutil.NoopLogger(),
+		Logger:       pslog.NoopLogger(),
 		Clock:        newStubClock(time.Unix(1_700_000_000, 0)),
 		JSONMaxBytes: 1 << 20,
 		DefaultTTL:   10 * time.Second,
@@ -952,10 +1139,11 @@ func TestQueueStateAcquireDefaultsHidden(t *testing.T) {
 	}
 	defer handler.releaseLeaseOutcome(ctx, stateKey, outcome)
 	relState := relativeKey(namespaces.Default, stateKey)
-	meta, _, err := store.LoadMeta(ctx, namespaces.Default, relState)
+	metaRes, err := store.LoadMeta(ctx, namespaces.Default, relState)
 	if err != nil {
 		t.Fatalf("load meta: %v", err)
 	}
+	meta := metaRes.Meta
 	if meta == nil || !meta.QueryExcluded() {
 		t.Fatalf("expected queue state meta to be query hidden, got %+v", meta)
 	}
@@ -968,7 +1156,7 @@ func TestQueueStateAcquireRespectsManualVisibility(t *testing.T) {
 	store := memory.New()
 	handler := New(Config{
 		Store:        store,
-		Logger:       loggingutil.NoopLogger(),
+		Logger:       pslog.NoopLogger(),
 		Clock:        newStubClock(time.Unix(1_700_000_000, 0)),
 		JSONMaxBytes: 1 << 20,
 		DefaultTTL:   10 * time.Second,
@@ -993,19 +1181,22 @@ func TestQueueStateAcquireRespectsManualVisibility(t *testing.T) {
 	}
 	acquire("worker-init")
 	relState := relativeKey(namespaces.Default, stateKey)
-	meta, etag, err := store.LoadMeta(ctx, namespaces.Default, relState)
+	metaRes, err := store.LoadMeta(ctx, namespaces.Default, relState)
 	if err != nil {
 		t.Fatalf("load meta: %v", err)
 	}
+	meta := metaRes.Meta
+	etag := metaRes.ETag
 	meta.SetQueryHidden(false)
 	if _, err := store.StoreMeta(ctx, namespaces.Default, relState, meta, etag); err != nil {
 		t.Fatalf("store meta: %v", err)
 	}
 	acquire("worker-visible")
-	meta, _, err = store.LoadMeta(ctx, namespaces.Default, relState)
+	metaRes, err = store.LoadMeta(ctx, namespaces.Default, relState)
 	if err != nil {
 		t.Fatalf("reload meta: %v", err)
 	}
+	meta = metaRes.Meta
 	if meta.QueryExcluded() {
 		val, _ := meta.GetAttribute(storage.MetaAttributeQueryExclude)
 		t.Fatalf("expected manual opt-in to persist, got attribute=%q", val)

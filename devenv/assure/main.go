@@ -172,10 +172,12 @@ func startLockdServer(ctx context.Context, cfg envConfig) (*lockdServerHandle, e
 	if err := serverCfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validate lockd config: %w", err)
 	}
-	srv, stop, err := lockd.StartServer(ctx, serverCfg, lockd.WithLogger(pslog.NewStructured(io.Discard)))
+	handle, err := lockd.StartServer(ctx, serverCfg, lockd.WithLogger(pslog.NewStructured(io.Discard)))
 	if err != nil {
 		return nil, err
 	}
+	srv := handle.Server
+	stop := handle.Stop
 	addr := srv.ListenerAddr()
 	if addr == nil {
 		_ = stop(context.Background())

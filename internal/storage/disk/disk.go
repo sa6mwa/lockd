@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"pkt.systems/kryptograf"
-	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/search"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/uuidv7"
@@ -142,8 +141,12 @@ func New(cfg Config) (*Store, error) {
 }
 
 // QueueWatchStatus reports whether fsnotify-based queue change notifications are active.
-func (s *Store) QueueWatchStatus() (bool, string, string) {
-	return s.queueWatchEnabled, s.queueWatchMode, s.queueWatchReason
+func (s *Store) QueueWatchStatus() storage.QueueWatchStatus {
+	return storage.QueueWatchStatus{
+		Enabled: s.queueWatchEnabled,
+		Mode:    s.queueWatchMode,
+		Reason:  s.queueWatchReason,
+	}
 }
 
 func (s *Store) keyLock(key string) *sync.Mutex {
@@ -176,11 +179,19 @@ func (s *Store) Close() error {
 	return nil
 }
 
+// BackendHash returns the stable identity hash for this backend.
+func (s *Store) BackendHash(ctx context.Context) (string, error) {
+	root := s.root
+	if abs, err := filepath.Abs(root); err == nil {
+		root = abs
+	}
+	desc := fmt.Sprintf("disk|%s", root)
+	result, err := storage.ResolveBackendHash(ctx, s, desc)
+	return result.Hash, err
+}
+
 func (s *Store) loggers(ctx context.Context) (pslog.Logger, pslog.Logger) {
 	logger := pslog.LoggerFromContext(ctx)
-	if logger == nil {
-		logger = loggingutil.NoopLogger()
-	}
 	logger = logger.With("storage_backend", "disk")
 	return logger, logger
 }
@@ -236,10 +247,12 @@ func (s *Store) metaPath(namespace, encoded string) string {
 }
 
 func (s *Store) lockFilePath(key string) (string, error) {
-	ns, segments, err := storage.SplitNamespacedKey(key)
+	parts, err := storage.SplitNamespacedKey(key)
 	if err != nil {
 		return "", err
 	}
+	ns := parts.Namespace
+	segments := parts.Segments
 	if len(segments) == 0 {
 		return "", fmt.Errorf("disk: invalid lock key %q", key)
 	}
@@ -365,7 +378,7 @@ type objectInfoRecord struct {
 }
 
 // LoadMeta reads the per-key metadata protobuf and returns it with the stored ETag.
-func (s *Store) LoadMeta(ctx context.Context, namespace, key string) (*storage.Meta, string, error) {
+func (s *Store) LoadMeta(ctx context.Context, namespace, key string) (storage.LoadMetaResult, error) {
 	logger, verbose := s.loggers(ctx)
 	start := time.Now()
 	verbose.Trace("disk.load_meta.begin", "key", key)
@@ -373,7 +386,7 @@ func (s *Store) LoadMeta(ctx context.Context, namespace, key string) (*storage.M
 	ns, encoded, err := s.encodeKey(namespace, key)
 	if err != nil {
 		logger.Debug("disk.load_meta.encode_error", "key", key, "error", err)
-		return nil, "", err
+		return storage.LoadMetaResult{}, err
 	}
 	rec, err := s.readMetaRecord(ns, encoded)
 	if err != nil {
@@ -382,7 +395,7 @@ func (s *Store) LoadMeta(ctx context.Context, namespace, key string) (*storage.M
 		} else {
 			logger.Debug("disk.load_meta.error", "key", key, "error", err, "elapsed", time.Since(start))
 		}
-		return nil, "", err
+		return storage.LoadMetaResult{}, err
 	}
 	meta := *rec.Meta
 	if rec.Meta.Lease != nil {
@@ -404,7 +417,7 @@ func (s *Store) LoadMeta(ctx context.Context, namespace, key string) (*storage.M
 		"meta_etag", rec.ETag,
 		"elapsed", time.Since(start),
 	)
-	return &meta, rec.ETag, nil
+	return storage.LoadMetaResult{Meta: &meta, ETag: rec.ETag}, nil
 }
 
 // StoreMeta persists metadata with conditional semantics when expectedETag is provided.
@@ -599,7 +612,7 @@ func (s *Store) ListMetaKeys(ctx context.Context, namespace string) ([]string, e
 }
 
 // ReadState opens the immutable JSON state file for key and returns its metadata.
-func (s *Store) ReadState(ctx context.Context, namespace, key string) (io.ReadCloser, *storage.StateInfo, error) {
+func (s *Store) ReadState(ctx context.Context, namespace, key string) (storage.ReadStateResult, error) {
 	logger, verbose := s.loggers(ctx)
 	start := time.Now()
 	verbose.Trace("disk.read_state.begin", "key", key)
@@ -607,7 +620,7 @@ func (s *Store) ReadState(ctx context.Context, namespace, key string) (io.ReadCl
 	_, encoded, err := s.encodeKey(namespace, key)
 	if err != nil {
 		logger.Debug("disk.read_state.encode_error", "key", key, "error", err)
-		return nil, nil, err
+		return storage.ReadStateResult{}, err
 	}
 	info, err := s.readStateRecord(namespace, encoded)
 	if err != nil {
@@ -616,16 +629,16 @@ func (s *Store) ReadState(ctx context.Context, namespace, key string) (io.ReadCl
 		} else {
 			logger.Debug("disk.read_state.info_error", "key", key, "error", err)
 		}
-		return nil, nil, err
+		return storage.ReadStateResult{}, err
 	}
 	file, err := os.Open(s.stateDataPath(namespace, encoded))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			verbose.Debug("disk.read_state.not_found", "key", key, "elapsed", time.Since(start))
-			return nil, nil, storage.ErrNotFound
+			return storage.ReadStateResult{}, storage.ErrNotFound
 		}
 		logger.Debug("disk.read_state.open_error", "key", key, "error", err)
-		return nil, nil, err
+		return storage.ReadStateResult{}, err
 	}
 	encrypted := s.crypto != nil && s.crypto.Enabled()
 	var descriptor []byte
@@ -639,20 +652,20 @@ func (s *Store) ReadState(ctx context.Context, namespace, key string) (io.ReadCl
 		if len(descriptor) == 0 {
 			file.Close()
 			logger.Debug("disk.read_state.missing_descriptor", "key", key)
-			return nil, nil, fmt.Errorf("disk: missing state descriptor for %q", key)
+			return storage.ReadStateResult{}, fmt.Errorf("disk: missing state descriptor for %q", key)
 		}
 		storageKey := path.Join(namespace, key)
 		mat, err := s.crypto.MaterialFromDescriptor(storage.StateObjectContext(storageKey), descriptor)
 		if err != nil {
 			file.Close()
 			logger.Debug("disk.read_state.material_error", "key", key, "error", err)
-			return nil, nil, err
+			return storage.ReadStateResult{}, err
 		}
 		decReader, err := s.crypto.DecryptReaderForMaterial(file, mat)
 		if err != nil {
 			file.Close()
 			logger.Debug("disk.read_state.decrypt_error", "key", key, "error", err)
-			return nil, nil, err
+			return storage.ReadStateResult{}, err
 		}
 		reader = decReader
 	}
@@ -675,7 +688,7 @@ func (s *Store) ReadState(ctx context.Context, namespace, key string) (io.ReadCl
 	if len(descriptor) > 0 {
 		stateInfo.Descriptor = append([]byte(nil), descriptor...)
 	}
-	return reader, stateInfo, nil
+	return storage.ReadStateResult{Reader: reader, Info: stateInfo}, nil
 }
 
 // WriteState stages and atomically replaces the JSON state file, returning the new ETag.
@@ -749,13 +762,14 @@ func (s *Store) WriteState(ctx context.Context, namespace, key string, body io.R
 				return nil, err
 			}
 		} else {
-			var descBytes []byte
-			mat, descBytes, err = s.crypto.MintMaterial(storage.StateObjectContext(storageKey))
+			var minted storage.MaterialResult
+			minted, err = s.crypto.MintMaterial(storage.StateObjectContext(storageKey))
 			if err != nil {
 				logger.Debug("disk.write_state.mint_descriptor_error", "key", key, "error", err)
 				return nil, err
 			}
-			descriptor = append([]byte(nil), descBytes...)
+			descriptor = append([]byte(nil), minted.Descriptor...)
+			mat = minted.Material
 		}
 		encWriter, err := s.crypto.EncryptWriterForMaterial(tempFile, mat)
 		if err != nil {
@@ -808,6 +822,11 @@ func (s *Store) WriteState(ctx context.Context, namespace, key string, body io.R
 		}
 		if info.ETag != opts.ExpectedETag {
 			logger.Debug("disk.write_state.cas_mismatch", "key", key, "expected_etag", opts.ExpectedETag, "current_etag", info.ETag)
+			return nil, storage.ErrCASMismatch
+		}
+	} else if opts.IfNotExists {
+		if _, err := s.readStateRecord(ns, encoded); err == nil {
+			logger.Debug("disk.write_state.if_not_exists_conflict", "key", key)
 			return nil, storage.ErrCASMismatch
 		}
 	}
@@ -936,7 +955,7 @@ func (s *Store) loadObjectInfo(namespace, key string) (*storage.ObjectInfo, erro
 	payload, err := os.ReadFile(infoPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("disk: missing object metadata for %q", key)
+			return nil, storage.ErrNotFound
 		}
 		return nil, fmt.Errorf("disk: read object metadata for %q: %w", key, err)
 	}
@@ -1056,24 +1075,34 @@ func (s *Store) ListObjects(ctx context.Context, namespace string, opts storage.
 	}
 
 	sort.Strings(keys)
-	limit := len(keys)
-	if opts.Limit > 0 && opts.Limit < limit {
-		limit = opts.Limit
+	capHint := len(keys)
+	if opts.Limit > 0 && opts.Limit < capHint {
+		capHint = opts.Limit
 	}
 	result := &storage.ListResult{
-		Objects: make([]storage.ObjectInfo, 0, limit),
+		Objects: make([]storage.ObjectInfo, 0, capHint),
 	}
-	for i := 0; i < limit; i++ {
-		info, err := s.loadObjectInfo(namespace, keys[i])
+	maxItems := opts.Limit
+	if maxItems <= 0 {
+		maxItems = len(keys)
+	}
+	lastReturned := ""
+	for _, key := range keys {
+		if maxItems > 0 && len(result.Objects) >= maxItems {
+			result.Truncated = true
+			result.NextStartAfter = lastReturned
+			break
+		}
+		info, err := s.loadObjectInfo(namespace, key)
 		if err != nil {
-			logger.Debug("disk.list_objects.load_error", "namespace", namespace, "key", keys[i], "error", err)
+			if errors.Is(err, storage.ErrNotFound) {
+				continue
+			}
+			logger.Debug("disk.list_objects.load_error", "namespace", namespace, "key", key, "error", err)
 			return nil, err
 		}
 		result.Objects = append(result.Objects, *info)
-	}
-	if limit > 0 && limit < len(keys) {
-		result.Truncated = true
-		result.NextStartAfter = keys[limit-1]
+		lastReturned = key
 	}
 	verbose.Debug("disk.list_objects.success",
 		"namespace", namespace,
@@ -1088,36 +1117,36 @@ func (s *Store) ListObjects(ctx context.Context, namespace string, opts storage.
 }
 
 // GetObject streams the object payload for key.
-func (s *Store) GetObject(ctx context.Context, namespace, key string) (io.ReadCloser, *storage.ObjectInfo, error) {
+func (s *Store) GetObject(ctx context.Context, namespace, key string) (storage.GetObjectResult, error) {
 	logger, verbose := s.loggers(ctx)
 	namespace = strings.TrimSpace(namespace)
 	if namespace == "" {
-		return nil, nil, fmt.Errorf("disk: namespace required")
+		return storage.GetObjectResult{}, fmt.Errorf("disk: namespace required")
 	}
 	verbose.Trace("disk.get_object.begin", "namespace", namespace, "key", key)
 	dataPath, err := s.objectDataPath(namespace, key)
 	if err != nil {
-		return nil, nil, err
+		return storage.GetObjectResult{}, err
 	}
 	f, err := os.Open(dataPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			verbose.Debug("disk.get_object.not_found", "key", key)
-			return nil, nil, storage.ErrNotFound
+			return storage.GetObjectResult{}, storage.ErrNotFound
 		}
 		logger.Debug("disk.get_object.open_error", "namespace", namespace, "key", key, "error", err)
-		return nil, nil, fmt.Errorf("disk: open object %q: %w", key, err)
+		return storage.GetObjectResult{}, fmt.Errorf("disk: open object %q: %w", key, err)
 	}
 	info, err := s.loadObjectInfo(namespace, key)
 	if err != nil {
 		f.Close()
-		return nil, nil, err
+		return storage.GetObjectResult{}, err
 	}
 	if plain, ok := storage.ObjectPlaintextSizeFromContext(ctx); ok && plain > 0 {
 		info.Size = plain
 	}
 	verbose.Debug("disk.get_object.success", "namespace", namespace, "key", key, "etag", info.ETag, "size", info.Size)
-	return f, info, nil
+	return storage.GetObjectResult{Reader: f, Info: info}, nil
 }
 
 // PutObject writes an object to disk with optional conditional semantics.
@@ -1284,15 +1313,16 @@ func (s *Store) readMetaRecord(namespace, encoded string) (*metaRecord, error) {
 		}
 		return nil, err
 	}
-	etag, meta, err := storage.UnmarshalMetaRecord(data, s.crypto)
+	record, err := storage.UnmarshalMetaRecord(data, s.crypto)
 	if err != nil {
 		return nil, fmt.Errorf("disk: decode meta: %w", err)
 	}
+	meta := record.Meta
 	if meta == nil {
 		meta = &storage.Meta{}
 	}
 	return &metaRecord{
-		ETag: etag,
+		ETag: record.ETag,
 		Meta: meta,
 	}, nil
 }

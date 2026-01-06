@@ -1,0 +1,125 @@
+# Backlog / Tracking
+
+- [x] Switch transaction IDs and lease IDs to `github.com/rs/xid`; keep `uuidv7` for keys/manifests. (Implemented.)
+- [x] Ensure future XA TC/RM records and any new APIs reuse xid generation; avoid reintroducing uuidv7 for txn/lease.
+- [x] Audit docs/Swagger/CLI help to clearly state xid format for txn/lease IDs and adjust examples accordingly.
+- [x] Add txn-aware smoke cases to each backend suite (disk/azure/minio) that exercise update/remove/keepalive via raw client (no LeaseSession autofill) to assert `missing_txn` handling and commit/rollback semantics.
+- [x] Ensure info/warn/error logs that mention `lease_id` also include `txn_id` (queue delivery/extend, ack/nack, metadata paths); add targeted asserts or log snapshot tests.
+- [x] Add staging cleanup to all backends and run integration suites to validate local TX commit/rollback.
+  - [x] mem/query (local TX staging/commit/rollback verified)
+  - [x] disk/query
+  - [x] minio/lq
+  - [x] s3 (aws/query)
+  - [x] azure/query
+  - [x] nfs/query
+- [x] XA Phase 0–1 (single-node TX core: prepare/commit/rollback + restart recovery)
+  - [x] Durable `.txns` record schema + ReplayTxn handler; sweep integrates with server sweeper.
+  - [x] Queue enlistment on one node (ACK on commit, NACK on rollback) with replay coverage across mem/disk/nfs/minio/aws/azure.
+  - [x] Stateful dequeue XA decision coverage (state object participant) across mem/disk/minio/aws/azure lq.
+  - [x] Queue enlistment mixed-key integration coverage in lq suites (disk/minio/aws/azure/nfs).
+  - [x] Staging sweeper applies decisions to staged state (query suites cover doc paths).
+  - [x] Multi-key enlistment API surface parity (update/lease/remove/keepalive) and CLI flags; lock+doc side integration tests.
+  - [x] Restart-recovery coverage for locks/doc state (beyond queue messages) in nfs/minio/aws/azure suites.
+  - [x] Long-run watchdog/soak to catch staging/txn leaks; add perf counters for applied/failed decisions.
+  - [x] Docs: README + docs/XA.md walkthrough of single-node flow and failure cases.
+- [x] XA Phase 2 (multi-node TC/RM over shared backend)
+  - [x] RM apply endpoints (commit/rollback) wired to CAS over shared store; idempotent + fencing (TC decisions now flow through `/v1/txn/decide`).
+  - [x] TC decision fan-out + retry/backoff; durable decision anchoring.
+  - [x] Integration: two-server disk/minio/aws/azure runs with txn decisions replayed after TC/RM restarts.
+- [x] XA Phase 2.5 (queue enlistment in XA, multi-node)
+  - [x] Queue visibility holds + dispatcher wakeups on replay across nodes.
+  - [x] Failure injection: TC crash after decision, RM restart, queue message correctly ACK/NACK.
+  - [x] Integration: lq suites for mem/disk/minio/aws/azure with multi-node fanout (commit/rollback + stateful + mixed-key).
+  - [x] Integration: lq suites for mem/disk/minio/aws/azure with multi-node topology and restart.
+  - [x] Queue message doc-level lease fencing (store lease_id/txn_id/fencing_token in message meta; validate in txn apply + ack/nack; hard error on mismatch).
+  - [x] Queue NACK delay reschedule returns updated `MetaETag` (CAS-safe).
+- [ ] Archipelago (global TC leader + implicit XA, no shared backend)
+  - [x] Design: document quorum TC leader election, lease/term fencing, and implicit XA flow in ARCHIPELAGO.md.
+  - [x] Config: dynamic TC cluster membership (`lockd tc join|leave|list`, `--join`, `--self`) plus RM registry (`/v1/tc/rm/*`).
+  - [x] TC leader election: quorum leases + term fencing, renewals, step-down on quorum loss.
+  - [x] Leader election stability: followers observe peer leader leases + back off elections; add unit coverage for follow/observe + parallel lease/renew requests.
+  - [x] TC-only endpoints for lease/leader discovery + forwarding when non-leader receives `/v1/txn/decide`.
+  - [x] Implicit XA: always register pending + decide via TC leader when TC cluster membership is configured; preserve local-only path when unset.
+  - [x] RM enforcement: reject stale TC terms; idempotent apply on same term/state; actionable errors for term mismatch.
+  - [x] Update docs/diagrams/README to reflect implicit TC flow and leader election.
+  - [x] Integration harness: extend archipelago scenario TTLs to avoid sweeper-triggered rollbacks mid-failover.
+  - [ ] Tests (unit, deterministic clock): tcleader lease store
+    - [x] Follow semantics for observed leaders (non-deterministic clock coverage).
+    - [x] Grant/renew/release happy path; explicit expiry when `now` passes lease end.
+    - [x] Term fencing: reject lower term; accept same term only for same leader; accept higher term for new leader.
+    - [x] Reacquire after expiry increments term and clears prior leader.
+  - [ ] Tests (unit, deterministic clock): tcleader manager election/step-down
+    - [x] Parallel lease/renew request fan-out + observed leader wait (non-deterministic clock coverage).
+    - [x] Elects leader with quorum, term = max(peer_terms)+1.
+    - [x] Steps down immediately on quorum loss or renew failure; exposes no leader until quorum returns.
+    - [x] Honors membership list changes: self missing => election disabled; re-enabled when self reappears.
+    - [x] Backoff/jitter bounded (no tight loop) and observable via injected clock/ticker.
+  - [ ] Tests (unit, mem-backed multi-node/double-island): fast regression suite
+    - [x] Basic mem-backed failover regression (2 islands, 2 TCs per island; `archipelago_unit_test.go`; skipped with `-short`).
+    - [x] Spin up 3 TCs + 2 RMs across two mem-backed islands; explicit lease TTLs.
+    - [x] Deterministic clock variant for mem-backed multi-node regression.
+    - [x] Scenario: two pending txns (one per island) + leader drops + new leader elected + new pending txn on island B + client commit of original txn -> decision recorded once, fan-out succeeds, both islands apply.
+    - [x] Scenario: non-leader receives `/v1/txn/decide` -> forwards to leader; leader unreachable => `tc_not_leader` with leader_endpoint.
+    - [x] Scenario: quorum loss during renew => leader step-down; commit returns `tc_unavailable`; quorum restored => new leader term; old term rejected (`tc_term_stale`).
+  - [x] Tests (unit): txncoord decider + forwarding
+    - [x] Non-leader forwards `/v1/txn/decide` to leader, preserves decision payload.
+    - [x] Leader unreachable => `tc_not_leader` (with leader_endpoint) or `tc_unavailable` as appropriate.
+    - [x] Leader stamps `tc_term`; retries are idempotent on same term/state.
+    - [x] Fanout succeeds when any RM endpoint for a backend succeeds (HA semantics); only fails when all endpoints for a backend fail.
+  - [x] Tests (unit): tcrm replicator + tccluster store
+    - [x] Replicator forwards to peers and skips self (basic coverage).
+    - [x] Register/unregister replicates to all peers or returns explicit replication error; no partial success.
+    - [x] Cluster join/leave normalization and persistence (sorted, deduped endpoints).
+  - [ ] Tests (integration, mem-backed islands, deterministic orchestration): multi-island leader failover matrix
+    - [x] Base leader failover scenario (pending txns + leader drop + new txn + commit) across mem/disk/nfs/minio/aws/azure/mixed.
+    - [x] Ensure two pending txns across exactly two islands (2-island suites currently create only one pending txn).
+    - [x] Leader drops after recording decision but before remote fan-out; new leader replays decision and completes fan-out; idempotent apply on already-applied RMs.
+      - [x] Deterministic gate: pause leader immediately after decision is recorded and before fan-out begins, then stop leader.
+      - [x] New leader elected; replay decision via `/v1/txn/replay` or implicit sweeper; remote RM applies once (idempotent on already-applied).
+      - [x] Verify: txn record state committed on both islands; repeated apply yields idempotent success.
+    - [x] Non-leader receives `/v1/txn/decide` -> forwards to leader; if leader unreachable returns `tc_not_leader` with leader_endpoint.
+      - [x] Verify forward path: create pending txn on one island, call `/v1/txn/decide` on non-leader, expect commit + state applied.
+      - [x] Stop current leader while lease is active; ensure non-leader still reports old leader; `/v1/txn/decide` returns `tc_not_leader` + leader_endpoint.
+    - [x] Quorum loss during renew: leader steps down; `/v1/txn/decide` returns `tc_unavailable`; quorum returns => new leader with higher term; old term rejected (`tc_term_stale`).
+    - [x] RM registry replication: register/unregister while a TC peer is down => explicit error + no partial update; after peer returns, registry converges across TCs.
+    - [x] RM apply term fencing: stale term => `tc_term_stale`; same term + conflicting decision => `txn_conflict`; same term + same decision => idempotent success.
+    - [x] TC membership churn: leader leaves via `tc leave` -> re-election; membership list canonicalized; leader must be present in membership to lead.
+    - [x] Run base scenario across all backends: mem, disk, nfs, minio, aws, azure.
+    - [x] Run cross-island variants via `integration/mixed` (mem+disk+minio+aws+azure).
+    - [ ] Add scale variants:
+      - [x] mem: 3 islands, 3 TCs per island (multi-TC/multi-RM coverage), leader failover + commit across all islands.
+      - [x] disk: 3 islands, 3 TCs per island (multi-TC/multi-RM coverage), leader failover + commit across all islands.
+      - [x] mixed: 5 islands (mem, disk, minio, aws, azure), 2 TCs per island, leader failover + commit across all islands.
+      - [x] mem-only pressure test: 5 islands, 2 TCs per island, high fanout/concurrency (current test repeats fanout sequentially).
+  - [x] Tests (integration, queue + state): dequeue with txn across islands + leader failover
+    - [x] Message + state sidecar enlisted on island B, leader on island A; leader drops mid-txn; new leader elected; commit drives ACK + state apply; stale lease returns `queue_message_lease_mismatch`.
+- [x] XA Phase 3 (backend_hash islands for mixed backends)
+  - [x] Global decision record + per-island txn records; routing logic.
+  - [x] Integration: mixed-backend islands (disk+minio) happy-path + rollback.
+  - [x] Federation/mTLS: lazy trust by CA for cross-island TC<->RM (no SAN pinning; accept any cert signed by trusted CA). Add SPIFFE/SVID support for stronger identity later.
+- [ ] XA Phase 4 (external RM adapters)
+  - [ ] Postgres adapter scaffold (prepare/commit/rollback) + conformance tests.
+  - [ ] Sample app + docs for external XA participant wiring.
+- [x] Security / AuthZ
+  - [x] First authz layer: distinguish TC client certs vs user clients; gate TC/RM endpoints (`/v1/txn/*`, RM prepare/commit/rollback) to TC-only.
+  - [x] CLI/config plumbing for CA trust bundles (export/import) to enable TC access into remote islands.
+- [x] Docs / DX
+  - [x] Rework transaction docs with full DX coverage (client + CLI flows, enqueue/dequeue XA usage, failure modes).
+  - [x] Replace `docs/diagram/*.puml` with a new set (rename files, new diagrams for XA happy path + failure paths, TC/RM interactions, queue flows).
+- [x] Observability
+  - [x] Decision logs structured (txn_id, participant count, state) across TC/RM.
+  - [x] Watchdogs for long prepares/commits; alerts on stuck staged_txn.
+  - [x] TC/RM metrics (applied decisions, CAS retries, replay durations); sweeper stats for orphaned txn/staging artifacts.
+  - [x] Investigate `aws/query` full-sweep timeout in `TestAWSQueryDomainDatasets` (see `integration-logs/aws-query.log` from `run-integration-suites.sh all`).
+- [x] Benchmarks
+  - [x] Fix `run-benchmark-suites.sh` failures (regressed after the 2-return-value refactor).
+- [x] CLI: add `lockd version` subcommand that prints `pkt.systems/lockd <version>` using module version auto-derived from go toolchain metadata (works for `go install` and `go build`; no manual version file).
+- [ ] Idempotent acquire reuse
+  - [ ] Implement server-side idempotency cache/binding for acquire (keyed on namespace/key/owner/txn_id + client identity) so retries can reuse lease_id/txn_id after lost responses.
+  - [ ] Gate reuse to matching client identity/immutable fields to avoid hijack; short TTL.
+  - [ ] Reintroduce CLI/SDK idempotency flag + help/tests once server-side reuse lands (flag removed for now to avoid no-op confusion).
+- [ ] Development environment (devenv) complete lockd environment
+  - [ ] docker-compose is auto-configured with mTLS and connected to minio container
+  - [ ] docker-compose.yaml spins up a complete environment, writes 5 client certs to devenv/out/
+  - [ ] Same as above, but for server cert: dump the server crt in devenv/out/ so that we can import it into another "island" for XA tests and development
+  - [ ] Is it possible to put a project name inside docker-compose.yaml or does that always have to be with the -p flag in nerdctl compose?

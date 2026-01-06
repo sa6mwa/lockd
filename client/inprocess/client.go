@@ -58,11 +58,12 @@ func New(ctx context.Context, cfg lockd.Config, opts ...lockd.Option) (*Client, 
 		cfg.Listen = filepath.Join(socketDir, "lockd.sock")
 	}
 
-	_, stop, err := lockd.StartServer(ctx, cfg, opts...)
+	handle, err := lockd.StartServer(ctx, cfg, opts...)
 	if err != nil {
 		cleanup()
 		return nil, err
 	}
+	stop := handle.Stop
 
 	cli, err := lockdclient.New("unix://" + cfg.Listen)
 	if err != nil {

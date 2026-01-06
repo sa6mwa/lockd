@@ -7,9 +7,9 @@ import (
 	"time"
 
 	"pkt.systems/lockd/internal/clock"
-	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/queue"
 	"pkt.systems/lockd/internal/storage/memory"
+	"pkt.systems/pslog"
 )
 
 // Covers stateful ack/nack/extend paths including fencing and CAS surface.
@@ -23,7 +23,7 @@ func TestQueueAckStatefulFlow(t *testing.T) {
 		DefaultNamespace: "default",
 		DefaultTTL:       10 * time.Second,
 		MaxTTL:           1 * time.Minute,
-		Logger:           loggingutil.NoopLogger(),
+		Logger:           pslog.NoopLogger(),
 	})
 
 	// Enqueue and ensure state.
@@ -48,7 +48,16 @@ func TestQueueAckStatefulFlow(t *testing.T) {
 	}
 
 	// Nack (stateful) and ensure leases are cleared and meta_etag changes.
-	doc, metaETag, _ := qsvc.GetMessage(ctx, "default", "jobs", msg.ID)
+	docRes, _ := qsvc.GetMessage(ctx, "default", "jobs", msg.ID)
+	doc := docRes.Document
+	metaETag := docRes.ETag
+	doc.LeaseID = acqMsg.LeaseID
+	doc.LeaseFencingToken = acqMsg.FencingToken
+	doc.LeaseTxnID = acqMsg.TxnID
+	metaETag, err = qsvc.SaveMessageDocument(ctx, "default", "jobs", doc.ID, doc, metaETag)
+	if err != nil {
+		t.Fatalf("save message: %v", err)
+	}
 	resNack, err := svc.Nack(ctx, QueueNackCommand{
 		Namespace:         "default",
 		Queue:             "jobs",
@@ -59,6 +68,7 @@ func TestQueueAckStatefulFlow(t *testing.T) {
 		StateLeaseID:      acqState.LeaseID,
 		FencingToken:      acqMsg.FencingToken,
 		StateFencingToken: acqState.FencingToken,
+		TxnID:             acqMsg.TxnID,
 		Delay:             0,
 	})
 	if err != nil || !resNack.Requeued {
@@ -82,16 +92,30 @@ func TestQueueAckStatefulFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-acquire state: %v", err)
 	}
+	docRes, err = qsvc.GetMessage(ctx, "default", "jobs", msg.ID)
+	if err != nil {
+		t.Fatalf("get message: %v", err)
+	}
+	doc = docRes.Document
+	metaETag = docRes.ETag
+	doc.LeaseID = acqMsg2.LeaseID
+	doc.LeaseFencingToken = acqMsg2.FencingToken
+	doc.LeaseTxnID = acqMsg2.TxnID
+	metaETag, err = qsvc.SaveMessageDocument(ctx, "default", "jobs", doc.ID, doc, metaETag)
+	if err != nil {
+		t.Fatalf("save message: %v", err)
+	}
 	ext, err := svc.Extend(ctx, QueueExtendCommand{
 		Namespace:         "default",
 		Queue:             "jobs",
 		MessageID:         doc.ID,
-		MetaETag:          resNack.MetaETag,
+		MetaETag:          metaETag,
 		Stateful:          true,
 		LeaseID:           acqMsg2.LeaseID,
 		StateLeaseID:      acqState2.LeaseID,
 		FencingToken:      acqMsg2.FencingToken,
 		StateFencingToken: acqState2.FencingToken,
+		TxnID:             acqMsg2.TxnID,
 		Visibility:        15 * time.Second,
 	})
 	if err != nil {
@@ -99,6 +123,16 @@ func TestQueueAckStatefulFlow(t *testing.T) {
 	}
 	if ext.StateLeaseExpiresAtUnix <= acqState2.ExpiresAt {
 		t.Fatalf("expected state lease extended")
+	}
+	rec, _, err := svc.loadTxnRecord(ctx, acqMsg2.TxnID)
+	if err != nil {
+		t.Fatalf("load txn record: %v", err)
+	}
+	if rec == nil {
+		t.Fatalf("expected txn record for %s", acqMsg2.TxnID)
+	}
+	if rec.ExpiresAtUnix < ext.LeaseExpiresAtUnix {
+		t.Fatalf("expected txn expiry >= lease expiry, got %d want >= %d", rec.ExpiresAtUnix, ext.LeaseExpiresAtUnix)
 	}
 
 	// Ack stateful delivery.
@@ -111,6 +145,7 @@ func TestQueueAckStatefulFlow(t *testing.T) {
 		StateLeaseID:      acqState2.LeaseID,
 		FencingToken:      acqMsg2.FencingToken,
 		StateFencingToken: acqState2.FencingToken,
+		TxnID:             acqMsg2.TxnID,
 		Stateful:          true,
 	})
 	if err != nil || !resAck.Acked {

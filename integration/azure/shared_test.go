@@ -87,6 +87,7 @@ func startAzureTestServer(t testing.TB, cfg lockd.Config, opts ...lockd.TestServ
 	if cfgCopy.StorageRetryMaxDelay < 15*time.Second {
 		cfgCopy.StorageRetryMaxDelay = 15 * time.Second
 	}
+	cryptotest.ConfigureTCAuth(t, &cfgCopy)
 
 	options := []lockd.TestServerOption{
 		lockd.WithTestConfig(cfgCopy),
@@ -107,10 +108,25 @@ func startAzureTestServer(t testing.TB, cfg lockd.Config, opts ...lockd.TestServ
 		lockd.WithShutdownTimeout(10*time.Second),
 	)
 	options = append(options, closeDefaults)
+	ts, err := lockd.NewTestServer(context.Background(), options...)
+	if err != nil {
+		t.Fatalf("start test server: %v", err)
+	}
 	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		if err := ts.Stop(ctx); err != nil {
+			t.Fatalf("stop test server: %v", err)
+		}
+	})
+	t.Cleanup(func() {
+		if backend := ts.Backend(); backend != nil {
+			azuretest.CleanupNamespaceIndexesWithStore(t, backend, namespaces.Default)
+			return
+		}
 		azuretest.CleanupNamespaceIndexes(t, cfg, namespaces.Default)
 	})
-	return lockd.StartTestServer(t, options...)
+	return ts
 }
 
 func directClient(t testing.TB, ts *lockd.TestServer) *lockdclient.Client {

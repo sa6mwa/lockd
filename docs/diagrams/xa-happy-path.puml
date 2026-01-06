@@ -1,0 +1,70 @@
+@startuml xa-happy-path
+
+title XA happy path (single backend, implicit commit)
+autonumber
+
+participant "client SDK operation" as SDK
+participant "lockd RM (implicit XA)" as RM
+database "Backend" as Store
+
+== Acquire keyA ==
+SDK -> RM: POST /v1/acquire (keyA)
+loop CAS retry (lease meta)
+  RM -> Store: load_meta(keyA)
+  alt meta missing
+    RM -> Store: store_meta(expected_etag="",\nlease_id, lease_owner, lease_expires_at,\nlease_txn_id, fencing_token++)
+  else meta present
+    RM -> Store: store_meta(expected_etag=meta_etag,\nlease_id, lease_owner, lease_expires_at,\nlease_txn_id, fencing_token++)
+  end
+end
+RM --> SDK: lease_id, txn_id, fencing_token
+
+== Acquire keyB ==
+SDK -> RM: POST /v1/acquire (keyB, txn_id)
+loop CAS retry (lease meta)
+  RM -> Store: load_meta(keyB)
+  alt meta missing
+    RM -> Store: store_meta(expected_etag="",\nlease_id, lease_owner, lease_expires_at,\nlease_txn_id, fencing_token++)
+  else meta present
+    RM -> Store: store_meta(expected_etag=meta_etag,\nlease_id, lease_owner, lease_expires_at,\nlease_txn_id, fencing_token++)
+  end
+end
+RM --> SDK: lease_id, txn_id, fencing_token
+
+== Stage keyA ==
+SDK -> RM: POST /v1/update (keyA, txn_id)
+loop CAS retry (meta + staging)
+  RM -> Store: load_meta(keyA)
+  RM -> Store: write_state state/<key>/.staging/<txn_id> (expected_etag=staged_etag)
+  RM -> Store: store_meta(expected_etag=meta_etag,\nstaged_txn_id, staged_state_etag)
+end
+RM --> SDK: update ok (etag, version)
+
+== Stage keyB ==
+SDK -> RM: POST /v1/update (keyB, txn_id)
+loop CAS retry (meta + staging)
+  RM -> Store: load_meta(keyB)
+  RM -> Store: write_state state/<key>/.staging/<txn_id> (expected_etag=staged_etag)
+  RM -> Store: store_meta(expected_etag=meta_etag,\nstaged_txn_id, staged_state_etag)
+end
+RM --> SDK: update ok (etag, version)
+
+== Decide + apply (commit via release) ==
+SDK -> RM: POST /v1/release (keyA, txn_id, rollback=false)
+loop CAS retry (txn record)
+  RM -> Store: get_txn_record(.txns/<txn_id>)
+  alt txn record missing
+    RM -> Store: put_txn_record(state=pending,\nparticipants+=keyA,keyB) (expected_etag="")
+  else txn record exists
+    RM -> Store: put_txn_record(state=pending,\nparticipants+=keyA,keyB) (expected_etag=txn_etag)
+  end
+  RM -> Store: put_txn_record(state=commit,\ntc_term, participants merged) (expected_etag=txn_etag)
+end
+loop apply participants
+  RM -> Store: load_meta(participant)
+  RM -> Store: write_state key from state/<key>/.staging/<txn_id> (expected_etag=staged_etag)
+  RM -> Store: store_meta(expected_etag=meta_etag,\nclear lease + staging)
+end
+RM --> SDK: release ok
+
+@enduml

@@ -74,7 +74,7 @@ const docTemplate = `{
                         "mTLS": []
                     }
                 ],
-                "description": "Acquire or wait for an exclusive lease on a key. When block_seconds \u003e 0 the request will long-poll until a lease becomes available or the timeout elapses.",
+                "description": "Acquire or wait for an exclusive lease on a key. When block_seconds \u003e 0 the request will long-poll until a lease becomes available or the timeout elapses. Returns a compact xid-based ` + "`" + `lease_id` + "`" + ` and ` + "`" + `txn_id` + "`" + ` (20-char lowercase base32, e.g. ` + "`" + `c5v9d0sl70b3m3q8ndg0` + "`" + `) that must be echoed on write operations. Namespaces starting with ` + "`" + `.` + "`" + ` are reserved (e.g. ` + "`" + `.txns` + "`" + `) and will be rejected.",
                 "consumes": [
                     "application/json"
                 ],
@@ -97,6 +97,12 @@ const docTemplate = `{
                         "description": "Key to acquire when the request body omits it",
                         "name": "key",
                         "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Existing transaction identifier (xid) to join a multi-key transaction",
+                        "name": "X-Txn-ID",
+                        "in": "header"
                     },
                     {
                         "description": "Lease acquisition parameters",
@@ -129,6 +135,542 @@ const docTemplate = `{
                     },
                     "503": {
                         "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/attachment": {
+            "get": {
+                "security": [
+                    {
+                        "mTLS": []
+                    }
+                ],
+                "description": "Streams a single attachment (GET) or stages its deletion (DELETE).",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/octet-stream"
+                ],
+                "tags": [
+                    "lease"
+                ],
+                "summary": "Retrieve or delete a state attachment",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Namespace override (defaults to server setting)",
+                        "name": "namespace",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Lease key",
+                        "name": "key",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Attachment name",
+                        "name": "name",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Attachment id",
+                        "name": "id",
+                        "in": "query"
+                    },
+                    {
+                        "type": "boolean",
+                        "description": "Set to true to read without a lease (GET)",
+                        "name": "public",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Lease identifier (required unless public=1)",
+                        "name": "X-Lease-ID",
+                        "in": "header"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Transaction identifier (required for lease operations)",
+                        "name": "X-Txn-ID",
+                        "in": "header"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Optional fencing token proof",
+                        "name": "X-Fencing-Token",
+                        "in": "header"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Attachment payload",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "security": [
+                    {
+                        "mTLS": []
+                    }
+                ],
+                "description": "Streams a single attachment (GET) or stages its deletion (DELETE).",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/octet-stream"
+                ],
+                "tags": [
+                    "lease"
+                ],
+                "summary": "Retrieve or delete a state attachment",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Namespace override (defaults to server setting)",
+                        "name": "namespace",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Lease key",
+                        "name": "key",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Attachment name",
+                        "name": "name",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Attachment id",
+                        "name": "id",
+                        "in": "query"
+                    },
+                    {
+                        "type": "boolean",
+                        "description": "Set to true to read without a lease (GET)",
+                        "name": "public",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Lease identifier (required unless public=1)",
+                        "name": "X-Lease-ID",
+                        "in": "header"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Transaction identifier (required for lease operations)",
+                        "name": "X-Txn-ID",
+                        "in": "header"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Optional fencing token proof",
+                        "name": "X-Fencing-Token",
+                        "in": "header"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Attachment payload",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/attachments": {
+            "get": {
+                "security": [
+                    {
+                        "mTLS": []
+                    }
+                ],
+                "description": "Upload, list, or delete attachments for a key depending on the HTTP method.",
+                "consumes": [
+                    "application/octet-stream"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "lease"
+                ],
+                "summary": "Manage state attachments",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Namespace override (defaults to server setting)",
+                        "name": "namespace",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Lease key",
+                        "name": "key",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Attachment name (upload/delete)",
+                        "name": "name",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Attachment id (delete)",
+                        "name": "id",
+                        "in": "query"
+                    },
+                    {
+                        "type": "boolean",
+                        "description": "Set to true to read without a lease (list)",
+                        "name": "public",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Attachment content type (upload)",
+                        "name": "content_type",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "Maximum attachment size (0 = unlimited)",
+                        "name": "max_bytes",
+                        "in": "query"
+                    },
+                    {
+                        "type": "boolean",
+                        "description": "Do not overwrite existing attachments (upload)",
+                        "name": "prevent_overwrite",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Lease identifier (required unless public=1)",
+                        "name": "X-Lease-ID",
+                        "in": "header"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Transaction identifier (required for lease operations)",
+                        "name": "X-Txn-ID",
+                        "in": "header"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Optional fencing token proof",
+                        "name": "X-Fencing-Token",
+                        "in": "header"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.AttachmentListResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "security": [
+                    {
+                        "mTLS": []
+                    }
+                ],
+                "description": "Upload, list, or delete attachments for a key depending on the HTTP method.",
+                "consumes": [
+                    "application/octet-stream"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "lease"
+                ],
+                "summary": "Manage state attachments",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Namespace override (defaults to server setting)",
+                        "name": "namespace",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Lease key",
+                        "name": "key",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Attachment name (upload/delete)",
+                        "name": "name",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Attachment id (delete)",
+                        "name": "id",
+                        "in": "query"
+                    },
+                    {
+                        "type": "boolean",
+                        "description": "Set to true to read without a lease (list)",
+                        "name": "public",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Attachment content type (upload)",
+                        "name": "content_type",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "Maximum attachment size (0 = unlimited)",
+                        "name": "max_bytes",
+                        "in": "query"
+                    },
+                    {
+                        "type": "boolean",
+                        "description": "Do not overwrite existing attachments (upload)",
+                        "name": "prevent_overwrite",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Lease identifier (required unless public=1)",
+                        "name": "X-Lease-ID",
+                        "in": "header"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Transaction identifier (required for lease operations)",
+                        "name": "X-Txn-ID",
+                        "in": "header"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Optional fencing token proof",
+                        "name": "X-Fencing-Token",
+                        "in": "header"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.AttachmentListResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "security": [
+                    {
+                        "mTLS": []
+                    }
+                ],
+                "description": "Upload, list, or delete attachments for a key depending on the HTTP method.",
+                "consumes": [
+                    "application/octet-stream"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "lease"
+                ],
+                "summary": "Manage state attachments",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Namespace override (defaults to server setting)",
+                        "name": "namespace",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Lease key",
+                        "name": "key",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Attachment name (upload/delete)",
+                        "name": "name",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Attachment id (delete)",
+                        "name": "id",
+                        "in": "query"
+                    },
+                    {
+                        "type": "boolean",
+                        "description": "Set to true to read without a lease (list)",
+                        "name": "public",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Attachment content type (upload)",
+                        "name": "content_type",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "Maximum attachment size (0 = unlimited)",
+                        "name": "max_bytes",
+                        "in": "query"
+                    },
+                    {
+                        "type": "boolean",
+                        "description": "Do not overwrite existing attachments (upload)",
+                        "name": "prevent_overwrite",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Lease identifier (required unless public=1)",
+                        "name": "X-Lease-ID",
+                        "in": "header"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Transaction identifier (required for lease operations)",
+                        "name": "X-Txn-ID",
+                        "in": "header"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Optional fencing token proof",
+                        "name": "X-Fencing-Token",
+                        "in": "header"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.AttachmentListResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
                         "schema": {
                             "$ref": "#/definitions/api.ErrorResponse"
                         }
@@ -355,7 +897,7 @@ const docTemplate = `{
                         "mTLS": []
                     }
                 ],
-                "description": "Refresh an existing lease before it expires. Returns the new expiration timestamp.",
+                "description": "Refresh an existing lease before it expires. Requires the xid lease identifier minted by Acquire and its fencing token; returns the new expiration timestamp.",
                 "consumes": [
                     "application/json"
                 ],
@@ -387,6 +929,19 @@ const docTemplate = `{
                         "schema": {
                             "$ref": "#/definitions/api.KeepAliveRequest"
                         }
+                    },
+                    {
+                        "type": "string",
+                        "description": "Fencing token associated with the lease (from Acquire response)",
+                        "name": "X-Fencing-Token",
+                        "in": "header",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Transaction identifier (required when the lease is enlisted in a txn)",
+                        "name": "X-Txn-ID",
+                        "in": "header"
                     }
                 ],
                 "responses": {
@@ -457,8 +1012,15 @@ const docTemplate = `{
                     },
                     {
                         "type": "string",
-                        "description": "Lease identifier",
+                        "description": "Lease identifier (xid from Acquire, 20-char lowercase base32)",
                         "name": "X-Lease-ID",
+                        "in": "header",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Transaction identifier (xid from Acquire)",
+                        "name": "X-Txn-ID",
                         "in": "header",
                         "required": true
                     },
@@ -707,7 +1269,7 @@ const docTemplate = `{
                         "mTLS": []
                     }
                 ],
-                "description": "Confirms processing of a delivery and deletes the message or its retry lease.",
+                "description": "Confirms processing of a delivery and deletes the message or its retry lease. If a txn_id is present (or the lease is already enlisted) and TC is enabled, this records a commit decision via the TC.",
                 "consumes": [
                     "application/json"
                 ],
@@ -770,17 +1332,17 @@ const docTemplate = `{
                         "mTLS": []
                     }
                 ],
-                "description": "Performs a single dequeue attempt, optionally waiting for availability. Responses stream as multipart/related parts containing message metadata and payload.",
+                "description": "Dequeues one or more messages from the specified queue. Supports long polling via wait_seconds. If txn_id is provided, the message is enlisted as a transaction participant.",
                 "consumes": [
                     "application/json"
                 ],
                 "produces": [
-                    "multipart/related"
+                    "application/json"
                 ],
                 "tags": [
                     "queue"
                 ],
-                "summary": "Fetch one or more queue messages",
+                "summary": "Dequeue messages",
                 "parameters": [
                     {
                         "type": "string",
@@ -801,7 +1363,7 @@ const docTemplate = `{
                         "in": "query"
                     },
                     {
-                        "description": "Dequeue parameters",
+                        "description": "Dequeue parameters (queue, owner, wait_seconds, visibility)",
                         "name": "request",
                         "in": "body",
                         "required": true,
@@ -812,19 +1374,13 @@ const docTemplate = `{
                 ],
                 "responses": {
                     "200": {
-                        "description": "Multipart response with message metadata and optional payload",
+                        "description": "OK",
                         "schema": {
-                            "type": "string"
+                            "$ref": "#/definitions/api.DequeueResponse"
                         }
                     },
                     "400": {
                         "description": "Bad Request",
-                        "schema": {
-                            "$ref": "#/definitions/api.ErrorResponse"
-                        }
-                    },
-                    "404": {
-                        "description": "Not Found",
                         "schema": {
                             "$ref": "#/definitions/api.ErrorResponse"
                         }
@@ -851,7 +1407,7 @@ const docTemplate = `{
                         "mTLS": []
                     }
                 ],
-                "description": "Dequeues messages and includes their associated state blobs in the multipart response when available.",
+                "description": "Dequeues messages and includes their associated state blobs in the multipart response when available. If txn_id is provided, the message and state sidecar are enlisted as transaction participants.",
                 "consumes": [
                     "application/json"
                 ],
@@ -861,7 +1417,7 @@ const docTemplate = `{
                 "tags": [
                     "queue"
                 ],
-                "summary": "Fetch queue messages with state attachments",
+                "summary": "Fetch queue messages with state sidecars",
                 "parameters": [
                     {
                         "type": "string",
@@ -893,7 +1449,7 @@ const docTemplate = `{
                 ],
                 "responses": {
                     "200": {
-                        "description": "Multipart response with message metadata, payload, and state attachments",
+                        "description": "Multipart response with message metadata, payload, and state sidecar",
                         "schema": {
                             "type": "string"
                         }
@@ -1011,7 +1567,7 @@ const docTemplate = `{
                         "mTLS": []
                     }
                 ],
-                "description": "Extends the visibility timeout and lease window for an in-flight message.",
+                "description": "Extends the visibility timeout and lease window for an in-flight message. txn_id is optional; if omitted the server uses the lease's txn_id (if any).",
                 "consumes": [
                     "application/json"
                 ],
@@ -1074,7 +1630,7 @@ const docTemplate = `{
                         "mTLS": []
                     }
                 ],
-                "description": "Requeues the delivery with optional delay and last error metadata.",
+                "description": "Requeues the delivery with optional delay and last error metadata. If a txn_id is present (or the lease is already enlisted) and TC is enabled, this records a rollback decision via the TC.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1137,7 +1693,7 @@ const docTemplate = `{
                         "mTLS": []
                     }
                 ],
-                "description": "Opens a long-lived multipart stream of deliveries for the specified queue owner. Each part contains message metadata and payload.",
+                "description": "Opens a long-lived multipart stream of deliveries for the specified queue owner. Each part contains message metadata and payload. If txn_id is provided, each delivery is enlisted as a transaction participant.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1218,7 +1774,7 @@ const docTemplate = `{
                         "mTLS": []
                     }
                 ],
-                "description": "Opens a long-lived multipart stream where each part contains message metadata, payload, and state snapshot when available.",
+                "description": "Opens a long-lived multipart stream where each part contains message metadata, payload, and state snapshot when available. If txn_id is provided, the message and state sidecar are enlisted as transaction participants.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1299,7 +1855,7 @@ const docTemplate = `{
                         "mTLS": []
                     }
                 ],
-                "description": "Releases the lease associated with the provided key and lease identifier.",
+                "description": "Releases the lease associated with the provided key and lease identifier. The request must include the xid ` + "`" + `txn_id` + "`" + ` from Acquire; set ` + "`" + `rollback=true` + "`" + ` to abandon staged changes, otherwise the release commits the staged state.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1395,8 +1951,15 @@ const docTemplate = `{
                     },
                     {
                         "type": "string",
-                        "description": "Lease identifier",
+                        "description": "Lease identifier (xid from Acquire, 20-char lowercase base32)",
                         "name": "X-Lease-ID",
+                        "in": "header",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Transaction identifier (xid from Acquire)",
+                        "name": "X-Txn-ID",
                         "in": "header",
                         "required": true
                     },
@@ -1447,6 +2010,774 @@ const docTemplate = `{
                 }
             }
         },
+        "/v1/tc/cluster/announce": {
+            "post": {
+                "security": [
+                    {
+                        "mTLS": []
+                    }
+                ],
+                "description": "Refreshes the caller's membership lease. Requires TC-auth with a server certificate when mTLS is enabled (unless tc-disable-auth is set).",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "transaction"
+                ],
+                "summary": "Announce TC cluster membership",
+                "parameters": [
+                    {
+                        "description": "TC cluster announce request",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.TCClusterAnnounceRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.TCClusterAnnounceResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/tc/cluster/leave": {
+            "post": {
+                "security": [
+                    {
+                        "mTLS": []
+                    }
+                ],
+                "description": "Deletes the caller's membership lease. Requires TC-auth with a server certificate when mTLS is enabled (unless tc-disable-auth is set).",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "transaction"
+                ],
+                "summary": "Leave the TC cluster",
+                "parameters": [
+                    {
+                        "description": "TC cluster leave request",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.TCClusterLeaveRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.TCClusterLeaveResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/tc/cluster/list": {
+            "get": {
+                "security": [
+                    {
+                        "mTLS": []
+                    }
+                ],
+                "description": "List the current active TC cluster membership list. Requires TC-auth when mTLS is enabled (unless tc-disable-auth is set).",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "transaction"
+                ],
+                "summary": "List TC cluster membership",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.TCClusterListResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/tc/leader": {
+            "get": {
+                "security": [
+                    {
+                        "mTLS": []
+                    }
+                ],
+                "description": "Returns the observed TC leader state. Requires TC-auth when mTLS is enabled (unless tc-disable-auth is set).",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "transaction"
+                ],
+                "summary": "Return TC leader state",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.TCLeaderResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/tc/lease/acquire": {
+            "post": {
+                "security": [
+                    {
+                        "mTLS": []
+                    }
+                ],
+                "description": "Acquire a TC leader lease as part of the TC election quorum. Requires TC-auth when mTLS is enabled (unless tc-disable-auth is set).",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "transaction"
+                ],
+                "summary": "Acquire a TC leader lease",
+                "parameters": [
+                    {
+                        "description": "TC lease acquire request",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.TCLeaseAcquireRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.TCLeaseAcquireResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/tc/lease/release": {
+            "post": {
+                "security": [
+                    {
+                        "mTLS": []
+                    }
+                ],
+                "description": "Release a TC leader lease as part of the TC election quorum. Requires TC-auth when mTLS is enabled (unless tc-disable-auth is set).",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "transaction"
+                ],
+                "summary": "Release a TC leader lease",
+                "parameters": [
+                    {
+                        "description": "TC lease release request",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.TCLeaseReleaseRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.TCLeaseReleaseResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/tc/lease/renew": {
+            "post": {
+                "security": [
+                    {
+                        "mTLS": []
+                    }
+                ],
+                "description": "Renew a TC leader lease as part of the TC election quorum. Requires TC-auth when mTLS is enabled (unless tc-disable-auth is set).",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "transaction"
+                ],
+                "summary": "Renew a TC leader lease",
+                "parameters": [
+                    {
+                        "description": "TC lease renew request",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.TCLeaseRenewRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.TCLeaseRenewResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/tc/rm/list": {
+            "get": {
+                "security": [
+                    {
+                        "mTLS": []
+                    }
+                ],
+                "description": "List RM endpoints by backend hash. Requires TC-auth when mTLS is enabled (unless tc-disable-auth is set).",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "transaction"
+                ],
+                "summary": "List RM registry entries",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.TCRMListResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/tc/rm/register": {
+            "post": {
+                "security": [
+                    {
+                        "mTLS": []
+                    }
+                ],
+                "description": "Register an RM endpoint for a backend hash. Replicates across the TC cluster. Requires TC-auth with a server certificate when mTLS is enabled (unless tc-disable-auth is set).",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "transaction"
+                ],
+                "summary": "Register an RM endpoint",
+                "parameters": [
+                    {
+                        "description": "RM register request",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.TCRMRegisterRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.TCRMRegisterResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "502": {
+                        "description": "Bad Gateway",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/tc/rm/unregister": {
+            "post": {
+                "security": [
+                    {
+                        "mTLS": []
+                    }
+                ],
+                "description": "Unregister an RM endpoint for a backend hash. Replicates across the TC cluster. Requires TC-auth with a server certificate when mTLS is enabled (unless tc-disable-auth is set).",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "transaction"
+                ],
+                "summary": "Unregister an RM endpoint",
+                "parameters": [
+                    {
+                        "description": "RM unregister request",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.TCRMUnregisterRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.TCRMUnregisterResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "502": {
+                        "description": "Bad Gateway",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/txn/commit": {
+            "post": {
+                "security": [
+                    {
+                        "mTLS": []
+                    }
+                ],
+                "description": "Apply a commit decision for a transaction on the local RM. Requires tc_term when TC leadership is enabled. Requires TC-auth when mTLS is enabled (unless tc-disable-auth is set).",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "transaction"
+                ],
+                "summary": "Apply a commit decision on an RM",
+                "parameters": [
+                    {
+                        "description": "Txn decision request",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.TxnDecisionRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.TxnDecisionResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/txn/decide": {
+            "post": {
+                "security": [
+                    {
+                        "mTLS": []
+                    }
+                ],
+                "description": "Record a transaction decision (pending|commit|rollback). Commit/rollback decisions are applied locally and fan out to RMs. TC-auth only; called by lockd RMs or TC tooling. Any TC endpoint can receive this call; non-leaders forward to the leader, which stamps the tc_term fencing token. Requires TC-auth when mTLS is enabled (unless tc-disable-auth is set).",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "transaction"
+                ],
+                "summary": "Record a transaction decision",
+                "parameters": [
+                    {
+                        "description": "Txn decision request",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.TxnDecisionRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.TxnDecisionResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "502": {
+                        "description": "Bad Gateway",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/txn/replay": {
+            "post": {
+                "security": [
+                    {
+                        "mTLS": []
+                    }
+                ],
+                "description": "Apply the recorded decision for a transaction (commit or rollback) to its participants. Pending transactions remain unchanged unless expired, in which case they roll back. Idempotent and safe to retry. Requires TC-auth when mTLS is enabled (unless tc-disable-auth is set).",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "transaction"
+                ],
+                "summary": "Replay a transaction decision",
+                "parameters": [
+                    {
+                        "description": "Txn replay request",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.TxnReplayRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.TxnReplayResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/txn/rollback": {
+            "post": {
+                "security": [
+                    {
+                        "mTLS": []
+                    }
+                ],
+                "description": "Apply a rollback decision for a transaction on the local RM. Requires tc_term when TC leadership is enabled. Requires TC-auth when mTLS is enabled (unless tc-disable-auth is set).",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "transaction"
+                ],
+                "summary": "Apply a rollback decision on an RM",
+                "parameters": [
+                    {
+                        "description": "Txn decision request",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.TxnDecisionRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.TxnDecisionResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/v1/update": {
             "post": {
                 "security": [
@@ -1481,8 +2812,15 @@ const docTemplate = `{
                     },
                     {
                         "type": "string",
-                        "description": "Lease identifier",
+                        "description": "Lease identifier (xid from Acquire, 20-char lowercase base32)",
                         "name": "X-Lease-ID",
+                        "in": "header",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Transaction identifier (xid from Acquire)",
+                        "name": "X-Txn-ID",
                         "in": "header",
                         "required": true
                     },
@@ -1579,6 +2917,9 @@ const docTemplate = `{
                 },
                 "state_lease_id": {
                     "type": "string"
+                },
+                "txn_id": {
+                    "type": "string"
                 }
             }
         },
@@ -1610,6 +2951,9 @@ const docTemplate = `{
                 },
                 "ttl_seconds": {
                     "type": "integer"
+                },
+                "txn_id": {
+                    "type": "string"
                 }
             }
         },
@@ -1643,8 +2987,51 @@ const docTemplate = `{
                 "state_etag": {
                     "type": "string"
                 },
+                "txn_id": {
+                    "type": "string"
+                },
                 "version": {
                     "type": "integer"
+                }
+            }
+        },
+        "api.AttachmentInfo": {
+            "type": "object",
+            "properties": {
+                "content_type": {
+                    "type": "string"
+                },
+                "created_at_unix": {
+                    "type": "integer"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "size": {
+                    "type": "integer"
+                },
+                "updated_at_unix": {
+                    "type": "integer"
+                }
+            }
+        },
+        "api.AttachmentListResponse": {
+            "type": "object",
+            "properties": {
+                "attachments": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/api.AttachmentInfo"
+                    }
+                },
+                "key": {
+                    "type": "string"
+                },
+                "namespace": {
+                    "type": "string"
                 }
             }
         },
@@ -1666,11 +3053,25 @@ const docTemplate = `{
                 "start_after": {
                     "type": "string"
                 },
+                "txn_id": {
+                    "type": "string"
+                },
                 "visibility_timeout_seconds": {
                     "type": "integer"
                 },
                 "wait_seconds": {
                     "type": "integer"
+                }
+            }
+        },
+        "api.DequeueResponse": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "$ref": "#/definitions/api.Message"
+                },
+                "next_cursor": {
+                    "type": "string"
                 }
             }
         },
@@ -1753,6 +3154,9 @@ const docTemplate = `{
                 "error": {
                     "type": "string"
                 },
+                "leader_endpoint": {
+                    "type": "string"
+                },
                 "retry_after_seconds": {
                     "type": "integer"
                 }
@@ -1786,6 +3190,9 @@ const docTemplate = `{
                     "type": "integer"
                 },
                 "state_lease_id": {
+                    "type": "string"
+                },
+                "txn_id": {
                     "type": "string"
                 }
             }
@@ -1861,6 +3268,9 @@ const docTemplate = `{
                 },
                 "ttl_seconds": {
                     "type": "integer"
+                },
+                "txn_id": {
+                    "type": "string"
                 }
             }
         },
@@ -1868,6 +3278,75 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "expires_at_unix": {
+                    "type": "integer"
+                }
+            }
+        },
+        "api.Message": {
+            "type": "object",
+            "properties": {
+                "attempts": {
+                    "type": "integer"
+                },
+                "attributes": {
+                    "type": "object",
+                    "additionalProperties": {}
+                },
+                "correlation_id": {
+                    "type": "string"
+                },
+                "fencing_token": {
+                    "type": "integer"
+                },
+                "lease_expires_at_unix": {
+                    "type": "integer"
+                },
+                "lease_id": {
+                    "type": "string"
+                },
+                "max_attempts": {
+                    "type": "integer"
+                },
+                "message_id": {
+                    "type": "string"
+                },
+                "meta_etag": {
+                    "type": "string"
+                },
+                "namespace": {
+                    "type": "string"
+                },
+                "not_visible_until_unix": {
+                    "type": "integer"
+                },
+                "payload_bytes": {
+                    "type": "integer"
+                },
+                "payload_content_type": {
+                    "type": "string"
+                },
+                "queue": {
+                    "type": "string"
+                },
+                "state_etag": {
+                    "type": "string"
+                },
+                "state_fencing_token": {
+                    "type": "integer"
+                },
+                "state_lease_expires_at_unix": {
+                    "type": "integer"
+                },
+                "state_lease_id": {
+                    "type": "string"
+                },
+                "state_txn_id": {
+                    "type": "string"
+                },
+                "txn_id": {
+                    "type": "string"
+                },
+                "visibility_timeout_seconds": {
                     "type": "integer"
                 }
             }
@@ -1922,10 +3401,16 @@ const docTemplate = `{
                 "queue": {
                     "type": "string"
                 },
+                "state_etag": {
+                    "type": "string"
+                },
                 "state_fencing_token": {
                     "type": "integer"
                 },
                 "state_lease_id": {
+                    "type": "string"
+                },
+                "txn_id": {
                     "type": "string"
                 }
             }
@@ -2050,6 +3535,12 @@ const docTemplate = `{
                 },
                 "namespace": {
                     "type": "string"
+                },
+                "rollback": {
+                    "type": "boolean"
+                },
+                "txn_id": {
+                    "type": "string"
                 }
             }
         },
@@ -2069,6 +3560,330 @@ const docTemplate = `{
                 },
                 "removed": {
                     "type": "boolean"
+                }
+            }
+        },
+        "api.TCClusterAnnounceRequest": {
+            "type": "object",
+            "properties": {
+                "self_endpoint": {
+                    "type": "string"
+                }
+            }
+        },
+        "api.TCClusterAnnounceResponse": {
+            "type": "object",
+            "properties": {
+                "endpoints": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "expires_at_unix": {
+                    "type": "integer"
+                },
+                "updated_at_unix": {
+                    "type": "integer"
+                }
+            }
+        },
+        "api.TCClusterLeaveRequest": {
+            "type": "object"
+        },
+        "api.TCClusterLeaveResponse": {
+            "type": "object",
+            "properties": {
+                "endpoints": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "updated_at_unix": {
+                    "type": "integer"
+                }
+            }
+        },
+        "api.TCClusterListResponse": {
+            "type": "object",
+            "properties": {
+                "endpoints": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "updated_at_unix": {
+                    "type": "integer"
+                }
+            }
+        },
+        "api.TCLeaderResponse": {
+            "type": "object",
+            "properties": {
+                "expires_at": {
+                    "type": "integer"
+                },
+                "leader_endpoint": {
+                    "type": "string"
+                },
+                "leader_id": {
+                    "type": "string"
+                },
+                "term": {
+                    "type": "integer"
+                }
+            }
+        },
+        "api.TCLeaseAcquireRequest": {
+            "type": "object",
+            "properties": {
+                "candidate_endpoint": {
+                    "type": "string"
+                },
+                "candidate_id": {
+                    "type": "string"
+                },
+                "term": {
+                    "type": "integer"
+                },
+                "ttl_ms": {
+                    "type": "integer"
+                }
+            }
+        },
+        "api.TCLeaseAcquireResponse": {
+            "type": "object",
+            "properties": {
+                "expires_at": {
+                    "type": "integer"
+                },
+                "granted": {
+                    "type": "boolean"
+                },
+                "leader_endpoint": {
+                    "type": "string"
+                },
+                "leader_id": {
+                    "type": "string"
+                },
+                "term": {
+                    "type": "integer"
+                }
+            }
+        },
+        "api.TCLeaseReleaseRequest": {
+            "type": "object",
+            "properties": {
+                "leader_id": {
+                    "type": "string"
+                },
+                "term": {
+                    "type": "integer"
+                }
+            }
+        },
+        "api.TCLeaseReleaseResponse": {
+            "type": "object",
+            "properties": {
+                "released": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "api.TCLeaseRenewRequest": {
+            "type": "object",
+            "properties": {
+                "leader_id": {
+                    "type": "string"
+                },
+                "term": {
+                    "type": "integer"
+                },
+                "ttl_ms": {
+                    "type": "integer"
+                }
+            }
+        },
+        "api.TCLeaseRenewResponse": {
+            "type": "object",
+            "properties": {
+                "expires_at": {
+                    "type": "integer"
+                },
+                "leader_endpoint": {
+                    "type": "string"
+                },
+                "leader_id": {
+                    "type": "string"
+                },
+                "renewed": {
+                    "type": "boolean"
+                },
+                "term": {
+                    "type": "integer"
+                }
+            }
+        },
+        "api.TCRMBackend": {
+            "type": "object",
+            "properties": {
+                "backend_hash": {
+                    "type": "string"
+                },
+                "endpoints": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "updated_at_unix": {
+                    "type": "integer"
+                }
+            }
+        },
+        "api.TCRMListResponse": {
+            "type": "object",
+            "properties": {
+                "backends": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/api.TCRMBackend"
+                    }
+                },
+                "updated_at_unix": {
+                    "type": "integer"
+                }
+            }
+        },
+        "api.TCRMRegisterRequest": {
+            "type": "object",
+            "properties": {
+                "backend_hash": {
+                    "type": "string"
+                },
+                "endpoint": {
+                    "type": "string"
+                }
+            }
+        },
+        "api.TCRMRegisterResponse": {
+            "type": "object",
+            "properties": {
+                "backend_hash": {
+                    "type": "string"
+                },
+                "endpoints": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "updated_at_unix": {
+                    "type": "integer"
+                }
+            }
+        },
+        "api.TCRMUnregisterRequest": {
+            "type": "object",
+            "properties": {
+                "backend_hash": {
+                    "type": "string"
+                },
+                "endpoint": {
+                    "type": "string"
+                }
+            }
+        },
+        "api.TCRMUnregisterResponse": {
+            "type": "object",
+            "properties": {
+                "backend_hash": {
+                    "type": "string"
+                },
+                "endpoints": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "updated_at_unix": {
+                    "type": "integer"
+                }
+            }
+        },
+        "api.TxnDecisionRequest": {
+            "type": "object",
+            "properties": {
+                "expires_at_unix": {
+                    "type": "integer"
+                },
+                "participants": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/api.TxnParticipant"
+                    }
+                },
+                "state": {
+                    "description": "pending|commit|rollback",
+                    "type": "string"
+                },
+                "target_backend_hash": {
+                    "description": "TargetBackendHash scopes RM apply requests to a specific backend island.",
+                    "type": "string"
+                },
+                "tc_term": {
+                    "description": "TCTerm is the current TC leader term for this decision.",
+                    "type": "integer"
+                },
+                "txn_id": {
+                    "type": "string"
+                }
+            }
+        },
+        "api.TxnDecisionResponse": {
+            "type": "object",
+            "properties": {
+                "state": {
+                    "type": "string"
+                },
+                "txn_id": {
+                    "type": "string"
+                }
+            }
+        },
+        "api.TxnParticipant": {
+            "type": "object",
+            "properties": {
+                "backend_hash": {
+                    "description": "BackendHash identifies the storage backend island for this participant.",
+                    "type": "string"
+                },
+                "key": {
+                    "type": "string"
+                },
+                "namespace": {
+                    "type": "string"
+                }
+            }
+        },
+        "api.TxnReplayRequest": {
+            "type": "object",
+            "properties": {
+                "txn_id": {
+                    "type": "string"
+                }
+            }
+        },
+        "api.TxnReplayResponse": {
+            "type": "object",
+            "properties": {
+                "state": {
+                    "type": "string"
+                },
+                "txn_id": {
+                    "type": "string"
                 }
             }
         },

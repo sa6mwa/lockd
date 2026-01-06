@@ -47,9 +47,15 @@ func metadataAttributesFromMeta(meta *storage.Meta) api.MetadataAttributes {
 	if meta == nil {
 		return attr
 	}
-	if meta.QueryExcluded() {
-		val := true
-		attr.QueryHidden = &val
+	val, ok := meta.StagedAttributes[storage.MetaAttributeQueryExclude]
+	if !ok && meta.Attributes != nil {
+		val, ok = meta.Attributes[storage.MetaAttributeQueryExclude]
+	}
+	if ok {
+		hidden := strings.EqualFold(val, "true") || strings.EqualFold(val, "1") || strings.EqualFold(val, "yes")
+		if hidden {
+			attr.QueryHidden = &hidden
+		}
 	}
 	return attr
 }

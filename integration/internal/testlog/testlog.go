@@ -27,8 +27,8 @@ type Recorder struct {
 	entries []Entry
 }
 
-// NewRecorder returns a logger that records every structured log line and mirrors
-// it to testing.TB (when non-nil). The recorder is safe for concurrent use.
+// NewRecorder returns a logger that records every structured log line.
+// The recorder is safe for concurrent use.
 func NewRecorder(t testing.TB, level pslog.Level) (pslog.Logger, *Recorder) {
 	rec := &Recorder{}
 	writer := &recordingWriter{t: t, recorder: rec}
@@ -109,10 +109,6 @@ func (w *recordingWriter) Write(p []byte) (int, error) {
 		}
 		entry := parseLogEntry(line)
 		w.recorder.add(entry)
-		if w.t != nil {
-			w.t.Helper()
-			w.t.Log(string(line))
-		}
 	}
 	return len(p), nil
 }

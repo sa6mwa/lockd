@@ -15,19 +15,19 @@ import (
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/integration/internal/cryptotest"
 	queuetestutil "pkt.systems/lockd/integration/queue/testutil"
-	"pkt.systems/lockd/internal/loggingutil"
+	"pkt.systems/pslog"
 )
 
 func TestCryptoMemLocks(t *testing.T) {
 	cfg := buildMemConfig(t)
 	options := []lockd.TestServerOption{
 		lockd.WithTestConfig(cfg),
-		lockd.WithTestLogger(loggingutil.NoopLogger()),
+		lockd.WithTestLogger(pslog.NoopLogger()),
 		lockd.WithTestClientOptions(
 			lockdclient.WithHTTPTimeout(20*time.Second),
 			lockdclient.WithKeepAliveTimeout(20*time.Second),
 			lockdclient.WithCloseTimeout(20*time.Second),
-			lockdclient.WithLogger(loggingutil.NoopLogger()),
+			lockdclient.WithLogger(pslog.NoopLogger()),
 		),
 	}
 	options = append(options, cryptotest.SharedMTLSOptions(t)...)
@@ -78,12 +78,12 @@ func TestCryptoMemQueues(t *testing.T) {
 	cfg := buildMemConfig(t)
 	options := []lockd.TestServerOption{
 		lockd.WithTestConfig(cfg),
-		lockd.WithTestLogger(loggingutil.NoopLogger()),
+		lockd.WithTestLogger(pslog.NoopLogger()),
 		lockd.WithTestClientOptions(
 			lockdclient.WithHTTPTimeout(20*time.Second),
 			lockdclient.WithKeepAliveTimeout(20*time.Second),
 			lockdclient.WithCloseTimeout(20*time.Second),
-			lockdclient.WithLogger(loggingutil.NoopLogger()),
+			lockdclient.WithLogger(pslog.NoopLogger()),
 		),
 	}
 	options = append(options, cryptotest.SharedMTLSOptions(t)...)
@@ -162,8 +162,7 @@ func buildMemConfig(t testing.TB) lockd.Config {
 		ListenProto: "tcp",
 		Listen:      "127.0.0.1:0",
 	}
-	cfg.MemQueueWatch = true
-	cfg.MemQueueWatchSet = true
+	cfg.DisableMemQueueWatch = false
 	cfg.QueuePollInterval = 100 * time.Millisecond
 	cfg.QueuePollJitter = 0
 	cfg.QueueResilientPollInterval = time.Second

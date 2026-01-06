@@ -23,11 +23,12 @@ import (
 
 	"pkt.systems/lockd"
 	"pkt.systems/lockd/api"
+	"pkt.systems/lockd/benchmark/internal/benchenv"
 	lockdclient "pkt.systems/lockd/client"
-	"pkt.systems/lockd/internal/diagnostics/storagecheck"
-	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/s3"
+	"pkt.systems/lockd/internal/svcfields"
+	"pkt.systems/lockd/namespaces"
 	"pkt.systems/pslog"
 )
 
@@ -50,14 +51,18 @@ type benchmarkEnv struct {
 func setupBenchmarkEnv(b *testing.B, withLockd bool) *benchmarkEnv {
 	b.Helper()
 
-	cfg := loadMinioConfig(b)
-	ensureMinioBucket(b, cfg)
-	ensureStoreReady(b, context.Background(), cfg)
+	cfg := benchenv.LoadMinioConfig(b)
+	if err := cfg.Validate(); err != nil {
+		b.Fatalf("config validation: %v", err)
+	}
+	benchenv.EnsureMinioBucket(b, cfg)
+	benchenv.EnsureS3StoreReady(b, cfg)
 
-	storeCfg, _, err := lockd.BuildGenericS3Config(cfg)
+	storeResult, err := lockd.BuildGenericS3Config(cfg)
 	if err != nil {
 		b.Fatalf("build s3 config: %v", err)
 	}
+	storeCfg := storeResult.Config
 	store, err := s3.New(storeCfg)
 	if err != nil {
 		b.Fatalf("new minio store: %v", err)
@@ -83,10 +88,10 @@ func setupBenchmarkEnv(b *testing.B, withLockd bool) *benchmarkEnv {
 func (env *benchmarkEnv) cleanupKey(b testing.TB, key string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := env.store.Remove(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+	if err := env.store.Remove(ctx, namespaces.Default, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 		b.Fatalf("cleanup remove state: %v", err)
 	}
-	if err := env.store.DeleteMeta(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+	if err := env.store.DeleteMeta(ctx, namespaces.Default, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 		b.Fatalf("cleanup delete meta: %v", err)
 	}
 }
@@ -223,7 +228,12 @@ func BenchmarkLockdLargeJSON(b *testing.B) {
 		if _, err := client.UpdateBytes(ctx, key, lease.LeaseID, payload, opts); err != nil {
 			b.Fatalf("update state: %v", err)
 		}
-		if _, err := client.Release(ctx, api.ReleaseRequest{Key: key, LeaseID: lease.LeaseID}); err != nil {
+		if _, err := client.Release(ctx, api.ReleaseRequest{
+			Namespace: namespaces.Default,
+			Key:       key,
+			LeaseID:   lease.LeaseID,
+			TxnID:     lease.TxnID,
+		}); err != nil {
 			b.Fatalf("release: %v", err)
 		}
 		env.cleanupKey(b, key)
@@ -250,7 +260,12 @@ func BenchmarkLockdLargeJSONStream(b *testing.B) {
 		if _, err := client.Update(ctx, key, lease.LeaseID, reader, opts); err != nil {
 			b.Fatalf("update state (stream): %v", err)
 		}
-		if _, err := client.Release(ctx, api.ReleaseRequest{Key: key, LeaseID: lease.LeaseID}); err != nil {
+		if _, err := client.Release(ctx, api.ReleaseRequest{
+			Namespace: namespaces.Default,
+			Key:       key,
+			LeaseID:   lease.LeaseID,
+			TxnID:     lease.TxnID,
+		}); err != nil {
 			b.Fatalf("release: %v", err)
 		}
 		env.cleanupKey(b, key)
@@ -306,7 +321,12 @@ func BenchmarkLockdSmallJSONStream(b *testing.B) {
 		if _, err := client.Update(ctx, key, lease.LeaseID, stream, lockdclient.UpdateOptions{IfVersion: version}); err != nil {
 			b.Fatalf("update state (stream): %v", err)
 		}
-		if _, err := client.Release(ctx, api.ReleaseRequest{Key: key, LeaseID: lease.LeaseID}); err != nil {
+		if _, err := client.Release(ctx, api.ReleaseRequest{
+			Namespace: namespaces.Default,
+			Key:       key,
+			LeaseID:   lease.LeaseID,
+			TxnID:     lease.TxnID,
+		}); err != nil {
 			b.Fatalf("release: %v", err)
 		}
 		env.cleanupKey(b, key)
@@ -347,7 +367,8 @@ func startMinioBenchServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client 
 
 	cfg.Listen = "127.0.0.1:0"
 	cfg.ListenProto = "tcp"
-	cfg.DisableMTLS = true
+	mtlsEnabled := benchenv.TestMTLSEnabled()
+	cfg.DisableMTLS = !mtlsEnabled
 	cfg.JSONMaxBytes = 100 << 20
 	cfg.DefaultTTL = 30 * time.Second
 	cfg.MaxTTL = 2 * time.Minute
@@ -372,12 +393,21 @@ func startMinioBenchServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client 
 		clientLoggerOpt,
 	}
 
-	ts := lockd.StartTestServer(tb,
+	opts := []lockd.TestServerOption{
 		lockd.WithTestConfig(cfg),
 		lockd.WithTestListener("tcp", "127.0.0.1:0"),
 		serverLoggerOpt,
 		lockd.WithTestClientOptions(clientOpts...),
-	)
+	}
+	if mtlsEnabled {
+		opts = append(opts, benchenv.SharedMTLSOptions(tb)...)
+	} else {
+		opts = append(opts,
+			lockd.WithoutTestMTLS(),
+			lockd.WithTestClientOptions(lockdclient.WithDisableMTLS(true)),
+		)
+	}
+	ts := lockd.StartTestServer(tb, opts...)
 	return ts.Client
 }
 
@@ -385,7 +415,7 @@ func minioBenchLoggerOptions(tb testing.TB) (lockd.TestServerOption, lockdclient
 	tb.Helper()
 	levelStr := os.Getenv("LOCKD_BENCH_LOG_LEVEL")
 	if levelStr == "" {
-		return lockd.WithTestLogger(loggingutil.NoopLogger()), lockdclient.WithLogger(loggingutil.NoopLogger())
+		return lockd.WithTestLogger(pslog.NoopLogger()), lockdclient.WithLogger(pslog.NoopLogger())
 	}
 
 	logPath := os.Getenv("LOCKD_BENCH_LOG_PATH")
@@ -413,15 +443,15 @@ func minioBenchLoggerOptions(tb testing.TB) (lockd.TestServerOption, lockdclient
 		tb.Cleanup(func() { _ = os.Remove(logPath) })
 	}
 
-	baseLogger := loggingutil.WithSubsystem(pslog.NewStructured(writer), "bench.minio")
+	baseLogger := svcfields.WithSubsystem(pslog.NewStructured(writer), "bench.minio")
 	if level, ok := pslog.ParseLevel(levelStr); ok {
 		baseLogger = baseLogger.LogLevel(level)
 	} else {
 		tb.Fatalf("invalid LOCKD_BENCH_LOG_LEVEL %q", levelStr)
 	}
 
-	serverLogger := loggingutil.WithSubsystem(baseLogger, "bench.minio.server").WithLogLevel()
-	clientLogger := loggingutil.WithSubsystem(baseLogger, "bench.minio.client").WithLogLevel()
+	serverLogger := svcfields.WithSubsystem(baseLogger, "bench.minio.server").WithLogLevel()
+	clientLogger := svcfields.WithSubsystem(baseLogger, "bench.minio.client").WithLogLevel()
 
 	return lockd.WithTestLogger(serverLogger), lockdclient.WithLogger(clientLogger)
 }
@@ -450,7 +480,12 @@ func runLockdSmallJSONMinio(b *testing.B, env *benchmarkEnv) {
 			}
 			version = ""
 		}
-		if _, err := client.Release(ctx, api.ReleaseRequest{Key: key, LeaseID: lease.LeaseID}); err != nil {
+		if _, err := client.Release(ctx, api.ReleaseRequest{
+			Namespace: namespaces.Default,
+			Key:       key,
+			LeaseID:   lease.LeaseID,
+			TxnID:     lease.TxnID,
+		}); err != nil {
 			b.Fatalf("release: %v", err)
 		}
 		env.cleanupKey(b, key)
@@ -481,7 +516,12 @@ func BenchmarkLockdConcurrentDistinctKeys(b *testing.B) {
 			if _, err := client.UpdateBytes(ctx, key, lease.LeaseID, payload, opts); err != nil {
 				b.Fatalf("update state: %v", err)
 			}
-			if _, err := client.Release(ctx, api.ReleaseRequest{Key: key, LeaseID: lease.LeaseID}); err != nil {
+			if _, err := client.Release(ctx, api.ReleaseRequest{
+				Namespace: namespaces.Default,
+				Key:       key,
+				LeaseID:   lease.LeaseID,
+				TxnID:     lease.TxnID,
+			}); err != nil {
 				b.Fatalf("release: %v", err)
 			}
 			env.cleanupKey(b, key)
@@ -571,7 +611,12 @@ func BenchmarkLockdConcurrentLarge(b *testing.B) {
 			if _, err := client.UpdateBytes(ctx, key, lease.LeaseID, payload, opts); err != nil {
 				b.Fatalf("update state: %v", err)
 			}
-			if _, err := client.Release(ctx, api.ReleaseRequest{Key: key, LeaseID: lease.LeaseID}); err != nil {
+			if _, err := client.Release(ctx, api.ReleaseRequest{
+				Namespace: namespaces.Default,
+				Key:       key,
+				LeaseID:   lease.LeaseID,
+				TxnID:     lease.TxnID,
+			}); err != nil {
 				b.Fatalf("release: %v", err)
 			}
 			env.cleanupKey(b, key)
@@ -581,90 +626,4 @@ func BenchmarkLockdConcurrentLarge(b *testing.B) {
 
 func init() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
-}
-
-func loadMinioConfig(tb testing.TB) lockd.Config {
-	tb.Helper()
-	ensureMinioCredentials(tb)
-
-	store := os.Getenv("LOCKD_STORE")
-	if store == "" {
-		store = "s3://localhost:9000/lockd-integration?insecure=1"
-	}
-	if !strings.HasPrefix(store, "s3://") {
-		tb.Skip("LOCKD_STORE must reference an s3:// URI for MinIO benchmarks")
-	}
-
-	cfg := lockd.Config{
-		Store:           store,
-		S3MaxPartSize:   8 << 20,
-		SweeperInterval: time.Second,
-	}
-	if err := cfg.Validate(); err != nil {
-		tb.Fatalf("config validation: %v", err)
-	}
-	return cfg
-}
-
-func ensureMinioCredentials(tb testing.TB) {
-	tb.Helper()
-	if _, ok := os.LookupEnv("MINIO_ROOT_USER"); !ok {
-		tb.Setenv("MINIO_ROOT_USER", "minioadmin")
-	}
-	if _, ok := os.LookupEnv("MINIO_ROOT_PASSWORD"); !ok {
-		tb.Setenv("MINIO_ROOT_PASSWORD", "minioadmin")
-	}
-	if _, ok := os.LookupEnv("MINIO_ACCESS_KEY"); !ok {
-		tb.Setenv("MINIO_ACCESS_KEY", "minioadmin")
-	}
-	if _, ok := os.LookupEnv("MINIO_SECRET_KEY"); !ok {
-		tb.Setenv("MINIO_SECRET_KEY", "minioadmin")
-	}
-	if _, ok := os.LookupEnv("LOCKD_S3_ACCESS_KEY_ID"); !ok {
-		tb.Setenv("LOCKD_S3_ACCESS_KEY_ID", "minioadmin")
-	}
-	if _, ok := os.LookupEnv("LOCKD_S3_SECRET_ACCESS_KEY"); !ok {
-		tb.Setenv("LOCKD_S3_SECRET_ACCESS_KEY", "minioadmin")
-	}
-	if _, ok := os.LookupEnv("LOCKD_S3_ROOT_USER"); !ok {
-		tb.Setenv("LOCKD_S3_ROOT_USER", "minioadmin")
-	}
-	if _, ok := os.LookupEnv("LOCKD_S3_ROOT_PASSWORD"); !ok {
-		tb.Setenv("LOCKD_S3_ROOT_PASSWORD", "minioadmin")
-	}
-}
-
-func ensureMinioBucket(tb testing.TB, cfg lockd.Config) {
-	tb.Helper()
-	minioCfg, _, err := lockd.BuildGenericS3Config(cfg)
-	if err != nil {
-		tb.Fatalf("build s3 config: %v", err)
-	}
-	store, err := s3.New(minioCfg)
-	if err != nil {
-		tb.Fatalf("new minio store: %v", err)
-	}
-	tb.Cleanup(func() { _ = store.Close() })
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	exists, err := store.Client().BucketExists(ctx, minioCfg.Bucket)
-	if err != nil {
-		tb.Fatalf("bucket exists: %v", err)
-	}
-	if !exists {
-		if err := store.Client().MakeBucket(ctx, minioCfg.Bucket, minio.MakeBucketOptions{Region: minioCfg.Region}); err != nil {
-			tb.Fatalf("make bucket: %v", err)
-		}
-	}
-}
-
-func ensureStoreReady(tb testing.TB, ctx context.Context, cfg lockd.Config) {
-	tb.Helper()
-	res, err := storagecheck.VerifyStore(ctx, cfg)
-	if err != nil {
-		tb.Fatalf("verify store: %v", err)
-	}
-	if !res.Passed() {
-		tb.Fatalf("store verification failed: %+v", res)
-	}
 }

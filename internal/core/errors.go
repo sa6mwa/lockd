@@ -10,6 +10,8 @@ type Failure struct {
 	RetryAfter int64 // seconds
 	Version    int64
 	ETag       string
+	// LeaderEndpoint provides the current TC leader when relevant.
+	LeaderEndpoint string
 	HTTPStatus int // optional hint for HTTP adapters
 }
 

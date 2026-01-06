@@ -114,24 +114,24 @@ func (s *Service) streamPublishedDocument(ctx context.Context, namespace, key st
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	reader, version, skip, err := s.OpenPublishedDocument(ctx, namespace, key)
+	doc, err := s.OpenPublishedDocument(ctx, namespace, key)
 	if err != nil {
 		return err
 	}
-	if skip {
-		if reader != nil {
-			reader.Close()
+	if doc.NoContent {
+		if doc.Reader != nil {
+			doc.Reader.Close()
 		}
 		return nil
 	}
-	if reader == nil {
+	if doc.Reader == nil {
 		return nil
 	}
-	if err := sink.OnDocument(ctx, namespace, key, version, reader); err != nil {
-		reader.Close()
+	if err := sink.OnDocument(ctx, namespace, key, doc.Version, doc.Reader); err != nil {
+		doc.Reader.Close()
 		return err
 	}
-	reader.Close()
+	doc.Reader.Close()
 	return nil
 }
 
@@ -142,8 +142,8 @@ func (s *Service) selectQueryEngine(ctx context.Context, namespace string, hint 
 	}
 	cfg := s.defaultNamespaceConfig
 	if s.namespaceConfigs != nil {
-		if loaded, _, loadErr := s.namespaceConfigs.Load(ctx, namespace); loadErr == nil {
-			cfg = loaded
+		if loaded, loadErr := s.namespaceConfigs.Load(ctx, namespace); loadErr == nil {
+			cfg = loaded.Config
 			cfg.Normalize()
 		}
 	}

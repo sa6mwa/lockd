@@ -1,0 +1,89 @@
+@startuml xa-queue-dequeue
+
+title XA queue dequeue (message + optional state)
+autonumber
+
+participant "client SDK operation" as SDK
+participant "lockd RM (queue)" as RM
+participant "lockd TC leader" as TC
+database "Queue backend" as Store
+
+== Dequeue with txn_id ==
+SDK -> RM: POST /v1/queue/dequeue (queue, owner, txn_id)
+loop CAS retry (message lease)
+  RM -> Store: load_meta(q/<queue>/msg/<id>)
+  alt meta missing
+    RM -> Store: store_meta(expected_etag="",\nlease_id, lease_owner, lease_expires_at,\nlease_txn_id, fencing_token++)
+  else meta present
+    RM -> Store: store_meta(expected_etag=meta_etag,\nlease_id, lease_owner, lease_expires_at,\nlease_txn_id, fencing_token++)
+  end
+end
+loop CAS retry (message doc)
+  RM -> Store: get_message_doc(queue/<id>)
+  RM -> Store: put_message_doc(expected_etag=doc_etag,\nlease_id, lease_txn_id, lease_fencing_token,\nattempts++, not_visible_until)
+end
+RM -> Store: get_payload(queue/<id>)
+loop CAS retry (txn record)
+  RM -> Store: get_txn_record(.txns/<txn_id>)
+  alt txn record missing
+    RM -> Store: put_txn_record(state=pending,\nparticipants+=q/<queue>/msg/<id>) (expected_etag="")
+  else txn record exists
+    RM -> Store: put_txn_record(state=pending,\nparticipants+=q/<queue>/msg/<id>) (expected_etag=txn_etag)
+  end
+end
+RM --> SDK: message + lease_id + txn_id + meta_etag + fencing_token
+
+opt stateful dequeue
+  loop CAS retry (state lease)
+    RM -> Store: load_meta(q/<queue>/state/<id>)
+    RM -> Store: store_meta(expected_etag=meta_etag,\nlease_id, lease_owner, lease_txn_id,\nfencing_token++)
+  end
+  loop CAS retry (txn record)
+    RM -> Store: get_txn_record(.txns/<txn_id>)
+    alt txn record missing
+      RM -> Store: put_txn_record(state=pending,\nparticipants+=q/<queue>/state/<id>) (expected_etag="")
+    else txn record exists
+      RM -> Store: put_txn_record(state=pending,\nparticipants+=q/<queue>/state/<id>) (expected_etag=txn_etag)
+    end
+  end
+end
+
+== Decide + apply ==
+SDK -> RM: POST /v1/queue/ack or /v1/queue/nack
+RM -> TC: POST /v1/txn/decide (commit|rollback,\nparticipants, tc_term)
+loop CAS retry (txn record)
+  TC -> Store: get_txn_record(.txns/<txn_id>)
+  alt txn record missing
+    TC -> Store: put_txn_record(state=commit|rollback,\nparticipants merged, tc_term) (expected_etag="")
+  else txn record exists
+    TC -> Store: put_txn_record(state=commit|rollback,\nparticipants merged, tc_term) (expected_etag=txn_etag)
+  end
+end
+
+alt commit (ACK)
+  loop CAS retry (message removal)
+    RM -> Store: load_meta(q/<queue>/msg/<id>)
+    RM -> Store: get_message_doc(queue/<id>)
+    RM -> Store: delete_message_doc(expected_etag=doc_etag)
+    RM -> Store: delete_payload(expected_etag=payload_etag)
+    RM -> Store: store_meta(expected_etag=meta_etag,\nclear lease)
+  end
+  opt stateful participant
+    RM -> Store: load_meta(q/<queue>/state/<id>)
+    RM -> Store: delete_state(expected_etag=state_etag)
+    RM -> Store: store_meta(expected_etag=meta_etag,\nclear lease)
+  end
+else rollback (NACK)
+  loop CAS retry (message reschedule)
+    RM -> Store: load_meta(q/<queue>/msg/<id>)
+    RM -> Store: get_message_doc(queue/<id>)
+    RM -> Store: put_message_doc(expected_etag=doc_etag,\nclear lease, not_visible_until)
+    RM -> Store: store_meta(expected_etag=meta_etag,\nclear lease, visibility reset)
+  end
+  opt stateful participant
+    RM -> Store: load_meta(q/<queue>/state/<id>)
+    RM -> Store: store_meta(expected_etag=meta_etag,\nclear lease)
+  end
+end
+
+@enduml

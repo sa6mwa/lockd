@@ -23,7 +23,6 @@ import (
 	"pkt.systems/lockd/integration/internal/cryptotest"
 	shutdowntest "pkt.systems/lockd/integration/internal/shutdowntest"
 	queuetestutil "pkt.systems/lockd/integration/queue/testutil"
-	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/qrf"
 	memorybackend "pkt.systems/lockd/internal/storage/memory"
 	"pkt.systems/lockd/internal/uuidv7"
@@ -69,7 +68,7 @@ func RunMemLQScenarios(t *testing.T, mode memQueueMode) {
 }
 
 func runMemQueueBasics(t *testing.T, mode memQueueMode) {
-	queuetestutil.InstallWatchdog(t, "mem-queue-suite", 10*time.Second)
+	queuetestutil.InstallWatchdog(t, "mem-queue-suite", 30*time.Second)
 
 	cfg := buildMemQueueConfig(t, mode.queueWatch)
 	ts := startMemQueueServer(t, cfg)
@@ -83,6 +82,44 @@ func runMemQueueBasics(t *testing.T, mode memQueueMode) {
 	t.Run("NackRedelivery", func(t *testing.T) {
 		queuetestutil.InstallWatchdog(t, "mem-nack", 5*time.Second)
 		queuetestutil.RunQueueNackScenario(t, cli, queuetestutil.QueueName("mem-nack"), []byte("mem nack payload"))
+	})
+
+	t.Run("TxnDecisionCommit", func(t *testing.T) {
+		queuetestutil.InstallWatchdog(t, "mem-txn-commit", 8*time.Second)
+		queuetestutil.RunQueueTxnDecisionScenario(t, ts, true)
+	})
+
+	t.Run("TxnDecisionRollback", func(t *testing.T) {
+		queuetestutil.InstallWatchdog(t, "mem-txn-rollback", 8*time.Second)
+		queuetestutil.RunQueueTxnDecisionScenario(t, ts, false)
+	})
+
+	t.Run("TxnStatefulDecisionCommit", func(t *testing.T) {
+		queuetestutil.InstallWatchdog(t, "mem-txn-stateful-commit", 8*time.Second)
+		queuetestutil.RunQueueTxnStatefulDecisionScenario(t, ts, true)
+	})
+
+	t.Run("TxnStatefulDecisionRollback", func(t *testing.T) {
+		queuetestutil.InstallWatchdog(t, "mem-txn-stateful-rollback", 8*time.Second)
+		queuetestutil.RunQueueTxnStatefulDecisionScenario(t, ts, false)
+	})
+
+	t.Run("TxnMixedKeyCommit", func(t *testing.T) {
+		queuetestutil.InstallWatchdog(t, "mem-txn-mixed-commit", 15*time.Second)
+		queuetestutil.RunQueueTxnMixedKeyScenario(t, ts, true)
+	})
+	t.Run("TxnMixedKeyRollback", func(t *testing.T) {
+		queuetestutil.InstallWatchdog(t, "mem-txn-mixed-rollback", 15*time.Second)
+		queuetestutil.RunQueueTxnMixedKeyScenario(t, ts, false)
+	})
+
+	t.Run("TxnReplayCommit", func(t *testing.T) {
+		queuetestutil.InstallWatchdog(t, "mem-txn-replay-commit", 15*time.Second)
+		queuetestutil.RunQueueTxnReplayScenario(t, cfg, startMemQueueServerWithOptions, true)
+	})
+	t.Run("TxnReplayRollback", func(t *testing.T) {
+		queuetestutil.InstallWatchdog(t, "mem-txn-replay-rollback", 15*time.Second)
+		queuetestutil.RunQueueTxnReplayScenario(t, cfg, startMemQueueServerWithOptions, false)
 	})
 }
 
@@ -426,8 +463,7 @@ func buildMemQueueConfig(t testing.TB, queueWatch bool) lockd.Config {
 		QueuePollJitter:            0,
 		QueueResilientPollInterval: 200 * time.Millisecond,
 	}
-	cfg.MemQueueWatch = queueWatch
-	cfg.MemQueueWatchSet = true
+	cfg.DisableMemQueueWatch = !queueWatch
 	cfg.QRFEnabled = true
 	cfg.QRFQueueSoftLimit = 3
 	cfg.QRFQueueHardLimit = 6
@@ -715,12 +751,8 @@ func runMemQueueMultiServerRouting(t *testing.T, mode memQueueMode) {
 	cfg := buildMemQueueConfig(t, mode.queueWatch)
 	backend := memorybackend.New()
 
-	var sharedCreds lockd.TestMTLSCredentials
-	if cryptotest.TestMTLSEnabled() {
-		sharedCreds = cryptotest.SharedMTLSCredentials(t)
-	}
-	serverA := startMemQueueServerWithBackend(t, cfg, backend, cryptotest.SharedMTLSOptions(t, sharedCreds)...)
-	serverB := startMemQueueServerWithBackend(t, cfg, backend, cryptotest.SharedMTLSOptions(t, sharedCreds)...)
+	serverA := startMemQueueServerWithBackend(t, cfg, backend, cryptotest.SharedMTLSOptions(t)...)
+	serverB := startMemQueueServerWithBackend(t, cfg, backend, cryptotest.SharedMTLSOptions(t)...)
 
 	queue := queuetestutil.QueueName("mem-routing")
 	payload := []byte("shared-backend")
@@ -750,7 +782,7 @@ func runMemQueueMultiServerFailoverClient(t *testing.T, mode memQueueMode) {
 
 	serverA := startMemQueueServerWithBackend(t, cfg, backend)
 	creds := serverA.TestMTLSCredentials()
-	serverB := startMemQueueServerWithBackend(t, cfg, backend, cryptotest.SharedMTLSOptions(t, creds)...)
+	serverB := startMemQueueServerWithBackend(t, cfg, backend)
 
 	queue := queuetestutil.QueueName("mem-failover")
 	queuetestutil.MustEnqueueBytes(t, serverA.Client, queue, []byte("failover-payload"))
@@ -1049,11 +1081,12 @@ func startMemQueueServerWithCapture(t testing.TB, cfg lockd.Config) (*lockd.Test
 
 func startMemQueueServer(t testing.TB, cfg lockd.Config) *lockd.TestServer {
 	t.Helper()
+	cryptotest.ConfigureTCAuth(t, &cfg)
 	options := []lockd.TestServerOption{
 		lockd.WithTestConfig(cfg),
-		lockd.WithTestLogger(loggingutil.NoopLogger()),
+		lockd.WithTestLogger(pslog.NoopLogger()),
 		lockd.WithTestClientOptions(
-			lockdclient.WithLogger(loggingutil.NoopLogger()),
+			lockdclient.WithLogger(pslog.NoopLogger()),
 			lockdclient.WithHTTPTimeout(30*time.Second),
 			lockdclient.WithKeepAliveTimeout(30*time.Second),
 			lockdclient.WithCloseTimeout(30*time.Second),
@@ -1063,14 +1096,33 @@ func startMemQueueServer(t testing.TB, cfg lockd.Config) *lockd.TestServer {
 	return lockd.StartTestServer(t, options...)
 }
 
+func startMemQueueServerWithOptions(t testing.TB, cfg lockd.Config, extra ...lockd.TestServerOption) *lockd.TestServer {
+	t.Helper()
+	cryptotest.ConfigureTCAuth(t, &cfg)
+	options := []lockd.TestServerOption{
+		lockd.WithTestConfig(cfg),
+		lockd.WithTestLogger(pslog.NoopLogger()),
+		lockd.WithTestClientOptions(
+			lockdclient.WithLogger(pslog.NoopLogger()),
+			lockdclient.WithHTTPTimeout(30*time.Second),
+			lockdclient.WithKeepAliveTimeout(30*time.Second),
+			lockdclient.WithCloseTimeout(30*time.Second),
+		),
+	}
+	options = append(options, extra...)
+	options = append(options, cryptotest.SharedMTLSOptions(t)...)
+	return lockd.StartTestServer(t, options...)
+}
+
 func startMemQueueServerWithBackend(t testing.TB, cfg lockd.Config, backend *memorybackend.Store, extra ...lockd.TestServerOption) *lockd.TestServer {
 	t.Helper()
+	cryptotest.ConfigureTCAuth(t, &cfg)
 	options := []lockd.TestServerOption{
 		lockd.WithTestConfig(cfg),
 		lockd.WithTestBackend(backend),
-		lockd.WithTestLogger(loggingutil.NoopLogger()),
+		lockd.WithTestLogger(pslog.NoopLogger()),
 		lockd.WithTestClientOptions(
-			lockdclient.WithLogger(loggingutil.NoopLogger()),
+			lockdclient.WithLogger(pslog.NoopLogger()),
 			lockdclient.WithHTTPTimeout(30*time.Second),
 			lockdclient.WithKeepAliveTimeout(30*time.Second),
 			lockdclient.WithCloseTimeout(30*time.Second),
@@ -1132,13 +1184,13 @@ func ensureQueueRecovered(t testing.TB, ts *lockd.TestServer, cli *lockdclient.C
 	deadline := time.Now().Add(15 * time.Second)
 	for {
 		if ts != nil && ts.Server != nil {
-			state, reason, snap := ts.Server.QRFStatus()
-			if state != qrf.StateEngaged &&
-				snap.QueueProducerInflight == 0 &&
-				snap.QueueConsumerInflight == 0 &&
-				snap.QueueAckInflight == 0 &&
-				snap.Load1Multiplier <= 1.05 {
-				t.Logf("[recovery-pass] qrf state=%s reason=%s multiplier=%.2f", state.String(), reason, snap.Load1Multiplier)
+			status := ts.Server.QRFStatus()
+			if status.State != qrf.StateEngaged &&
+				status.Snapshot.QueueProducerInflight == 0 &&
+				status.Snapshot.QueueConsumerInflight == 0 &&
+				status.Snapshot.QueueAckInflight == 0 &&
+				status.Snapshot.Load1Multiplier <= 1.05 {
+				t.Logf("[recovery-pass] qrf state=%s reason=%s multiplier=%.2f", status.State.String(), status.Reason, status.Snapshot.Load1Multiplier)
 				return
 			}
 		}
@@ -1172,19 +1224,19 @@ func ensureQueueRecovered(t testing.TB, ts *lockd.TestServer, cli *lockdclient.C
 func dumpQRFDiagnostics(t testing.TB, ts *lockd.TestServer, label string) {
 	t.Helper()
 	if ts != nil && ts.Server != nil {
-		state, reason, snap := ts.Server.QRFStatus()
+		status := ts.Server.QRFStatus()
 		t.Logf("[%s] qrf state=%s reason=%s queue_producers=%d queue_consumers=%d queue_ack=%d load1=%.2f baseline=%.2f multiplier=%.2f cpu=%.2f mem=%.2f",
 			label,
-			state.String(),
-			reason,
-			snap.QueueProducerInflight,
-			snap.QueueConsumerInflight,
-			snap.QueueAckInflight,
-			snap.SystemLoad1,
-			snap.Load1Baseline,
-			snap.Load1Multiplier,
-			snap.SystemCPUPercent,
-			snap.SystemMemoryUsedPercent,
+			status.State.String(),
+			status.Reason,
+			status.Snapshot.QueueProducerInflight,
+			status.Snapshot.QueueConsumerInflight,
+			status.Snapshot.QueueAckInflight,
+			status.Snapshot.SystemLoad1,
+			status.Snapshot.Load1Baseline,
+			status.Snapshot.Load1Multiplier,
+			status.Snapshot.SystemCPUPercent,
+			status.Snapshot.SystemMemoryUsedPercent,
 		)
 	}
 	if g := pprof.Lookup("goroutine"); g != nil {

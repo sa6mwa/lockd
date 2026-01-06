@@ -13,7 +13,7 @@ import (
 func TestNamespaceIsolationLocks(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
-	ts := StartTestServer(t)
+	ts := startTestServerFast(t)
 
 	defaultClient, err := ts.NewClient(client.WithDefaultNamespace(DefaultNamespace))
 	if err != nil {
@@ -106,7 +106,7 @@ func TestNamespaceIsolationLocks(t *testing.T) {
 func TestNamespaceIsolationQueues(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
-	ts := StartTestServer(t)
+	ts := startTestServerFast(t)
 
 	defaultClient, err := ts.NewClient(client.WithDefaultNamespace(DefaultNamespace))
 	if err != nil {

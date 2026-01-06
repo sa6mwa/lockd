@@ -42,14 +42,14 @@ func TestVerifyMetaStateDecryptionDetectsCorruption(t *testing.T) {
 			t.Fatalf("update meta with descriptor: %v", err)
 		}
 	}
-	reader, _, err := base.ReadState(ctx, namespace, metaKey)
+	readRes, err := base.ReadState(ctx, namespace, metaKey)
 	if err != nil {
 		t.Fatalf("baseline read state: %v", err)
 	}
-	if _, err := io.ReadAll(reader); err != nil {
+	if _, err := io.ReadAll(readRes.Reader); err != nil {
 		t.Fatalf("baseline consume state: %v", err)
 	}
-	if err := reader.Close(); err != nil {
+	if err := readRes.Reader.Close(); err != nil {
 		t.Fatalf("baseline close reader: %v", err)
 	}
 
@@ -145,26 +145,34 @@ type backendWrapper struct {
 	putObjectHook func(context.Context, string, string, io.Reader, storage.PutObjectOptions) (io.Reader, storage.PutObjectOptions, error)
 }
 
-func (b *backendWrapper) ReadState(ctx context.Context, namespace, key string) (io.ReadCloser, *storage.StateInfo, error) {
-	reader, info, err := b.Backend.ReadState(ctx, namespace, key)
+func (b *backendWrapper) ReadState(ctx context.Context, namespace, key string) (storage.ReadStateResult, error) {
+	result, err := b.Backend.ReadState(ctx, namespace, key)
 	if err != nil {
-		return reader, info, err
+		return result, err
 	}
 	if b.readStateHook == nil {
-		return reader, info, nil
+		return result, nil
 	}
-	return b.readStateHook(ctx, namespace, key, reader, info)
+	reader, info, err := b.readStateHook(ctx, namespace, key, result.Reader, result.Info)
+	if err != nil {
+		return storage.ReadStateResult{}, err
+	}
+	return storage.ReadStateResult{Reader: reader, Info: info}, nil
 }
 
-func (b *backendWrapper) GetObject(ctx context.Context, namespace, key string) (io.ReadCloser, *storage.ObjectInfo, error) {
-	reader, info, err := b.Backend.GetObject(ctx, namespace, key)
+func (b *backendWrapper) GetObject(ctx context.Context, namespace, key string) (storage.GetObjectResult, error) {
+	result, err := b.Backend.GetObject(ctx, namespace, key)
 	if err != nil {
-		return reader, info, err
+		return result, err
 	}
 	if b.getObjectHook == nil {
-		return reader, info, nil
+		return result, nil
 	}
-	return b.getObjectHook(ctx, namespace, key, reader, info)
+	reader, info, err := b.getObjectHook(ctx, namespace, key, result.Reader, result.Info)
+	if err != nil {
+		return storage.GetObjectResult{}, err
+	}
+	return storage.GetObjectResult{Reader: reader, Info: info}, nil
 }
 
 func (b *backendWrapper) PutObject(ctx context.Context, namespace, key string, body io.Reader, opts storage.PutObjectOptions) (*storage.ObjectInfo, error) {

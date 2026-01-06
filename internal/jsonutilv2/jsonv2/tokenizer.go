@@ -33,6 +33,12 @@ const (
 	TokenComma
 )
 
+// Token captures a JSON token and its raw bytes.
+type Token struct {
+	Kind Kind
+	Raw  []byte
+}
+
 // Tokenizer incrementally decodes JSON tokens from an io.Reader. It borrows
 // the tokenization logic from the Go 1.25 json v2 runtime while avoiding the
 // goexperiment build flag.
@@ -56,8 +62,8 @@ func NewTokenizer(r io.Reader, maxBytes int64) *Tokenizer {
 	}
 }
 
-// Next advances to the next token, returning its kind, raw bytes, and any error encountered.
-func (t *Tokenizer) Next() (Kind, []byte, error) {
+// Next advances to the next token, returning it alongside any error encountered.
+func (t *Tokenizer) Next() (Token, error) {
 	for {
 		if err := t.ensureBuffered(); err != nil {
 			if errors.Is(err, io.EOF) {
@@ -65,15 +71,15 @@ func (t *Tokenizer) Next() (Kind, []byte, error) {
 					// if data remains, continue processing; otherwise signal EOF
 					t.eof = true
 				} else {
-					return TokenEOF, nil, io.EOF
+					return Token{Kind: TokenEOF}, io.EOF
 				}
 			} else {
-				return TokenEOF, nil, err
+				return Token{Kind: TokenEOF}, err
 			}
 		}
 		if t.pos >= len(t.buf) {
 			if t.eof {
-				return TokenEOF, nil, io.EOF
+				return Token{Kind: TokenEOF}, io.EOF
 			}
 			continue
 		}
@@ -90,27 +96,27 @@ func (t *Tokenizer) Next() (Kind, []byte, error) {
 		case '{':
 			start := t.pos
 			t.pos++
-			return TokenBeginObject, t.buf[start:t.pos], nil
+			return Token{Kind: TokenBeginObject, Raw: t.buf[start:t.pos]}, nil
 		case '}':
 			start := t.pos
 			t.pos++
-			return TokenEndObject, t.buf[start:t.pos], nil
+			return Token{Kind: TokenEndObject, Raw: t.buf[start:t.pos]}, nil
 		case '[':
 			start := t.pos
 			t.pos++
-			return TokenBeginArray, t.buf[start:t.pos], nil
+			return Token{Kind: TokenBeginArray, Raw: t.buf[start:t.pos]}, nil
 		case ']':
 			start := t.pos
 			t.pos++
-			return TokenEndArray, t.buf[start:t.pos], nil
+			return Token{Kind: TokenEndArray, Raw: t.buf[start:t.pos]}, nil
 		case ':':
 			start := t.pos
 			t.pos++
-			return TokenColon, t.buf[start:t.pos], nil
+			return Token{Kind: TokenColon, Raw: t.buf[start:t.pos]}, nil
 		case ',':
 			start := t.pos
 			t.pos++
-			return TokenComma, t.buf[start:t.pos], nil
+			return Token{Kind: TokenComma, Raw: t.buf[start:t.pos]}, nil
 		case '"':
 			return t.readString()
 		case 't':
@@ -122,12 +128,12 @@ func (t *Tokenizer) Next() (Kind, []byte, error) {
 		case '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
 			return t.readNumber()
 		default:
-			return TokenEOF, nil, newInvalidCharacterError(t.buf[t.pos:], "looking for beginning of value")
+			return Token{Kind: TokenEOF}, newInvalidCharacterError(t.buf[t.pos:], "looking for beginning of value")
 		}
 	}
 }
 
-func (t *Tokenizer) readString() (Kind, []byte, error) {
+func (t *Tokenizer) readString() (Token, error) {
 	start := t.pos
 	var flags valueFlags
 	resume := 0
@@ -138,24 +144,24 @@ func (t *Tokenizer) readString() (Kind, []byte, error) {
 		if err == nil {
 			end := start + n
 			t.pos = end
-			return TokenString, t.buf[start:end], nil
+			return Token{Kind: TokenString, Raw: t.buf[start:end]}, nil
 		}
 		if errors.Is(err, io.ErrUnexpectedEOF) {
 			resume = n
 			if fetchErr := t.fetch(); fetchErr != nil {
 				if errors.Is(fetchErr, io.EOF) {
-					return TokenEOF, nil, errInvalidEOF
+					return Token{Kind: TokenEOF}, errInvalidEOF
 				}
-				return TokenEOF, nil, fetchErr
+				return Token{Kind: TokenEOF}, fetchErr
 			}
 			start = t.pos
 			continue
 		}
-		return TokenEOF, nil, err
+		return Token{Kind: TokenEOF}, err
 	}
 }
 
-func (t *Tokenizer) readLiteral(lit string) (Kind, []byte, error) {
+func (t *Tokenizer) readLiteral(lit string) (Token, error) {
 	start := t.pos
 	for {
 		n, err := consumeLiteral(t.buf[start:], lit)
@@ -165,36 +171,36 @@ func (t *Tokenizer) readLiteral(lit string) (Kind, []byte, error) {
 				if fetchErr := t.fetch(); fetchErr != nil {
 					if errors.Is(fetchErr, io.EOF) {
 						t.pos = end
-						return TokenLiteral, t.buf[start:end], nil
+						return Token{Kind: TokenLiteral, Raw: t.buf[start:end]}, nil
 					}
-					return TokenEOF, nil, fetchErr
+					return Token{Kind: TokenEOF}, fetchErr
 				}
 				start = t.pos
 				continue
 			}
 			if end < len(t.buf) {
 				if err := validateLiteralTerminator(t.buf[end]); err != nil {
-					return TokenEOF, nil, err
+					return Token{Kind: TokenEOF}, err
 				}
 			}
 			t.pos = end
-			return TokenLiteral, t.buf[start:end], nil
+			return Token{Kind: TokenLiteral, Raw: t.buf[start:end]}, nil
 		}
 		if errors.Is(err, io.ErrUnexpectedEOF) {
 			if fetchErr := t.fetch(); fetchErr != nil {
 				if errors.Is(fetchErr, io.EOF) {
-					return TokenEOF, nil, errInvalidEOF
+					return Token{Kind: TokenEOF}, errInvalidEOF
 				}
-				return TokenEOF, nil, fetchErr
+				return Token{Kind: TokenEOF}, fetchErr
 			}
 			start = t.pos
 			continue
 		}
-		return TokenEOF, nil, err
+		return Token{Kind: TokenEOF}, err
 	}
 }
 
-func (t *Tokenizer) readNumber() (Kind, []byte, error) {
+func (t *Tokenizer) readNumber() (Token, error) {
 	start := t.pos
 	resume := 0
 	state := consumeNumberInit
@@ -208,19 +214,19 @@ func (t *Tokenizer) readNumber() (Kind, []byte, error) {
 		case err == nil && !t.needMore(end):
 			if end < len(t.buf) {
 				if valErr := validateNumberTerminator(t.buf[end]); valErr != nil {
-					return TokenEOF, nil, valErr
+					return Token{Kind: TokenEOF}, valErr
 				}
 			}
 			t.pos = end
-			return TokenNumber, t.buf[start:end], nil
+			return Token{Kind: TokenNumber, Raw: t.buf[start:end]}, nil
 		case err == nil && t.needMore(end):
 			resume = n
 			if fetchErr := t.fetch(); fetchErr != nil {
 				if errors.Is(fetchErr, io.EOF) {
 					t.pos = end
-					return TokenNumber, t.buf[start:end], nil
+					return Token{Kind: TokenNumber, Raw: t.buf[start:end]}, nil
 				}
-				return TokenEOF, nil, fetchErr
+				return Token{Kind: TokenEOF}, fetchErr
 			}
 			start = t.pos
 			continue
@@ -228,14 +234,14 @@ func (t *Tokenizer) readNumber() (Kind, []byte, error) {
 			resume = n
 			if fetchErr := t.fetch(); fetchErr != nil {
 				if errors.Is(fetchErr, io.EOF) {
-					return TokenEOF, nil, errInvalidEOF
+					return Token{Kind: TokenEOF}, errInvalidEOF
 				}
-				return TokenEOF, nil, fetchErr
+				return Token{Kind: TokenEOF}, fetchErr
 			}
 			start = t.pos
 			continue
 		default:
-			return TokenEOF, nil, err
+			return Token{Kind: TokenEOF}, err
 		}
 	}
 }

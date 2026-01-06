@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/storage/memory"
+	"pkt.systems/pslog"
 )
 
 func FuzzCompactJSON(f *testing.F) {
@@ -23,7 +23,7 @@ func FuzzCompactJSON(f *testing.F) {
 	f.Fuzz(func(t *testing.T, input []byte) {
 		h := New(Config{
 			Store:                memory.New(),
-			Logger:               loggingutil.NoopLogger(),
+			Logger:               pslog.NoopLogger(),
 			JSONMaxBytes:         1 << 20,
 			DefaultTTL:           time.Second,
 			MaxTTL:               time.Minute,

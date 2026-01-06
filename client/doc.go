@@ -29,6 +29,8 @@
 //	    Owner:      "worker-1",
 //	    TTLSeconds: 30,
 //	    BlockSecs:  client.BlockWaitForever,
+//	    // Optional: join an existing transaction across multiple keys.
+//	    TxnID:      existingTxnID,
 //	}
 //	lease, err := cli.Acquire(ctx, req)
 //	if err != nil {
@@ -45,11 +47,18 @@
 //	    log.Fatal(err)
 //	}
 //
+// The lease session carries the `TxnID` minted by Acquire. All lease-bound
+// mutations (Update/Remove/UpdateMetadata/Release/attachments) require that
+// transaction id. The SDK supplies `X-Txn-ID` automatically when you use
+// `LeaseSession`; raw HTTP clients must provide it themselves.
+//
 // When most operations live in a single namespace, wrap the client with
 // client.WithDefaultNamespace("workflows") so explicit Namespace fields can be
 // omitted without relying on the server fallback. The CLI mirrors this via
 // --namespace / LOCKD_CLIENT_NAMESPACE for leases and LOCKD_QUEUE_NAMESPACE for
 // queue flows.
+// Namespaces that start with "." are reserved for lockd internals (e.g. `.txns`
+// stores transaction records) and are rejected by both HTTP and core services.
 //
 // The lease session tracks fencing tokens automatically; the same `Client`
 // instance should be reused for subsequent operations so KeepAlive, Get, Update,
@@ -87,6 +96,37 @@
 // lease—even when the handler returns an error. The context provided to the
 // handler is cancelled if keepalives fail or the lease is lost, so long-running
 // work can react quickly.
+//
+// # Attachments
+//
+// Leases can stage binary attachments alongside JSON state. Attachments are
+// streamed and committed when the lease is released:
+//
+// Use `ListAttachments`/`RetrieveAttachment` on the lease to inspect staged
+// files, and `DeleteAttachment`/`DeleteAllAttachments` to stage removals that
+// apply on release (rollbacks discard staged changes).
+// Lease-bound attachment operations require the transaction id; public reads
+// do not.
+//
+//	file, _ := os.Open("invoice.pdf")
+//	defer file.Close()
+//	if _, err := lease.Attach(ctx, client.AttachRequest{
+//	    Name:        "invoice.pdf",
+//	    ContentType: "application/pdf",
+//	    Body:        file,
+//	}); err != nil {
+//	    log.Fatal(err)
+//	}
+//	if err := lease.Release(ctx); err != nil {
+//	    log.Fatal(err)
+//	}
+//
+// Public reads can list or download attachments after commit:
+//
+//	resp, _ := cli.Get(ctx, "orders")
+//	defer resp.Close()
+//	list, _ := resp.ListAttachments(ctx)
+//	_ = list
 //
 // # Perimeter defence interoperability
 //

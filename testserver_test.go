@@ -12,7 +12,7 @@ import (
 )
 
 func TestNewTestServerDefault(t *testing.T) {
-	ts := StartTestServer(t)
+	ts := startTestServerFast(t)
 	if ts.Client == nil {
 		t.Fatal("expected auto client")
 	}
@@ -56,7 +56,7 @@ func TestNewTestServerDefault(t *testing.T) {
 
 func TestNewTestServerUnixSocket(t *testing.T) {
 	socket := t.TempDir() + "/lockd.sock"
-	ts := StartTestServer(t, WithTestUnixSocket(socket))
+	ts := startTestServerFast(t, WithTestUnixSocket(socket))
 	if !strings.HasPrefix(ts.URL(), "unix://") {
 		t.Fatalf("expected unix URL, got %s", ts.URL())
 	}
@@ -91,7 +91,7 @@ func TestNewTestServerWithChaos(t *testing.T) {
 		MaxDelay:        2 * time.Millisecond,
 		DropProbability: 0.0,
 	}
-	ts := StartTestServer(t, WithTestChaos(chaos))
+	ts := startTestServerFast(t, WithTestChaos(chaos))
 	serverAddr := ts.Server.ListenerAddr().String()
 	proxyAddr := ts.Addr().String()
 	if serverAddr == proxyAddr {
@@ -100,7 +100,7 @@ func TestNewTestServerWithChaos(t *testing.T) {
 }
 
 func TestNewTestServerWithoutClient(t *testing.T) {
-	ts := StartTestServer(t, WithoutTestClient())
+	ts := startTestServerFast(t, WithoutTestClient())
 	if ts.Client != nil {
 		t.Fatalf("expected client to be nil")
 	}

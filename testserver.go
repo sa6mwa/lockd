@@ -18,14 +18,17 @@ import (
 	"time"
 
 	"pkt.systems/lockd/client"
+	"pkt.systems/lockd/internal/clock"
 	"pkt.systems/lockd/internal/cryptoutil"
-	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/storage"
+	"pkt.systems/lockd/internal/txncoord"
+	"pkt.systems/lockd/internal/uuidv7"
 	"pkt.systems/lockd/tlsutil"
 	"pkt.systems/pslog"
 )
 
 const testMTLSEnv = "LOCKD_TEST_WITH_MTLS"
+const testingLogBufferEntries = 2000
 
 type testMTLSMode int
 
@@ -57,6 +60,11 @@ type testingWriter struct {
 	mu sync.Mutex
 	// closed guards against writes after the associated test has finished.
 	closed bool
+
+	entries    []string
+	next       int
+	full       bool
+	maxEntries int
 }
 
 func (w *testingWriter) Write(p []byte) (int, error) {
@@ -70,22 +78,7 @@ func (w *testingWriter) Write(p []byte) (int, error) {
 		if len(line) == 0 {
 			continue
 		}
-		w.t.Helper()
-		func(entry string) {
-			defer func() {
-				if r := recover(); r != nil {
-					msg := fmt.Sprint(r)
-					if strings.Contains(msg, "Log in goroutine after") {
-						return
-					}
-					if strings.Contains(msg, "Log in goroutine during concurrent Cleanups") {
-						return
-					}
-					panic(r)
-				}
-			}()
-			w.t.Log(entry)
-		}(string(line))
+		w.appendEntryLocked(string(line))
 	}
 	w.mu.Unlock()
 	return len(p), nil
@@ -93,8 +86,58 @@ func (w *testingWriter) Write(p []byte) (int, error) {
 
 func (w *testingWriter) close() {
 	w.mu.Lock()
+	if w.closed {
+		w.mu.Unlock()
+		return
+	}
 	w.closed = true
+	entries := w.snapshotLocked()
 	w.mu.Unlock()
+	if w.t == nil || !w.t.Failed() || len(entries) == 0 {
+		return
+	}
+	w.t.Helper()
+	w.t.Logf("server log (last %d entries):", len(entries))
+	for _, entry := range entries {
+		w.t.Log(entry)
+	}
+}
+
+func (w *testingWriter) appendEntryLocked(entry string) {
+	if w.maxEntries <= 0 {
+		return
+	}
+	if len(w.entries) < w.maxEntries {
+		w.entries = append(w.entries, entry)
+		if len(w.entries) == w.maxEntries {
+			w.next = 0
+			w.full = true
+		} else {
+			w.next = len(w.entries)
+		}
+		return
+	}
+	w.entries[w.next] = entry
+	w.next++
+	if w.next >= w.maxEntries {
+		w.next = 0
+		w.full = true
+	}
+}
+
+func (w *testingWriter) snapshotLocked() []string {
+	if len(w.entries) == 0 {
+		return nil
+	}
+	if !w.full {
+		out := make([]string, len(w.entries))
+		copy(out, w.entries)
+		return out
+	}
+	out := make([]string, 0, len(w.entries))
+	out = append(out, w.entries[w.next:]...)
+	out = append(out, w.entries[:w.next]...)
+	return out
 }
 
 // Stop shuts down the server using the provided context.
@@ -122,9 +165,38 @@ func (ts *TestServer) Stop(ctx context.Context, opts ...CloseOption) error {
 	return ts.stop(ctx, opts...)
 }
 
+// Abort stops the server abruptly without leaving TC cluster membership.
+// Intended for tests that need crash-like behaviour.
+func (ts *TestServer) Abort(ctx context.Context) error {
+	if ts == nil {
+		return nil
+	}
+	if ts.Client != nil {
+		_ = ts.Client.Close()
+	}
+	for _, cli := range ts.extraClients {
+		_ = cli.Close()
+	}
+	ts.extraClients = nil
+	for _, httpCli := range ts.extraHTTP {
+		if tr, ok := httpCli.Transport.(*http.Transport); ok {
+			tr.CloseIdleConnections()
+		}
+	}
+	ts.extraHTTP = nil
+	if ts.proxy != nil {
+		_ = ts.proxy.Close()
+		ts.proxy = nil
+	}
+	if ts.Server != nil {
+		return ts.Server.Abort(ctx)
+	}
+	return nil
+}
+
 // NewTestingLogger creates a pslog logger that writes through testing.TB.
 func NewTestingLogger(t testing.TB, level pslog.Level) pslog.Logger {
-	writer := &testingWriter{t: t}
+	writer := &testingWriter{t: t, maxEntries: testingLogBufferEntries}
 	t.Cleanup(writer.close)
 	logger := pslog.NewStructured(writer)
 	if level != pslog.NoLevel {
@@ -161,7 +233,13 @@ func (ts *TestServer) Backend() storage.Backend {
 	if ts == nil {
 		return nil
 	}
-	return ts.backend
+	if ts.backend != nil {
+		return ts.backend
+	}
+	if ts.Server != nil {
+		return ts.Server.backend
+	}
+	return nil
 }
 
 // NewClient returns a new client configured against the test server.
@@ -252,6 +330,9 @@ type testServerOptions struct {
 	closeDefaults    []CloseOption
 	closeDefaultsSet bool
 	mtlsMode         testMTLSMode
+	tcLeaseTTL       time.Duration
+	clock            clock.Clock
+	tcFanoutGate     txncoord.FanoutGate
 }
 
 // TestServerOption customises NewTestServer/StartTestServer behaviour.
@@ -311,6 +392,27 @@ func WithTestBackend(backend storage.Backend) TestServerOption {
 func WithTestLogger(logger pslog.Logger) TestServerOption {
 	return func(o *testServerOptions) {
 		o.logger = logger
+	}
+}
+
+// WithTestTCLeaderLeaseTTL overrides the lease TTL used for TC leader election.
+func WithTestTCLeaderLeaseTTL(ttl time.Duration) TestServerOption {
+	return func(o *testServerOptions) {
+		o.tcLeaseTTL = ttl
+	}
+}
+
+// WithTestClock injects a custom clock implementation for the server.
+func WithTestClock(c clock.Clock) TestServerOption {
+	return func(o *testServerOptions) {
+		o.clock = c
+	}
+}
+
+// WithTestTCFanoutGate injects a hook between local apply and remote fan-out.
+func WithTestTCFanoutGate(gate txncoord.FanoutGate) TestServerOption {
+	return func(o *testServerOptions) {
+		o.tcFanoutGate = gate
 	}
 }
 
@@ -466,7 +568,7 @@ func NewTestServer(ctx context.Context, opts ...TestServerOption) (*TestServer, 
 		if options.testTB != nil {
 			logger = NewTestingLogger(options.testTB, options.testLogLevel)
 		} else {
-			logger = loggingutil.NoopLogger()
+			logger = pslog.NoopLogger()
 		}
 	}
 
@@ -480,9 +582,8 @@ func NewTestServer(ctx context.Context, opts ...TestServerOption) (*TestServer, 
 
 	ctxServer, cancel := context.WithCancel(context.Background())
 	type startResult struct {
-		srv  *Server
-		stop func(context.Context, ...CloseOption) error
-		err  error
+		handle ServerHandle
+		err    error
 	}
 	resultCh := make(chan startResult, 1)
 	backend := options.backend
@@ -494,8 +595,17 @@ func NewTestServer(ctx context.Context, opts ...TestServerOption) (*TestServer, 
 		if backend != nil {
 			startOpts = append(startOpts, WithBackend(backend))
 		}
-		srv, stop, err := StartServer(ctxServer, cfg, startOpts...)
-		resultCh <- startResult{srv: srv, stop: stop, err: err}
+		if options.clock != nil {
+			startOpts = append(startOpts, WithClock(options.clock))
+		}
+		if options.tcFanoutGate != nil {
+			startOpts = append(startOpts, WithTCFanoutGate(options.tcFanoutGate))
+		}
+		if options.tcLeaseTTL > 0 {
+			startOpts = append(startOpts, WithTCLeaderLeaseTTL(options.tcLeaseTTL))
+		}
+		handle, err := StartServer(ctxServer, cfg, startOpts...)
+		resultCh <- startResult{handle: handle, err: err}
 	}()
 
 	var (
@@ -529,8 +639,8 @@ func NewTestServer(ctx context.Context, opts ...TestServerOption) (*TestServer, 
 		cancel()
 		return nil, res.err
 	}
-	srv := res.srv
-	originalStop := res.stop
+	srv := res.handle.Server
+	originalStop := res.handle.Stop
 	stop := func(stopCtx context.Context, closeOpts ...CloseOption) error {
 		cancel()
 		return originalStop(stopCtx, closeOpts...)
@@ -1020,6 +1130,14 @@ func (c TestMTLSCredentials) ServerBundle() []byte {
 	return append([]byte(nil), c.material.serverBundle...)
 }
 
+// ClientBundle returns a copy of the PEM-encoded client bundle associated with the credentials.
+func (c TestMTLSCredentials) ClientBundle() []byte {
+	if c.material == nil {
+		return nil
+	}
+	return append([]byte(nil), c.material.clientBundle...)
+}
+
 // NewHTTPClient constructs an HTTP client configured for MTLS using the embedded client bundle.
 func (c TestMTLSCredentials) NewHTTPClient() (*http.Client, error) {
 	if c.material == nil {
@@ -1070,11 +1188,21 @@ func newTestMTLSMaterial(hosts []string) (*testMTLSMaterial, error) {
 		return nil, fmt.Errorf("mtls: derive metadata material: %w", err)
 	}
 	dedupedHosts := dedupeHosts(hosts)
-	serverCert, serverKey, err := ca.IssueServer(dedupedHosts, "lockd-test-server", 365*24*time.Hour)
+	nodeID := uuidv7.NewString()
+	spiffeURI, err := SPIFFEURIForServer(nodeID)
+	if err != nil {
+		return nil, fmt.Errorf("mtls: spiffe uri: %w", err)
+	}
+	serverIssued, err := ca.IssueServerWithRequest(tlsutil.ServerCertRequest{
+		CommonName: "lockd-test-server",
+		Validity:   365 * 24 * time.Hour,
+		Hosts:      dedupedHosts,
+		URIs:       []*url.URL{spiffeURI},
+	})
 	if err != nil {
 		return nil, fmt.Errorf("mtls: issue server cert: %w", err)
 	}
-	serverBundle, err := tlsutil.EncodeServerBundle(ca.CertPEM, nil, serverCert, serverKey, nil)
+	serverBundle, err := tlsutil.EncodeServerBundle(ca.CertPEM, nil, serverIssued.CertPEM, serverIssued.KeyPEM, nil)
 	if err != nil {
 		return nil, fmt.Errorf("mtls: encode server bundle: %w", err)
 	}
@@ -1082,11 +1210,11 @@ func newTestMTLSMaterial(hosts []string) (*testMTLSMaterial, error) {
 	if err != nil {
 		return nil, fmt.Errorf("mtls: augment server bundle: %w", err)
 	}
-	clientCert, clientKey, err := ca.IssueClient("lockd-test-client", 365*24*time.Hour)
+	clientIssued, err := ca.IssueClient(tlsutil.ClientCertRequest{CommonName: "lockd-test-client", Validity: 365 * 24 * time.Hour})
 	if err != nil {
 		return nil, fmt.Errorf("mtls: issue client cert: %w", err)
 	}
-	clientBundle, err := tlsutil.EncodeClientBundle(ca.CertPEM, clientCert, clientKey)
+	clientBundle, err := tlsutil.EncodeClientBundle(ca.CertPEM, clientIssued.CertPEM, clientIssued.KeyPEM)
 	if err != nil {
 		return nil, fmt.Errorf("mtls: encode client bundle: %w", err)
 	}
@@ -1111,9 +1239,9 @@ func (m *testMTLSMaterial) NewHTTPClient() (*http.Client, error) {
 	}
 	transport := baseTransport.Clone()
 	transport.TLSClientConfig = &tls.Config{
-		MinVersion:   tls.VersionTLS12,
-		RootCAs:      m.clientParsed.CAPool,
-		Certificates: []tls.Certificate{m.clientParsed.Certificate},
+		MinVersion:         tls.VersionTLS12,
+		RootCAs:            m.clientParsed.CAPool,
+		Certificates:       []tls.Certificate{m.clientParsed.Certificate},
 		ClientSessionCache: tls.NewLRUClientSessionCache(512),
 	}
 	transport.ForceAttemptHTTP2 = true

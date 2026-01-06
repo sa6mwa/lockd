@@ -466,16 +466,16 @@ func runAWSQueueQRFThrottling(t *testing.T) {
 		ts.Server.ForceQRFObserve(qrf.Snapshot{CollectedAt: first})
 		ts.Server.ForceQRFObserve(qrf.Snapshot{CollectedAt: first.Add(150 * time.Millisecond)})
 		time.Sleep(500 * time.Millisecond)
-		state, reason, _ := ts.Server.QRFStatus()
-		t.Logf("aws-qrf: recovery loop state=%s reason=%q", state.String(), reason)
-		if state == qrf.StateDisengaged {
+		status := ts.Server.QRFStatus()
+		t.Logf("aws-qrf: recovery loop state=%s reason=%q", status.State.String(), status.Reason)
+		if status.State == qrf.StateDisengaged {
 			recovered = true
 			break
 		}
 	}
-	state, reason, _ := ts.Server.QRFStatus()
+	status := ts.Server.QRFStatus()
 	if !recovered {
-		t.Fatalf("expected QRF to disengage for recovery enqueue (state=%s reason=%q)", state.String(), reason)
+		t.Fatalf("expected QRF to disengage for recovery enqueue (state=%s reason=%q)", status.State.String(), status.Reason)
 	}
 	recoveryEnqueueCtx, recoveryEnqueueCancel := context.WithTimeout(context.Background(), 20*time.Second)
 	if _, err := cli.Enqueue(recoveryEnqueueCtx, queue, bytes.NewReader([]byte("recovery")), lockdclient.EnqueueOptions{ContentType: "application/octet-stream"}); err != nil {

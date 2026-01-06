@@ -11,10 +11,10 @@ import (
 	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/client"
 	"pkt.systems/lockd/internal/clock"
-	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/memory"
 	"pkt.systems/lockd/namespaces"
+	"pkt.systems/pslog"
 )
 
 type sweeperClock struct {
@@ -114,7 +114,7 @@ func newShutdownHarness(t *testing.T) (*Server, *drainCapture, *httpShutdownCapt
 	t.Helper()
 	srv := &Server{
 		cfg:              Config{},
-		logger:           loggingutil.NoopLogger(),
+		logger:           pslog.NoopLogger(),
 		backend:          memory.New(),
 		httpSrv:          &http.Server{},
 		clock:            clock.Real{},
@@ -168,7 +168,7 @@ func TestSweeperClearsExpiredLeases(t *testing.T) {
 	srv, err := NewServer(cfg,
 		WithBackend(store),
 		WithClock(newSweeperClock(start)),
-		WithLogger(loggingutil.NoopLogger()),
+		WithLogger(pslog.NoopLogger()),
 	)
 	if err != nil {
 		t.Fatalf("new server: %v", err)
@@ -177,10 +177,11 @@ func TestSweeperClearsExpiredLeases(t *testing.T) {
 	defer srv.stopSweeper()
 	// Allow sweeper goroutine to run at least once.
 	time.Sleep(10 * time.Millisecond)
-	updated, _, err := store.LoadMeta(ctx, namespace, key)
+	updatedRes, err := store.LoadMeta(ctx, namespace, key)
 	if err != nil {
 		t.Fatalf("load meta: %v", err)
 	}
+	updated := updatedRes.Meta
 	if updated.Lease != nil {
 		t.Fatalf("expected sweeper to clear lease, still present: %+v", updated.Lease)
 	}
@@ -189,10 +190,12 @@ func TestSweeperClearsExpiredLeases(t *testing.T) {
 func TestShutdownBlocksAcquireDuringDrain(t *testing.T) {
 	ctx := context.Background()
 	cfg := Config{Store: "mem://", Listen: "127.0.0.1:0", DisableMTLS: true}
-	srv, stop, err := StartServer(ctx, cfg)
+	handle, err := StartServer(ctx, cfg)
 	if err != nil {
 		t.Fatalf("start server: %v", err)
 	}
+	srv := handle.Server
+	stop := handle.Stop
 	addr := srv.ListenerAddr()
 	if addr == nil {
 		t.Fatal("listener address not available")
@@ -251,10 +254,12 @@ func TestShutdownBlocksAcquireDuringDrain(t *testing.T) {
 func TestShutdownAutoReleasesLeases(t *testing.T) {
 	ctx := context.Background()
 	cfg := Config{Store: "mem://", Listen: "127.0.0.1:0", DisableMTLS: true}
-	srv, stop, err := StartServer(ctx, cfg)
+	handle, err := StartServer(ctx, cfg)
 	if err != nil {
 		t.Fatalf("start server: %v", err)
 	}
+	srv := handle.Server
+	stop := handle.Stop
 	addr := srv.ListenerAddr()
 	if addr == nil {
 		t.Fatal("listener address not available")
@@ -287,11 +292,11 @@ func TestShutdownAutoReleasesLeases(t *testing.T) {
 	namespace := srv.cfg.DefaultNamespace
 
 	waitFor(t, 2*time.Second, 20*time.Millisecond, func() bool {
-		meta, _, err := srv.backend.LoadMeta(ctx, namespace, "gamma")
+		metaRes, err := srv.backend.LoadMeta(ctx, namespace, "gamma")
 		if err != nil {
 			return false
 		}
-		return meta.Lease == nil
+		return metaRes.Meta.Lease == nil
 	})
 
 	select {

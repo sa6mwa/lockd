@@ -1,0 +1,55 @@
+@startuml xa-tc-rm-fanout
+
+title TC decision + RM fan-out (multi-backend, commit)
+autonumber
+
+participant "lockd RM (implicit XA)" as RM
+participant "lockd TC endpoint" as TC
+participant "lockd TC leader" as Leader
+participant "lockd RM (backend B)" as RMB
+database "TC backend (A)" as BA
+database "Backend B" as BB
+
+== Record decision ==
+RM -> TC: POST /v1/txn/decide (state=commit,\nparticipants + backend_hash)
+alt TC is not leader
+  TC -> Leader: forward /v1/txn/decide
+else TC is leader
+  TC -> Leader: accept /v1/txn/decide
+end
+loop CAS retry (txn record on TC backend)
+  Leader -> BA: get_txn_record(.txns/<txn_id>)
+  alt txn record missing
+    Leader -> BA: put_txn_record(state=commit,\nparticipants merged, tc_term) (expected_etag="")
+  else txn record exists
+    Leader -> BA: put_txn_record(state=commit,\nparticipants merged, tc_term) (expected_etag=txn_etag)
+  end
+end
+
+== Apply local participants (backend A) ==
+loop apply participants (backend A)
+  Leader -> BA: load_meta(participant)
+  Leader -> BA: write_state from state/<key>/.staging/<txn_id> (expected_etag=staged_etag)
+  Leader -> BA: store_meta(expected_etag=meta_etag,\nclear lease + staging)
+end
+
+== Fan-out to remote RMs ==
+Leader -> BA: load_rm_registry(.lockd/tc-rm-members)
+Leader -> RMB: POST /v1/txn/commit (target_backend_hash=B,\nparticipants=B, tc_term)
+loop CAS retry (txn record on backend B)
+  RMB -> BB: get_txn_record(.txns/<txn_id>)
+  alt txn record missing
+    RMB -> BB: put_txn_record(state=commit,\nparticipants merged, tc_term) (expected_etag="")
+  else txn record exists
+    RMB -> BB: put_txn_record(state=commit,\nparticipants merged, tc_term) (expected_etag=txn_etag)
+  end
+end
+loop apply participants (backend B)
+  RMB -> BB: load_meta(participant)
+  RMB -> BB: write_state from state/<key>/.staging/<txn_id> (expected_etag=staged_etag)
+  RMB -> BB: store_meta(expected_etag=meta_etag,\nclear lease + staging)
+end
+RMB --> Leader: 200
+Leader --> RM: 200 state=commit
+
+@enduml

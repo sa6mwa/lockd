@@ -41,19 +41,25 @@ func splitKeySegments(key string) ([]string, error) {
 	return parts, nil
 }
 
+// NamespacedKeyParts captures the namespace and remaining segments from a key.
+type NamespacedKeyParts struct {
+	Namespace string
+	Segments  []string
+}
+
 // SplitNamespacedKey separates a logical storage key into namespace and remaining path segments.
 // Keys are expected to be formatted as "<namespace>/<segment>/...".
-func SplitNamespacedKey(key string) (string, []string, error) {
+func SplitNamespacedKey(key string) (NamespacedKeyParts, error) {
 	clean := strings.TrimSpace(key)
 	clean = strings.TrimPrefix(clean, "/")
 	if clean == "" {
-		return "", nil, fmt.Errorf("storage: key %q missing namespace", key)
+		return NamespacedKeyParts{}, fmt.Errorf("storage: key %q missing namespace", key)
 	}
 	parts := strings.Split(clean, "/")
 	if len(parts) < 2 {
-		return "", nil, fmt.Errorf("storage: key %q missing resource segments", key)
+		return NamespacedKeyParts{}, fmt.Errorf("storage: key %q missing resource segments", key)
 	}
-	return parts[0], parts[1:], nil
+	return NamespacedKeyParts{Namespace: parts[0], Segments: parts[1:]}, nil
 }
 
 // NamespacedMetaObject returns the object key for metadata within a namespace.

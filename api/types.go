@@ -2,12 +2,12 @@ package api
 
 // AcquireRequest models the JSON payload for POST /v1/acquire.
 type AcquireRequest struct {
-	Namespace   string `json:"namespace,omitempty"`
-	Key         string `json:"key"`
-	TTLSeconds  int64  `json:"ttl_seconds"`
-	Owner       string `json:"owner"`
-	BlockSecs   int64  `json:"block_seconds"`
-	Idempotency string `json:"-"`
+	Namespace  string `json:"namespace,omitempty"`
+	Key        string `json:"key"`
+	TTLSeconds int64  `json:"ttl_seconds"`
+	Owner      string `json:"owner"`
+	BlockSecs  int64  `json:"block_seconds"`
+	TxnID      string `json:"txn_id,omitempty"`
 }
 
 const (
@@ -19,6 +19,7 @@ const (
 type AcquireResponse struct {
 	Namespace     string `json:"namespace"`
 	LeaseID       string `json:"lease_id"`
+	TxnID         string `json:"txn_id,omitempty"`
 	Key           string `json:"key"`
 	Owner         string `json:"owner"`
 	ExpiresAt     int64  `json:"expires_at_unix"`
@@ -43,6 +44,7 @@ type KeepAliveRequest struct {
 	Key        string `json:"key"`
 	LeaseID    string `json:"lease_id"`
 	TTLSeconds int64  `json:"ttl_seconds"`
+	TxnID      string `json:"txn_id,omitempty"`
 }
 
 // KeepAliveResponse acknowledges keepalive.
@@ -55,6 +57,8 @@ type ReleaseRequest struct {
 	Namespace string `json:"namespace,omitempty"`
 	Key       string `json:"key"`
 	LeaseID   string `json:"lease_id"`
+	TxnID     string `json:"txn_id"`
+	Rollback  bool   `json:"rollback,omitempty"`
 }
 
 // ReleaseResponse indicates release status.
@@ -85,6 +89,7 @@ type DescribeResponse struct {
 type ErrorResponse struct {
 	ErrorCode         string `json:"error"`
 	Detail            string `json:"detail,omitempty"`
+	LeaderEndpoint    string `json:"leader_endpoint,omitempty"`
 	CurrentVersion    int64  `json:"current_version,omitempty"`
 	CurrentETag       string `json:"current_etag,omitempty"`
 	RetryAfterSeconds int64  `json:"retry_after_seconds,omitempty"`
@@ -131,7 +136,6 @@ type EnqueueRequest struct {
 	MaxAttempts              int            `json:"max_attempts,omitempty"`
 	Attributes               map[string]any `json:"attributes,omitempty"`
 	PayloadContentType       string         `json:"payload_content_type,omitempty"`
-	IdempotencyKey           string         `json:"-"`
 }
 
 // EnqueueResponse surfaces details of the enqueued message.
@@ -152,6 +156,7 @@ type DequeueRequest struct {
 	Namespace                string `json:"namespace,omitempty"`
 	Queue                    string `json:"queue,omitempty"`
 	Owner                    string `json:"owner,omitempty"`
+	TxnID                    string `json:"txn_id,omitempty"`
 	VisibilityTimeoutSeconds int64  `json:"visibility_timeout_seconds,omitempty"`
 	WaitSeconds              int64  `json:"wait_seconds,omitempty"`
 	PageSize                 int    `json:"page_size,omitempty"`
@@ -174,11 +179,13 @@ type Message struct {
 	LeaseID                  string         `json:"lease_id"`
 	LeaseExpiresAtUnix       int64          `json:"lease_expires_at_unix"`
 	FencingToken             int64          `json:"fencing_token"`
+	TxnID                    string         `json:"txn_id,omitempty"`
 	MetaETag                 string         `json:"meta_etag"`
 	StateETag                string         `json:"state_etag,omitempty"`
 	StateLeaseID             string         `json:"state_lease_id,omitempty"`
 	StateLeaseExpiresAtUnix  int64          `json:"state_lease_expires_at_unix,omitempty"`
 	StateFencingToken        int64          `json:"state_fencing_token,omitempty"`
+	StateTxnID               string         `json:"state_txn_id,omitempty"`
 }
 
 // DequeueResponse delivers a message and associated cursors.
@@ -193,6 +200,7 @@ type AckRequest struct {
 	Queue             string `json:"queue"`
 	MessageID         string `json:"message_id"`
 	LeaseID           string `json:"lease_id"`
+	TxnID             string `json:"txn_id,omitempty"`
 	FencingToken      int64  `json:"fencing_token"`
 	MetaETag          string `json:"meta_etag"`
 	StateETag         string `json:"state_etag,omitempty"`
@@ -212,8 +220,10 @@ type NackRequest struct {
 	Queue             string `json:"queue"`
 	MessageID         string `json:"message_id"`
 	LeaseID           string `json:"lease_id"`
+	TxnID             string `json:"txn_id,omitempty"`
 	FencingToken      int64  `json:"fencing_token"`
 	MetaETag          string `json:"meta_etag"`
+	StateETag         string `json:"state_etag,omitempty"`
 	DelaySeconds      int64  `json:"delay_seconds,omitempty"`
 	LastError         any    `json:"last_error,omitempty"`
 	StateLeaseID      string `json:"state_lease_id,omitempty"`
@@ -233,6 +243,7 @@ type ExtendRequest struct {
 	Queue             string `json:"queue"`
 	MessageID         string `json:"message_id"`
 	LeaseID           string `json:"lease_id"`
+	TxnID             string `json:"txn_id,omitempty"`
 	FencingToken      int64  `json:"fencing_token"`
 	MetaETag          string `json:"meta_etag"`
 	ExtendBySeconds   int64  `json:"extend_by_seconds,omitempty"`

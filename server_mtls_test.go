@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"pkt.systems/lockd/internal/cryptoutil"
+	"pkt.systems/lockd/internal/uuidv7"
 	"pkt.systems/lockd/tlsutil"
 	"pkt.systems/pslog"
 )
@@ -29,11 +31,21 @@ func TestServerMTLSRevocationFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("extract ca material: %v", err)
 	}
-	serverCertPEM, serverKeyPEM, err := ca.IssueServer([]string{"127.0.0.1", "localhost"}, "lockd-test-server", 365*24*time.Hour)
+	nodeID := uuidv7.NewString()
+	spiffeURI, err := SPIFFEURIForServer(nodeID)
+	if err != nil {
+		t.Fatalf("spiffe uri: %v", err)
+	}
+	serverIssued, err := ca.IssueServerWithRequest(tlsutil.ServerCertRequest{
+		CommonName: "lockd-test-server",
+		Validity:   365 * 24 * time.Hour,
+		Hosts:      []string{"127.0.0.1", "localhost"},
+		URIs:       []*url.URL{spiffeURI},
+	})
 	if err != nil {
 		t.Fatalf("issue server cert: %v", err)
 	}
-	bundleBytes, err := tlsutil.EncodeServerBundle(ca.CertPEM, ca.KeyPEM, serverCertPEM, serverKeyPEM, nil)
+	bundleBytes, err := tlsutil.EncodeServerBundle(ca.CertPEM, ca.KeyPEM, serverIssued.CertPEM, serverIssued.KeyPEM, nil)
 	if err != nil {
 		t.Fatalf("encode server bundle: %v", err)
 	}
@@ -48,15 +60,15 @@ func TestServerMTLSRevocationFlow(t *testing.T) {
 		t.Fatalf("write bundle: %v", err)
 	}
 
-	clientCertPEM, clientKeyPEM, err := ca.IssueClient("lockd-client-1", 365*24*time.Hour)
+	clientIssued, err := ca.IssueClient(tlsutil.ClientCertRequest{CommonName: "lockd-client-1", Validity: 365 * 24 * time.Hour})
 	if err != nil {
 		t.Fatalf("issue client cert: %v", err)
 	}
-	clientTLSCert, err := tls.X509KeyPair(clientCertPEM, clientKeyPEM)
+	clientTLSCert, err := tls.X509KeyPair(clientIssued.CertPEM, clientIssued.KeyPEM)
 	if err != nil {
 		t.Fatalf("build client key pair: %v", err)
 	}
-	clientCert, err := tlsutil.FirstCertificateFromPEM(clientCertPEM)
+	clientCert, err := tlsutil.FirstCertificateFromPEM(clientIssued.CertPEM)
 	if err != nil {
 		t.Fatalf("parse client cert: %v", err)
 	}
@@ -75,7 +87,7 @@ func TestServerMTLSRevocationFlow(t *testing.T) {
 	// Stop server, revoke the client certificate, and restart.
 	server1.Close(t)
 
-	revokedBundle, err := tlsutil.EncodeServerBundle(ca.CertPEM, ca.KeyPEM, serverCertPEM, serverKeyPEM, []string{revokedSerial})
+	revokedBundle, err := tlsutil.EncodeServerBundle(ca.CertPEM, ca.KeyPEM, serverIssued.CertPEM, serverIssued.KeyPEM, []string{revokedSerial})
 	if err != nil {
 		t.Fatalf("encode revoked bundle: %v", err)
 	}
@@ -97,11 +109,11 @@ func TestServerMTLSRevocationFlow(t *testing.T) {
 		t.Fatalf("expected certificate failure, got %v", err)
 	}
 
-	newClientCertPEM, newClientKeyPEM, err := ca.IssueClient("lockd-client-2", 365*24*time.Hour)
+	newClientIssued, err := ca.IssueClient(tlsutil.ClientCertRequest{CommonName: "lockd-client-2", Validity: 365 * 24 * time.Hour})
 	if err != nil {
 		t.Fatalf("issue new client cert: %v", err)
 	}
-	newClientTLSCert, err := tls.X509KeyPair(newClientCertPEM, newClientKeyPEM)
+	newClientTLSCert, err := tls.X509KeyPair(newClientIssued.CertPEM, newClientIssued.KeyPEM)
 	if err != nil {
 		t.Fatalf("build new client key pair: %v", err)
 	}

@@ -29,6 +29,12 @@ type Crypto struct {
 	metadataContext  []byte
 }
 
+// MaterialResult captures minted crypto material and its descriptor bytes.
+type MaterialResult struct {
+	Material   kryptograf.Material
+	Descriptor []byte
+}
+
 var cryptoBufferPool sync.Pool
 
 // NewCrypto initialises a Crypto helper according to cfg. When encryption is disabled the returned value is nil.
@@ -108,20 +114,20 @@ func (c *Crypto) DecryptMetadata(ciphertext []byte) ([]byte, error) {
 }
 
 // MintMaterial derives a new material for the supplied context and returns it along with its descriptor bytes.
-func (c *Crypto) MintMaterial(context string) (kryptograf.Material, []byte, error) {
+func (c *Crypto) MintMaterial(context string) (MaterialResult, error) {
 	if !c.Enabled() {
-		return kryptograf.Material{}, nil, nil
+		return MaterialResult{}, nil
 	}
 	mat, err := c.kg.MintDEK([]byte(context))
 	if err != nil {
-		return kryptograf.Material{}, nil, fmt.Errorf("storage crypto: mint material for %q: %w", context, err)
+		return MaterialResult{}, fmt.Errorf("storage crypto: mint material for %q: %w", context, err)
 	}
 	descBytes, err := mat.Descriptor.MarshalBinary()
 	if err != nil {
 		mat.Zero()
-		return kryptograf.Material{}, nil, fmt.Errorf("storage crypto: marshal descriptor for %q: %w", context, err)
+		return MaterialResult{}, fmt.Errorf("storage crypto: marshal descriptor for %q: %w", context, err)
 	}
-	return mat, descBytes, nil
+	return MaterialResult{Material: mat, Descriptor: descBytes}, nil
 }
 
 // MaterialFromDescriptor reconstructs a material for the supplied context and descriptor bytes.
@@ -143,6 +149,11 @@ func (c *Crypto) MaterialFromDescriptor(context string, descriptor []byte) (kryp
 // StateObjectContext returns the encryption context used for a lock state object.
 func StateObjectContext(key string) string {
 	return "state:" + key
+}
+
+// AttachmentObjectContext returns the encryption context used for attachment objects.
+func AttachmentObjectContext(key string) string {
+	return "attachment:" + key
 }
 
 func queueObjectContext(prefix, namespace, relPath string) string {

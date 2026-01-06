@@ -26,7 +26,7 @@ func prepareNFSQueueRoot(t testing.TB) string {
 	t.Helper()
 	base := strings.TrimSpace(os.Getenv("LOCKD_NFS_ROOT"))
 	if base == "" {
-		t.Skip("LOCKD_NFS_ROOT not set; skipping NFS queue tests")
+		t.Fatalf("LOCKD_NFS_ROOT not set; cannot run NFS queue tests")
 	}
 	info, err := os.Stat(base)
 	if err != nil || !info.IsDir() {
@@ -72,6 +72,11 @@ func buildNFSQueueConfig(t testing.TB, root string, opts nfsQueueOptions) lockd.
 func startNFSQueueServer(t testing.TB, cfg lockd.Config) *lockd.TestServer {
 	t.Helper()
 	return queuetestutil.StartQueueTestServer(t, cfg)
+}
+
+func startNFSQueueServerWithOptions(t testing.TB, cfg lockd.Config, opts ...lockd.TestServerOption) *lockd.TestServer {
+	t.Helper()
+	return queuetestutil.StartQueueTestServerWithOptions(t, cfg, opts)
 }
 
 func startNFSQueueServerWithCapture(t testing.TB, cfg lockd.Config) (*lockd.TestServer, *queuetestutil.LogCapture) {

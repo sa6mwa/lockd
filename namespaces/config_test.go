@@ -43,10 +43,11 @@ func TestConfigStoreRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	ns := "default"
 
-	cfg, etag, err := cfgStore.Load(ctx, ns)
-	if err != nil || etag != "" {
-		t.Fatalf("load default: cfg=%v etag=%q err=%v", cfg, etag, err)
+	loadRes, err := cfgStore.Load(ctx, ns)
+	if err != nil || loadRes.ETag != "" {
+		t.Fatalf("load default: cfg=%v etag=%q err=%v", loadRes.Config, loadRes.ETag, err)
 	}
+	cfg := loadRes.Config
 
 	cfg.Query.Preferred = search.EngineScan
 	cfg.Query.Fallback = namespaces.FallbackNone
@@ -54,15 +55,15 @@ func TestConfigStoreRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("save config: %v", err)
 	}
-	loaded, etag, err := cfgStore.Load(ctx, ns)
+	loadedRes, err := cfgStore.Load(ctx, ns)
 	if err != nil {
 		t.Fatalf("reload config: %v", err)
 	}
-	if etag == "" || newETag != etag {
-		t.Fatalf("etag mismatch: %q vs %q", newETag, etag)
+	if loadedRes.ETag == "" || newETag != loadedRes.ETag {
+		t.Fatalf("etag mismatch: %q vs %q", newETag, loadedRes.ETag)
 	}
-	if loaded.Query.Preferred != search.EngineScan || loaded.Query.Fallback != namespaces.FallbackNone {
-		t.Fatalf("unexpected config %+v", loaded)
+	if loadedRes.Config.Query.Preferred != search.EngineScan || loadedRes.Config.Query.Fallback != namespaces.FallbackNone {
+		t.Fatalf("unexpected config %+v", loadedRes.Config)
 	}
 	if _, err := cfgStore.Save(ctx, ns, cfg, "bogus"); err == nil {
 		t.Fatalf("expected cas mismatch when saving with stale etag")

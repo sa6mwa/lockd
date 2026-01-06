@@ -92,6 +92,7 @@ func startMinioQueueServerWithLogger(t testing.TB, cfg lockd.Config, logger pslo
 
 func startMinioQueueServerWithOptions(t testing.TB, cfg lockd.Config, serverOpts ...lockd.TestServerOption) *lockd.TestServer {
 	t.Helper()
+	cryptotest.ConfigureTCAuth(t, &cfg)
 	clientLogger := lockd.NewTestingLogger(t, pslog.TraceLevel)
 	clientOpts := []lockdclient.Option{
 		lockdclient.WithHTTPTimeout(60 * time.Second),
@@ -148,10 +149,11 @@ func loadMinioQueueConfig(t testing.TB) lockd.Config {
 }
 
 func ensureMinioQueueBucket(t testing.TB, cfg lockd.Config) {
-	minioCfg, _, err := lockd.BuildGenericS3Config(cfg)
+	minioResult, err := lockd.BuildGenericS3Config(cfg)
 	if err != nil {
 		t.Fatalf("build s3 config: %v", err)
 	}
+	minioCfg := minioResult.Config
 	store, err := s3.New(minioCfg)
 	if err != nil {
 		t.Fatalf("create minio store: %v", err)

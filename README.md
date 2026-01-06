@@ -33,6 +33,13 @@ Typical flow:
 If the worker crashes or the connection drops, TTL expiry allows the next
 worker to resume from the last committed state.
 
+**Identifiers:** lease IDs and transaction IDs are compact `xid` strings (20
+lowercase base32 chars, e.g. `c5v9d0sl70b3m3q8ndg0`). Keys/manifests/segments
+retain uuidv7 for ordering. Use the `txn_id` returned by Acquire to join
+multiple keys into the same local transaction; namespaces that start with `.`
+are reserved for lockd internals (e.g. `.txns` stores transaction decisions)
+and are rejected.
+
 <a href="https://github.com/sa6mwa/centaurarticles/blob/main/pub/10x.pdf" target="_blank">
 <img align="right" src="10x.png" width="170" height="240" alt="Article about human—AI software development">
 </a>
@@ -54,10 +61,12 @@ worker to resume from the last committed state.
 - **Exclusive leases** per key with configurable TTLs, keep-alives, fencing tokens, and sweeper reaping for expired holders.
 - **Acquire-for-update helpers** wrap acquire → get → update, keeping leases alive while user code runs and releasing them automatically.
 - **Public reads** let dashboards or downstream systems fetch published state without holding leases (`/v1/get?public=1`, `Client.Get` default behavior).
+- **Reserved namespaces**: user namespaces must not start with `.`; `.txns` and other dot-prefixed namespaces are reserved for lockd internals.
 
 ### Document store + search
 
 - **Atomic JSON state** up to ~100 MB (configurable) with CAS (version + ETag) headers.
+- **State attachments**: stream binary files alongside a key (staged under the lease transaction and committed on release).
 - **Namespace-aware indexing** across S3/MinIO, Azure, or disk backends. Query with RFC 6901 selectors (`/workflow/state="done"`, braces, `>=`, etc.).
 - **Streaming query results**: keys-only (compact JSON) or NDJSON documents with metadata, consumable via SDK/CLI.
 - **Encryption everywhere** when configured—metadata, state blobs, queue payloads all flow through `internal/storage.Crypto`.
@@ -71,8 +80,8 @@ worker to resume from the last committed state.
 ### APIs & tooling
 
 - **Simple HTTP/JSON API** (no gRPC) with optional mTLS. All endpoints support correlation IDs, structured errors, and fencing tokens.
-- **Go SDK (`client`)** with retries, structured `APIError`, acquire-for-update, streaming query helpers, and document helpers (`client.Document`).
-- **Cobra/Viper CLI** that mirrors the SDK (leases, queue operations, `lockd client query`, `lockd client namespace`, etc.) and is covered by unit tests.
+- **Go SDK (`client`)** with retries, structured `APIError`, acquire-for-update, streaming query helpers, document helpers (`client.Document`), and attachment helpers.
+- **Cobra/Viper CLI** that mirrors the SDK (leases, attachments, queue operations, `lockd client query`, `lockd client namespace`, etc.) and is covered by unit tests.
 
 ### Storage backends
 
@@ -84,6 +93,7 @@ worker to resume from the last committed state.
 ### Operations & observability
 
 - **Structured logging** (`pslog`) with subsystem tagging (`server.lifecycle.core`, `search.index`, `queue.dispatcher`, etc.).
+- **Transaction telemetry**: decision/apply/replay/sweep logs (`txn.*`, `txn.tc.*`, `txn.rm.*`), watchdog warnings for long-running operations, and OTLP metrics (`lockd.txn.*`, `lockd.txn.fanout.*`).
 - **Watchdogs** baked into unit/integration tests to catch hangs instantly.
 - **`lockd verify store`** diagnostics ensure backend credentials + permissions + encryption descriptors are valid before deploying.
 - **Integration suites** (`run-integration-suites.sh`) cover every backend/feature combination; use them before landing cross-cutting changes.
@@ -92,12 +102,18 @@ worker to resume from the last committed state.
 
 ## Architecture
 
-![Lockd component view](docs/diagrams/component-view.png)
+PlantUML sources live in `docs/diagrams/` (render with `make diagrams`):
+
+- `component-view.puml` — component-level view of lockd subsystems and XA coordination.
+- `xa-happy-path.puml` — multi-key commit on a single backend.
+- `xa-rollback-timeout.puml` — rollback after lease/decision expiry.
+- `xa-tc-rm-fanout.puml` — TC decision + RM fan-out across backends.
+- `xa-queue-dequeue.puml` — queue dequeue enlisted in a transaction.
 
 ### Subsystems (`sys` hierarchy)
 
 Every structured log carries a `sys` field (`system.subsystem.component`). The
-strings come directly from `loggingutil.WithSubsystem` and represent concrete
+strings come directly from `svcfields.WithSubsystem` and represent concrete
 code paths. The primary production subsystems are:
 
 - `client.sdk` – Go SDK calls (leases, queue APIs, acquire-for-update helper).
@@ -131,27 +147,23 @@ Additional prefixes show up in specialised contexts:
 - `api.http.router.*` – Every HTTP route (acquire, query, queue ops, etc.).
 - `client.cli.*` / `cli.verify` – CLI subcommands and auth workflows.
 
-### Sequence diagrams
-
-Lockd’s major workflows are documented as PlantUML sequence diagrams:
-
-- [State path](docs/diagrams/sequence-state.png) — acquire/get/update/release over the lease/state surface.
-- [Queue path](docs/diagrams/sequence-queue.png) — enqueue, dequeue, and ack/nack/extend across the queue service.
-- [Search path](docs/diagrams/sequence-search.png) — `/v1/query` execution and `/v1/index/flush`.
-
 ### Request flow
 
-1. **Acquire** – `POST /v1/acquire` → acquire lease (optionally blocking).
+1. **Acquire** – `POST /v1/acquire` → acquire lease (optionally blocking). Include `X-Txn-ID` (or `txn_id` in the body) to join an existing transaction across keys. Namespaces starting with `.` are rejected to protect internal records such as `.txns`.
 2. **Get state** – `POST /v1/get` → stream JSON state with CAS headers.
    Supply `X-Lease-ID` + `X-Fencing-Token` from the acquire response.
 3. **Update state** – `POST /v1/update` → upload new JSON with
-   `X-If-Version` and/or `X-If-State-ETag` to enforce CAS. Include the current
-   `X-Fencing-Token`.
-4. **Remove state (optional)** – `POST /v1/remove` → delete the stored JSON
-   blob while holding the lease. Honor the same `X-Lease-ID`, `X-Fencing-Token`,
-   and CAS headers (`X-If-Version`, `X-If-State-ETag`) as updates.
-5. **Release** – `POST /v1/release` → release lease with the same fencing token;
-   the sweeper handles timeouts for crashed workers.
+   `X-If-Version` and/or `X-If-State-ETag` to enforce CAS. Include
+   `X-Lease-ID`, `X-Txn-ID`, and the current `X-Fencing-Token`.
+4. **Attach files (optional)** – `POST /v1/attachments` → stream binary payloads
+   while holding the lease (`X-Lease-ID`, `X-Txn-ID`). List via `GET /v1/attachments`,
+   download via `GET /v1/attachment`, and delete via `DELETE`.
+5. **Remove state (optional)** – `POST /v1/remove` → delete the stored JSON
+   blob while holding the lease. Honor the same `X-Lease-ID`, `X-Txn-ID`,
+   `X-Fencing-Token`, and CAS headers (`X-If-Version`, `X-If-State-ETag`) as updates.
+6. **Release** – `POST /v1/release` → commit by default, or pass `rollback=true`
+   to discard staged changes. The request body must include the xid `txn_id`
+   from Acquire; the sweeper handles timeouts for crashed workers.
 
 ### Atomic acquire + update helper
 
@@ -169,6 +181,40 @@ decide whether to re-run the helper.
 
 The legacy `/v1/acquire-for-update` streaming endpoint has been removed;
 all clients must use the callback helper described above.
+
+### Attachments
+
+Attachments are staged under the lease transaction and committed on release.
+Each attachment has a name, UUIDv7, size, content type, and timestamps.
+
+```bash
+eval "$(lockd client acquire --key orders)"
+lockd client attachments put --name invoice.pdf --file ./invoice.pdf --content-type application/pdf
+lockd client release
+```
+
+Public reads are available after release:
+
+```bash
+lockd client attachments list --key orders --public
+lockd client attachments get --key orders --name invoice.pdf --public -o invoice.pdf
+```
+
+See `docs/ATTACHMENTS.md` for SDK and API details.
+
+## XA transactions (TC + RM)
+
+Lockd records decisions in `.txns` and stages writes under `state/<key>/.staging/<txn_id>` (attachments live under `state/<key>/.staging/<txn_id>/attachments/<uuidv7>` and commit to `state/<key>/attachments/<uuidv7>`). A single TC leader is elected via quorum leases; normal client SDK flows do **not** call `/v1/txn/decide` directly. Instead, `Release`/`Ack`/`Nack` trigger the core decider, which records `pending|commit|rollback` and fans out to RM apply endpoints (`/v1/txn/commit`, `/v1/txn/rollback`) with a `tc_term` fencing token that RMs use to reject stale decisions. Any TC endpoint can receive `/v1/txn/decide` (TC-auth only); non-leaders forward to the leader. Queue dequeues can be enlisted in a transaction; commit ACKs messages, rollback NACKs them, and stale leases return `409 queue_message_lease_mismatch`.
+
+TC cluster membership leases are stored under `.lockd/tc-cluster/leases/<identity>` and managed with `lockd tc announce|leave|list` (servers refresh leases automatically). Use `--self` plus optional `--join` seeds (config key `tc-join`) to bootstrap leader election. RM endpoints are registered under `.lockd/tc-rm-members` via `/v1/tc/rm/register` (server cert required when mTLS is enabled) and replicated across the TC cluster.
+
+For TC tooling (TC-auth), use `lockd txn prepare|commit|rollback|replay`. Normal SDK/CLI flows use `lockd client release --rollback` or queue ACK/NACK. Full SDK/CLI examples and failure-mode guidance live in `docs/XA.md`.
+
+**Recovery + watchdogs**
+
+- `.txns` records are durable and re-applied after process restarts; staged blobs under `.staging/` are swept automatically.
+- `POST /v1/txn/replay` (or `client.TxnReplay`) forces a decision to re-run if you need deterministic recovery in tests or during incident response.
+- Integration suites include commit/rollback restart coverage for mem/disk and a txn soak that fails fast on stalled sweeps or leaked staged data.
 
 ### Internal layout
 
@@ -334,12 +380,13 @@ Each key’s metadata protobuf stores lease info plus user-controlled attributes
 The server exposes `POST /v1/metadata` so callers can mutate attributes without
 rewriting the JSON state. Today the flag `query_hidden` (persisted as the
 `lockd.query.exclude` attribute) hides a key from `/v1/query` results while
-keeping it readable via the lease or `public=1` GET helpers. Toggle it by
-holding the lease and calling:
+keeping it readable via the lease or `public=1` GET helpers. Include the
+`txn_id` from Acquire via `X-Txn-ID` and toggle it by holding the lease and calling:
 
 ```sh
 curl -sS -X POST "https://host:9341/v1/metadata?key=orders&namespace=default" \
   -H "X-Lease-ID: $LEASE_ID" \
+  -H "X-Txn-ID: $TXN_ID" \
   -H "X-Fencing-Token: $FENCING" \
   -d '{"query_hidden":true}'
 ```
@@ -386,7 +433,7 @@ its behaviour:
 | `--queue-poll-interval` (`LOCKD_QUEUE_POLL_INTERVAL`) | Baseline interval between storage scans when no change notifications arrive (default `3s`). |
 | `--queue-poll-jitter` (`LOCKD_QUEUE_POLL_JITTER`) | Adds randomised delay up to the specified duration to stagger concurrent servers (default `500ms`; set `0` to disable). |
 | `--disk-queue-watch` (`LOCKD_DISK_QUEUE_WATCH`) | Enables Linux/inotify queue watchers on the disk backend (default `true`; automatically ignored on unsupported filesystems such as NFS). |
-| `--mem-queue-watch` (`LOCKD_MEM_QUEUE_WATCH`) | Enables in-process queue notifications for the in-memory backend (default `true`; disable to force pure polling). |
+| `--disable-mem-queue-watch` (`LOCKD_DISABLE_MEM_QUEUE_WATCH`) | Disables in-process queue notifications for the in-memory backend (default `false`). |
 
 ### Development Environment (Docker Compose + OTLP)
 
@@ -421,6 +468,9 @@ lockd
 
 All HTTP endpoints are wrapped with `otelhttp`, storage backends emit child
 spans, and structured logs attach `trace_id`/`span_id` when a span is active.
+Transaction telemetry is exported as metrics such as `lockd.txn.decisions.recorded`,
+`lockd.txn.apply.applied/failed/retries`, `lockd.txn.decide|apply|replay|sweep.duration_ms`,
+and `lockd.txn.fanout.*`.
 
 ### Dev Environment Assurance
 
@@ -467,6 +517,9 @@ eval "$(lockd client acquire --server localhost:9341 --owner worker --key orders
 lockd client keepalive --lease "$LOCKD_CLIENT_LEASE_ID" --key orders
 lockd client update --lease "$LOCKD_CLIENT_LEASE_ID" --fencing-token "$LOCKD_CLIENT_FENCING_TOKEN" --key orders payload.json
 ```
+
+`lockd client acquire` also exports `LOCKD_CLIENT_TXN_ID`; lease-bound mutations
+default to that transaction id unless you override `--txn-id`.
 
 If the server detects a stale token it returns `403 fencing_mismatch`, ensuring
 delayed or replayed requests cannot clobber state after a lease changes hands.
@@ -789,14 +842,14 @@ defer inproc.Release(ctx, api.ReleaseRequest{Key: "jobs", LeaseID: lease.LeaseID
 Use `client.BlockWaitForever` (default) to wait indefinitely when acquiring, or `client.BlockNoWait` to fail immediately if the lease is already held.
 
 Behind the scenes it relies on `lockd.StartServer`, which launches the server in
-a goroutine and returns a shutdown function. You can use the helper directly
+a goroutine and returns a handle with a Stop method. You can use the helper directly
 when wiring tests around Unix-domain sockets:
 
 ```go
 cfg := lockd.Config{Store: "mem://", ListenProto: "unix", Listen: "/tmp/lockd.sock", DisableMTLS: true}
-srv, stop, err := lockd.StartServer(ctx, cfg)
+handle, err := lockd.StartServer(ctx, cfg)
 if err != nil { log.Fatal(err) }
-defer stop(context.Background())
+defer handle.Stop(context.Background())
 
 cli, err := client.New("unix:///tmp/lockd.sock")
 if err != nil { log.Fatal(err) }
@@ -845,6 +898,8 @@ To keep observability output, docs, and dashboards aligned, every structured log
 - `sys` is mandatory and encodes the origin hierarchy as `system.subsystem.component[.subcomponent]`. Use as many segments as needed to pinpoint the emitting code (for example `storage.crypto.envelope`, `queue.dispatcher.ready_cache.prune`, or `server.shutdown.controller.drain`).
 - We no longer emit `svc` or `component` keys—`sys` replaces both. Any additional structured fields (latency, owner, key, cid, etc.) stay as-is.
 
+High-volume events (per-message queue delivery/enqueue logs, subscription delivery traces) are emitted at Debug/Trace so Info remains a summary signal.
+
 OpenTelemetry exports follow the same convention: every server-managed span records `lockd.sys=<value>` alongside `lockd.operation`, so traces and metrics can be filtered with the same identifiers as logs.
 
 ## TLS (mTLS)
@@ -875,12 +930,15 @@ lockd auth new server --ca-in $HOME/.lockd/ca.pem --hosts "lockd.example.com,127
 # Issue a new client certificate signed by the bundle CA
 lockd auth new client --ca-in $HOME/.lockd/ca.pem --cn worker-1
 
+# Issue a TC client certificate for TC-to-TC / TC-to-RM calls
+lockd auth new tcclient --ca-in $HOME/.lockd/ca.pem --cn tc-worker-1
+
 # Revoke previously issued client certificates (by serial number)
 lockd auth revoke client <hex-serial> [<hex-serial>...]
 
 # Inspect bundle details (CA, server cert, denylist)
 lockd auth inspect server        # lists all server*.pem bundles
-lockd auth inspect client --in $HOME/.lockd/client-*.pem
+lockd auth inspect client --in $HOME/.lockd/client-*.pem   # includes tc-client*.pem as well
 
 # Verify bundles (validity, EKUs, denylist enforcement)
 lockd auth verify server        # scans all server*.pem in the config dir
@@ -1131,9 +1189,10 @@ sources the required `.env.<backend>` files, and stores logs under
 `integration-logs/`. Use `list` to see available suites (mem, disk, nfs, aws,
 azure, minio, plus `/lq`, `/query`, and `/crypto` variants), pass specific suites such as
 `disk disk/lq` or `nfs nfs/lq`, or run the full matrix with `all`. The helper
-honors `LOCKD_GO_TEST_TIMEOUT`, exports `LOCKD_TEST_STORAGE_ENCRYPTION=1` so
-disk/nfs/etc. suites run with envelope crypto by default, and exposes
-`--disable-crypto` to flip the env var when targeting legacy buckets.
+honors `LOCKD_GO_TEST_TIMEOUT`, uses `LOCKD_AWS_GO_TEST_TIMEOUT` (default `10m`)
+for AWS suites, exports `LOCKD_TEST_STORAGE_ENCRYPTION=1` so disk/nfs/etc.
+suites run with envelope crypto by default, and exposes `--disable-crypto` to
+flip the env var when targeting legacy buckets.
 
 Current backends:
 

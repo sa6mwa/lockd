@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"pkt.systems/lockd/internal/clock"
 	"pkt.systems/pslog"
 )
 
@@ -21,6 +22,7 @@ type Manager struct {
 type WriterOptions struct {
 	FlushDocs     int
 	FlushInterval time.Duration
+	Clock         clock.Clock
 	Logger        pslog.Logger
 }
 
@@ -31,6 +33,9 @@ func NewManager(store *Store, opts WriterOptions) *Manager {
 	}
 	if opts.FlushInterval <= 0 {
 		opts.FlushInterval = DefaultFlushInterval
+	}
+	if opts.Clock == nil {
+		opts.Clock = clock.Real{}
 	}
 	return &Manager{
 		store:   store,
@@ -54,6 +59,7 @@ func (m *Manager) WriterFor(namespace string) *Writer {
 		Store:         m.store,
 		FlushDocs:     m.options.FlushDocs,
 		FlushInterval: m.options.FlushInterval,
+		Clock:         m.options.Clock,
 		Logger:        m.options.Logger,
 	})
 	m.writers[namespace] = writer
@@ -102,10 +108,11 @@ func (m *Manager) ManifestSeq(ctx context.Context, namespace string) (uint64, er
 	if m == nil || m.store == nil {
 		return 0, fmt.Errorf("index store unavailable")
 	}
-	manifest, _, err := m.store.LoadManifest(ctx, namespace)
+	manifestRes, err := m.store.LoadManifest(ctx, namespace)
 	if err != nil {
 		return 0, err
 	}
+	manifest := manifestRes.Manifest
 	if manifest == nil {
 		return 0, nil
 	}

@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,18 +45,20 @@ func logQueueDeliveryInfo(logger pslog.Logger, delivery *core.QueueDelivery) {
 		"max_attempts", msg.MaxAttempts,
 		"lease", msg.LeaseID,
 		"fencing", msg.FencingToken,
+		"txn_id", msg.TxnID,
 		"visibility_timeout_seconds", msg.VisibilityTimeoutSeconds,
 	}
 	if msg.StateLeaseID != "" {
 		fields = append(fields,
 			"state_lease", msg.StateLeaseID,
 			"state_fencing", msg.StateFencingToken,
+			"state_txn_id", msg.StateTxnID,
 		)
 	}
 	if delivery.NextCursor != "" {
 		fields = append(fields, "cursor", delivery.NextCursor)
 	}
-	logger.Info("queue.delivery.sent", fields...)
+	logger.Debug("queue.delivery.sent", fields...)
 }
 
 func routerSys(operation string) string {
@@ -98,6 +101,13 @@ func clientIdentityFromRequest(r *http.Request) string {
 		serial = cert.SerialNumber.Text(16)
 	}
 	return fmt.Sprintf("%s#%s", cert.Subject.String(), serial)
+}
+
+func peerCertificate(r *http.Request) *x509.Certificate {
+	if r == nil || r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+		return nil
+	}
+	return r.TLS.PeerCertificates[0]
 }
 
 type limitedWriter struct {
@@ -265,6 +275,7 @@ func convertCoreError(err error) error {
 			Status:     httpErr.Status,
 			Code:       httpErr.Code,
 			Detail:     httpErr.Detail,
+			LeaderEndpoint: httpErr.LeaderEndpoint,
 			Version:    httpErr.Version,
 			ETag:       httpErr.ETag,
 			RetryAfter: httpErr.RetryAfter,
@@ -450,11 +461,13 @@ func toAPIDeliveryMessage(msg *core.QueueMessage) *api.Message {
 		LeaseID:                  msg.LeaseID,
 		LeaseExpiresAtUnix:       msg.LeaseExpiresAtUnix,
 		FencingToken:             msg.FencingToken,
+		TxnID:                    msg.TxnID,
 		MetaETag:                 msg.MetaETag,
 		StateETag:                msg.StateETag,
 		StateLeaseID:             msg.StateLeaseID,
 		StateLeaseExpiresAtUnix:  msg.StateLeaseExpiresAtUnix,
 		StateFencingToken:        msg.StateFencingToken,
+		StateTxnID:               msg.StateTxnID,
 	}
 }
 

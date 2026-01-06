@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"pkt.systems/lockd/internal/clock"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/pslog"
 )
@@ -16,6 +17,7 @@ type WriterConfig struct {
 	Store         *Store
 	FlushDocs     int
 	FlushInterval time.Duration
+	Clock         clock.Clock
 	Logger        pslog.Logger
 }
 
@@ -27,7 +29,7 @@ type Writer struct {
 	mu         sync.Mutex
 	ctx        context.Context
 	cancel     context.CancelFunc
-	ticker     *time.Ticker
+	clock      clock.Clock
 	logger     pslog.Logger
 	pending    atomic.Bool
 	lastFlush  atomic.Int64
@@ -42,6 +44,9 @@ func NewWriter(cfg WriterConfig) *Writer {
 	if cfg.FlushInterval <= 0 {
 		cfg.FlushInterval = DefaultFlushInterval
 	}
+	if cfg.Clock == nil {
+		cfg.Clock = clock.Real{}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	w := &Writer{
 		cfg:      cfg,
@@ -49,10 +54,10 @@ func NewWriter(cfg WriterConfig) *Writer {
 		memtable: NewMemTable(),
 		ctx:      ctx,
 		cancel:   cancel,
-		ticker:   time.NewTicker(cfg.FlushInterval),
+		clock:    cfg.Clock,
 		logger:   cfg.Logger,
 	}
-	w.lastFlush.Store(time.Now().UnixNano())
+	w.lastFlush.Store(w.clock.Now().UnixNano())
 	go w.flushLoop()
 	return w
 }
@@ -60,9 +65,6 @@ func NewWriter(cfg WriterConfig) *Writer {
 // Close stops the writer and flushes pending data.
 func (w *Writer) Close(ctx context.Context) error {
 	w.cancel()
-	if w.ticker != nil {
-		w.ticker.Stop()
-	}
 	return w.Flush(ctx)
 }
 
@@ -97,7 +99,7 @@ func (w *Writer) flushLoop() {
 		select {
 		case <-w.ctx.Done():
 			return
-		case <-w.ticker.C:
+		case <-w.clock.After(w.cfg.FlushInterval):
 			_ = w.Flush(context.Background())
 		}
 	}
@@ -108,7 +110,7 @@ func (w *Writer) flushLocked(ctx context.Context) error {
 		w.pending.Store(false)
 		return nil
 	}
-	segment := w.memtable.Flush(time.Now())
+	segment := w.memtable.Flush(w.clock.Now())
 	if segment.DocCount() == 0 {
 		w.pending.Store(false)
 		return nil
@@ -120,7 +122,7 @@ func (w *Writer) flushLocked(ctx context.Context) error {
 		return err
 	}
 	w.pending.Store(false)
-	w.lastFlush.Store(time.Now().UnixNano())
+	w.lastFlush.Store(w.clock.Now().UnixNano())
 	w.signalReadableLocked()
 	if w.logger != nil {
 		w.logger.Debug("index.flush.success", "namespace", w.cfg.Namespace, "segment", segment.ID, "docs", segment.DocCount())
@@ -135,10 +137,12 @@ func (w *Writer) persistSegment(ctx context.Context, segment *Segment) error {
 	if _, err := w.store.WriteSegment(ctx, w.cfg.Namespace, segment); err != nil {
 		return err
 	}
-	manifest, etag, err := w.store.LoadManifest(ctx, w.cfg.Namespace)
+	manifestRes, err := w.store.LoadManifest(ctx, w.cfg.Namespace)
 	if err != nil {
 		return err
 	}
+	manifest := manifestRes.Manifest
+	etag := manifestRes.ETag
 	shard := manifest.Shards[0]
 	if shard == nil {
 		shard = &Shard{ID: 0}
@@ -165,8 +169,7 @@ func (w *Writer) WaitForReadable(ctx context.Context) error {
 	if wait <= 0 {
 		wait = DefaultFlushInterval
 	}
-	timer := time.NewTimer(wait)
-	defer timer.Stop()
+	deadline := w.clock.After(wait)
 	for {
 		if !w.pending.Load() {
 			return nil
@@ -178,7 +181,7 @@ func (w *Writer) WaitForReadable(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-timer.C:
+		case <-deadline:
 			return nil
 		case <-ch:
 		}

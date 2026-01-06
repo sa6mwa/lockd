@@ -138,6 +138,37 @@ type MessageDescriptor struct {
 	Document     messageDocument
 }
 
+// MessageListResult captures message listing output.
+type MessageListResult struct {
+	Descriptors    []MessageDescriptor
+	NextStartAfter string
+	Truncated      bool
+}
+
+// MessageCandidateResult captures the next ready candidate and cursor.
+type MessageCandidateResult struct {
+	Descriptor *MessageDescriptor
+	NextCursor string
+}
+
+// MessageResult captures a message document and its ETag.
+type MessageResult struct {
+	Document *MessageDocument
+	ETag     string
+}
+
+// PayloadResult captures a payload reader with metadata.
+type PayloadResult struct {
+	Reader io.ReadCloser
+	Info   *storage.ObjectInfo
+}
+
+// StateResult captures a queue state document and its ETag.
+type StateResult struct {
+	Document *StateDocument
+	ETag     string
+}
+
 // StateDocument captures metadata about queue state blobs.
 type StateDocument struct {
 	Type          string    `json:"type"`
@@ -167,6 +198,9 @@ type MessageDocument struct {
 	VisibilityTimeout  int64          `json:"visibility_timeout_seconds,omitempty"`
 	ExpiresAt          *time.Time     `json:"expires_at,omitempty"`
 	CorrelationID      string         `json:"correlation_id,omitempty"`
+	LeaseID            string         `json:"lease_id,omitempty"`
+	LeaseFencingToken  int64          `json:"lease_fencing_token,omitempty"`
+	LeaseTxnID         string         `json:"lease_txn_id,omitempty"`
 	PayloadDescriptor  []byte         `json:"payload_descriptor,omitempty"`
 	MetaDescriptor     []byte         `json:"meta_descriptor,omitempty"`
 }
@@ -340,10 +374,12 @@ func (s *Service) preparePayloadReader(namespace, payloadPath string, payload io
 	if s.crypto == nil || !s.crypto.Enabled() {
 		return counting, nil, counting, nil
 	}
-	mat, descBytes, err := s.crypto.MintMaterial(storage.QueuePayloadContext(namespace, payloadPath))
+	minted, err := s.crypto.MintMaterial(storage.QueuePayloadContext(namespace, payloadPath))
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	mat := minted.Material
+	descBytes := minted.Descriptor
 	pr, pw := io.Pipe()
 	encWriter, err := s.crypto.EncryptWriterForMaterial(pw, mat)
 	if err != nil {
@@ -383,12 +419,13 @@ func (s *Service) encodeMessageMeta(namespace, metaPath string, doc *messageDocu
 		}
 	}
 	if len(descriptor) == 0 {
-		var descBytes []byte
-		mat, descBytes, err = s.crypto.MintMaterial(storage.QueueMetaContext(namespace, metaPath))
+		var minted storage.MaterialResult
+		minted, err = s.crypto.MintMaterial(storage.QueueMetaContext(namespace, metaPath))
 		if err != nil {
 			return nil, nil, err
 		}
-		descriptor = append([]byte(nil), descBytes...)
+		descriptor = append([]byte(nil), minted.Descriptor...)
+		mat = minted.Material
 	}
 	var buf bytes.Buffer
 	writer, err := s.crypto.EncryptWriterForMaterial(&buf, mat)
@@ -457,12 +494,12 @@ func (s *Service) EnsureMessageReady(ctx context.Context, namespace, queue, id s
 		return err
 	}
 	key := messagePayloadPath(name, id)
-	body, _, err := s.store.GetObject(ctx, ns, key)
+	obj, err := s.store.GetObject(ctx, ns, key)
 	if err != nil {
 		return err
 	}
-	if body != nil {
-		_ = body.Close()
+	if obj.Reader != nil {
+		_ = obj.Reader.Close()
 	}
 	return nil
 }
@@ -551,14 +588,14 @@ func contentTypeOrDefault(contentType string) string {
 }
 
 // ListMessages enumerates message metadata objects in lexical order.
-func (s *Service) ListMessages(ctx context.Context, namespace, queue string, startAfter string, limit int) ([]MessageDescriptor, string, bool, error) {
+func (s *Service) ListMessages(ctx context.Context, namespace, queue string, startAfter string, limit int) (MessageListResult, error) {
 	name, err := sanitizeQueueName(queue)
 	if err != nil {
-		return nil, "", false, err
+		return MessageListResult{}, err
 	}
 	ns, err := sanitizeNamespace(namespace)
 	if err != nil {
-		return nil, "", false, err
+		return MessageListResult{}, err
 	}
 	prefix := path.Join(queueBasePath(name), "msg") + "/"
 	opts := storage.ListOptions{
@@ -570,7 +607,7 @@ func (s *Service) ListMessages(ctx context.Context, namespace, queue string, sta
 	}
 	result, err := s.store.ListObjects(ctx, ns, opts)
 	if err != nil {
-		return nil, "", false, err
+		return MessageListResult{}, err
 	}
 	descriptors := make([]MessageDescriptor, 0, len(result.Objects))
 	for _, obj := range result.Objects {
@@ -583,7 +620,7 @@ func (s *Service) ListMessages(ctx context.Context, namespace, queue string, sta
 			if errors.Is(err, storage.ErrNotFound) {
 				continue
 			}
-			return nil, "", false, err
+			return MessageListResult{}, err
 		}
 		if docPtr.Queue != name || docPtr.ID != id {
 			continue
@@ -598,18 +635,18 @@ func (s *Service) ListMessages(ctx context.Context, namespace, queue string, sta
 		descriptors = append(descriptors, descriptor)
 	}
 	next := result.NextStartAfter
-	return descriptors, next, result.Truncated, nil
+	return MessageListResult{Descriptors: descriptors, NextStartAfter: next, Truncated: result.Truncated}, nil
 }
 
 // NextCandidate returns the next visible message ready for processing.
-func (s *Service) NextCandidate(ctx context.Context, namespace, queue string, startAfter string, pageSize int) (*MessageDescriptor, string, error) {
+func (s *Service) NextCandidate(ctx context.Context, namespace, queue string, startAfter string, pageSize int) (MessageCandidateResult, error) {
 	name, err := sanitizeQueueName(queue)
 	if err != nil {
-		return nil, "", err
+		return MessageCandidateResult{}, err
 	}
 	ns, err := sanitizeNamespace(namespace)
 	if err != nil {
-		return nil, "", err
+		return MessageCandidateResult{}, err
 	}
 	cache := s.readyCacheForQueue(ns, name)
 	if startAfter != "" {
@@ -618,13 +655,13 @@ func (s *Service) NextCandidate(ctx context.Context, namespace, queue string, st
 	now := s.clk.Now().UTC()
 	desc, err := cache.next(ctx, pageSize, now)
 	if err != nil {
-		return nil, "", err
+		return MessageCandidateResult{}, err
 	}
 	if desc == nil {
-		return nil, "", storage.ErrNotFound
+		return MessageCandidateResult{}, storage.ErrNotFound
 	}
 	desc.Namespace = ns
-	return desc, "", nil
+	return MessageCandidateResult{Descriptor: desc, NextCursor: ""}, nil
 }
 
 // RefreshReadyCache syncs the ready cache for the provided queue immediately.
@@ -682,10 +719,12 @@ func (s *Service) loadDescriptor(ctx context.Context, namespace, queue, metadata
 
 // loadMessageDocument fetches and decodes the message metadata.
 func (s *Service) loadMessageDocument(ctx context.Context, namespace, queue, metadataKey string) (*messageDocument, string, error) {
-	reader, info, err := s.store.GetObject(ctx, namespace, metadataKey)
+	obj, err := s.store.GetObject(ctx, namespace, metadataKey)
 	if err != nil {
 		return nil, "", err
 	}
+	reader := obj.Reader
+	info := obj.Info
 	displayKey := fullObjectKey(namespace, metadataKey)
 	var (
 		data       []byte
@@ -744,16 +783,20 @@ func (s *Service) loadMessageDocument(ctx context.Context, namespace, queue, met
 }
 
 // GetMessage loads the metadata document for the provided queue/id pair.
-func (s *Service) GetMessage(ctx context.Context, namespace, queue, id string) (*MessageDocument, string, error) {
+func (s *Service) GetMessage(ctx context.Context, namespace, queue, id string) (MessageResult, error) {
 	name, err := sanitizeQueueName(queue)
 	if err != nil {
-		return nil, "", err
+		return MessageResult{}, err
 	}
 	ns, err := sanitizeNamespace(namespace)
 	if err != nil {
-		return nil, "", err
+		return MessageResult{}, err
 	}
-	return s.loadMessageDocument(ctx, ns, name, messageMetaPath(name, id))
+	doc, etag, err := s.loadMessageDocument(ctx, ns, name, messageMetaPath(name, id))
+	if err != nil {
+		return MessageResult{}, err
+	}
+	return MessageResult{Document: doc, ETag: etag}, nil
 }
 
 // SaveMessageDocument writes metadata via CAS.
@@ -857,6 +900,15 @@ func (s *Service) IncrementAttempts(ctx context.Context, namespace, queue string
 	return s.SaveMessageDocument(ctx, namespace, queue, doc.ID, doc, expectedETag)
 }
 
+func clearMessageLease(doc *messageDocument) {
+	if doc == nil {
+		return
+	}
+	doc.LeaseID = ""
+	doc.LeaseFencingToken = 0
+	doc.LeaseTxnID = ""
+}
+
 // Reschedule moves message visibility forward without incrementing attempts (used for nack).
 func (s *Service) Reschedule(ctx context.Context, namespace, queue string, doc *messageDocument, expectedETag string, delay time.Duration) (string, error) {
 	if doc == nil {
@@ -868,6 +920,7 @@ func (s *Service) Reschedule(ctx context.Context, namespace, queue string, doc *
 	now := s.clk.Now().UTC()
 	doc.NotVisibleUntil = now.Add(delay)
 	doc.UpdatedAt = now
+	clearMessageLease(doc)
 	if doc != nil && doc.Namespace == "" {
 		doc.Namespace = namespace
 	}
@@ -896,49 +949,51 @@ func (s *Service) ExtendVisibility(ctx context.Context, namespace, queue string,
 }
 
 // GetPayload streams the message payload.
-func (s *Service) GetPayload(ctx context.Context, namespace, queue, id string) (io.ReadCloser, *storage.ObjectInfo, error) {
+func (s *Service) GetPayload(ctx context.Context, namespace, queue, id string) (PayloadResult, error) {
 	name, err := sanitizeQueueName(queue)
 	if err != nil {
-		return nil, nil, err
+		return PayloadResult{}, err
 	}
 	ns, err := sanitizeNamespace(namespace)
 	if err != nil {
-		return nil, nil, err
+		return PayloadResult{}, err
 	}
 	payloadKey := messagePayloadPath(name, id)
 	descriptor := []byte(nil)
 	if ctxDesc, ok := storage.ObjectDescriptorFromContext(ctx); ok && len(ctxDesc) > 0 {
 		descriptor = append([]byte(nil), ctxDesc...)
 	}
-	reader, info, err := s.store.GetObject(ctx, ns, payloadKey)
+	obj, err := s.store.GetObject(ctx, ns, payloadKey)
 	if err != nil {
-		return nil, nil, err
+		return PayloadResult{}, err
 	}
+	reader := obj.Reader
+	info := obj.Info
 	if s.crypto != nil && s.crypto.Enabled() {
 		if len(descriptor) == 0 && info != nil {
 			descriptor = append([]byte(nil), info.Descriptor...)
 		}
 		if len(descriptor) == 0 {
 			reader.Close()
-			return nil, nil, fmt.Errorf("queue: missing payload descriptor for %s", fullObjectKey(ns, payloadKey))
+			return PayloadResult{}, fmt.Errorf("queue: missing payload descriptor for %s", fullObjectKey(ns, payloadKey))
 		}
 		mat, err := s.crypto.MaterialFromDescriptor(storage.QueuePayloadContext(ns, payloadKey), descriptor)
 		if err != nil {
 			reader.Close()
-			return nil, nil, err
+			return PayloadResult{}, err
 		}
 		decReader, err := s.crypto.DecryptReaderForMaterial(reader, mat)
 		if err != nil {
 			reader.Close()
-			return nil, nil, err
+			return PayloadResult{}, err
 		}
 		if info != nil {
 			info.ContentType = ""
 			info.Descriptor = append([]byte(nil), descriptor...)
 		}
-		return decReader, info, nil
+		return PayloadResult{Reader: decReader, Info: info}, nil
 	}
-	return reader, info, nil
+	return PayloadResult{Reader: reader, Info: info}, nil
 }
 
 // EnsureStateExists creates an empty state document if missing.
@@ -976,13 +1031,13 @@ func (s *Service) EnsureStateExists(ctx context.Context, namespace, queue, id st
 	})
 	if err != nil {
 		if errors.Is(err, storage.ErrCASMismatch) {
-			reader, meta, loadErr := s.store.GetObject(ctx, ns, stateKey)
+			obj, loadErr := s.store.GetObject(ctx, ns, stateKey)
 			if loadErr != nil {
 				return "", loadErr
 			}
-			_ = reader.Close()
-			if meta != nil {
-				return meta.ETag, nil
+			_ = obj.Reader.Close()
+			if obj.Info != nil {
+				return obj.Info.ETag, nil
 			}
 			return "", nil
 		}
@@ -1059,13 +1114,15 @@ func (s *Service) moveToDLQInternal(ctx context.Context, namespace, queue, id st
 }
 
 func (s *Service) copyObject(ctx context.Context, namespace, srcKey, dstKey string, ifNotExists bool, srcContext, dstContext string) error {
-	reader, info, err := s.store.GetObject(ctx, namespace, srcKey)
+	obj, err := s.store.GetObject(ctx, namespace, srcKey)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil
 		}
 		return err
 	}
+	reader := obj.Reader
+	info := obj.Info
 	var plainReader io.Reader = reader
 	plainCloser := reader
 	if srcContext != "" && s.crypto != nil && s.crypto.Enabled() {
@@ -1095,11 +1152,12 @@ func (s *Service) copyObject(ctx context.Context, namespace, srcKey, dstKey stri
 	finalReader := plainReader
 	descriptor := []byte(nil)
 	if dstContext != "" && s.crypto != nil && s.crypto.Enabled() {
-		mat, descBytes, err := s.crypto.MintMaterial(dstContext)
+		minted, err := s.crypto.MintMaterial(dstContext)
 		if err != nil {
 			return err
 		}
-		descriptor = append([]byte(nil), descBytes...)
+		descriptor = append([]byte(nil), minted.Descriptor...)
+		mat := minted.Material
 		pr, pw := io.Pipe()
 		encWriter, err := s.crypto.EncryptWriterForMaterial(pw, mat)
 		if err != nil {
@@ -1168,28 +1226,28 @@ func (s *Service) DeleteState(ctx context.Context, namespace, queue, id string, 
 }
 
 // LoadState retrieves the JSON state document associated with the queue message.
-func (s *Service) LoadState(ctx context.Context, namespace, queue, id string) (*StateDocument, string, error) {
+func (s *Service) LoadState(ctx context.Context, namespace, queue, id string) (StateResult, error) {
 	name, err := sanitizeQueueName(queue)
 	if err != nil {
-		return nil, "", err
+		return StateResult{}, err
 	}
 	ns, err := sanitizeNamespace(namespace)
 	if err != nil {
-		return nil, "", err
+		return StateResult{}, err
 	}
 	stateKey := messageStatePath(name, id)
-	reader, info, err := s.store.GetObject(ctx, ns, stateKey)
+	obj, err := s.store.GetObject(ctx, ns, stateKey)
 	if err != nil {
-		return nil, "", err
+		return StateResult{}, err
 	}
-	defer reader.Close()
+	defer obj.Reader.Close()
 	var doc stateDocument
-	if err := json.NewDecoder(reader).Decode(&doc); err != nil {
-		return nil, "", fmt.Errorf("queue: decode state %q: %w", fullObjectKey(ns, stateKey), err)
+	if err := json.NewDecoder(obj.Reader).Decode(&doc); err != nil {
+		return StateResult{}, fmt.Errorf("queue: decode state %q: %w", fullObjectKey(ns, stateKey), err)
 	}
 	etag := ""
-	if info != nil {
-		etag = info.ETag
+	if obj.Info != nil {
+		etag = obj.Info.ETag
 	}
 	if doc.Namespace == "" {
 		doc.Namespace = ns
@@ -1197,7 +1255,7 @@ func (s *Service) LoadState(ctx context.Context, namespace, queue, id string) (*
 	if doc.Queue == "" {
 		doc.Queue = name
 	}
-	return &doc, etag, nil
+	return StateResult{Document: &doc, ETag: etag}, nil
 }
 
 // SaveState updates the workflow state document via CAS.
@@ -1260,6 +1318,7 @@ func (s *Service) Nack(ctx context.Context, namespace, queue string, doc *messag
 		doc.Namespace = namespace
 	}
 	doc.LastError = lastErr
+	clearMessageLease(doc)
 	return s.SaveMessageDocument(ctx, namespace, queue, doc.ID, doc, expectedETag)
 }
 

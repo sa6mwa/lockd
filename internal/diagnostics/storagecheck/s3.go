@@ -55,20 +55,20 @@ func VerifyStore(ctx context.Context, cfg lockd.Config) (Result, error) {
 	}
 	cfg = cfgWithCrypto
 	if strings.HasPrefix(cfg.Store, "aws://") {
-		awsCfg, creds, err := lockd.BuildAWSConfig(cfg)
+		awsResult, err := lockd.BuildAWSConfig(cfg)
 		if err != nil {
 			return Result{}, err
 		}
-		awsCfg.Crypto = crypto
-		return verifyObjectStore(ctx, "aws", awsCfg, true, creds)
+		awsResult.Config.Crypto = crypto
+		return verifyObjectStore(ctx, "aws", awsResult.Config, true, awsResult.Credentials)
 	}
 	if strings.HasPrefix(cfg.Store, "s3://") {
-		s3cfg, creds, err := lockd.BuildGenericS3Config(cfg)
+		s3Result, err := lockd.BuildGenericS3Config(cfg)
 		if err != nil {
 			return Result{}, err
 		}
-		s3cfg.Crypto = crypto
-		return verifyObjectStore(ctx, "s3-compatible", s3cfg, false, creds)
+		s3Result.Config.Crypto = crypto
+		return verifyObjectStore(ctx, "s3-compatible", s3Result.Config, false, s3Result.Credentials)
 	}
 	if strings.HasPrefix(cfg.Store, "azure://") {
 		azureCfg, err := lockd.BuildAzureConfig(cfg)
@@ -79,12 +79,12 @@ func VerifyStore(ctx context.Context, cfg lockd.Config) (Result, error) {
 		return verifyAzure(ctx, azureCfg, crypto)
 	}
 	if strings.HasPrefix(cfg.Store, "disk://") {
-		diskCfg, root, err := lockd.BuildDiskConfig(cfg)
+		diskResult, err := lockd.BuildDiskConfig(cfg)
 		if err != nil {
 			return Result{}, err
 		}
-		diskCfg.Crypto = crypto
-		return verifyDisk(ctx, diskCfg, root, crypto)
+		diskResult.Config.Crypto = crypto
+		return verifyDisk(ctx, diskResult.Config, diskResult.Root, crypto)
 	}
 	return Result{}, storage.ErrNotImplemented
 }

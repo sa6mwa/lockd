@@ -1,8 +1,9 @@
 // Package lockd exposes the Go APIs behind the single-binary coordination
 // plane that combines exclusive leases, atomic JSON state (with search/index),
-// and an at-least-once queue. The server runs cleanly as PID 1 or can be
-// embedded as a library; the same storage abstraction powers disk, S3/MinIO,
-// Azure Blob, and in-memory backends with optional envelope encryption.
+// binary attachments, and an at-least-once queue. The server runs cleanly as
+// PID 1 or can be embedded as a library; the same storage abstraction powers
+// disk, S3/MinIO, Azure Blob, and in-memory backends with optional envelope
+// encryption.
 //
 // Copyright (C) 2025 Michel Blomgren <https://pkt.systems>
 //
@@ -36,6 +37,10 @@
 // the field on `Config`, providing `Namespace` in `api.AcquireRequest`, or
 // configuring clients via `client.WithDefaultNamespace` keeps each workload’s
 // state isolated under its own prefix.
+// Namespaces that start with a dot are reserved for lockd internals (e.g.
+// `.txns` stores transaction records) and are rejected by both the HTTP layer
+// and the core service. Always use user-defined namespaces that do not begin
+// with '.'.
 //
 // # Unix domain sockets
 //
@@ -49,9 +54,9 @@
 //	    Listen:       "/var/run/lockd.sock",
 //	    DisableMTLS:  true,
 //	}
-//	srv, stop, err := lockd.StartServer(ctx, cfg)
+//	handle, err := lockd.StartServer(ctx, cfg)
 //	if err != nil { log.Fatal(err) }
-//	defer stop(context.Background())
+//	defer handle.Stop(context.Background())
 //
 // # Client SDK
 //
@@ -73,6 +78,8 @@
 //	    Owner:      "worker-1",
 //	    TTLSeconds: 30,
 //	    BlockSecs:  client.BlockWaitForever,
+//	    // Optional: join an existing transaction across keys.
+//	    TxnID:      existingTxnID,
 //	})
 //	if err != nil { log.Fatal(err) }
 //	defer sess.Close()
@@ -84,6 +91,12 @@
 //	if err := sess.Load(ctx, &state); err != nil { log.Fatal(err) }
 //	state.Counter++
 //	if err := sess.Save(ctx, state); err != nil { log.Fatal(err) }
+//
+// The lease session carries the `TxnID` minted by Acquire. All lease-bound
+// mutations (Update/Remove/UpdateMetadata/Release/attachments) require that
+// transaction id. The SDK wires `X-Txn-ID` automatically when you use
+// `LeaseSession`; custom HTTP clients must supply it (and include `txn_id` in
+// the release request body).
 //
 // The client tracks fencing tokens automatically; reusing the same `Client`
 // instance ensures follow-up KeepAlive/Get/Update/Release calls include the
@@ -133,6 +146,40 @@
 // Explicit Release calls elsewhere still treat `lease_required` as success so
 // teardown never hangs even if the lease has already been reclaimed.
 //
+// # State attachments
+//
+// Keys can carry multiple named binary attachments. Attachments are staged
+// under the lease transaction just like JSON state updates: attach files while
+// holding the lease, and they become visible to public reads once the lease is
+// released (commit). Attachments are stored under `state/<key>/attachments/<id>`
+// and flow through the same encryption-at-rest pipeline as state/queue payloads.
+// Lease-bound attachment operations require `X-Txn-ID`; public reads do not.
+//
+// Use `ListAttachments`/`RetrieveAttachment` on the lease to inspect staged
+// files, and `DeleteAttachment`/`DeleteAllAttachments` to stage removals that
+// apply on release (rollbacks discard staged changes).
+//
+//	lease, err := cli.Acquire(ctx, api.AcquireRequest{Key: "orders", Owner: "worker-1", TTLSeconds: 30})
+//	if err != nil { log.Fatal(err) }
+//	defer lease.Close()
+//
+//	if _, err := lease.Attach(ctx, client.AttachRequest{
+//	    Name:        "invoice.pdf",
+//	    ContentType: "application/pdf",
+//	    Body:        fileReader,
+//	}); err != nil {
+//	    log.Fatal(err)
+//	}
+//	if err := lease.Release(ctx); err != nil { log.Fatal(err) }
+//
+//	// Public reads can list/retrieve attachments after release.
+//	resp, err := cli.Get(ctx, "orders")
+//	if err != nil { log.Fatal(err) }
+//	defer resp.Close()
+//	attachments, err := resp.ListAttachments(ctx)
+//	if err != nil { log.Fatal(err) }
+//	_ = attachments
+//
 // # Queue service
 //
 // lockd includes an at-least-once queue built on the same storage backends,
@@ -177,7 +224,7 @@
 // # Embedding and helpers
 //
 // `StartServer` launches a server in a goroutine, waits for readiness, and
-// returns a stop function. It’s useful when wiring lockd into existing
+// returns a handle with a Stop method. It’s useful when wiring lockd into existing
 // processes or sidecars. The `client/inprocess` package builds on top of it,
 // starting an embedded server (MTLS disabled) and returning a ready-to-use
 // client facade:

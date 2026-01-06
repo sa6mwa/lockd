@@ -8,6 +8,8 @@ mtls_enabled=1
 
 go_test_timeout=${LOCKD_GO_TEST_TIMEOUT:-2m}
 
+start_ts=$(date +%s)
+
 print_usage() {
   cat <<'USAGE'
 Usage: run-integration-suites.sh [--disable-crypto] [--disable-mtls] [suite ...]
@@ -83,6 +85,19 @@ add_backend azure 1 1 1
 add_suite "azure/query" "azure" "integration azure query" ".env.azure"
 add_backend minio 1 1 1
 add_suite "minio/query" "minio" "integration minio query" ".env.minio"
+add_suite "mixed" "mixed" "integration mixed" ".env.minio .env.aws .env.azure"
+
+format_duration() {
+  local total=$1
+  local hours=$((total / 3600))
+  local mins=$(((total % 3600) / 60))
+  local secs=$((total % 60))
+  if [[ $hours -gt 0 ]]; then
+    printf "%d:%02d:%02d" "$hours" "$mins" "$secs"
+  else
+    printf "%d:%02d" "$mins" "$secs"
+  fi
+}
 
 list_suites() {
   echo "Available suites:"
@@ -140,24 +155,123 @@ for suite in "${SUITES_TO_RUN[@]}"; do
     EXIT_CODE=1
     continue
   fi
+  suite_timeout=$go_test_timeout
+  if [[ $suite == mem* ]]; then
+    suite_timeout=${LOCKD_MEM_GO_TEST_TIMEOUT:-5m}
+  fi
+  if [[ $suite == disk* ]]; then
+    suite_timeout=${LOCKD_DISK_GO_TEST_TIMEOUT:-5m}
+  fi
+  if [[ $suite == nfs* ]]; then
+    suite_timeout=${LOCKD_NFS_GO_TEST_TIMEOUT:-5m}
+  fi
+  if [[ $suite == azure* ]]; then
+    suite_timeout=${LOCKD_AZURE_GO_TEST_TIMEOUT:-5m}
+  fi
+  if [[ $suite == aws* ]]; then
+    suite_timeout=${LOCKD_AWS_GO_TEST_TIMEOUT:-10m}
+  fi
+  if [[ $suite == mixed* ]]; then
+    suite_timeout=${LOCKD_MIXED_GO_TEST_TIMEOUT:-8m}
+  fi
   env_file=${SUITE_ENVFILE[$suite]}
-  if [[ -n $env_file && ! -f $env_file ]]; then
-    echo "Missing environment file: $env_file (suite $suite)" >&2
-    EXIT_CODE=1
-    continue
+  if [[ -n $env_file ]]; then
+    for file in $env_file; do
+      if [[ ! -f $file ]]; then
+        echo "Missing environment file: $file (suite $suite)" >&2
+        EXIT_CODE=1
+        continue 2
+      fi
+    done
   fi
   tags=${SUITE_TAGS[$suite]}
   log_file="$LOG_DIR/${suite//\//-}.log"
   echo "==> Running $suite (tags: $tags)"
   if [[ -n $env_file ]]; then
-    cmd_string="set -a && source '$env_file' && set +a && go test -timeout $go_test_timeout -v -tags '$tags' -count=1 ./integration/..."
+    if [[ $suite == "mixed" ]]; then
+      cmd_string=$(cat <<EOF
+set -e
+load_env_file() {
+  local file=\$1
+  set -a
+  source "\$file"
+  set +a
+}
+capture_minio() {
+  if [[ -n "\${LOCKD_STORE:-}" ]]; then
+    export LOCKD_MINIO_STORE="\$LOCKD_STORE"
+  fi
+  if [[ -n "\${LOCKD_S3_ROOT_USER:-}" ]]; then
+    export LOCKD_MINIO_S3_ROOT_USER="\$LOCKD_S3_ROOT_USER"
+  fi
+  if [[ -n "\${LOCKD_S3_ROOT_PASSWORD:-}" ]]; then
+    export LOCKD_MINIO_S3_ROOT_PASSWORD="\$LOCKD_S3_ROOT_PASSWORD"
+  fi
+  if [[ -n "\${LOCKD_S3_ACCESS_KEY_ID:-}" ]]; then
+    export LOCKD_MINIO_S3_ACCESS_KEY_ID="\$LOCKD_S3_ACCESS_KEY_ID"
+  fi
+  if [[ -n "\${LOCKD_S3_SECRET_ACCESS_KEY:-}" ]]; then
+    export LOCKD_MINIO_S3_SECRET_ACCESS_KEY="\$LOCKD_S3_SECRET_ACCESS_KEY"
+  fi
+  if [[ -n "\${LOCKD_S3_SESSION_TOKEN:-}" ]]; then
+    export LOCKD_MINIO_S3_SESSION_TOKEN="\$LOCKD_S3_SESSION_TOKEN"
+  fi
+  unset LOCKD_STORE LOCKD_S3_ROOT_USER LOCKD_S3_ROOT_PASSWORD LOCKD_S3_ACCESS_KEY_ID LOCKD_S3_SECRET_ACCESS_KEY LOCKD_S3_SESSION_TOKEN
+}
+capture_aws() {
+  if [[ -n "\${LOCKD_STORE:-}" ]]; then
+    export LOCKD_AWS_STORE="\$LOCKD_STORE"
+  fi
+  if [[ -n "\${LOCKD_AWS_REGION:-}" ]]; then
+    export LOCKD_AWS_REGION="\$LOCKD_AWS_REGION"
+  elif [[ -n "\${AWS_REGION:-}" ]]; then
+    export LOCKD_AWS_REGION="\$AWS_REGION"
+  elif [[ -n "\${AWS_DEFAULT_REGION:-}" ]]; then
+    export LOCKD_AWS_REGION="\$AWS_DEFAULT_REGION"
+  fi
+  unset LOCKD_STORE
+}
+capture_azure() {
+  if [[ -n "\${LOCKD_STORE:-}" ]]; then
+    export LOCKD_AZURE_STORE="\$LOCKD_STORE"
+  fi
+  if [[ -n "\${LOCKD_AZURE_ACCOUNT_KEY:-}" ]]; then
+    export LOCKD_AZURE_ACCOUNT_KEY="\$LOCKD_AZURE_ACCOUNT_KEY"
+  fi
+  if [[ -n "\${LOCKD_AZURE_ENDPOINT:-}" ]]; then
+    export LOCKD_AZURE_ENDPOINT="\$LOCKD_AZURE_ENDPOINT"
+  fi
+  if [[ -n "\${LOCKD_AZURE_SAS_TOKEN:-}" ]]; then
+    export LOCKD_AZURE_SAS_TOKEN="\$LOCKD_AZURE_SAS_TOKEN"
+  fi
+  unset LOCKD_STORE
+}
+for file in $env_file; do
+  load_env_file "\$file"
+  case "\$file" in
+    *minio*) capture_minio ;;
+    *aws*) capture_aws ;;
+    *azure*) capture_azure ;;
+  esac
+done
+go test -timeout $suite_timeout -v -tags '$tags' -count=1 ./integration/...
+EOF
+)
+    else
+      cmd_string="set -a && source '$env_file' && set +a && go test -timeout $suite_timeout -v -tags '$tags' -count=1 ./integration/..."
+    fi
   else
-    cmd_string="go test -timeout $go_test_timeout -v -tags '$tags' -count=1 ./integration/..."
+    cmd_string="go test -timeout $suite_timeout -v -tags '$tags' -count=1 ./integration/..."
   fi
   echo "Command: $cmd_string"
   cmd_goflags="${GOFLAGS:-}"
   if [[ $cmd_goflags != *"-p="* ]]; then
-    cmd_goflags="${cmd_goflags:+$cmd_goflags }-p=1"
+    if [[ $suite == aws* ]]; then
+      default_p=${LOCKD_AWS_GOFLAGS_P:-2}
+    else
+      default_p=1
+    fi
+    cmd_goflags="${cmd_goflags:+$cmd_goflags }-p=${default_p}"
   fi
   if GOFLAGS="$cmd_goflags" bash -c "$cmd_string" 2>&1 | tee "$log_file"; then
     SUITE_STATUS[$suite]=0
@@ -189,6 +303,9 @@ for suite in "${RUN_SUITES[@]}"; do
     printf "  %-15s FAIL\n" "$suite"
   fi
 done
+end_ts=$(date +%s)
+elapsed=$((end_ts - start_ts))
+printf "Elapsed: %s\n" "$(format_duration "$elapsed")"
 
 echo
 if [[ $EXIT_CODE -ne 0 ]]; then

@@ -16,12 +16,16 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"pkt.systems/lockd"
-	"pkt.systems/lockd/internal/loggingutil"
+	"pkt.systems/lockd/internal/svcfields"
 	"pkt.systems/pslog"
 )
 
 func submain(ctx context.Context) int {
-	baseLogger := pslog.NewStructured(os.Stderr).LogLevel(pslog.InfoLevel).With("app", "lockd")
+	baseLogger := pslog.LoggerFromEnv(
+		pslog.WithEnvPrefix("LOCKD_LOG_"),
+		pslog.WithEnvOptions(pslog.Options{Mode: pslog.ModeStructured, MinLevel: pslog.InfoLevel}),
+		pslog.WithEnvWriter(os.Stderr),
+	).With("app", "lockd")
 	cmd := newRootCommand(baseLogger)
 	targetCmd := cmd
 	if len(os.Args) > 1 {
@@ -33,7 +37,7 @@ func submain(ctx context.Context) int {
 	if err := cmd.ExecuteContext(ctx); err != nil {
 		if err != context.Canceled {
 			if targetCmd == cmd {
-				loggingutil.WithSubsystem(baseLogger, "cli.root").Error("command failed", "error", err)
+				svcfields.WithSubsystem(baseLogger, "cli.root").Error("command failed", "error", err)
 			} else {
 				fmt.Fprintf(os.Stderr, "%s\n", err)
 			}
@@ -136,7 +140,7 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 `,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger := baseLogger
-			cliLogger := loggingutil.WithSubsystem(logger, "cli.root")
+			cliLogger := svcfields.WithSubsystem(logger, "cli.root")
 			ctx := cmd.Context()
 			cmd.SilenceUsage = true
 
@@ -168,7 +172,7 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 			level, ok := pslog.ParseLevel(logLevel)
 			if ok {
 				logger = logger.LogLevel(level)
-				cliLogger = loggingutil.WithSubsystem(logger, "cli.root")
+				cliLogger = svcfields.WithSubsystem(logger, "cli.root")
 			}
 			cliLogger.Info("starting lockd", "store", cfg.Store, "listen", cfg.Listen, "mtls", !cfg.DisableMTLS, "default_namespace", cfg.DefaultNamespace)
 
@@ -214,7 +218,7 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 				return fmt.Errorf("set LOCKD_CONFIG_DIR: %w", err)
 			}
 		}
-		logger := loggingutil.WithSubsystem(baseLogger, "cli.bootstrap")
+		logger := svcfields.WithSubsystem(baseLogger, "cli.bootstrap")
 		return bootstrapConfigDir(abs, logger)
 	}
 
@@ -241,13 +245,30 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 	flags.Duration("disk-retention", 0, "optional retention window for disk backend (0 keeps state indefinitely)")
 	flags.Duration("disk-janitor-interval", 0, "override janitor sweep interval for disk backend (default derived from retention)")
 	flags.Bool("disk-queue-watch", true, "enable inotify-based queue events for disk backend (Linux only; falls back to polling on unsupported filesystems)")
-	flags.Bool("mem-queue-watch", true, "enable in-memory queue change notifications")
+	flags.Bool("disable-mem-queue-watch", false, "disable in-memory queue change notifications")
 	flags.Bool("disable-storage-encryption", false, "disable kryptograf envelope encryption (plaintext at rest)")
 	flags.Bool("storage-encryption-snappy", false, "enable Snappy compression before encrypting objects")
 	flags.Bool("disable-krypto-pool", false, "disable kryptograf buffer pool (enabled by default)")
 	flags.Bool("disable-mtls", false, "disable mutual TLS")
+	flags.Int("http2-max-concurrent-streams", lockd.DefaultMaxConcurrentStreams, "maximum concurrent HTTP/2 streams per connection (0 uses http2 default)")
 	flags.String("bundle", "", "path to combined server bundle PEM")
 	flags.String("denylist-path", "", "path to certificate denylist (optional)")
+	tcTrustDefault := ""
+	if dir, err := lockd.DefaultTCTrustDir(); err == nil {
+		tcTrustDefault = dir
+	}
+	flags.String("tc-trust-dir", tcTrustDefault, "directory containing trusted TC CA certificates (for federation)")
+	flags.Bool("tc-disable-auth", false, "disable TC client certificate enforcement for transaction coordinator endpoints")
+	flags.Bool("tc-allow-default-ca", false, "allow the primary server CA for TC endpoints when TC auth is enabled")
+	flags.String("self", "", "this node's endpoint (used for TC leadership and RM registration)")
+	flags.StringSlice("join", nil, "seed TC endpoints used to bootstrap leader election")
+	flags.Duration("tc-fanout-timeout", lockd.DefaultTCFanoutTimeout, "per-RM timeout for TC fan-out apply calls")
+	flags.Int("tc-fanout-attempts", lockd.DefaultTCFanoutMaxAttempts, "maximum attempts per RM apply during TC fan-out")
+	flags.Duration("tc-fanout-base-delay", lockd.DefaultTCFanoutBaseDelay, "base backoff delay for TC fan-out retries")
+	flags.Duration("tc-fanout-max-delay", lockd.DefaultTCFanoutMaxDelay, "maximum backoff delay for TC fan-out retries")
+	flags.Float64("tc-fanout-multiplier", lockd.DefaultTCFanoutMultiplier, "backoff multiplier for TC fan-out retries")
+	flags.Duration("tc-decision-retention", lockd.DefaultTCDecisionRetention, "retain decided txn records for this duration")
+	flags.String("tc-client-bundle", "", "path to client bundle PEM used by TC fan-out calls when mTLS is enabled")
 	flags.String("s3-sse", "", "server-side encryption mode for S3 objects")
 	flags.String("s3-kms-key-id", "", "KMS key ID for S3 server-side encryption")
 	flags.String("s3-max-part-size", s3PartDefault, "maximum S3 multipart upload part size")
@@ -308,12 +329,15 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 	names := []string{
 		"config",
 		"listen", "listen-proto", "store", "default-namespace", "json-max", "json-util", "payload-spool-mem", "default-ttl", "max-ttl", "acquire-block",
-		"sweeper-interval", "drain-grace", "shutdown-timeout", "disk-retention", "disk-janitor-interval", "disable-mtls", "bundle", "denylist-path", "s3-sse",
+		"sweeper-interval", "drain-grace", "shutdown-timeout", "disk-retention", "disk-janitor-interval",
+		"disable-mtls", "http2-max-concurrent-streams", "bundle", "denylist-path", "tc-trust-dir", "tc-disable-auth", "tc-allow-default-ca",
+		"self", "join", "tc-fanout-timeout", "tc-fanout-attempts", "tc-fanout-base-delay", "tc-fanout-max-delay", "tc-fanout-multiplier", "tc-decision-retention", "tc-client-bundle",
+		"s3-sse",
 		"s3-kms-key-id", "s3-max-part-size", "aws-region", "aws-kms-key-id", "azure-key", "azure-endpoint", "azure-sas-token",
 		"storage-retry-attempts", "storage-retry-base-delay", "storage-retry-max-delay", "storage-retry-multiplier",
 		"queue-max-consumers", "queue-poll-interval", "queue-poll-jitter", "queue-resilient-poll-interval",
 		"indexer-flush-docs", "indexer-flush-interval",
-		"disk-queue-watch", "mem-queue-watch", "disable-storage-encryption", "storage-encryption-snappy", "disable-krypto-pool",
+		"disk-queue-watch", "disable-mem-queue-watch", "disable-storage-encryption", "storage-encryption-snappy", "disable-krypto-pool",
 		"lsf-sample-interval", "lsf-log-interval",
 		"qrf-enabled", "qrf-queue-soft-limit", "qrf-queue-hard-limit", "qrf-queue-consumer-soft-limit", "qrf-queue-consumer-hard-limit", "qrf-lock-soft-limit", "qrf-lock-hard-limit",
 		"qrf-memory-soft-limit", "qrf-memory-hard-limit", "qrf-memory-soft-limit-percent", "qrf-memory-hard-limit-percent",
@@ -326,13 +350,19 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 	for _, name := range names {
 		bindFlag(name)
 	}
+	if err := viper.BindPFlag("tc-join", flags.Lookup("join")); err != nil {
+		panic(err)
+	}
 
-	cmd.AddCommand(newVerifyCommand(loggingutil.WithSubsystem(baseLogger, "cli.verify")))
+	cmd.AddCommand(newVerifyCommand(svcfields.WithSubsystem(baseLogger, "cli.verify")))
 	cmd.AddCommand(newAuthCommand())
 	cmd.AddCommand(newClientCommand())
 	cmd.AddCommand(newNamespaceCommand())
 	cmd.AddCommand(newIndexCommand())
 	cmd.AddCommand(newConfigCommand())
+	cmd.AddCommand(newVersionCommand())
+	cmd.AddCommand(newTxnRootCommand())
+	cmd.AddCommand(newTCCommand())
 
 	return cmd
 }
@@ -372,12 +402,25 @@ func bindConfig(cfg *lockd.Config) error {
 	if viper.IsSet("mtls") {
 		cfg.DisableMTLS = !viper.GetBool("mtls")
 	}
+	cfg.HTTP2MaxConcurrentStreams = viper.GetInt("http2-max-concurrent-streams")
+	cfg.HTTP2MaxConcurrentStreamsSet = true
 	cfg.BundlePath = viper.GetString("bundle")
 	cfg.DenylistPath = viper.GetString("denylist-path")
+	cfg.TCTrustDir = viper.GetString("tc-trust-dir")
+	cfg.TCDisableAuth = viper.GetBool("tc-disable-auth")
+	cfg.TCAllowDefaultCA = viper.GetBool("tc-allow-default-ca")
+	cfg.SelfEndpoint = viper.GetString("self")
+	cfg.TCJoinEndpoints = viper.GetStringSlice("tc-join")
+	cfg.TCFanoutTimeout = viper.GetDuration("tc-fanout-timeout")
+	cfg.TCFanoutMaxAttempts = viper.GetInt("tc-fanout-attempts")
+	cfg.TCFanoutBaseDelay = viper.GetDuration("tc-fanout-base-delay")
+	cfg.TCFanoutMaxDelay = viper.GetDuration("tc-fanout-max-delay")
+	cfg.TCFanoutMultiplier = viper.GetFloat64("tc-fanout-multiplier")
+	cfg.TCDecisionRetention = viper.GetDuration("tc-decision-retention")
+	cfg.TCClientBundlePath = viper.GetString("tc-client-bundle")
 	cfg.S3SSE = viper.GetString("s3-sse")
 	cfg.S3KMSKeyID = viper.GetString("s3-kms-key-id")
-	cfg.MemQueueWatch = viper.GetBool("mem-queue-watch")
-	cfg.MemQueueWatchSet = true
+	cfg.DisableMemQueueWatch = viper.GetBool("disable-mem-queue-watch")
 	cfg.DisableStorageEncryption = viper.GetBool("disable-storage-encryption")
 	if viper.IsSet("storage-encryption") {
 		cfg.DisableStorageEncryption = !viper.GetBool("storage-encryption")

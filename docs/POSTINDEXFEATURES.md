@@ -76,8 +76,8 @@ secondary-index query path. It is split into two parts:
 
 ### 2.1 Namespace capability discovery in the SDK
 
-- Add `Client.GetNamespaceConfig(ctx, ns)` returning the server’s namespace
-  metadata (`/v1/namespace` response).
+- Add `Client.GetNamespaceConfig(ctx, ns)` returning a result struct with the
+  server’s namespace metadata + ETag (`/v1/namespace` response).
 - Provide typed helpers (`NamespaceCapabilities`) so code can answer “does this
   namespace allow public reads?”, “what’s the preferred query engine?”, etc.
 - Impact: YCSB and production apps can adapt automatically instead of guessing.

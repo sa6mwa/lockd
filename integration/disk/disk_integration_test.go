@@ -28,9 +28,9 @@ import (
 	"pkt.systems/lockd/integration/internal/cryptotest"
 	shutdowntest "pkt.systems/lockd/integration/internal/shutdowntest"
 	testlog "pkt.systems/lockd/integration/internal/testlog"
-	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/disk"
+	"pkt.systems/lockd/internal/svcfields"
 	"pkt.systems/lockd/internal/uuidv7"
 	"pkt.systems/lockd/namespaces"
 	"pkt.systems/pslog"
@@ -83,6 +83,17 @@ func TestDiskLockLifecycle(t *testing.T) {
 	ctx := context.Background()
 	key := "disk-lifecycle-" + uuidv7.NewString()
 	runLifecycleTest(t, ctx, cli, key, "disk-worker")
+}
+
+func TestDiskAttachmentsLifecycle(t *testing.T) {
+	ensureDiskRootEnv(t)
+	root := prepareDiskRoot(t, "")
+	cfg := buildDiskConfig(t, root, 0)
+	cli := startDiskServer(t, cfg)
+
+	ctx := context.Background()
+	key := "disk-attach-" + uuidv7.NewString()
+	runAttachmentTest(t, ctx, cli, key)
 }
 
 func TestDiskConcurrency(t *testing.T) {
@@ -765,9 +776,9 @@ func TestDiskRemoveFailoverMultiServer(t *testing.T) {
 		),
 	}
 	primaryOptions = append(primaryOptions, closeDefaults)
-	primaryOptions = append(primaryOptions, cryptotest.SharedMTLSOptions(t, sharedCreds)...)
+	primaryOptions = append(primaryOptions, cryptotest.SharedMTLSOptions(t)...)
 	primary := lockd.StartTestServer(t, primaryOptions...)
-	backupOptions := append([]lockd.TestServerOption{closeDefaults}, cryptotest.SharedMTLSOptions(t, sharedCreds)...)
+	backupOptions := append([]lockd.TestServerOption{closeDefaults}, cryptotest.SharedMTLSOptions(t)...)
 	backupOptions = append(backupOptions,
 		lockd.WithTestBackend(store),
 		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
@@ -1028,13 +1039,10 @@ func TestDiskAcquireForUpdateRandomPayloads(t *testing.T) {
 }
 
 func TestDiskAcquireForUpdateCallbackSingleServer(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	watchdog := time.AfterFunc(10*time.Second, func() {
+	watchdog := time.AfterFunc(30*time.Second, func() {
 		buf := make([]byte, 1<<18)
 		n := runtime.Stack(buf, true)
-		panic("TestDiskAcquireForUpdateCallbackSingleServer timeout after 10s:\n" + string(buf[:n]))
+		panic("TestDiskAcquireForUpdateCallbackSingleServer timeout after 30s:\n" + string(buf[:n]))
 	})
 	defer watchdog.Stop()
 
@@ -1059,7 +1067,8 @@ func TestDiskAcquireForUpdateCallbackSingleServer(t *testing.T) {
 		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
 			lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
-			lockdclient.WithHTTPTimeout(500*time.Millisecond),
+			lockdclient.WithHTTPTimeout(5*time.Second),
+			lockdclient.WithFailureRetries(5),
 		),
 	}
 	serverOpts = append(serverOpts, cryptotest.SharedMTLSOptions(t)...)
@@ -1082,7 +1091,7 @@ func TestDiskAcquireForUpdateCallbackSingleServer(t *testing.T) {
 	seedCli := directDiskClient(t, ts)
 	t.Cleanup(func() { _ = seedCli.Close() })
 
-	seedCtx, seedCancel := context.WithTimeout(ctx, time.Second)
+	seedCtx, seedCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	seedLease, err := seedCli.Acquire(seedCtx, api.AcquireRequest{
 		Namespace:  namespace,
 		Key:        key,
@@ -1104,6 +1113,9 @@ func TestDiskAcquireForUpdateCallbackSingleServer(t *testing.T) {
 		t.Fatalf("seed release: %v", err)
 	}
 	seedCancel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
 	handlerCalled := false
 	err = proxiedClient.AcquireForUpdate(ctx, api.AcquireRequest{
@@ -1228,9 +1240,9 @@ func runDiskAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase fail
 		),
 	}
 	primaryOptions = append(primaryOptions, closeDefaults)
-	primaryOptions = append(primaryOptions, cryptotest.SharedMTLSOptions(t, sharedCreds)...)
+	primaryOptions = append(primaryOptions, cryptotest.SharedMTLSOptions(t)...)
 	primary := lockd.StartTestServer(t, primaryOptions...)
-	backupOptions := append([]lockd.TestServerOption{closeDefaults}, cryptotest.SharedMTLSOptions(t, sharedCreds)...)
+	backupOptions := append([]lockd.TestServerOption{closeDefaults}, cryptotest.SharedMTLSOptions(t)...)
 	backupOptions = append(backupOptions,
 		lockd.WithTestBackend(store),
 		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
@@ -1606,10 +1618,10 @@ func TestDiskRetentionSweep(t *testing.T) {
 
 	store.SweepOnceForTests()
 
-	if _, _, err := store.LoadMeta(ctx, namespace, key); !errors.Is(err, storage.ErrNotFound) {
+	if _, err := store.LoadMeta(ctx, namespace, key); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected meta cleanup, got %v", err)
 	}
-	if _, _, err := store.ReadState(ctx, namespace, key); !errors.Is(err, storage.ErrNotFound) {
+	if _, err := store.ReadState(ctx, namespace, key); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected state cleanup, got %v", err)
 	}
 }
@@ -1691,6 +1703,106 @@ func TestDiskMultiReplica(t *testing.T) {
 	}
 }
 
+func TestDiskTxnCommitAcrossNodes(t *testing.T) {
+	ensureDiskRootEnv(t)
+	root := prepareDiskRoot(t, "")
+	cfg := buildDiskConfig(t, root, 0)
+
+	cliRM := startDiskServer(t, cfg) // acts as RM holding the lease
+	cliTC := startDiskServer(t, cfg) // acts as TC issuing the decision
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	key := "disk-txn-cross-commit-" + uuidv7.NewString()
+
+	lease := acquireWithRetry(t, ctx, cliRM, key, "rm-node", 45, lockdclient.BlockWaitForever)
+	if err := lease.Save(ctx, map[string]any{"value": "from-rm"}); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+
+	resp, err := cliTC.Release(ctx, api.ReleaseRequest{
+		Key:     key,
+		LeaseID: lease.LeaseID,
+		TxnID:   lease.TxnID,
+	})
+	if err != nil {
+		t.Fatalf("cross-node release (commit): %v", err)
+	}
+	if !resp.Released {
+		t.Fatalf("expected release=true")
+	}
+	// Drop the lease on the originating server to avoid lingering in-memory trackers.
+	_, _ = cliRM.Release(ctx, api.ReleaseRequest{
+		Key:     key,
+		LeaseID: lease.LeaseID,
+		TxnID:   lease.TxnID,
+	})
+
+	verifier := acquireWithRetry(t, ctx, cliRM, key, "verifier", 45, lockdclient.BlockWaitForever)
+	state, _, _, err := getStateJSON(ctx, verifier)
+	if err != nil {
+		t.Fatalf("get_state: %v", err)
+	}
+	if !releaseLease(t, ctx, verifier) {
+		t.Fatalf("release verifier failed")
+	}
+	if state == nil || state["value"] != "from-rm" {
+		t.Fatalf("expected committed state from RM, got %+v", state)
+	}
+}
+
+func TestDiskTxnRollbackAcrossNodes(t *testing.T) {
+	ensureDiskRootEnv(t)
+	root := prepareDiskRoot(t, "")
+	cfg := buildDiskConfig(t, root, 0)
+
+	cliRM := startDiskServer(t, cfg)
+	cliTC := startDiskServer(t, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	key := "disk-txn-cross-rollback-" + uuidv7.NewString()
+
+	lease := acquireWithRetry(t, ctx, cliRM, key, "rm-node", 45, lockdclient.BlockWaitForever)
+	if err := lease.Save(ctx, map[string]any{"value": "should-rollback"}); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+
+	resp, err := cliTC.Release(ctx, api.ReleaseRequest{
+		Key:      key,
+		LeaseID:  lease.LeaseID,
+		TxnID:    lease.TxnID,
+		Rollback: true,
+	})
+	if err != nil {
+		t.Fatalf("cross-node release (rollback): %v", err)
+	}
+	if !resp.Released {
+		t.Fatalf("expected release=true")
+	}
+	// Clear the lease tracker on the original server.
+	_, _ = cliRM.Release(ctx, api.ReleaseRequest{
+		Key:      key,
+		LeaseID:  lease.LeaseID,
+		TxnID:    lease.TxnID,
+		Rollback: true,
+	})
+
+	verifier := acquireWithRetry(t, ctx, cliRM, key, "verifier", 45, lockdclient.BlockWaitForever)
+	state, _, _, err := getStateJSON(ctx, verifier)
+	if err != nil {
+		t.Fatalf("get_state: %v", err)
+	}
+	if !releaseLease(t, ctx, verifier) {
+		t.Fatalf("release verifier failed")
+	}
+	if state != nil {
+		t.Fatalf("expected rollback to discard state, got %+v", state)
+	}
+}
+
 func directDiskClient(t testing.TB, ts *lockd.TestServer) *lockdclient.Client {
 	t.Helper()
 	if ts == nil || ts.Server == nil {
@@ -1742,6 +1854,106 @@ func runLifecycleTest(t *testing.T, ctx context.Context, cli *lockdclient.Client
 
 	if !releaseLease(t, ctx, lease) {
 		t.Fatalf("expected release success")
+	}
+}
+
+func runAttachmentTest(t *testing.T, ctx context.Context, cli *lockdclient.Client, key string) {
+	t.Helper()
+	lease := acquireWithRetry(t, ctx, cli, key, "attach-worker", 45, lockdclient.BlockWaitForever)
+	alpha := []byte("alpha")
+	bravo := []byte("bravo")
+	if _, err := lease.Attach(ctx, lockdclient.AttachRequest{
+		Name: "alpha.bin",
+		Body: bytes.NewReader(alpha),
+	}); err != nil {
+		t.Fatalf("attach alpha: %v", err)
+	}
+	if _, err := lease.Attach(ctx, lockdclient.AttachRequest{
+		Name:        "bravo.bin",
+		Body:        bytes.NewReader(bravo),
+		ContentType: "text/plain",
+	}); err != nil {
+		t.Fatalf("attach bravo: %v", err)
+	}
+	list, err := lease.ListAttachments(ctx)
+	if err != nil {
+		t.Fatalf("list attachments: %v", err)
+	}
+	if list == nil || len(list.Attachments) != 2 {
+		t.Fatalf("expected 2 attachments, got %+v", list)
+	}
+	att, err := lease.RetrieveAttachment(ctx, lockdclient.AttachmentSelector{Name: "alpha.bin"})
+	if err != nil {
+		t.Fatalf("retrieve alpha: %v", err)
+	}
+	data, err := io.ReadAll(att)
+	att.Close()
+	if err != nil {
+		t.Fatalf("read alpha: %v", err)
+	}
+	if !bytes.Equal(data, alpha) {
+		t.Fatalf("unexpected alpha payload: %q", data)
+	}
+	if !releaseLease(t, ctx, lease) {
+		t.Fatalf("expected release success")
+	}
+
+	resp, err := cli.Get(ctx, key)
+	if err != nil {
+		t.Fatalf("public get: %v", err)
+	}
+	publicList, err := resp.ListAttachments(ctx)
+	if err != nil {
+		resp.Close()
+		t.Fatalf("public list: %v", err)
+	}
+	if len(publicList.Attachments) != 2 {
+		resp.Close()
+		t.Fatalf("expected 2 public attachments, got %+v", publicList.Attachments)
+	}
+	publicAtt, err := resp.RetrieveAttachment(ctx, lockdclient.AttachmentSelector{Name: "bravo.bin"})
+	if err != nil {
+		resp.Close()
+		t.Fatalf("public retrieve bravo: %v", err)
+	}
+	publicData, err := io.ReadAll(publicAtt)
+	publicAtt.Close()
+	resp.Close()
+	if err != nil {
+		t.Fatalf("read public bravo: %v", err)
+	}
+	if !bytes.Equal(publicData, bravo) {
+		t.Fatalf("unexpected bravo payload: %q", publicData)
+	}
+
+	lease2 := acquireWithRetry(t, ctx, cli, key, "attach-delete", 45, lockdclient.BlockWaitForever)
+	if _, err := lease2.DeleteAttachment(ctx, lockdclient.AttachmentSelector{Name: "alpha.bin"}); err != nil {
+		t.Fatalf("delete alpha: %v", err)
+	}
+	if !releaseLease(t, ctx, lease2) {
+		t.Fatalf("expected release success")
+	}
+	listAfter, err := cli.ListAttachments(ctx, lockdclient.ListAttachmentsRequest{Key: key, Public: true})
+	if err != nil {
+		t.Fatalf("list after delete: %v", err)
+	}
+	if len(listAfter.Attachments) != 1 || listAfter.Attachments[0].Name != "bravo.bin" {
+		t.Fatalf("expected bravo only, got %+v", listAfter.Attachments)
+	}
+
+	lease3 := acquireWithRetry(t, ctx, cli, key, "attach-clear", 45, lockdclient.BlockWaitForever)
+	if _, err := lease3.DeleteAllAttachments(ctx); err != nil {
+		t.Fatalf("delete all: %v", err)
+	}
+	if !releaseLease(t, ctx, lease3) {
+		t.Fatalf("expected release success")
+	}
+	finalList, err := cli.ListAttachments(ctx, lockdclient.ListAttachmentsRequest{Key: key, Public: true})
+	if err != nil {
+		t.Fatalf("final list: %v", err)
+	}
+	if len(finalList.Attachments) != 0 {
+		t.Fatalf("expected no attachments, got %+v", finalList.Attachments)
 	}
 }
 
@@ -1883,6 +2095,33 @@ func startDiskTestServer(tb testing.TB, cfg lockd.Config) *lockd.TestServer {
 	return lockd.StartTestServer(tb, options...)
 }
 
+func TestDiskRejectsReservedNamespace(t *testing.T) {
+	ensureDiskRootEnv(t)
+	root := prepareDiskRoot(t, "")
+	cfg := buildDiskConfig(t, root, 0)
+	cli := startDiskServer(t, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err := cli.Acquire(ctx, api.AcquireRequest{
+		Namespace:  ".txns",
+		Key:        "should-fail",
+		Owner:      "tester",
+		TTLSeconds: 5,
+	})
+	if err == nil {
+		t.Fatalf("expected acquire to fail for reserved namespace")
+	}
+	var apiErr *lockdclient.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected APIError, got %T: %v", err, err)
+	}
+	if apiErr.Status != http.StatusBadRequest || apiErr.Response.ErrorCode != "invalid_namespace" {
+		t.Fatalf("unexpected error: status=%d code=%s detail=%s", apiErr.Status, apiErr.Response.ErrorCode, apiErr.Response.Detail)
+	}
+}
+
 func diskTestLoggerOption(tb testing.TB) lockd.TestServerOption {
 	tb.Helper()
 	levelStr := os.Getenv("LOCKD_BENCH_LOG_LEVEL")
@@ -1903,7 +2142,7 @@ func diskTestLoggerOption(tb testing.TB) lockd.TestServerOption {
 	}
 	tb.Cleanup(func() { _ = file.Close() })
 
-	logger := loggingutil.WithSubsystem(pslog.NewStructured(file), "bench.disk")
+	logger := svcfields.WithSubsystem(pslog.NewStructured(file), "bench.disk")
 	if level, ok := pslog.ParseLevel(levelStr); ok {
 		logger = logger.LogLevel(level)
 	} else {

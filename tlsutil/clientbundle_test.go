@@ -12,11 +12,11 @@ func TestLoadClientBundle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate ca: %v", err)
 	}
-	clientCertPEM, clientKeyPEM, err := ca.IssueClient("test-client", 12*time.Hour)
+	issued, err := ca.IssueClient(ClientCertRequest{CommonName: "test-client", Validity: 12 * time.Hour})
 	if err != nil {
 		t.Fatalf("issue client: %v", err)
 	}
-	clientBundle, err := EncodeClientBundle(ca.CertPEM, clientCertPEM, clientKeyPEM)
+	clientBundle, err := EncodeClientBundle(ca.CertPEM, issued.CertPEM, issued.KeyPEM)
 	if err != nil {
 		t.Fatalf("encode client bundle: %v", err)
 	}

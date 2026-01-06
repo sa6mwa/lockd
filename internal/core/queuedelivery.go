@@ -23,7 +23,7 @@ var (
 )
 
 // consumeQueue obtains a single delivery respecting block/wait semantics.
-func (s *Service) consumeQueue(ctx context.Context, qsvc *queue.Service, disp *queue.Dispatcher, namespace, queueName, owner string, visibility time.Duration, stateful bool, blockSeconds int64) (delivery *QueueDelivery, nextCursor string, err error) {
+func (s *Service) consumeQueue(ctx context.Context, qsvc *queue.Service, disp *queue.Dispatcher, namespace, queueName, owner string, txnID string, visibility time.Duration, stateful bool, blockSeconds int64) (delivery *QueueDelivery, nextCursor string, err error) {
 	if disp == nil {
 		return nil, "", Failure{Code: "queue_disabled", Detail: "queue dispatcher not configured", HTTPStatus: 501}
 	}
@@ -74,7 +74,7 @@ func (s *Service) consumeQueue(ctx context.Context, qsvc *queue.Service, disp *q
 			}
 			var retry bool
 			prepStart := s.clock.Now()
-			delivery, retry, err = s.prepareQueueDelivery(ctx, qsvc, namespace, queueName, owner, visibility, stateful, cand)
+			delivery, retry, err = s.prepareQueueDelivery(ctx, qsvc, namespace, queueName, owner, txnID, visibility, stateful, cand)
 			timing.prepare += s.clock.Now().Sub(prepStart)
 			if retry {
 				retries++
@@ -107,9 +107,19 @@ func (s *Service) consumeQueue(ctx context.Context, qsvc *queue.Service, disp *q
 
 	for {
 		attempts++
+		waitCtx := ctx
+		var waitCancel context.CancelFunc
+		if blockSeconds > 0 {
+			// Keep the wait bounded to the caller's block window so the remaining
+			// context deadline can be used for the prepare/storage phase.
+			waitCtx, waitCancel = context.WithTimeout(ctx, time.Duration(blockSeconds)*time.Second)
+		}
 		waitStart := s.clock.Now()
-		cand, waitErr := disp.Wait(ctx, namespace, queueName)
+		cand, waitErr := disp.Wait(waitCtx, namespace, queueName)
 		timing.wait += s.clock.Now().Sub(waitStart)
+		if waitCancel != nil {
+			waitCancel()
+		}
 		if waitErr != nil {
 			if errors.Is(waitErr, queue.ErrTooManyConsumers) {
 				return nil, "", Failure{Code: "queue_busy", Detail: "too many consumers", HTTPStatus: 503}
@@ -118,7 +128,7 @@ func (s *Service) consumeQueue(ctx context.Context, qsvc *queue.Service, disp *q
 		}
 		var retry bool
 		prepStart := s.clock.Now()
-		delivery, retry, err = s.prepareQueueDelivery(ctx, qsvc, namespace, queueName, owner, visibility, stateful, cand)
+		delivery, retry, err = s.prepareQueueDelivery(ctx, qsvc, namespace, queueName, owner, txnID, visibility, stateful, cand)
 		timing.prepare += s.clock.Now().Sub(prepStart)
 		if retry {
 			retries++
@@ -149,9 +159,9 @@ func (s *Service) consumeQueue(ctx context.Context, qsvc *queue.Service, disp *q
 }
 
 // consumeQueueBatch aggregates deliveries up to pageSize with the same fill heuristics used by the HTTP handler.
-func (s *Service) consumeQueueBatch(ctx context.Context, qsvc *queue.Service, disp *queue.Dispatcher, namespace, queueName, owner string, visibility time.Duration, stateful bool, blockSeconds int64, pageSize int) ([]*QueueDelivery, string, error) {
+func (s *Service) consumeQueueBatch(ctx context.Context, qsvc *queue.Service, disp *queue.Dispatcher, namespace, queueName, owner string, txnID string, visibility time.Duration, stateful bool, blockSeconds int64, pageSize int) ([]*QueueDelivery, string, error) {
 	if pageSize <= 1 {
-		delivery, nextCursor, err := s.consumeQueue(ctx, qsvc, disp, namespace, queueName, owner, visibility, stateful, blockSeconds)
+		delivery, nextCursor, err := s.consumeQueue(ctx, qsvc, disp, namespace, queueName, owner, txnID, visibility, stateful, blockSeconds)
 		if err != nil {
 			return nil, "", err
 		}
@@ -183,7 +193,7 @@ func (s *Service) consumeQueueBatch(ctx context.Context, qsvc *queue.Service, di
 	)
 
 	for len(deliveries) < pageSize {
-		delivery, cursor, err := s.consumeQueue(ctx, qsvc, disp, namespace, queueName, owner, visibility, stateful, currentBlock)
+		delivery, cursor, err := s.consumeQueue(ctx, qsvc, disp, namespace, queueName, owner, txnID, visibility, stateful, currentBlock)
 		if err != nil {
 			if errors.Is(err, errQueueEmpty) {
 				emptyFastPath++
@@ -202,7 +212,7 @@ func (s *Service) consumeQueueBatch(ctx context.Context, qsvc *queue.Service, di
 					wait = retryInterval
 				}
 				waitCtx, cancel := context.WithTimeout(ctx, wait)
-				waitDelivery, waitCursor, waitErr := s.consumeQueue(waitCtx, qsvc, disp, namespace, queueName, owner, visibility, stateful, 1)
+				waitDelivery, waitCursor, waitErr := s.consumeQueue(waitCtx, qsvc, disp, namespace, queueName, owner, txnID, visibility, stateful, 1)
 				cancel()
 				if waitErr != nil {
 					if errors.Is(waitErr, errQueueEmpty) || errors.Is(waitErr, context.DeadlineExceeded) || errors.Is(waitErr, context.Canceled) {
@@ -330,7 +340,7 @@ func (s *Service) rescheduleAfterPrepareRetry(qsvc *queue.Service, namespace, qu
 	}
 }
 
-func (s *Service) prepareQueueDelivery(ctx context.Context, qsvc *queue.Service, namespace, queueName, owner string, visibility time.Duration, stateful bool, cand *queue.Candidate) (*QueueDelivery, bool, error) {
+func (s *Service) prepareQueueDelivery(ctx context.Context, qsvc *queue.Service, namespace, queueName, owner string, txnID string, visibility time.Duration, stateful bool, cand *queue.Candidate) (*QueueDelivery, bool, error) {
 	if cand == nil {
 		return nil, false, fmt.Errorf("nil candidate")
 	}
@@ -375,6 +385,7 @@ func (s *Service) prepareQueueDelivery(ctx context.Context, qsvc *queue.Service,
 		Namespace:     namespace,
 		Key:           messageKey,
 		Owner:         owner,
+		TxnID:         txnID,
 		TTL:           ttl,
 		Block:         0,
 		WaitForever:   false,
@@ -386,10 +397,29 @@ func (s *Service) prepareQueueDelivery(ctx context.Context, qsvc *queue.Service,
 		}
 		return nil, false, err
 	}
+	releaseLease := func(key string, outcome *acquireOutcome) {
+		if outcome == nil {
+			return
+		}
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = s.releaseLeaseOutcome(releaseCtx, key, outcome)
+	}
 	releaseMessage := func() {
-		_ = s.releaseLeaseOutcome(ctx, messageKey, acq)
+		releaseLease(messageKey, acq)
 	}
 
+	if txnID != "" {
+		relParticipant := relativeKey(namespace, messageKey)
+		if _, _, err := s.enlistTxnParticipant(ctx, txnID, namespace, relParticipant, acq.Response.ExpiresAt); err != nil {
+			releaseMessage()
+			return nil, false, fmt.Errorf("register txn participant: %w", err)
+		}
+	}
+
+	doc.LeaseID = acq.Response.LeaseID
+	doc.LeaseFencingToken = acq.Response.FencingToken
+	doc.LeaseTxnID = acq.Response.TxnID
 	newMetaETag, err := qsvc.IncrementAttempts(ctx, namespace, queueName, &doc, desc.MetadataETag, ttl)
 	if err != nil {
 		releaseMessage()
@@ -406,7 +436,7 @@ func (s *Service) prepareQueueDelivery(ctx context.Context, qsvc *queue.Service,
 	if len(doc.PayloadDescriptor) > 0 {
 		payloadCtx = storage.ContextWithObjectDescriptor(payloadCtx, doc.PayloadDescriptor)
 	}
-	reader, info, err := qsvc.GetPayload(payloadCtx, namespace, queueName, doc.ID)
+	payloadRes, err := qsvc.GetPayload(payloadCtx, namespace, queueName, doc.ID)
 	if err != nil {
 		releaseMessage()
 		if errors.Is(err, storage.ErrNotFound) {
@@ -418,6 +448,8 @@ func (s *Service) prepareQueueDelivery(ctx context.Context, qsvc *queue.Service,
 		}
 		return nil, true, errDeliveryRetry
 	}
+	reader := payloadRes.Reader
+	info := payloadRes.Info
 
 	var payloadSize int64 = doc.PayloadBytes
 	if info != nil && info.Size >= 0 {
@@ -446,7 +478,13 @@ func (s *Service) prepareQueueDelivery(ctx context.Context, qsvc *queue.Service,
 		LeaseID:                  acq.Response.LeaseID,
 		LeaseExpiresAtUnix:       acq.Response.ExpiresAt,
 		FencingToken:             acq.Response.FencingToken,
+		TxnID:                    acq.Response.TxnID,
 		MetaETag:                 newMetaETag,
+	}
+
+	stateTxnID := txnID
+	if stateTxnID == "" {
+		stateTxnID = acq.Response.TxnID
 	}
 
 	var stateOutcome *acquireOutcome
@@ -472,6 +510,7 @@ func (s *Service) prepareQueueDelivery(ctx context.Context, qsvc *queue.Service,
 			Namespace:     namespace,
 			Key:           stateKey,
 			Owner:         owner,
+			TxnID:         stateTxnID,
 			TTL:           ttl,
 			Block:         0,
 			WaitForever:   false,
@@ -487,9 +526,18 @@ func (s *Service) prepareQueueDelivery(ctx context.Context, qsvc *queue.Service,
 			return nil, false, err
 		}
 		releaseState = func() {
-			_ = s.releaseLeaseOutcome(ctx, stateKey, stateOutcome)
+			releaseLease(stateKey, stateOutcome)
 		}
-		_, stateDocETag, err := qsvc.LoadState(ctx, namespace, queueName, doc.ID)
+		if txnID != "" {
+			relParticipant := relativeKey(namespace, stateKey)
+			if _, _, err := s.enlistTxnParticipant(ctx, txnID, namespace, relParticipant, stateOutcome.Response.ExpiresAt); err != nil {
+				releaseState()
+				reader.Close()
+				releaseMessage()
+				return nil, false, fmt.Errorf("register txn participant: %w", err)
+			}
+		}
+		stateRes, err := qsvc.LoadState(ctx, namespace, queueName, doc.ID)
 		if err != nil {
 			releaseState()
 			reader.Close()
@@ -502,12 +550,14 @@ func (s *Service) prepareQueueDelivery(ctx context.Context, qsvc *queue.Service,
 			}
 			return nil, true, errDeliveryRetry
 		}
+		stateDocETag := stateRes.ETag
 		if stateDocETag != "" {
 			stateETag = stateDocETag
 		}
 		message.StateLeaseID = stateOutcome.Response.LeaseID
 		message.StateLeaseExpiresAtUnix = stateOutcome.Response.ExpiresAt
 		message.StateFencingToken = stateOutcome.Response.FencingToken
+		message.StateTxnID = stateOutcome.Response.TxnID
 		message.StateETag = stateETag
 	}
 
@@ -552,10 +602,10 @@ type acquireParams struct {
 	Namespace     string
 	Key           string
 	Owner         string
+	TxnID         string
 	TTL           time.Duration
 	Block         time.Duration
 	WaitForever   bool
-	Idempotency   string
 	CorrelationID string
 }
 
@@ -589,7 +639,7 @@ func (s *Service) acquireLeaseForKey(ctx context.Context, params acquireParams) 
 		Owner:            params.Owner,
 		TTLSeconds:       int64(params.TTL.Seconds()),
 		BlockSeconds:     blockSeconds,
-		Idempotency:      params.Idempotency,
+		TxnID:            params.TxnID,
 		ClientHint:       params.CorrelationID,
 		ForceQueryHidden: isQueueStateKey,
 	}
@@ -602,6 +652,7 @@ func (s *Service) acquireLeaseForKey(ctx context.Context, params acquireParams) 
 	resp := api.AcquireResponse{
 		Namespace:     res.Namespace,
 		LeaseID:       res.LeaseID,
+		TxnID:         res.TxnID,
 		Key:           relativeKey(res.Namespace, res.Key),
 		Owner:         res.Owner,
 		ExpiresAt:     res.ExpiresAt,

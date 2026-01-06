@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"pkt.systems/lockd/internal/correlation"
 	"pkt.systems/lockd/internal/qrf"
@@ -15,6 +16,7 @@ type QueueAckResult struct {
 	Acked         bool
 	CorrelationID string
 	LeaseOwner    string
+	TxnID         string
 }
 
 // QueueNackResult describes a negative-ack outcome.
@@ -22,6 +24,7 @@ type QueueNackResult struct {
 	Requeued      bool
 	MetaETag      string
 	CorrelationID string
+	TxnID         string
 }
 
 // QueueExtendResult describes an extend outcome.
@@ -31,6 +34,7 @@ type QueueExtendResult struct {
 	MetaETag                 string
 	StateLeaseExpiresAtUnix  int64
 	CorrelationID            string
+	TxnID                    string
 }
 
 // Ack confirms processing of a delivery and releases leases.
@@ -71,29 +75,29 @@ func (s *Service) Ack(ctx context.Context, cmd QueueAckCommand) (*QueueAckResult
 		leaseOwner = meta.Lease.Owner
 	}
 
-	doc, docMetaETag, err := qsvc.GetMessage(ctx, namespace, cmd.Queue, cmd.MessageID)
+	docRes, err := qsvc.GetMessage(ctx, namespace, cmd.Queue, cmd.MessageID)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, Failure{Code: "not_found", Detail: "message not found", HTTPStatus: 404}
 		}
 		return nil, err
 	}
+	doc := docRes.Document
 
 	now := s.clock.Now()
-	if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, now); err != nil {
-		// Allow transparent lease upgrade when a fresher lease exists.
-		var fail Failure
-		if errors.As(err, &fail) && fail.Code == "lease_required" && meta.Lease != nil && meta.Lease.Owner != "" {
-			cmd.LeaseID = meta.Lease.ID
-			cmd.FencingToken = meta.Lease.FencingToken
-			if docMetaETag != "" {
-				cmd.MetaETag = docMetaETag
-				metaETag = docMetaETag
-			}
-			leaseOwner = meta.Lease.Owner
-		} else {
-			return nil, err
-		}
+	leaseTxn := ""
+	if meta.Lease != nil {
+		leaseTxn = meta.Lease.TxnID
+	}
+	checkTxn := cmd.TxnID
+	if checkTxn == "" {
+		checkTxn = leaseTxn
+	}
+	if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, checkTxn, now); err != nil {
+		return nil, err
+	}
+	if err := validateQueueMessageLease(doc, cmd.LeaseID, cmd.FencingToken, checkTxn); err != nil {
+		return nil, err
 	}
 
 	corr := doc.CorrelationID
@@ -104,6 +108,43 @@ func (s *Service) Ack(ctx context.Context, cmd QueueAckCommand) (*QueueAckResult
 		corr = correlation.Generate()
 	}
 	ctx = correlation.Set(ctx, corr)
+
+	if checkTxn != "" && s.tcDecider != nil {
+		rec := TxnRecord{
+			TxnID:         checkTxn,
+			State:         TxnStateCommit,
+			ExpiresAtUnix: meta.Lease.ExpiresAtUnix,
+			Participants: []TxnParticipant{{
+				Namespace:   namespace,
+				Key:         messageRel,
+				BackendHash: s.backendHash,
+			}},
+		}
+		if cmd.StateLeaseID != "" {
+			stateKey, err := queue.StateLeaseKey(namespace, cmd.Queue, cmd.MessageID)
+			if err != nil {
+				return nil, Failure{Code: "invalid_queue_state_key", Detail: err.Error(), HTTPStatus: 400}
+			}
+			rec.Participants = append(rec.Participants, TxnParticipant{
+				Namespace:   namespace,
+				Key:         relativeKey(namespace, stateKey),
+				BackendHash: s.backendHash,
+			})
+		}
+		state, err := s.tcDecider.Decide(ctx, rec)
+		if err != nil {
+			return nil, err
+		}
+		if state == TxnStatePending {
+			return nil, Failure{Code: "txn_pending", Detail: "transaction decision not recorded", HTTPStatus: 409}
+		}
+		return &QueueAckResult{
+			Acked:         true,
+			CorrelationID: corr,
+			LeaseOwner:    leaseOwner,
+			TxnID:         leaseTxn,
+		}, nil
+	}
 
 	if err := qsvc.Ack(ctx, namespace, cmd.Queue, cmd.MessageID, cmd.MetaETag, cmd.StateETag, cmd.Stateful); err != nil {
 		if errors.Is(err, storage.ErrCASMismatch) {
@@ -123,7 +164,8 @@ func (s *Service) Ack(ctx context.Context, cmd QueueAckCommand) (*QueueAckResult
 			stateRel := relativeKey(namespace, stateKey)
 			stateMeta, stateMetaETag, loadErr := s.ensureMeta(ctx, namespace, stateKey)
 			if loadErr == nil && stateMeta.Lease != nil {
-				if err := validateLease(stateMeta, cmd.StateLeaseID, cmd.StateFencingToken, s.clock.Now()); err == nil {
+				stateTxn := stateMeta.Lease.TxnID
+				if err := validateLease(stateMeta, cmd.StateLeaseID, cmd.StateFencingToken, stateTxn, s.clock.Now()); err == nil {
 					_ = s.releaseLeaseWithMeta(ctx, namespace, stateRel, cmd.StateLeaseID, stateMeta, stateMetaETag)
 				}
 			}
@@ -134,7 +176,12 @@ func (s *Service) Ack(ctx context.Context, cmd QueueAckCommand) (*QueueAckResult
 		s.queueDispatcher.Notify(namespace, cmd.Queue)
 	}
 
-	return &QueueAckResult{Acked: true, CorrelationID: corr, LeaseOwner: leaseOwner}, nil
+	return &QueueAckResult{
+		Acked:         true,
+		CorrelationID: corr,
+		LeaseOwner:    leaseOwner,
+		TxnID:         leaseTxn,
+	}, nil
 }
 
 // Nack requeues a delivery with optional delay and last error.
@@ -170,15 +217,27 @@ func (s *Service) Nack(ctx context.Context, cmd QueueNackCommand) (*QueueNackRes
 		}
 		return nil, err
 	}
-	if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, s.clock.Now()); err != nil {
+	leaseTxn := ""
+	if meta.Lease != nil {
+		leaseTxn = meta.Lease.TxnID
+	}
+	checkTxn := cmd.TxnID
+	if checkTxn == "" {
+		checkTxn = leaseTxn
+	}
+	if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, checkTxn, s.clock.Now()); err != nil {
 		return nil, err
 	}
 
-	doc, _, err := qsvc.GetMessage(ctx, namespace, cmd.Queue, cmd.MessageID)
+	docRes, err := qsvc.GetMessage(ctx, namespace, cmd.Queue, cmd.MessageID)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, Failure{Code: "not_found", Detail: "message not found", HTTPStatus: 404}
 		}
+		return nil, err
+	}
+	doc := docRes.Document
+	if err := validateQueueMessageLease(doc, cmd.LeaseID, cmd.FencingToken, checkTxn); err != nil {
 		return nil, err
 	}
 
@@ -193,6 +252,61 @@ func (s *Service) Nack(ctx context.Context, cmd QueueNackCommand) (*QueueNackRes
 		doc.CorrelationID = corr
 	}
 	ctx = correlation.Set(ctx, corr)
+
+	if checkTxn != "" && s.tcDecider != nil {
+		rec := TxnRecord{
+			TxnID:         checkTxn,
+			State:         TxnStateRollback,
+			ExpiresAtUnix: meta.Lease.ExpiresAtUnix,
+			Participants: []TxnParticipant{{
+				Namespace:   namespace,
+				Key:         messageRel,
+				BackendHash: s.backendHash,
+			}},
+		}
+		if cmd.StateLeaseID != "" {
+			stateKey, err := queue.StateLeaseKey(namespace, cmd.Queue, cmd.MessageID)
+			if err != nil {
+				return nil, Failure{Code: "invalid_queue_state_key", Detail: err.Error(), HTTPStatus: 400}
+			}
+			rec.Participants = append(rec.Participants, TxnParticipant{
+				Namespace:   namespace,
+				Key:         relativeKey(namespace, stateKey),
+				BackendHash: s.backendHash,
+			})
+		}
+		state, err := s.tcDecider.Decide(ctx, rec)
+		if err != nil {
+			return nil, err
+		}
+		if state == TxnStatePending {
+			return nil, Failure{Code: "txn_pending", Detail: "transaction decision not recorded", HTTPStatus: 409}
+		}
+		metaETag := cmd.MetaETag
+		if cmd.Delay > 0 {
+			docRes, err := qsvc.GetMessage(ctx, namespace, cmd.Queue, cmd.MessageID)
+			if err != nil {
+				if errors.Is(err, storage.ErrNotFound) {
+					return nil, Failure{Code: "not_found", Detail: "message not found", HTTPStatus: 404}
+				}
+				return nil, err
+			}
+			newETag, err := qsvc.Reschedule(ctx, namespace, cmd.Queue, docRes.Document, docRes.ETag, cmd.Delay)
+			if err != nil {
+				if errors.Is(err, storage.ErrCASMismatch) {
+					return nil, Failure{Code: "cas_mismatch", Detail: "message metadata changed", HTTPStatus: 409}
+				}
+				return nil, err
+			}
+			metaETag = newETag
+		}
+		return &QueueNackResult{
+			Requeued:      true,
+			MetaETag:      metaETag,
+			CorrelationID: corr,
+			TxnID:         leaseTxn,
+		}, nil
+	}
 
 	delay := cmd.Delay
 	newMetaETag, err := qsvc.Nack(ctx, namespace, cmd.Queue, doc, cmd.MetaETag, delay, cmd.LastError)
@@ -210,7 +324,8 @@ func (s *Service) Nack(ctx context.Context, cmd QueueNackCommand) (*QueueNackRes
 			stateRel := relativeKey(namespace, stateKey)
 			stateMeta, stateMetaETag, loadErr := s.ensureMeta(ctx, namespace, stateKey)
 			if loadErr == nil && stateMeta.Lease != nil {
-				if err := validateLease(stateMeta, cmd.StateLeaseID, cmd.StateFencingToken, s.clock.Now()); err == nil {
+				stateTxn := stateMeta.Lease.TxnID
+				if err := validateLease(stateMeta, cmd.StateLeaseID, cmd.StateFencingToken, stateTxn, s.clock.Now()); err == nil {
 					_ = s.releaseLeaseWithMeta(ctx, namespace, stateRel, cmd.StateLeaseID, stateMeta, stateMetaETag)
 				}
 			}
@@ -225,6 +340,7 @@ func (s *Service) Nack(ctx context.Context, cmd QueueNackCommand) (*QueueNackRes
 		Requeued:      true,
 		MetaETag:      newMetaETag,
 		CorrelationID: corr,
+		TxnID:         leaseTxn,
 	}, nil
 }
 
@@ -261,15 +377,27 @@ func (s *Service) Extend(ctx context.Context, cmd QueueExtendCommand) (*QueueExt
 		}
 		return nil, err
 	}
-	if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, s.clock.Now()); err != nil {
+	leaseTxn := ""
+	if meta.Lease != nil {
+		leaseTxn = meta.Lease.TxnID
+	}
+	checkTxn := cmd.TxnID
+	if checkTxn == "" {
+		checkTxn = leaseTxn
+	}
+	if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, checkTxn, s.clock.Now()); err != nil {
 		return nil, err
 	}
 
-	doc, _, err := qsvc.GetMessage(ctx, namespace, cmd.Queue, cmd.MessageID)
+	docRes, err := qsvc.GetMessage(ctx, namespace, cmd.Queue, cmd.MessageID)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, Failure{Code: "not_found", Detail: "message not found", HTTPStatus: 404}
 		}
+		return nil, err
+	}
+	doc := docRes.Document
+	if err := validateQueueMessageLease(doc, cmd.LeaseID, cmd.FencingToken, checkTxn); err != nil {
 		return nil, err
 	}
 
@@ -307,6 +435,11 @@ func (s *Service) Extend(ctx context.Context, cmd QueueExtendCommand) (*QueueExt
 		}
 		return nil, err
 	}
+	if checkTxn != "" {
+		if _, _, err := s.registerTxnParticipant(ctx, checkTxn, namespace, messageRel, meta.Lease.ExpiresAtUnix); err != nil {
+			return nil, fmt.Errorf("register txn participant: %w", err)
+		}
+	}
 
 	stateLeaseExpires := int64(0)
 	if cmd.StateLeaseID != "" {
@@ -322,7 +455,11 @@ func (s *Service) Extend(ctx context.Context, cmd QueueExtendCommand) (*QueueExt
 			}
 			return nil, err
 		}
-		if err := validateLease(stateMeta, cmd.StateLeaseID, cmd.StateFencingToken, now); err != nil {
+		stateTxn := ""
+		if stateMeta.Lease != nil {
+			stateTxn = stateMeta.Lease.TxnID
+		}
+		if err := validateLease(stateMeta, cmd.StateLeaseID, cmd.StateFencingToken, stateTxn, now); err != nil {
 			return nil, err
 		}
 		if stateMeta.Lease == nil {
@@ -338,6 +475,11 @@ func (s *Service) Extend(ctx context.Context, cmd QueueExtendCommand) (*QueueExt
 			return nil, err
 		}
 		stateLeaseExpires = stateMeta.Lease.ExpiresAtUnix
+		if checkTxn != "" {
+			if _, _, err := s.registerTxnParticipant(ctx, checkTxn, namespace, stateRel, stateMeta.Lease.ExpiresAtUnix); err != nil {
+				return nil, fmt.Errorf("register txn participant: %w", err)
+			}
+		}
 		_ = newStateETag
 	}
 
@@ -347,5 +489,6 @@ func (s *Service) Extend(ctx context.Context, cmd QueueExtendCommand) (*QueueExt
 		MetaETag:                 newMetaDocETag,
 		StateLeaseExpiresAtUnix:  stateLeaseExpires,
 		CorrelationID:            corr,
+		TxnID:                    leaseTxn,
 	}, nil
 }

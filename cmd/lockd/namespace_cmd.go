@@ -38,11 +38,11 @@ func newNamespaceGetCommand(cfg *clientCLIConfig) *cobra.Command {
 				return err
 			}
 			defer cfg.cleanup()
-			resp, etag, err := client.GetNamespaceConfig(ctx, namespace)
+			result, err := client.GetNamespaceConfig(ctx, namespace)
 			if err != nil {
 				return err
 			}
-			return printNamespaceConfig(cmd, resp, etag, outputType)
+			return printNamespaceConfig(cmd, result.Config, result.ETag, outputType)
 		},
 	}
 	cmd.Flags().StringVarP(&namespace, "namespace", "n", "", "namespace name (defaults to client default)")
@@ -81,11 +81,11 @@ func newNamespaceSetQueryCommand(cfg *clientCLIConfig) *cobra.Command {
 					FallbackEngine:  fallback,
 				},
 			}
-			resp, etag, err := client.UpdateNamespaceConfig(ctx, request, lockdclient.NamespaceConfigOptions{IfMatch: ifMatch})
+			result, err := client.UpdateNamespaceConfig(ctx, request, lockdclient.NamespaceConfigOptions{IfMatch: ifMatch})
 			if err != nil {
 				return err
 			}
-			return printNamespaceConfig(cmd, resp, etag, outputType)
+			return printNamespaceConfig(cmd, result.Config, result.ETag, outputType)
 		},
 	}
 	cmd.Flags().StringVarP(&namespace, "namespace", "n", "", "namespace name (defaults to client default)")

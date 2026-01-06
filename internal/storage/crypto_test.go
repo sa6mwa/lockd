@@ -78,10 +78,12 @@ func TestCryptoMetadataRoundTrip(t *testing.T) {
 func TestCryptoMintMaterialRoundTrip(t *testing.T) {
 	crypto := mustNewTestCrypto(t, false)
 
-	mat, descriptor, err := crypto.MintMaterial("state:test-key")
+	minted, err := crypto.MintMaterial("state:test-key")
 	if err != nil {
 		t.Fatalf("mint material: %v", err)
 	}
+	mat := minted.Material
+	descriptor := minted.Descriptor
 	if len(descriptor) == 0 {
 		t.Fatalf("expected descriptor bytes")
 	}
@@ -122,10 +124,11 @@ func TestCryptoMintMaterialRoundTrip(t *testing.T) {
 func TestCryptoMaterialContextMismatch(t *testing.T) {
 	crypto := mustNewTestCrypto(t, false)
 
-	_, descriptor, err := crypto.MintMaterial("queue-meta:q/orders/msg/1.pb")
+	minted, err := crypto.MintMaterial("queue-meta:q/orders/msg/1.pb")
 	if err != nil {
 		t.Fatalf("mint material: %v", err)
 	}
+	descriptor := minted.Descriptor
 
 	if _, err := crypto.MaterialFromDescriptor("queue-meta:q/other/msg.pb", descriptor); err == nil {
 		t.Fatalf("expected context mismatch to error")
@@ -135,10 +138,11 @@ func TestCryptoMaterialContextMismatch(t *testing.T) {
 func TestCryptoMaterialCorruptedDescriptor(t *testing.T) {
 	crypto := mustNewTestCrypto(t, false)
 
-	_, descriptor, err := crypto.MintMaterial("queue-payload:q/orders/msg/1.bin")
+	minted, err := crypto.MintMaterial("queue-payload:q/orders/msg/1.bin")
 	if err != nil {
 		t.Fatalf("mint material: %v", err)
 	}
+	descriptor := minted.Descriptor
 	corrupted := append([]byte(nil), descriptor...)
 	corrupted[0] ^= 0xFF
 
@@ -150,10 +154,12 @@ func TestCryptoMaterialCorruptedDescriptor(t *testing.T) {
 func TestCryptoSnappyRoundTrip(t *testing.T) {
 	crypto := mustNewTestCrypto(t, true)
 
-	mat, descriptor, err := crypto.MintMaterial("state:snappy")
+	minted, err := crypto.MintMaterial("state:snappy")
 	if err != nil {
 		t.Fatalf("mint material: %v", err)
 	}
+	mat := minted.Material
+	descriptor := minted.Descriptor
 
 	data := bytes.Repeat([]byte("snappy-data-"), 64)
 	var buf bytes.Buffer

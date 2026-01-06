@@ -24,7 +24,7 @@ import (
 	"time"
 
 	"pkt.systems/lockd/api"
-	"pkt.systems/lockd/internal/loggingutil"
+	"pkt.systems/lockd/internal/svcfields"
 	"pkt.systems/lockd/lql"
 	"pkt.systems/lockd/namespaces"
 	"pkt.systems/pslog"
@@ -45,6 +45,7 @@ type EnqueueOptions struct {
 type DequeueOptions struct {
 	Namespace    string
 	Owner        string
+	TxnID        string
 	Visibility   time.Duration
 	BlockSeconds int64 // set to BlockNoWait (-1) for immediate return, 0 for forever, >0 to wait seconds
 	PageSize     int
@@ -341,6 +342,7 @@ func (h *QueueMessageHandle) Ack(ctx context.Context) error {
 		Queue:        h.msg.Queue,
 		MessageID:    h.msg.MessageID,
 		LeaseID:      h.msg.LeaseID,
+		TxnID:        h.msg.TxnID,
 		FencingToken: h.msg.FencingToken,
 		MetaETag:     h.msg.MetaETag,
 		StateETag:    h.msg.StateETag,
@@ -396,6 +398,7 @@ func (h *QueueMessageHandle) Nack(ctx context.Context, delay time.Duration, last
 		Queue:        h.msg.Queue,
 		MessageID:    h.msg.MessageID,
 		LeaseID:      h.msg.LeaseID,
+		TxnID:        h.msg.TxnID,
 		FencingToken: h.msg.FencingToken,
 		MetaETag:     h.msg.MetaETag,
 		DelaySeconds: secondsFromDuration(delay),
@@ -452,6 +455,7 @@ func (h *QueueMessageHandle) Extend(ctx context.Context, extendBy time.Duration)
 		Queue:           h.msg.Queue,
 		MessageID:       h.msg.MessageID,
 		LeaseID:         h.msg.LeaseID,
+		TxnID:           h.msg.TxnID,
 		FencingToken:    h.msg.FencingToken,
 		MetaETag:        h.msg.MetaETag,
 		ExtendBySeconds: secondsFromDuration(extendBy),
@@ -527,6 +531,14 @@ func (m *QueueMessage) Namespace() string {
 		return ""
 	}
 	return m.handle.Namespace()
+}
+
+// TxnID returns the transaction id associated with the message lease, if any.
+func (m *QueueMessage) TxnID() string {
+	if m == nil || m.handle == nil {
+		return ""
+	}
+	return m.handle.msg.TxnID
 }
 
 // MessageID returns the message identifier.
@@ -834,6 +846,7 @@ func (s *QueueStateHandle) CorrelationID() string {
 }
 
 const headerFencingToken = "X-Fencing-Token"
+const headerTxnID = "X-Txn-ID"
 const headerQueryCursor = "X-Lockd-Query-Cursor"
 const headerQueryIndexSeq = "X-Lockd-Query-Index-Seq"
 const headerQueryMetadata = "X-Lockd-Query-Metadata"
@@ -1055,9 +1068,16 @@ func (c *Client) initialize(endpoints []string) error {
 	if c.httpClient == nil {
 		c.httpClient = &http.Client{}
 	}
+	ownedTransport := false
 	if c.httpClient.Transport == nil {
 		if base, ok := http.DefaultTransport.(*http.Transport); ok {
 			c.httpClient.Transport = base.Clone()
+			ownedTransport = true
+		}
+	}
+	if ownedTransport {
+		if tr, ok := c.httpClient.Transport.(*http.Transport); ok {
+			applyDefaultTransportTuning(tr)
 		}
 	}
 	if c.httpClient.Timeout != 0 {
@@ -1109,6 +1129,8 @@ const (
 	DefaultHTTPTimeout           = 15 * time.Second
 	DefaultCloseTimeout          = 5 * time.Second
 	DefaultKeepAliveTimeout      = 5 * time.Second
+	DefaultMaxIdleConns          = 256
+	DefaultMaxIdleConnsPerHost   = 128
 	DefaultForUpdateTimeout      = 15 * time.Minute
 	DefaultAcquireBaseDelay      = time.Second
 	DefaultAcquireMaxDelay       = 5 * time.Second
@@ -1142,6 +1164,18 @@ func secondsFromDuration(d time.Duration) int64 {
 	return int64(math.Ceil(seconds))
 }
 
+func applyDefaultTransportTuning(tr *http.Transport) {
+	if tr == nil {
+		return
+	}
+	if tr.MaxIdleConns < DefaultMaxIdleConns {
+		tr.MaxIdleConns = DefaultMaxIdleConns
+	}
+	if tr.MaxIdleConnsPerHost < DefaultMaxIdleConnsPerHost {
+		tr.MaxIdleConnsPerHost = DefaultMaxIdleConnsPerHost
+	}
+}
+
 // LeaseSession models an active lease returned by Acquire.
 type LeaseSession struct {
 	client *Client
@@ -1154,6 +1188,13 @@ type LeaseSession struct {
 	correlationID  string
 	endpoint       string
 	drainTriggered atomic.Bool
+	attachmentsMu  sync.Mutex
+	attachments    map[io.ReadCloser]struct{}
+}
+
+// ReleaseOptions controls commit vs rollback semantics during lease release.
+type ReleaseOptions struct {
+	Rollback bool
 }
 
 // AcquireForUpdateHandler is invoked while a lease is held. The provided context
@@ -1396,6 +1437,9 @@ func (s *LeaseSession) applyUpdate(ctx context.Context, body io.Reader, opts Upd
 	if opts.Namespace == "" {
 		opts.Namespace = s.Namespace
 	}
+	if opts.TxnID == "" {
+		opts.TxnID = s.TxnID
+	}
 	res, err := s.client.Update(ctx, s.Key, s.LeaseID, body, opts)
 	if err != nil {
 		return nil, err
@@ -1446,6 +1490,9 @@ func (s *LeaseSession) applyRemove(ctx context.Context, opts RemoveOptions) (*ap
 	ctx = WithCorrelationID(ctx, s.correlation())
 	if opts.Namespace == "" {
 		opts.Namespace = s.Namespace
+	}
+	if opts.TxnID == "" {
+		opts.TxnID = s.TxnID
 	}
 	res, err := s.client.Remove(ctx, s.Key, s.LeaseID, opts)
 	if err != nil {
@@ -1576,6 +1623,9 @@ func (s *LeaseSession) UpdateMetadata(ctx context.Context, meta MetadataOptions)
 		Namespace: s.Namespace,
 		Metadata:  meta,
 	}
+	if opts.TxnID == "" {
+		opts.TxnID = s.TxnID
+	}
 	if s.Version > 0 {
 		opts.IfVersion = strconv.FormatInt(s.Version, 10)
 	}
@@ -1591,6 +1641,7 @@ func (s *LeaseSession) KeepAlive(ctx context.Context, ttl time.Duration) (*api.K
 		Key:        s.Key,
 		LeaseID:    s.LeaseID,
 		TTLSeconds: int64(ttl.Seconds()),
+		TxnID:      s.TxnID,
 	}
 	resp, err := s.client.KeepAlive(ctx, req)
 	if err != nil {
@@ -1603,7 +1654,13 @@ func (s *LeaseSession) KeepAlive(ctx context.Context, ttl time.Duration) (*api.K
 }
 
 // Release relinquishes the lease early; it is safe to call multiple times.
+// It commits staged changes by default. Use ReleaseWithOptions to request a rollback.
 func (s *LeaseSession) Release(ctx context.Context) error {
+	return s.ReleaseWithOptions(ctx, ReleaseOptions{})
+}
+
+// ReleaseWithOptions relinquishes the lease and allows callers to rollback staged changes.
+func (s *LeaseSession) ReleaseWithOptions(ctx context.Context, opts ReleaseOptions) error {
 	ctx = WithCorrelationID(ctx, s.correlation())
 	s.mu.Lock()
 	if s.closed {
@@ -1612,11 +1669,14 @@ func (s *LeaseSession) Release(ctx context.Context) error {
 		return err
 	}
 	s.mu.Unlock()
-	resp, err := s.client.releaseInternal(ctx, api.ReleaseRequest{
+	req := api.ReleaseRequest{
 		Namespace: s.Namespace,
 		Key:       s.Key,
 		LeaseID:   s.LeaseID,
-	}, s.endpoint)
+		TxnID:     s.TxnID,
+		Rollback:  opts.Rollback,
+	}
+	resp, err := s.client.releaseInternal(ctx, req, s.endpoint)
 	if err != nil {
 		s.mu.Lock()
 		s.closeErr = err
@@ -1636,6 +1696,7 @@ func (s *LeaseSession) Release(ctx context.Context) error {
 	s.mu.Unlock()
 	s.client.unregisterSession(s.LeaseID)
 	s.client.ClearLeaseID(s.LeaseID)
+	s.closeAttachments()
 	return nil
 }
 
@@ -1699,6 +1760,8 @@ type GetResponse struct {
 	Version   string
 	HasState  bool
 	reader    io.ReadCloser
+	client    *Client
+	public    bool
 }
 
 // QueryReturn describes the payload mode exposed by /v1/query.
@@ -2162,6 +2225,7 @@ type UpdateOptions struct {
 	FencingToken string
 	Namespace    string
 	Metadata     MetadataOptions
+	TxnID        string
 }
 
 // UpdateOption customizes update behaviour.
@@ -2173,6 +2237,16 @@ type updateOptionFunc func(*UpdateOptions)
 
 func (f updateOptionFunc) apply(opts *UpdateOptions) {
 	f(opts)
+}
+
+// WithTxnID binds an update (or metadata mutation) to a transaction id.
+func WithTxnID(txnID string) UpdateOption {
+	return updateOptionFunc(func(opts *UpdateOptions) {
+		opts.TxnID = txnID
+		if opts.Metadata.TxnID == "" {
+			opts.Metadata.TxnID = txnID
+		}
+	})
 }
 
 // WithMetadata attaches metadata mutations to an update.
@@ -2196,6 +2270,7 @@ func WithQueryVisible() UpdateOption {
 // MetadataOptions captures metadata mutations attached to updates.
 type MetadataOptions struct {
 	QueryHidden *bool
+	TxnID       string
 }
 
 // NamespaceConfigOptions controls concurrency for namespace configuration mutations.
@@ -2261,6 +2336,7 @@ type RemoveOptions struct {
 	IfVersion    string
 	FencingToken string
 	Namespace    string
+	TxnID        string
 }
 
 type correlationTransport struct {
@@ -2362,6 +2438,18 @@ func (c *Client) unregisterSession(leaseID string) {
 		return
 	}
 	c.sessions.Delete(leaseID)
+}
+
+func (c *Client) sessionByLease(leaseID string) *LeaseSession {
+	if leaseID == "" {
+		return nil
+	}
+	if sess, ok := c.sessions.Load(leaseID); ok {
+		if ls, ok := sess.(*LeaseSession); ok {
+			return ls
+		}
+	}
+	return nil
 }
 
 // UseNamespace updates the default namespace used when callers omit one.
@@ -2695,7 +2783,7 @@ func WithLogger(logger pslog.Base) Option {
 			return
 		}
 		if full, ok := logger.(pslog.Logger); ok {
-			c.logger = loggingutil.WithSubsystem(full, "client.sdk")
+			c.logger = svcfields.WithSubsystem(full, "client.sdk")
 			return
 		}
 		c.logger = logger
@@ -2959,6 +3047,10 @@ func (c *Client) Acquire(ctx context.Context, req api.AcquireRequest, opts ...Ac
 	deadline := time.Time{}
 	if req.BlockSecs > 0 {
 		deadline = start.Add(time.Duration(req.BlockSecs) * time.Second)
+	} else if req.BlockSecs == BlockWaitForever {
+		if ctxDeadline, ok := ctx.Deadline(); ok {
+			deadline = ctxDeadline
+		}
 	}
 	namespace, err := c.namespaceFor(req.Namespace)
 	if err != nil {
@@ -3002,7 +3094,7 @@ func (c *Client) Acquire(ctx context.Context, req api.AcquireRequest, opts ...Ac
 			}
 			session := newLeaseSession(c, resp, token, endpoint)
 			session.setCorrelation(resp.CorrelationID)
-			c.logInfoCtx(ctx, "client.acquire.success", "key", keyForLog, "lease_id", resp.LeaseID, "endpoint", c.lastEndpoint, "attempt", attempt)
+			c.logInfoCtx(ctx, "client.acquire.success", "key", keyForLog, "lease_id", resp.LeaseID, "txn_id", resp.TxnID, "endpoint", c.lastEndpoint, "attempt", attempt)
 			return session, nil
 		}
 
@@ -3155,8 +3247,8 @@ func (c *Client) acquireOnce(ctx context.Context, req api.AcquireRequest) (api.A
 			return nil, nil, err
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
-		if req.Idempotency != "" {
-			httpReq.Header.Set("X-Idempotency-Key", req.Idempotency)
+		if req.TxnID != "" {
+			httpReq.Header.Set("X-Txn-ID", req.TxnID)
 		}
 		c.applyCorrelationHeader(ctx, httpReq, "")
 		return httpReq, cancel, nil
@@ -3263,7 +3355,7 @@ func (c *Client) AcquireForUpdate(ctx context.Context, req api.AcquireRequest, h
 		snapshot, snapErr := sess.Get(handshakeCtx)
 		if snapErr != nil {
 			handshakeCancel()
-			c.logWarnCtx(ctx, "client.acquire_for_update.snapshot_error", "key", keyForLog, "lease_id", sess.LeaseID, "error", snapErr)
+			c.logWarnCtx(ctx, "client.acquire_for_update.snapshot_error", "key", keyForLog, "lease_id", sess.LeaseID, "txn_id", sess.TxnID, "error", snapErr)
 			if releaseErr := sess.Release(ctx); releaseErr != nil && !isLeaseRequiredError(releaseErr) {
 				snapErr = errors.Join(snapErr, releaseErr)
 			}
@@ -3280,7 +3372,7 @@ func (c *Client) AcquireForUpdate(ctx context.Context, req api.AcquireRequest, h
 					sleep = retryHint
 				}
 				delay = sleep
-				c.logDebugCtx(ctx, "client.acquire_for_update.retry_after_snapshot_failure", "key", keyForLog, "lease_id", sess.LeaseID, "retries", retryCount, "delay", sleep, "retry_after", retryAfterFromError(snapErr), "qrf_state", qrfStateFromError(snapErr), "error", snapErr)
+				c.logDebugCtx(ctx, "client.acquire_for_update.retry_after_snapshot_failure", "key", keyForLog, "lease_id", sess.LeaseID, "txn_id", sess.TxnID, "retries", retryCount, "delay", sleep, "retry_after", retryAfterFromError(snapErr), "qrf_state", qrfStateFromError(snapErr), "error", snapErr)
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
@@ -3291,7 +3383,7 @@ func (c *Client) AcquireForUpdate(ctx context.Context, req api.AcquireRequest, h
 			return snapErr
 		}
 
-		c.logInfoCtx(ctx, "client.acquire_for_update.acquired", "key", keyForLog, "lease_id", sess.LeaseID, "endpoint", sess.endpoint)
+		c.logInfoCtx(ctx, "client.acquire_for_update.acquired", "key", keyForLog, "lease_id", sess.LeaseID, "txn_id", sess.TxnID, "endpoint", sess.endpoint)
 		cleanupHandshake := handshakeCancel
 
 		handlerCtx, handlerCancel := context.WithCancel(ctx)
@@ -3308,7 +3400,7 @@ func (c *Client) AcquireForUpdate(ctx context.Context, req api.AcquireRequest, h
 		handlerErr := handler(handlerCtx, userCtx)
 		if snapshot != nil {
 			if closeErr := snapshot.Close(); closeErr != nil {
-				c.logDebugCtx(ctx, "client.acquire_for_update.state_close_error", "key", keyForLog, "lease_id", sess.LeaseID, "error", closeErr)
+				c.logDebugCtx(ctx, "client.acquire_for_update.state_close_error", "key", keyForLog, "lease_id", sess.LeaseID, "txn_id", sess.TxnID, "error", closeErr)
 			}
 		}
 		handlerCancel()
@@ -3331,7 +3423,7 @@ func (c *Client) AcquireForUpdate(ctx context.Context, req api.AcquireRequest, h
 			if shouldRetryForUpdate(resultErr) {
 				retryCount++
 				if cfg.FailureRetries >= 0 && retryCount > cfg.FailureRetries {
-					c.logErrorCtx(ctx, "client.acquire_for_update.handler_error", "key", keyForLog, "lease_id", sess.LeaseID, "error", resultErr)
+					c.logErrorCtx(ctx, "client.acquire_for_update.handler_error", "key", keyForLog, "lease_id", sess.LeaseID, "txn_id", sess.TxnID, "error", resultErr)
 					return resultErr
 				}
 				sleep := acquireRetryDelay(delay, cfg)
@@ -3342,7 +3434,7 @@ func (c *Client) AcquireForUpdate(ctx context.Context, req api.AcquireRequest, h
 					sleep = retryHint
 				}
 				delay = sleep
-				c.logDebugCtx(ctx, "client.acquire_for_update.retry_after_handler_error", "key", keyForLog, "lease_id", sess.LeaseID, "retries", retryCount, "delay", sleep, "retry_after", retryAfterFromError(resultErr), "qrf_state", qrfStateFromError(resultErr), "error", resultErr)
+				c.logDebugCtx(ctx, "client.acquire_for_update.retry_after_handler_error", "key", keyForLog, "lease_id", sess.LeaseID, "txn_id", sess.TxnID, "retries", retryCount, "delay", sleep, "retry_after", retryAfterFromError(resultErr), "qrf_state", qrfStateFromError(resultErr), "error", resultErr)
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
@@ -3350,10 +3442,10 @@ func (c *Client) AcquireForUpdate(ctx context.Context, req api.AcquireRequest, h
 				}
 				continue
 			}
-			c.logErrorCtx(ctx, "client.acquire_for_update.handler_error", "key", keyForLog, "lease_id", sess.LeaseID, "error", resultErr)
+			c.logErrorCtx(ctx, "client.acquire_for_update.handler_error", "key", keyForLog, "lease_id", sess.LeaseID, "txn_id", sess.TxnID, "error", resultErr)
 			return resultErr
 		}
-		c.logInfoCtx(ctx, "client.acquire_for_update.success", "key", keyForLog, "lease_id", sess.LeaseID)
+		c.logInfoCtx(ctx, "client.acquire_for_update.success", "key", keyForLog, "lease_id", sess.LeaseID, "txn_id", sess.TxnID)
 		return nil
 	}
 }
@@ -3371,7 +3463,7 @@ func (c *Client) startForUpdateKeepAlive(ctx context.Context, cancel context.Can
 				return
 			case <-ticker.C:
 				if _, err := sess.KeepAlive(ctx, ttl); err != nil {
-					c.logWarnCtx(ctx, "client.acquire_for_update.keepalive_failed", "key", sess.Key, "lease_id", sess.LeaseID, "error", err)
+					c.logWarnCtx(ctx, "client.acquire_for_update.keepalive_failed", "key", sess.Key, "lease_id", sess.LeaseID, "txn_id", sess.TxnID, "error", err)
 					ch <- err
 					cancel()
 					return
@@ -3425,18 +3517,21 @@ func (c *Client) KeepAlive(ctx context.Context, req api.KeepAliveRequest) (*api.
 	}
 	headers := http.Header{}
 	headers.Set(headerFencingToken, token)
+	if txn := strings.TrimSpace(req.TxnID); txn != "" {
+		headers.Set(headerTxnID, txn)
+	}
 	if corr := CorrelationIDFromContext(ctx); corr != "" {
 		headers.Set(headerCorrelationID, corr)
 	}
-	c.logTraceCtx(ctx, "client.keepalive.headers", "key", req.Key, "lease_id", req.LeaseID, "fencing_token", token)
+	c.logTraceCtx(ctx, "client.keepalive.headers", "key", req.Key, "lease_id", req.LeaseID, "fencing_token", token, "txn_id", req.TxnID)
 	var resp api.KeepAliveResponse
 	kCtx, cancel := c.keepAliveContext(ctx)
 	defer cancel()
 	if _, err := c.postJSON(kCtx, "/v1/keepalive", req, &resp, headers, ""); err != nil {
-		c.logErrorCtx(ctx, "client.keepalive.error", "key", req.Key, "lease_id", req.LeaseID, "fencing_token", token, "error", err)
+		c.logErrorCtx(ctx, "client.keepalive.error", "key", req.Key, "lease_id", req.LeaseID, "fencing_token", token, "txn_id", req.TxnID, "error", err)
 		return nil, err
 	}
-	c.logTraceCtx(ctx, "client.keepalive.success", "key", req.Key, "lease_id", req.LeaseID, "fencing_token", token, "expires_at", resp.ExpiresAt)
+	c.logTraceCtx(ctx, "client.keepalive.success", "key", req.Key, "lease_id", req.LeaseID, "fencing_token", token, "txn_id", req.TxnID, "expires_at", resp.ExpiresAt)
 	return &resp, nil
 }
 
@@ -3454,11 +3549,11 @@ func (c *Client) releaseInternal(ctx context.Context, req api.ReleaseRequest, pr
 		return nil, err
 	}
 	req.Namespace = namespace
-	c.logTraceCtx(ctx, "client.release.start", "key", req.Key, "lease_id", req.LeaseID)
+	c.logTraceCtx(ctx, "client.release.start", "key", req.Key, "lease_id", req.LeaseID, "txn_id", req.TxnID)
 	token, err := c.fencingToken(req.LeaseID, "")
 	if err != nil {
 		if errors.Is(err, ErrMissingFencingToken) {
-			c.logDebugCtx(ctx, "client.release.no_token", "key", req.Key, "lease_id", req.LeaseID)
+			c.logDebugCtx(ctx, "client.release.no_token", "key", req.Key, "lease_id", req.LeaseID, "txn_id", req.TxnID)
 			return &api.ReleaseResponse{Released: true}, nil
 		}
 		return nil, err
@@ -3469,17 +3564,17 @@ func (c *Client) releaseInternal(ctx context.Context, req api.ReleaseRequest, pr
 		headers.Set(headerCorrelationID, corr)
 	}
 	c.closeIdleConnections()
-	c.logTraceCtx(ctx, "client.release.headers", "key", req.Key, "lease_id", req.LeaseID, "fencing_token", token)
+	c.logTraceCtx(ctx, "client.release.headers", "key", req.Key, "lease_id", req.LeaseID, "txn_id", req.TxnID, "fencing_token", token)
 	var resp api.ReleaseResponse
 	endpoint, err := c.postJSON(ctx, "/v1/release", req, &resp, headers, preferred)
 	if err != nil {
 		if isLeaseRequiredError(err) {
-			c.logDebugCtx(ctx, "client.release.already_gone", "key", req.Key, "lease_id", req.LeaseID)
+			c.logDebugCtx(ctx, "client.release.already_gone", "key", req.Key, "lease_id", req.LeaseID, "txn_id", req.TxnID)
 			c.leaseTokens.Delete(req.LeaseID)
 			return &api.ReleaseResponse{Released: true}, nil
 		}
 		if errors.Is(err, context.DeadlineExceeded) && preferred != "" {
-			c.logWarnCtx(ctx, "client.release.retry_different_endpoint", "key", req.Key, "lease_id", req.LeaseID, "endpoint", preferred, "error", err)
+			c.logWarnCtx(ctx, "client.release.retry_different_endpoint", "key", req.Key, "lease_id", req.LeaseID, "txn_id", req.TxnID, "endpoint", preferred, "error", err)
 			for _, base := range c.endpoints {
 				if base == preferred {
 					continue
@@ -3505,17 +3600,17 @@ func (c *Client) releaseInternal(ctx context.Context, req api.ReleaseRequest, pr
 					break
 				}
 				if isLeaseRequiredError(altErr) {
-					c.logDebugCtx(ctx, "client.release.already_gone", "key", req.Key, "lease_id", req.LeaseID, "endpoint", base)
+					c.logDebugCtx(ctx, "client.release.already_gone", "key", req.Key, "lease_id", req.LeaseID, "txn_id", req.TxnID, "endpoint", base)
 					c.leaseTokens.Delete(req.LeaseID)
 					return &api.ReleaseResponse{Released: true}, nil
 				}
-				c.logWarnCtx(ctx, "client.release.backup_failed", "key", req.Key, "lease_id", req.LeaseID, "endpoint", base, "error", altErr)
+				c.logWarnCtx(ctx, "client.release.backup_failed", "key", req.Key, "lease_id", req.LeaseID, "txn_id", req.TxnID, "endpoint", base, "error", altErr)
 			}
 			if err != nil {
 				return nil, err
 			}
 		} else {
-			c.logErrorCtx(ctx, "client.release.error", "key", req.Key, "lease_id", req.LeaseID, "fencing_token", token, "error", err)
+			c.logErrorCtx(ctx, "client.release.error", "key", req.Key, "lease_id", req.LeaseID, "txn_id", req.TxnID, "fencing_token", token, "error", err)
 			return nil, err
 		}
 	}
@@ -3526,11 +3621,11 @@ func (c *Client) releaseInternal(ctx context.Context, req api.ReleaseRequest, pr
 			}
 			_, extraErr := c.postJSON(ctx, "/v1/release", req, nil, headers.Clone(), base)
 			if extraErr != nil && !isLeaseRequiredError(extraErr) {
-				c.logDebugCtx(ctx, "client.release.extra_endpoint_error", "key", req.Key, "lease_id", req.LeaseID, "endpoint", base, "error", extraErr)
+				c.logDebugCtx(ctx, "client.release.extra_endpoint_error", "key", req.Key, "lease_id", req.LeaseID, "txn_id", req.TxnID, "endpoint", base, "error", extraErr)
 			}
 		}
 	}
-	c.logTraceCtx(ctx, "client.release.success", "key", req.Key, "lease_id", req.LeaseID, "fencing_token", token)
+	c.logTraceCtx(ctx, "client.release.success", "key", req.Key, "lease_id", req.LeaseID, "txn_id", req.TxnID, "fencing_token", token)
 	c.leaseTokens.Delete(req.LeaseID)
 	return &resp, nil
 }
@@ -3572,11 +3667,17 @@ func (c *Client) Describe(ctx context.Context, key string) (*api.DescribeRespons
 	return &describe, nil
 }
 
+// NamespaceConfigResult captures a namespace config document and its ETag.
+type NamespaceConfigResult struct {
+	Config *api.NamespaceConfigResponse
+	ETag   string
+}
+
 // GetNamespaceConfig returns the namespace configuration document and its ETag.
-func (c *Client) GetNamespaceConfig(ctx context.Context, namespace string) (*api.NamespaceConfigResponse, string, error) {
+func (c *Client) GetNamespaceConfig(ctx context.Context, namespace string) (NamespaceConfigResult, error) {
 	ns, err := c.namespaceFor(namespace)
 	if err != nil {
-		return nil, "", err
+		return NamespaceConfigResult{}, err
 	}
 	c.logTraceCtx(ctx, "client.namespace.get.start", "namespace", ns, "endpoint", c.lastEndpoint)
 	builder := func(base string) (*http.Request, context.CancelFunc, error) {
@@ -3593,36 +3694,36 @@ func (c *Client) GetNamespaceConfig(ctx context.Context, namespace string) (*api
 	resp, cancel, endpoint, err := c.attemptEndpoints(builder, "")
 	if err != nil {
 		c.logErrorCtx(ctx, "client.namespace.get.transport_error", "namespace", ns, "error", err)
-		return nil, "", err
+		return NamespaceConfigResult{}, err
 	}
 	defer cancel()
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		c.logWarnCtx(ctx, "client.namespace.get.error", "namespace", ns, "endpoint", endpoint, "status", resp.StatusCode)
-		return nil, "", c.decodeError(resp)
+		return NamespaceConfigResult{}, c.decodeError(resp)
 	}
 	var out api.NamespaceConfigResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, "", err
+		return NamespaceConfigResult{}, err
 	}
 	etag := strings.Trim(resp.Header.Get("ETag"), "\"")
 	c.logTraceCtx(ctx, "client.namespace.get.success", "namespace", ns, "endpoint", endpoint, "etag", etag)
-	return &out, etag, nil
+	return NamespaceConfigResult{Config: &out, ETag: etag}, nil
 }
 
 // UpdateNamespaceConfig mutates namespace-level settings and returns the updated configuration.
-func (c *Client) UpdateNamespaceConfig(ctx context.Context, req api.NamespaceConfigRequest, opts NamespaceConfigOptions) (*api.NamespaceConfigResponse, string, error) {
+func (c *Client) UpdateNamespaceConfig(ctx context.Context, req api.NamespaceConfigRequest, opts NamespaceConfigOptions) (NamespaceConfigResult, error) {
 	ns, err := c.namespaceFor(req.Namespace)
 	if err != nil {
-		return nil, "", err
+		return NamespaceConfigResult{}, err
 	}
 	req.Namespace = ns
 	if req.Query == nil {
-		return nil, "", fmt.Errorf("lockd: namespace query configuration required")
+		return NamespaceConfigResult{}, fmt.Errorf("lockd: namespace query configuration required")
 	}
 	payload, err := json.Marshal(req)
 	if err != nil {
-		return nil, "", err
+		return NamespaceConfigResult{}, err
 	}
 	path := fmt.Sprintf("/v1/namespace?namespace=%s", url.QueryEscape(ns))
 	c.logTraceCtx(ctx, "client.namespace.set.start", "namespace", ns, "endpoint", c.lastEndpoint)
@@ -3643,21 +3744,21 @@ func (c *Client) UpdateNamespaceConfig(ctx context.Context, req api.NamespaceCon
 	resp, cancel, endpoint, err := c.attemptEndpoints(builder, "")
 	if err != nil {
 		c.logErrorCtx(ctx, "client.namespace.set.transport_error", "namespace", ns, "error", err)
-		return nil, "", err
+		return NamespaceConfigResult{}, err
 	}
 	defer cancel()
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		c.logWarnCtx(ctx, "client.namespace.set.error", "namespace", ns, "endpoint", endpoint, "status", resp.StatusCode)
-		return nil, "", c.decodeError(resp)
+		return NamespaceConfigResult{}, c.decodeError(resp)
 	}
 	var out api.NamespaceConfigResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, "", err
+		return NamespaceConfigResult{}, err
 	}
 	etag := strings.Trim(resp.Header.Get("ETag"), "\"")
 	c.logTraceCtx(ctx, "client.namespace.set.success", "namespace", ns, "endpoint", endpoint, "etag", etag)
-	return &out, etag, nil
+	return NamespaceConfigResult{Config: &out, ETag: etag}, nil
 }
 
 // FlushIndex forces the namespace index writer to flush pending documents.
@@ -4101,7 +4202,7 @@ func (c *Client) getWithOptions(ctx context.Context, key string, opts GetOptions
 	}
 	c.logTraceCtx(ctx, logKey, logFields...)
 	builder := func(base string) (*http.Request, context.CancelFunc, error) {
-		reqCtx, cancel := c.requestContextNoTimeout(ctx)
+		reqCtx, cancel := c.requestContext(ctx)
 		full := fmt.Sprintf("%s/v1/get?key=%s&namespace=%s", base, url.QueryEscape(key), url.QueryEscape(namespace))
 		if public {
 			full += "&public=1"
@@ -4139,7 +4240,7 @@ func (c *Client) getWithOptions(ctx context.Context, key string, opts GetOptions
 			emptyFields = append(emptyFields, "lease_id", leaseID, "fencing_token", token)
 		}
 		c.logDebugCtx(ctx, "client.get.empty", emptyFields...)
-		return &GetResponse{Namespace: namespace, Key: key, ETag: strings.Trim(resp.Header.Get("ETag"), "\""), Version: resp.Header.Get("X-Key-Version")}, nil
+		return &GetResponse{Namespace: namespace, Key: key, ETag: strings.Trim(resp.Header.Get("ETag"), "\""), Version: resp.Header.Get("X-Key-Version"), client: c, public: public}, nil
 	}
 	if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
@@ -4166,6 +4267,8 @@ func (c *Client) getWithOptions(ctx context.Context, key string, opts GetOptions
 		Version:   resp.Header.Get("X-Key-Version"),
 		HasState:  true,
 		reader:    reader,
+		client:    c,
+		public:    public,
 	}
 	successFields := []any{"key", key, "namespace", namespace, "endpoint", endpoint, "etag", result.ETag, "version", result.Version}
 	if public {
@@ -4227,11 +4330,16 @@ func (c *Client) Update(ctx context.Context, key, leaseID string, body io.Reader
 		return nil, err
 	}
 	opts.Namespace = namespace
+	if opts.TxnID == "" {
+		if sess := c.sessionByLease(leaseID); sess != nil {
+			opts.TxnID = sess.TxnID
+		}
+	}
 	token, err := c.fencingToken(leaseID, opts.FencingToken)
 	if err != nil {
 		return nil, err
 	}
-	c.logTraceCtx(ctx, "client.update.start", "key", key, "lease_id", leaseID, "endpoint", c.lastEndpoint, "fencing_token", token)
+	c.logTraceCtx(ctx, "client.update.start", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", c.lastEndpoint, "fencing_token", token)
 	bodyFactory, err := makeBodyFactory(body)
 	if err != nil {
 		return nil, err
@@ -4250,6 +4358,9 @@ func (c *Client) Update(ctx context.Context, key, leaseID string, body io.Reader
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-Lease-ID", leaseID)
+		if opts.TxnID != "" {
+			req.Header.Set(headerTxnID, opts.TxnID)
+		}
 		if opts.IfETag != "" {
 			req.Header.Set("X-If-State-ETag", opts.IfETag)
 		}
@@ -4263,20 +4374,20 @@ func (c *Client) Update(ctx context.Context, key, leaseID string, body io.Reader
 	}
 	resp, cancel, endpoint, err := c.attemptEndpoints(builder, "")
 	if err != nil {
-		c.logErrorCtx(ctx, "client.update.transport_error", "key", key, "lease_id", leaseID, "endpoint", endpoint, "fencing_token", token, "error", err)
+		c.logErrorCtx(ctx, "client.update.transport_error", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", endpoint, "fencing_token", token, "error", err)
 		return nil, err
 	}
 	defer cancel()
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		c.logWarnCtx(ctx, "client.update.error", "key", key, "lease_id", leaseID, "endpoint", endpoint, "fencing_token", token, "status", resp.StatusCode)
+		c.logWarnCtx(ctx, "client.update.error", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", endpoint, "fencing_token", token, "status", resp.StatusCode)
 		return nil, c.decodeError(resp)
 	}
 	var result UpdateResult
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}
-	c.logTraceCtx(ctx, "client.update.success", "key", key, "lease_id", leaseID, "endpoint", endpoint, "fencing_token", token, "new_version", result.NewVersion, "new_etag", result.NewStateETag)
+	c.logTraceCtx(ctx, "client.update.success", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", endpoint, "fencing_token", token, "new_version", result.NewVersion, "new_etag", result.NewStateETag)
 	if newToken := resp.Header.Get(headerFencingToken); newToken != "" {
 		c.RegisterLeaseToken(leaseID, newToken)
 	}
@@ -4298,6 +4409,11 @@ func (c *Client) UpdateMetadata(ctx context.Context, key, leaseID string, opts U
 		return nil, err
 	}
 	opts.Namespace = namespace
+	if opts.TxnID == "" {
+		if sess := c.sessionByLease(leaseID); sess != nil {
+			opts.TxnID = sess.TxnID
+		}
+	}
 	token, err := c.fencingToken(leaseID, opts.FencingToken)
 	if err != nil {
 		return nil, err
@@ -4310,7 +4426,7 @@ func (c *Client) UpdateMetadata(ctx context.Context, key, leaseID string, opts U
 		return nil, err
 	}
 	path := fmt.Sprintf("/v1/metadata?key=%s&namespace=%s", url.QueryEscape(key), url.QueryEscape(namespace))
-	c.logTraceCtx(ctx, "client.metadata.start", "key", key, "lease_id", leaseID, "namespace", namespace)
+	c.logTraceCtx(ctx, "client.metadata.start", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "namespace", namespace)
 	builder := func(base string) (*http.Request, context.CancelFunc, error) {
 		reqCtx, cancel := c.requestContext(ctx)
 		req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, base+path, bytes.NewReader(body))
@@ -4320,6 +4436,9 @@ func (c *Client) UpdateMetadata(ctx context.Context, key, leaseID string, opts U
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-Lease-ID", leaseID)
+		if opts.TxnID != "" {
+			req.Header.Set(headerTxnID, opts.TxnID)
+		}
 		if opts.IfVersion != "" {
 			req.Header.Set("X-If-Version", opts.IfVersion)
 		}
@@ -4329,13 +4448,13 @@ func (c *Client) UpdateMetadata(ctx context.Context, key, leaseID string, opts U
 	}
 	resp, cancel, endpoint, err := c.attemptEndpoints(builder, "")
 	if err != nil {
-		c.logErrorCtx(ctx, "client.metadata.transport_error", "key", key, "lease_id", leaseID, "namespace", namespace, "endpoint", endpoint, "error", err)
+		c.logErrorCtx(ctx, "client.metadata.transport_error", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "namespace", namespace, "endpoint", endpoint, "error", err)
 		return nil, err
 	}
 	defer cancel()
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		c.logWarnCtx(ctx, "client.metadata.error", "key", key, "lease_id", leaseID, "namespace", namespace, "endpoint", endpoint, "status", resp.StatusCode)
+		c.logWarnCtx(ctx, "client.metadata.error", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "namespace", namespace, "endpoint", endpoint, "status", resp.StatusCode)
 		return nil, c.decodeError(resp)
 	}
 	var apiResp api.MetadataUpdateResponse
@@ -4345,7 +4464,7 @@ func (c *Client) UpdateMetadata(ctx context.Context, key, leaseID string, opts U
 	if newToken := resp.Header.Get(headerFencingToken); newToken != "" {
 		c.RegisterLeaseToken(leaseID, newToken)
 	}
-	c.logTraceCtx(ctx, "client.metadata.success", "key", key, "lease_id", leaseID, "namespace", namespace, "endpoint", endpoint, "version", apiResp.Version)
+	c.logTraceCtx(ctx, "client.metadata.success", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "namespace", namespace, "endpoint", endpoint, "version", apiResp.Version)
 	return &MetadataResult{
 		Version:  apiResp.Version,
 		Metadata: apiResp.Metadata,
@@ -4360,11 +4479,16 @@ func (c *Client) Remove(ctx context.Context, key, leaseID string, opts RemoveOpt
 		return nil, err
 	}
 	opts.Namespace = namespace
+	if opts.TxnID == "" {
+		if sess := c.sessionByLease(leaseID); sess != nil {
+			opts.TxnID = sess.TxnID
+		}
+	}
 	token, err := c.fencingToken(leaseID, opts.FencingToken)
 	if err != nil {
 		return nil, err
 	}
-	c.logTraceCtx(ctx, "client.remove.start", "key", key, "lease_id", leaseID, "endpoint", c.lastEndpoint, "fencing_token", token)
+	c.logTraceCtx(ctx, "client.remove.start", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", c.lastEndpoint, "fencing_token", token)
 	path := fmt.Sprintf("/v1/remove?key=%s&namespace=%s", url.QueryEscape(key), url.QueryEscape(namespace))
 	builder := func(base string) (*http.Request, context.CancelFunc, error) {
 		reqCtx, cancel := c.requestContext(ctx)
@@ -4374,6 +4498,9 @@ func (c *Client) Remove(ctx context.Context, key, leaseID string, opts RemoveOpt
 			return nil, nil, err
 		}
 		req.Header.Set("X-Lease-ID", leaseID)
+		if opts.TxnID != "" {
+			req.Header.Set(headerTxnID, opts.TxnID)
+		}
 		if opts.IfETag != "" {
 			req.Header.Set("X-If-State-ETag", opts.IfETag)
 		}
@@ -4386,24 +4513,67 @@ func (c *Client) Remove(ctx context.Context, key, leaseID string, opts RemoveOpt
 	}
 	resp, cancel, endpoint, err := c.attemptEndpoints(builder, "")
 	if err != nil {
-		c.logErrorCtx(ctx, "client.remove.transport_error", "key", key, "lease_id", leaseID, "endpoint", endpoint, "fencing_token", token, "error", err)
+		c.logErrorCtx(ctx, "client.remove.transport_error", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", endpoint, "fencing_token", token, "error", err)
 		return nil, err
 	}
 	defer cancel()
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		c.logWarnCtx(ctx, "client.remove.error", "key", key, "lease_id", leaseID, "endpoint", endpoint, "fencing_token", token, "status", resp.StatusCode)
+		c.logWarnCtx(ctx, "client.remove.error", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", endpoint, "fencing_token", token, "status", resp.StatusCode)
 		return nil, c.decodeError(resp)
 	}
 	var result api.RemoveResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}
-	c.logTraceCtx(ctx, "client.remove.success", "key", key, "lease_id", leaseID, "endpoint", endpoint, "fencing_token", token, "removed", result.Removed, "new_version", result.NewVersion)
+	c.logTraceCtx(ctx, "client.remove.success", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", endpoint, "fencing_token", token, "removed", result.Removed, "new_version", result.NewVersion)
 	if newToken := resp.Header.Get(headerFencingToken); newToken != "" {
 		c.RegisterLeaseToken(leaseID, newToken)
 	}
 	return &result, nil
+}
+
+// TxnPrepare records a pending decision for the txn, merging participants/expiry.
+func (c *Client) TxnPrepare(ctx context.Context, req api.TxnDecisionRequest) (*api.TxnDecisionResponse, error) {
+	req.State = "pending"
+	return c.txnDecision(ctx, "/v1/txn/decide", req)
+}
+
+// TxnCommit records a commit decision and applies it to participants.
+func (c *Client) TxnCommit(ctx context.Context, req api.TxnDecisionRequest) (*api.TxnDecisionResponse, error) {
+	req.State = "commit"
+	return c.txnDecision(ctx, "/v1/txn/decide", req)
+}
+
+// TxnRollback records a rollback decision and applies it to participants.
+func (c *Client) TxnRollback(ctx context.Context, req api.TxnDecisionRequest) (*api.TxnDecisionResponse, error) {
+	req.State = "rollback"
+	return c.txnDecision(ctx, "/v1/txn/decide", req)
+}
+
+// TxnReplay replays the decision (or rolls back expired pending) for txnID.
+func (c *Client) TxnReplay(ctx context.Context, txnID string) (*api.TxnReplayResponse, error) {
+	payload := api.TxnReplayRequest{TxnID: strings.TrimSpace(txnID)}
+	if payload.TxnID == "" {
+		return nil, fmt.Errorf("lockd: txn_id is required")
+	}
+	var resp api.TxnReplayResponse
+	if _, err := c.postJSON(ctx, "/v1/txn/replay", payload, &resp, nil, ""); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+func (c *Client) txnDecision(ctx context.Context, path string, req api.TxnDecisionRequest) (*api.TxnDecisionResponse, error) {
+	req.TxnID = strings.TrimSpace(req.TxnID)
+	if req.TxnID == "" {
+		return nil, fmt.Errorf("lockd: txn_id is required")
+	}
+	var resp api.TxnDecisionResponse
+	if _, err := c.postJSON(ctx, path, req, &resp, nil, ""); err != nil {
+		return nil, err
+	}
+	return &resp, nil
 }
 
 // APIError describes an error response from lockd.
@@ -4825,6 +4995,7 @@ func (c *Client) dequeueInternal(ctx context.Context, queue string, opts Dequeue
 		Namespace:                namespace,
 		Queue:                    queue,
 		Owner:                    owner,
+		TxnID:                    strings.TrimSpace(opts.TxnID),
 		VisibilityTimeoutSeconds: secondsFromDuration(opts.Visibility),
 		WaitSeconds:              waitSeconds,
 		PageSize:                 opts.PageSize,

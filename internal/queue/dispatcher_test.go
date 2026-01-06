@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/storage"
+	"pkt.systems/pslog"
 )
 
 type nextResponse struct {
@@ -21,22 +21,22 @@ type stubService struct {
 	calls     int
 }
 
-func (s *stubService) NextCandidate(ctx context.Context, namespace, queue string, startAfter string, pageSize int) (*MessageDescriptor, string, error) {
+func (s *stubService) NextCandidate(ctx context.Context, namespace, queue string, startAfter string, pageSize int) (MessageCandidateResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
 	if len(s.responses) == 0 {
-		return nil, "", storage.ErrNotFound
+		return MessageCandidateResult{}, storage.ErrNotFound
 	}
 	resp := s.responses[0]
 	s.responses = s.responses[1:]
 	if resp.err != nil {
-		return nil, "", resp.err
+		return MessageCandidateResult{}, resp.err
 	}
 	if resp.candidate == nil {
-		return nil, "", storage.ErrNotFound
+		return MessageCandidateResult{}, storage.ErrNotFound
 	}
-	return &resp.candidate.Descriptor, resp.candidate.NextCursor, nil
+	return MessageCandidateResult{Descriptor: &resp.candidate.Descriptor, NextCursor: resp.candidate.NextCursor}, nil
 }
 
 func (s *stubService) EnsureMessageReady(ctx context.Context, namespace, queue, id string) error {
@@ -51,7 +51,7 @@ func TestDispatcherTryWatcherDiscrepancy(t *testing.T) {
 		},
 	}
 	disp := NewDispatcher(svc,
-		WithLogger(loggingutil.NoopLogger()),
+		WithLogger(pslog.NoopLogger()),
 		WithResilientPollInterval(5*time.Minute),
 	)
 

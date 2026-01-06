@@ -1,0 +1,44 @@
+@startuml xa-rollback-timeout
+
+title XA rollback on timeout
+autonumber
+
+participant "client SDK operation" as SDK
+participant "lockd RM (implicit XA)" as RM
+participant "lockd txn sweeper" as Sweeper
+database "Backend" as Store
+
+== Acquire ==
+SDK -> RM: POST /v1/acquire (key, txn_id minted)
+loop CAS retry (lease meta)
+  RM -> Store: load_meta(key)
+  alt meta missing
+    RM -> Store: store_meta(expected_etag="",\nlease_id, lease_owner, lease_expires_at,\nlease_txn_id, fencing_token++)
+  else meta present
+    RM -> Store: store_meta(expected_etag=meta_etag,\nlease_id, lease_owner, lease_expires_at,\nlease_txn_id, fencing_token++)
+  end
+end
+RM --> SDK: lease_id, txn_id, fencing_token
+
+== Stage ==
+SDK -> RM: POST /v1/update (key, txn_id)
+loop CAS retry (meta + staging)
+  RM -> Store: load_meta(key)
+  RM -> Store: write_state state/<key>/.staging/<txn_id> (expected_etag=staged_etag)
+  RM -> Store: store_meta(expected_etag=meta_etag,\nstaged_txn_id, staged_state_etag)
+end
+
+== Timeout + sweep ==
+Sweeper -> Store: get_txn_record(.txns/<txn_id>)
+alt decision pending + expired
+  loop CAS retry (decision)
+    Sweeper -> Store: put_txn_record(state=rollback,\ntc_term, participants merged) (expected_etag=txn_etag)
+  end
+  loop apply participants
+    Sweeper -> Store: load_meta(participant)
+    Sweeper -> Store: delete_state state/<key>/.staging/<txn_id> (expected_etag=staged_etag)
+    Sweeper -> Store: store_meta(expected_etag=meta_etag,\nclear lease + staging)
+  end
+end
+
+@enduml

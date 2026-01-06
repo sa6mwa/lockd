@@ -74,6 +74,10 @@ func startAWSQueueServer(t testing.TB, cfg lockd.Config) *lockd.TestServer {
 	return newAWSQueueTestServer(t, cfg, lockd.NewTestingLogger(t, pslog.TraceLevel))
 }
 
+func startAWSQueueServerWithOptions(t testing.TB, cfg lockd.Config, opts ...lockd.TestServerOption) *lockd.TestServer {
+	return newAWSQueueTestServer(t, cfg, lockd.NewTestingLogger(t, pslog.TraceLevel), opts...)
+}
+
 func startAWSQueueServerWithCapture(t testing.TB, cfg lockd.Config) (*lockd.TestServer, *queuetestutil.LogCapture) {
 	capture := queuetestutil.NewLogCapture(t)
 	ts := newAWSQueueTestServer(t, cfg, capture.Logger())
@@ -83,6 +87,7 @@ func startAWSQueueServerWithCapture(t testing.TB, cfg lockd.Config) (*lockd.Test
 func newAWSQueueTestServer(t testing.TB, cfg lockd.Config, serverLogger pslog.Logger, opts ...lockd.TestServerOption) *lockd.TestServer {
 	t.Helper()
 
+	cryptotest.ConfigureTCAuth(t, &cfg)
 	if serverLogger == nil {
 		serverLogger = lockd.NewTestingLogger(t, pslog.TraceLevel)
 	}
@@ -104,11 +109,7 @@ func newAWSQueueTestServer(t testing.TB, cfg lockd.Config, serverLogger pslog.Lo
 			lockd.WithShutdownTimeout(10*time.Second),
 		),
 	}
-	var sharedCreds lockd.TestMTLSCredentials
-	if cryptotest.TestMTLSEnabled() {
-		sharedCreds = cryptotest.SharedMTLSCredentials(t)
-	}
-	options = append(options, cryptotest.SharedMTLSOptions(t, sharedCreds)...)
+	options = append(options, cryptotest.SharedMTLSOptions(t)...)
 	options = append(options, opts...)
 	return lockd.StartTestServer(t, options...)
 }
@@ -175,10 +176,11 @@ func ensureAWSQueueEnv(t testing.TB) {
 }
 
 func ensureAWSQueuePrefixWritable(t testing.TB, cfg lockd.Config) {
-	awsCfg, _, err := lockd.BuildAWSConfig(cfg)
+	awsResult, err := lockd.BuildAWSConfig(cfg)
 	if err != nil {
 		t.Fatalf("build aws config: %v", err)
 	}
+	awsCfg := awsResult.Config
 	store, err := s3.New(awsCfg)
 	if err != nil {
 		t.Fatalf("create s3 store: %v", err)

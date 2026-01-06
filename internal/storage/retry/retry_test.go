@@ -1,18 +1,18 @@
 package retry_test
 
 import (
-    "bytes"
-    "context"
-    "errors"
-    "fmt"
-    "io"
-    "testing"
-    "time"
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"testing"
+	"time"
 
-    "pkt.systems/lockd/internal/loggingutil"
-    "pkt.systems/lockd/internal/storage"
-    "pkt.systems/lockd/internal/storage/retry"
-    "pkt.systems/lockd/namespaces"
+	"pkt.systems/lockd/internal/storage"
+	"pkt.systems/lockd/internal/storage/retry"
+	"pkt.systems/lockd/namespaces"
+	"pkt.systems/pslog"
 )
 
 type fakeClock struct {
@@ -40,64 +40,71 @@ func (f *fakeClock) Sleep(d time.Duration) {
 }
 
 type stubBackend struct {
-    loadMetaErrs  []error
-    loadMetaCalls int
-    hook          func(int)
+	loadMetaErrs  []error
+	loadMetaCalls int
+	hook          func(int)
 }
 
-func (s *stubBackend) LoadMeta(ctx context.Context, namespace, key string) (*storage.Meta, string, error) {
-    s.loadMetaCalls++
-    if s.hook != nil {
-        s.hook(s.loadMetaCalls)
-    }
-    var err error
+func (s *stubBackend) LoadMeta(ctx context.Context, namespace, key string) (storage.LoadMetaResult, error) {
+	s.loadMetaCalls++
+	if s.hook != nil {
+		s.hook(s.loadMetaCalls)
+	}
+	var err error
 	if idx := s.loadMetaCalls - 1; idx < len(s.loadMetaErrs) {
 		err = s.loadMetaErrs[idx]
 	}
 	if err != nil {
-		return nil, "", err
+		return storage.LoadMetaResult{}, err
 	}
-    return &storage.Meta{Version: int64(s.loadMetaCalls)}, fmt.Sprintf("etag-%d", s.loadMetaCalls), nil
+	return storage.LoadMetaResult{
+		Meta: &storage.Meta{Version: int64(s.loadMetaCalls)},
+		ETag: fmt.Sprintf("etag-%d", s.loadMetaCalls),
+	}, nil
 }
 
 func (s *stubBackend) StoreMeta(context.Context, string, string, *storage.Meta, string) (string, error) {
-    return "", storage.ErrNotImplemented
+	return "", storage.ErrNotImplemented
 }
 
 func (s *stubBackend) DeleteMeta(context.Context, string, string, string) error {
-    return storage.ErrNotImplemented
+	return storage.ErrNotImplemented
 }
 
 func (s *stubBackend) ListMetaKeys(context.Context, string) ([]string, error) {
-    return nil, storage.ErrNotImplemented
+	return nil, storage.ErrNotImplemented
 }
 
-func (s *stubBackend) ReadState(context.Context, string, string) (io.ReadCloser, *storage.StateInfo, error) {
-    return io.NopCloser(bytes.NewReader(nil)), nil, storage.ErrNotImplemented
+func (s *stubBackend) ReadState(context.Context, string, string) (storage.ReadStateResult, error) {
+	return storage.ReadStateResult{Reader: io.NopCloser(bytes.NewReader(nil))}, storage.ErrNotImplemented
 }
 
 func (s *stubBackend) WriteState(context.Context, string, string, io.Reader, storage.PutStateOptions) (*storage.PutStateResult, error) {
-    return nil, storage.ErrNotImplemented
+	return nil, storage.ErrNotImplemented
 }
 
 func (s *stubBackend) Remove(context.Context, string, string, string) error {
-    return storage.ErrNotImplemented
+	return storage.ErrNotImplemented
 }
 
 func (s *stubBackend) ListObjects(context.Context, string, storage.ListOptions) (*storage.ListResult, error) {
-    return nil, storage.ErrNotImplemented
+	return nil, storage.ErrNotImplemented
 }
 
-func (s *stubBackend) GetObject(context.Context, string, string) (io.ReadCloser, *storage.ObjectInfo, error) {
-    return nil, nil, storage.ErrNotImplemented
+func (s *stubBackend) GetObject(context.Context, string, string) (storage.GetObjectResult, error) {
+	return storage.GetObjectResult{}, storage.ErrNotImplemented
 }
 
 func (s *stubBackend) PutObject(context.Context, string, string, io.Reader, storage.PutObjectOptions) (*storage.ObjectInfo, error) {
-    return nil, storage.ErrNotImplemented
+	return nil, storage.ErrNotImplemented
 }
 
 func (s *stubBackend) DeleteObject(context.Context, string, string, storage.DeleteObjectOptions) error {
-    return storage.ErrNotImplemented
+	return storage.ErrNotImplemented
+}
+
+func (s *stubBackend) BackendHash(context.Context) (string, error) {
+	return "stub-backend", nil
 }
 
 func (s *stubBackend) Close() error { return nil }
@@ -105,7 +112,7 @@ func (s *stubBackend) Close() error { return nil }
 func TestWrapReturnsNilOnNilInner(t *testing.T) {
 	t.Parallel()
 
-	if retry.Wrap(nil, loggingutil.NoopLogger(), &fakeClock{}, retry.Config{}) != nil {
+	if retry.Wrap(nil, pslog.NoopLogger(), &fakeClock{}, retry.Config{}) != nil {
 		t.Fatal("expected nil backend when inner is nil")
 	}
 }
@@ -120,21 +127,21 @@ func TestLoadMetaRetriesTransientErrors(t *testing.T) {
 		},
 	}
 	fc := &fakeClock{}
-	wrapped := retry.Wrap(back, loggingutil.NoopLogger(), fc, retry.Config{
+	wrapped := retry.Wrap(back, pslog.NoopLogger(), fc, retry.Config{
 		MaxAttempts: 3,
 		BaseDelay:   5 * time.Millisecond,
 		Multiplier:  2,
 		MaxDelay:    10 * time.Millisecond,
 	})
-    meta, etag, err := wrapped.LoadMeta(context.Background(), namespaces.Default, "key")
+	metaRes, err := wrapped.LoadMeta(context.Background(), namespaces.Default, "key")
 	if err != nil {
 		t.Fatalf("LoadMeta returned error: %v", err)
 	}
-	if meta == nil || meta.Version != 2 {
-		t.Fatalf("unexpected meta: %#v", meta)
+	if metaRes.Meta == nil || metaRes.Meta.Version != 2 {
+		t.Fatalf("unexpected meta: %#v", metaRes.Meta)
 	}
-	if etag != "etag-2" {
-		t.Fatalf("unexpected etag: %q", etag)
+	if metaRes.ETag != "etag-2" {
+		t.Fatalf("unexpected etag: %q", metaRes.ETag)
 	}
 	if back.loadMetaCalls != 2 {
 		t.Fatalf("expected 2 attempts, got %d", back.loadMetaCalls)
@@ -157,8 +164,8 @@ func TestLoadMetaStopsOnNonTransientError(t *testing.T) {
 		},
 	}
 	fc := &fakeClock{}
-	wrapped := retry.Wrap(back, loggingutil.NoopLogger(), fc, retry.Config{MaxAttempts: 3})
-    _, _, err := wrapped.LoadMeta(context.Background(), namespaces.Default, "key")
+	wrapped := retry.Wrap(back, pslog.NoopLogger(), fc, retry.Config{MaxAttempts: 3})
+	_, err := wrapped.LoadMeta(context.Background(), namespaces.Default, "key")
 	if err == nil || err.Error() != "fatal" {
 		t.Fatalf("expected fatal error, got %v", err)
 	}
@@ -175,10 +182,10 @@ func TestLoadMetaRespectsContextCancellation(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	back := &stubBackend{
-			loadMetaErrs: []error{
-				storage.NewTransientError(errors.New("flaky")),
-				storage.NewTransientError(errors.New("flaky retry")),
-			},
+		loadMetaErrs: []error{
+			storage.NewTransientError(errors.New("flaky")),
+			storage.NewTransientError(errors.New("flaky retry")),
+		},
 		hook: func(attempt int) {
 			if attempt == 1 {
 				cancel()
@@ -186,8 +193,8 @@ func TestLoadMetaRespectsContextCancellation(t *testing.T) {
 		},
 	}
 	fc := &fakeClock{}
-	wrapped := retry.Wrap(back, loggingutil.NoopLogger(), fc, retry.Config{MaxAttempts: 5})
-    _, _, err := wrapped.LoadMeta(ctx, namespaces.Default, "key")
+	wrapped := retry.Wrap(back, pslog.NoopLogger(), fc, retry.Config{MaxAttempts: 5})
+	_, err := wrapped.LoadMeta(ctx, namespaces.Default, "key")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context cancelled error, got %v", err)
 	}

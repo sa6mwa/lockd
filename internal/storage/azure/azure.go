@@ -39,6 +39,7 @@ type Config struct {
 // Store implements storage.Backend backed by Azure Blob Storage.
 type Store struct {
 	client    *azblob.Client
+	endpoint  string
 	container string
 	prefix    string
 	crypto    *storage.Crypto
@@ -145,6 +146,7 @@ func New(cfg Config) (*Store, error) {
 
 	return &Store{
 		client:    client,
+		endpoint:  endpoint,
 		container: cfg.Container,
 		prefix:    strings.Trim(cfg.Prefix, "/"),
 		crypto:    cfg.Crypto,
@@ -180,6 +182,16 @@ func isContainerExists(err error) bool {
 
 // Close satisfies storage.Backend by releasing resources held by Store (no-op for Azure).
 func (s *Store) Close() error { return nil }
+
+// BackendHash returns the stable identity hash for this backend.
+func (s *Store) BackendHash(ctx context.Context) (string, error) {
+	endpoint := strings.TrimSpace(s.endpoint)
+	container := strings.TrimSpace(s.container)
+	prefix := strings.Trim(s.prefix, "/")
+	desc := fmt.Sprintf("azure|endpoint=%s|container=%s|prefix=%s", endpoint, container, prefix)
+	result, err := storage.ResolveBackendHash(ctx, s, desc)
+	return result.Hash, err
+}
 
 func (s *Store) prefixed(parts ...string) string {
 	name := path.Join(parts...)
@@ -264,32 +276,32 @@ func (s *Store) metaContentType() string {
 }
 
 // LoadMeta fetches the protobuf metadata document for key and returns its ETag.
-func (s *Store) LoadMeta(ctx context.Context, namespace, key string) (*storage.Meta, string, error) {
+func (s *Store) LoadMeta(ctx context.Context, namespace, key string) (storage.LoadMetaResult, error) {
 	blobName, err := s.metaBlob(namespace, key)
 	if err != nil {
-		return nil, "", err
+		return storage.LoadMetaResult{}, err
 	}
 	resp, err := s.client.DownloadStream(ctx, s.container, blobName, nil)
 	if err != nil {
 		if isNotFound(err) {
-			return nil, "", storage.ErrNotFound
+			return storage.LoadMetaResult{}, storage.ErrNotFound
 		}
-		return nil, "", fmt.Errorf("azure: download meta: %w", err)
+		return storage.LoadMetaResult{}, fmt.Errorf("azure: download meta: %w", err)
 	}
 	defer resp.Body.Close()
 	payload, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, "", fmt.Errorf("azure: read meta: %w", err)
+		return storage.LoadMetaResult{}, fmt.Errorf("azure: read meta: %w", err)
 	}
 	meta, err := storage.UnmarshalMeta(payload, s.crypto)
 	if err != nil {
-		return nil, "", err
+		return storage.LoadMetaResult{}, err
 	}
 	etag := ""
 	if resp.ETag != nil {
 		etag = string(*resp.ETag)
 	}
-	return meta, etag, nil
+	return storage.LoadMetaResult{Meta: meta, ETag: etag}, nil
 }
 
 // StoreMeta writes the protobuf metadata document using conditional semantics when expectedETag is supplied.
@@ -414,17 +426,17 @@ func (s *Store) ListMetaKeys(ctx context.Context, namespace string) ([]string, e
 }
 
 // ReadState streams the JSON state blob for key and returns associated metadata.
-func (s *Store) ReadState(ctx context.Context, namespace, key string) (io.ReadCloser, *storage.StateInfo, error) {
+func (s *Store) ReadState(ctx context.Context, namespace, key string) (storage.ReadStateResult, error) {
 	blobName, err := s.stateBlob(namespace, key)
 	if err != nil {
-		return nil, nil, err
+		return storage.ReadStateResult{}, err
 	}
 	resp, err := s.client.DownloadStream(ctx, s.container, blobName, nil)
 	if err != nil {
 		if isNotFound(err) {
-			return nil, nil, storage.ErrNotFound
+			return storage.ReadStateResult{}, storage.ErrNotFound
 		}
-		return nil, nil, fmt.Errorf("azure: download state: %w", err)
+		return storage.ReadStateResult{}, fmt.Errorf("azure: download state: %w", err)
 	}
 	info := &storage.StateInfo{}
 	if resp.ETag != nil {
@@ -445,7 +457,7 @@ func (s *Store) ReadState(ctx context.Context, namespace, key string) (io.ReadCl
 		descriptor = append([]byte(nil), desc...)
 	} else if err != nil {
 		resp.Body.Close()
-		return nil, nil, err
+		return storage.ReadStateResult{}, err
 	}
 	if len(descriptor) > 0 {
 		info.Descriptor = append([]byte(nil), descriptor...)
@@ -457,21 +469,21 @@ func (s *Store) ReadState(ctx context.Context, namespace, key string) (io.ReadCl
 	if encrypted {
 		if len(descriptor) == 0 {
 			resp.Body.Close()
-			return nil, nil, fmt.Errorf("azure: missing state descriptor for %q", key)
+			return storage.ReadStateResult{}, fmt.Errorf("azure: missing state descriptor for %q", key)
 		}
 		mat, err := s.crypto.MaterialFromDescriptor(objectCtx, descriptor)
 		if err != nil {
 			resp.Body.Close()
-			return nil, nil, err
+			return storage.ReadStateResult{}, err
 		}
 		reader, err := s.crypto.DecryptReaderForMaterial(resp.Body, mat)
 		if err != nil {
 			resp.Body.Close()
-			return nil, nil, err
+			return storage.ReadStateResult{}, err
 		}
-		return reader, info, nil
+		return storage.ReadStateResult{Reader: reader, Info: info}, nil
 	}
-	return resp.Body, info, nil
+	return storage.ReadStateResult{Reader: resp.Body, Info: info}, nil
 }
 
 // WriteState uploads a new state blob, optionally enforcing a previous ETag.
@@ -489,6 +501,12 @@ func (s *Store) WriteState(ctx context.Context, namespace, key string, body io.R
 		uploadOpts.AccessConditions = &blob.AccessConditions{
 			ModifiedAccessConditions: &blob.ModifiedAccessConditions{
 				IfMatch: to.Ptr(azcore.ETag(opts.ExpectedETag)),
+			},
+		}
+	} else if opts.IfNotExists {
+		uploadOpts.AccessConditions = &blob.AccessConditions{
+			ModifiedAccessConditions: &blob.ModifiedAccessConditions{
+				IfNoneMatch: to.Ptr(azcore.ETag("*")),
 			},
 		}
 	}
@@ -509,12 +527,13 @@ func (s *Store) WriteState(ctx context.Context, namespace, key string, body io.R
 				return nil, err
 			}
 		} else {
-			var descBytes []byte
-			mat, descBytes, err = s.crypto.MintMaterial(objectCtx)
+			var minted storage.MaterialResult
+			minted, err = s.crypto.MintMaterial(objectCtx)
 			if err != nil {
 				return nil, err
 			}
-			descriptor = append([]byte(nil), descBytes...)
+			descriptor = append([]byte(nil), minted.Descriptor...)
+			mat = minted.Material
 		}
 		encoded := encodeAzureDescriptor(descriptor)
 		uploadOpts.Metadata = map[string]*string{descriptorMetadataKey: to.Ptr(encoded)}
@@ -672,17 +691,17 @@ outer:
 }
 
 // GetObject opens the blob referenced by key within the namespace.
-func (s *Store) GetObject(ctx context.Context, namespace, key string) (io.ReadCloser, *storage.ObjectInfo, error) {
+func (s *Store) GetObject(ctx context.Context, namespace, key string) (storage.GetObjectResult, error) {
 	blobName, err := s.objectBlob(namespace, key)
 	if err != nil {
-		return nil, nil, err
+		return storage.GetObjectResult{}, err
 	}
 	resp, err := s.client.DownloadStream(ctx, s.container, blobName, nil)
 	if err != nil {
 		if isNotFound(err) {
-			return nil, nil, storage.ErrNotFound
+			return storage.GetObjectResult{}, storage.ErrNotFound
 		}
-		return nil, nil, fmt.Errorf("azure: download object: %w", err)
+		return storage.GetObjectResult{}, fmt.Errorf("azure: download object: %w", err)
 	}
 	info := &storage.ObjectInfo{Key: key}
 	if resp.ETag != nil {
@@ -701,12 +720,12 @@ func (s *Store) GetObject(ctx context.Context, namespace, key string) (io.ReadCl
 		info.Descriptor = append([]byte(nil), desc...)
 	} else if err != nil {
 		resp.Body.Close()
-		return nil, nil, err
+		return storage.GetObjectResult{}, err
 	}
 	if plain, ok := storage.ObjectPlaintextSizeFromContext(ctx); ok && plain > 0 {
 		info.Size = plain
 	}
-	return resp.Body, info, nil
+	return storage.GetObjectResult{Reader: resp.Body, Info: info}, nil
 }
 
 // PutObject uploads a blob with CAS/creation semantics within the namespace.

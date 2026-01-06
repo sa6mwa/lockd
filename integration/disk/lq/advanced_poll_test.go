@@ -234,12 +234,8 @@ func runDiskQueueMultiServerRouting(t *testing.T) {
 		ResilientInterval: 250 * time.Millisecond,
 	})
 
-	var sharedCreds lockd.TestMTLSCredentials
-	if cryptotest.TestMTLSEnabled() {
-		sharedCreds = cryptotest.SharedMTLSCredentials(t)
-	}
-	serverA := startDiskQueueServer(t, cfg, cryptotest.SharedMTLSOptions(t, sharedCreds)...)
-	serverB := startDiskQueueServer(t, cfg, cryptotest.SharedMTLSOptions(t, sharedCreds)...)
+	serverA := startDiskQueueServer(t, cfg, cryptotest.SharedMTLSOptions(t)...)
+	serverB := startDiskQueueServer(t, cfg, cryptotest.SharedMTLSOptions(t)...)
 
 	queue := queuetestutil.QueueName("disk-routing")
 	payload := []byte("shared-disk-backend")
@@ -277,8 +273,8 @@ func runDiskQueueMultiServerFailoverClient(t *testing.T) {
 	if cryptotest.TestMTLSEnabled() {
 		sharedCreds = cryptotest.SharedMTLSCredentials(t)
 	}
-	serverA := startDiskQueueServer(t, cfg, cryptotest.SharedMTLSOptions(t, sharedCreds)...)
-	serverB := startDiskQueueServer(t, cfg, cryptotest.SharedMTLSOptions(t, sharedCreds)...)
+	serverA := startDiskQueueServer(t, cfg, cryptotest.SharedMTLSOptions(t)...)
+	serverB := startDiskQueueServer(t, cfg, cryptotest.SharedMTLSOptions(t)...)
 
 	queue := queuetestutil.QueueName("disk-failover")
 	queuetestutil.MustEnqueueBytes(t, serverA.Client, queue, []byte("failover-payload"))

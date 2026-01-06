@@ -57,6 +57,7 @@ func (s *Service) Dequeue(ctx context.Context, cmd QueueDequeueCommand) (*QueueD
 		namespace,
 		cmd.Queue,
 		owner,
+		cmd.TxnID,
 		visibility,
 		cmd.Stateful,
 		cmd.BlockSeconds,

@@ -37,15 +37,15 @@ func TestS3StoreMetaLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store meta create: %v", err)
 	}
-	got, gotETag, err := store.LoadMeta(ctx, namespace, key)
+	metaRes, err := store.LoadMeta(ctx, namespace, key)
 	if err != nil {
 		t.Fatalf("load meta: %v", err)
 	}
-	if got.Version != 1 {
-		t.Fatalf("expected version 1, got %d", got.Version)
+	if metaRes.Meta.Version != 1 {
+		t.Fatalf("expected version 1, got %d", metaRes.Meta.Version)
 	}
 	meta.Version = 2
-	newETag, err := store.StoreMeta(ctx, namespace, key, meta, gotETag)
+	newETag, err := store.StoreMeta(ctx, namespace, key, meta, metaRes.ETag)
 	if err != nil {
 		t.Fatalf("store meta update: %v", err)
 	}
@@ -77,20 +77,20 @@ func TestS3StoreStateLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("write state: %v", err)
 	}
-	reader, info, err := store.ReadState(ctx, namespace, "stream")
+	readRes, err := store.ReadState(ctx, namespace, "stream")
 	if err != nil {
 		t.Fatalf("read state: %v", err)
 	}
 	data := new(bytes.Buffer)
-	if _, err := data.ReadFrom(reader); err != nil {
+	if _, err := data.ReadFrom(readRes.Reader); err != nil {
 		t.Fatalf("read body: %v", err)
 	}
 	if !strings.Contains(data.String(), "offset") {
 		t.Fatalf("expected body, got %s", data.String())
 	}
-	_ = reader.Close()
-	if info.ETag == "" || info.ETag != res.NewETag {
-		t.Fatalf("expected etag match, got %q vs %q", info.ETag, res.NewETag)
+	_ = readRes.Reader.Close()
+	if readRes.Info.ETag == "" || readRes.Info.ETag != res.NewETag {
+		t.Fatalf("expected etag match, got %q vs %q", readRes.Info.ETag, res.NewETag)
 	}
 	if _, err := store.WriteState(ctx, namespace, "stream", bytes.NewReader([]byte(`{"offset":2}`)), storage.PutStateOptions{ExpectedETag: "wrong"}); err != storage.ErrCASMismatch {
 		t.Fatalf("expected cas mismatch, got %v", err)
@@ -215,6 +215,7 @@ func TestNotFoundAwareObjectConverts404(t *testing.T) {
 
 func TestClassifyPutObjectError(t *testing.T) {
 	preconditionErr := minio.ErrorResponse{StatusCode: http.StatusPreconditionFailed}
+	conflictErr := minio.ErrorResponse{StatusCode: http.StatusConflict, Code: "ConditionalRequestConflict"}
 	notFoundErr := minio.ErrorResponse{StatusCode: http.StatusNotFound}
 	otherErr := errors.New("boom")
 
@@ -226,6 +227,7 @@ func TestClassifyPutObjectError(t *testing.T) {
 	}{
 		{name: "nil", err: nil, want: nil},
 		{name: "precondition", err: preconditionErr, want: storage.ErrCASMismatch},
+		{name: "conditional conflict", err: conflictErr, want: storage.ErrCASMismatch},
 		{name: "not found with expected", err: notFoundErr, expected: true, want: storage.ErrNotFound},
 		{name: "not found without expected", err: notFoundErr, expected: false, want: nil},
 		{name: "other", err: otherErr, want: nil},

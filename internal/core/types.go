@@ -17,7 +17,7 @@ type AcquireCommand struct {
 	Owner            string
 	TTLSeconds       int64
 	BlockSeconds     int64
-	Idempotency      string
+	TxnID            string
 	ClientHint       string // optional client identity
 	ForceQueryHidden bool   // mark meta as query-hidden when acquiring (for queue state keys)
 }
@@ -26,6 +26,7 @@ type AcquireCommand struct {
 type AcquireResult struct {
 	Namespace     string
 	LeaseID       string
+	TxnID         string
 	Key           string
 	Owner         string
 	ExpiresAt     int64
@@ -45,6 +46,7 @@ type KeepAliveCommand struct {
 	Key           string
 	LeaseID       string
 	TTLSeconds    int64
+	TxnID         string
 	FencingToken  int64
 	ClientHint    string
 	Correlation   string
@@ -65,6 +67,8 @@ type ReleaseCommand struct {
 	Namespace     string
 	Key           string
 	LeaseID       string
+	TxnID         string
+	Rollback      bool
 	FencingToken  int64
 	KnownMeta     *storage.Meta
 	KnownMetaETag string
@@ -123,12 +127,120 @@ type GetResult struct {
 	NoContent        bool
 }
 
+// AttachmentInfo surfaces metadata about a stored attachment.
+type AttachmentInfo struct {
+	ID            string
+	Name          string
+	Size          int64
+	ContentType   string
+	CreatedAtUnix int64
+	UpdatedAtUnix int64
+}
+
+// AttachmentSelector identifies an attachment by name or id.
+type AttachmentSelector struct {
+	ID   string
+	Name string
+}
+
+// AttachCommand stages an attachment payload for a key.
+type AttachCommand struct {
+	Namespace        string
+	Key              string
+	LeaseID          string
+	FencingToken     int64
+	TxnID            string
+	Name             string
+	ContentType      string
+	MaxBytes         int64
+	MaxBytesSet      bool
+	PreventOverwrite bool
+	Body             io.Reader
+}
+
+// AttachResult reports the staged attachment metadata.
+type AttachResult struct {
+	Attachment AttachmentInfo
+	Noop       bool
+	Version    int64
+	Meta       *storage.Meta
+	MetaETag   string
+}
+
+// ListAttachmentsCommand lists attachments for a key.
+type ListAttachmentsCommand struct {
+	Namespace    string
+	Key          string
+	LeaseID      string
+	FencingToken int64
+	TxnID        string
+	Public       bool
+}
+
+// ListAttachmentsResult contains attachment metadata for a key.
+type ListAttachmentsResult struct {
+	Attachments []AttachmentInfo
+}
+
+// RetrieveAttachmentCommand fetches a single attachment payload.
+type RetrieveAttachmentCommand struct {
+	Namespace    string
+	Key          string
+	LeaseID      string
+	FencingToken int64
+	TxnID        string
+	Public       bool
+	Selector     AttachmentSelector
+}
+
+// RetrieveAttachmentResult returns an attachment stream and metadata.
+type RetrieveAttachmentResult struct {
+	Attachment AttachmentInfo
+	Reader     io.ReadCloser
+}
+
+// DeleteAttachmentCommand stages removal of a single attachment.
+type DeleteAttachmentCommand struct {
+	Namespace    string
+	Key          string
+	LeaseID      string
+	FencingToken int64
+	TxnID        string
+	Selector     AttachmentSelector
+}
+
+// DeleteAttachmentResult reports delete intent for a single attachment.
+type DeleteAttachmentResult struct {
+	Deleted  bool
+	Version  int64
+	Meta     *storage.Meta
+	MetaETag string
+}
+
+// DeleteAllAttachmentsCommand stages removal of all attachments.
+type DeleteAllAttachmentsCommand struct {
+	Namespace    string
+	Key          string
+	LeaseID      string
+	FencingToken int64
+	TxnID        string
+}
+
+// DeleteAllAttachmentsResult reports the number of staged deletions.
+type DeleteAllAttachmentsResult struct {
+	Deleted  int
+	Version  int64
+	Meta     *storage.Meta
+	MetaETag string
+}
+
 // MetadataCommand mutates metadata using optimistic concurrency or lease checks.
 type MetadataCommand struct {
 	Namespace     string
 	Key           string
 	LeaseID       string
 	FencingToken  int64
+	TxnID         string
 	Mutation      MetadataMutation
 	KnownMeta     *storage.Meta
 	KnownMetaETag string
@@ -150,6 +262,7 @@ type RemoveCommand struct {
 	Key           string
 	LeaseID       string
 	FencingToken  int64
+	TxnID         string
 	KnownMeta     *storage.Meta
 	KnownMetaETag string
 	IfStateETag   string

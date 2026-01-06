@@ -10,27 +10,33 @@ import (
 	"pkt.systems/lockd/internal/storage"
 )
 
-func (s *Service) openPublishedDocument(ctx context.Context, namespace, key string) (io.ReadCloser, int64, bool, error) {
+type PublishedDocumentResult struct {
+	Reader    io.ReadCloser
+	Version   int64
+	NoContent bool
+}
+
+func (s *Service) openPublishedDocument(ctx context.Context, namespace, key string) (PublishedDocumentResult, error) {
 	storageKey, err := s.namespacedKey(namespace, key)
 	if err != nil {
-		return nil, 0, false, Failure{Code: "invalid_key", Detail: err.Error(), HTTPStatus: http.StatusBadRequest}
+		return PublishedDocumentResult{}, Failure{Code: "invalid_key", Detail: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
 	meta, _, err := s.ensureMeta(ctx, namespace, storageKey)
 	if err != nil {
-		return nil, 0, false, err
+		return PublishedDocumentResult{}, err
 	}
 	if meta == nil || meta.QueryExcluded() || meta.StateETag == "" {
-		return nil, 0, true, nil
+		return PublishedDocumentResult{NoContent: true}, nil
 	}
 	publishedVersion := meta.PublishedVersion
 	if publishedVersion == 0 {
 		publishedVersion = meta.Version
 	}
 	if publishedVersion == 0 {
-		return nil, 0, true, nil
+		return PublishedDocumentResult{NoContent: true}, nil
 	}
 	if publishedVersion < meta.Version {
-		return nil, 0, false, Failure{
+		return PublishedDocumentResult{}, Failure{
 			Code:       "state_not_published",
 			Detail:     "state update not published yet",
 			HTTPStatus: http.StatusServiceUnavailable,
@@ -45,10 +51,10 @@ func (s *Service) openPublishedDocument(ctx context.Context, namespace, key stri
 	}
 	reader, info, err := s.readStateWithWarmup(stateCtx, namespace, storageKey, true)
 	if errors.Is(err, storage.ErrNotFound) {
-		return nil, 0, true, nil
+		return PublishedDocumentResult{NoContent: true}, nil
 	}
 	if err != nil {
-		return nil, 0, false, err
+		return PublishedDocumentResult{}, err
 	}
 	size := meta.StatePlaintextBytes
 	if size == 0 && info != nil {
@@ -56,16 +62,16 @@ func (s *Service) openPublishedDocument(ctx context.Context, namespace, key stri
 	}
 	if s.jsonMaxBytes > 0 && size > s.jsonMaxBytes {
 		reader.Close()
-		return nil, 0, false, Failure{
+		return PublishedDocumentResult{}, Failure{
 			Code:       "document_too_large",
 			Detail:     fmt.Sprintf("state exceeds %d bytes", s.jsonMaxBytes),
 			HTTPStatus: http.StatusRequestEntityTooLarge,
 		}
 	}
-	return reader, publishedVersion, false, nil
+	return PublishedDocumentResult{Reader: reader, Version: publishedVersion}, nil
 }
 
 // OpenPublishedDocument is exported for adapters to stream documents.
-func (s *Service) OpenPublishedDocument(ctx context.Context, namespace, key string) (io.ReadCloser, int64, bool, error) {
+func (s *Service) OpenPublishedDocument(ctx context.Context, namespace, key string) (PublishedDocumentResult, error) {
 	return s.openPublishedDocument(ctx, namespace, key)
 }

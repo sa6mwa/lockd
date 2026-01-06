@@ -135,12 +135,13 @@ func TestScanAdapterSkipsReservedAndHidden(t *testing.T) {
 	writeState(t, store, "default", "lockd-diagnostics/123", map[string]any{"internal": true})
 	writeState(t, store, "default", "orders/visible", map[string]any{"status": "open"})
 	writeState(t, store, "default", "orders/hidden", map[string]any{"status": "open"})
-	meta, etag, err := store.LoadMeta(ctx, "default", "orders/hidden")
+	metaRes, err := store.LoadMeta(ctx, "default", "orders/hidden")
 	if err != nil {
 		t.Fatalf("load meta: %v", err)
 	}
+	meta := metaRes.Meta
 	meta.MarkQueryExcluded()
-	if _, err := store.StoreMeta(ctx, "default", "orders/hidden", meta, etag); err != nil {
+	if _, err := store.StoreMeta(ctx, "default", "orders/hidden", meta, metaRes.ETag); err != nil {
 		t.Fatalf("store meta: %v", err)
 	}
 	adapter, err := New(Config{Backend: store})

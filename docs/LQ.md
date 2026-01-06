@@ -166,6 +166,7 @@ client Dequeue --> HTTP handler --> dispatcher.Wait(queue)
 
 4. `/v1/queue/ack`, `/v1/queue/nack`, `/v1/queue/extend`
    - Validate lease ownership using meta CAS.
+   - Validate the message metadata fence (`lease_id`, `lease_txn_id`, `lease_fencing_token`); stale leases return `409 queue_message_lease_mismatch`.
    - Call `queue.Service` helpers to update metadata or remove payload/state.
    - Release leases and notify dispatcher as appropriate (e.g. requeue after
      nack).
@@ -198,7 +199,7 @@ backends (S3/Azure/minio/disk without watch), regular polling remains in place.
 | `QueuePollInterval` (`--queue-poll-interval`) | Base interval between storage scans when no watcher events fire. | 3s |
 | `QueuePollJitter` (`--queue-poll-jitter`) | Random spread added to the interval to desynchronise multiple servers. Set to 0 to disable. | 500ms |
 | `DiskQueueWatch` (`--disk-queue-watch`) | Enables inotify watcher on Linux disk backend. Automatically ignored on unsupported filesystems (e.g. NFS). | true |
-| `MemQueueWatch` (`--mem-queue-watch`) | Enables in-process notifications for the memory backend. Disable to force pure polling (useful for regression tests). | true |
+| `DisableMemQueueWatch` (`--disable-mem-queue-watch`) | Disables in-process notifications for the memory backend. Set to true to force pure polling (useful for regression tests). | false |
 
 All flags have `LOCKD_*` environment-variable equivalents via Viper.
 

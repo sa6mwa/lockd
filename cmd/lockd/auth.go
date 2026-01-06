@@ -4,6 +4,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -14,6 +15,7 @@ import (
 
 	"pkt.systems/lockd"
 	"pkt.systems/lockd/internal/cryptoutil"
+	"pkt.systems/lockd/internal/uuidv7"
 	"pkt.systems/lockd/tlsutil"
 )
 
@@ -30,6 +32,7 @@ func newAuthCommand() *cobra.Command {
 	newCmd.AddCommand(newAuthNewCACommand())
 	newCmd.AddCommand(newAuthNewServerCommand())
 	newCmd.AddCommand(newAuthNewClientCommand())
+	newCmd.AddCommand(newAuthNewTCClientCommand())
 	cmd.AddCommand(newCmd)
 	cmd.AddCommand(newAuthRevokeClientCommand())
 	inspectCmd := &cobra.Command{
@@ -132,11 +135,29 @@ func newAuthNewServerCommand() *cobra.Command {
 			}
 
 			hostList := strings.Split(hosts, ",")
-			serverCert, serverKey, err := ca.IssueServer(hostList, cn, validity)
+			nodeID := ""
+			if info, err := os.Stat(out); err == nil && !info.IsDir() {
+				if existing, ok := serverNodeIDFromBundle(out); ok {
+					nodeID = existing
+				}
+			}
+			if nodeID == "" {
+				nodeID = uuidv7.NewString()
+			}
+			spiffeURI, err := lockd.SPIFFEURIForServer(nodeID)
+			if err != nil {
+				return fmt.Errorf("spiffe uri: %w", err)
+			}
+			issued, err := ca.IssueServerWithRequest(tlsutil.ServerCertRequest{
+				CommonName: cn,
+				Validity:   validity,
+				Hosts:      hostList,
+				URIs:       []*url.URL{spiffeURI},
+			})
 			if err != nil {
 				return err
 			}
-			bundleBytes, err := tlsutil.EncodeServerBundle(ca.CertPEM, nil, serverCert, serverKey, nil)
+			bundleBytes, err := tlsutil.EncodeServerBundle(ca.CertPEM, nil, issued.CertPEM, issued.KeyPEM, nil)
 			if err != nil {
 				return err
 			}
@@ -161,6 +182,37 @@ func newAuthNewServerCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite existing bundle if present")
 	cmd.Flags().StringVar(&caIn, "ca-in", "", "path to CA bundle (default $HOME/.lockd/ca.pem)")
 	return cmd
+}
+
+func serverNodeIDFromBundle(path string) (string, bool) {
+	bundle, err := tlsutil.LoadBundle(path, "")
+	if err != nil {
+		return "", false
+	}
+	nodeID := serverNodeIDFromCert(bundle.ServerCert)
+	return nodeID, nodeID != ""
+}
+
+func serverNodeIDFromCert(cert *x509.Certificate) string {
+	if cert == nil {
+		return ""
+	}
+	for _, uri := range cert.URIs {
+		if uri == nil {
+			continue
+		}
+		if uri.Scheme != "spiffe" || !strings.EqualFold(uri.Host, "lockd") {
+			continue
+		}
+		if !strings.HasPrefix(uri.Path, "/server/") {
+			continue
+		}
+		nodeID := strings.Trim(strings.TrimPrefix(uri.Path, "/server/"), "/")
+		if nodeID != "" {
+			return nodeID
+		}
+	}
+	return ""
 }
 
 func newAuthNewClientCommand() *cobra.Command {
@@ -203,12 +255,24 @@ func newAuthNewClientCommand() *cobra.Command {
 				out = deduped
 			}
 
-			certPEM, keyPEM, err := ca.IssueClient(cn, validity)
+			effectiveCN := strings.TrimSpace(cn)
+			if effectiveCN == "" {
+				effectiveCN = "lockd-client"
+			}
+			spiffeURI, err := lockd.SPIFFEURIForRole(lockd.ClientBundleRoleSDK, effectiveCN)
+			if err != nil {
+				return err
+			}
+			issued, err := ca.IssueClient(tlsutil.ClientCertRequest{
+				CommonName: effectiveCN,
+				Validity:   validity,
+				URIs:       []*url.URL{spiffeURI},
+			})
 			if err != nil {
 				return err
 			}
 
-			clientPEM, err := tlsutil.EncodeClientBundle(ca.CertPEM, certPEM, keyPEM)
+			clientPEM, err := tlsutil.EncodeClientBundle(ca.CertPEM, issued.CertPEM, issued.KeyPEM)
 			if err != nil {
 				return err
 			}
@@ -222,6 +286,82 @@ func newAuthNewClientCommand() *cobra.Command {
 	cmd.Flags().StringVar(&caBundle, "ca-in", "", "path to CA bundle (default $HOME/.lockd/ca.pem)")
 	cmd.Flags().StringVar(&out, "out", "", "client output path (default $HOME/.lockd/client.pem)")
 	cmd.Flags().StringVar(&cn, "cn", "lockd-client", "client certificate common name")
+	cmd.Flags().DurationVar(&validity, "valid-for", 365*24*time.Hour, "certificate validity period")
+	cmd.Flags().BoolVar(&force, "force", false, "overwrite existing file")
+	return cmd
+}
+
+func newAuthNewTCClientCommand() *cobra.Command {
+	var out string
+	var caBundle string
+	var cn string
+	var validity time.Duration
+	var force bool
+
+	cmd := &cobra.Command{
+		Use:   "tcclient",
+		Short: "Issue a new TC client certificate using the CA bundle",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if caBundle == "" {
+				path, err := lockd.DefaultCAPath()
+				if err != nil {
+					return err
+				}
+				caBundle = path
+			}
+
+			ca, err := tlsutil.LoadCA(caBundle)
+			if err != nil {
+				return fmt.Errorf("load ca: %w (run 'lockd auth new ca' first)", err)
+			}
+
+			defaultOut := !cmd.Flags().Changed("out")
+			if out == "" {
+				dir, err := lockd.DefaultConfigDir()
+				if err != nil {
+					return err
+				}
+				out = filepath.Join(dir, "tc-client.pem")
+			}
+			if !force && defaultOut {
+				deduped, err := nextSequentialPath(out)
+				if err != nil {
+					return err
+				}
+				out = deduped
+			}
+
+			effectiveCN := strings.TrimSpace(cn)
+			if effectiveCN == "" {
+				effectiveCN = "lockd-tc-client"
+			}
+			spiffeURI, err := lockd.SPIFFEURIForRole(lockd.ClientBundleRoleTC, effectiveCN)
+			if err != nil {
+				return err
+			}
+			issued, err := ca.IssueClient(tlsutil.ClientCertRequest{
+				CommonName: effectiveCN,
+				Validity:   validity,
+				URIs:       []*url.URL{spiffeURI},
+			})
+			if err != nil {
+				return err
+			}
+
+			clientPEM, err := tlsutil.EncodeClientBundle(ca.CertPEM, issued.CertPEM, issued.KeyPEM)
+			if err != nil {
+				return err
+			}
+			if err := writeFile(out, clientPEM, force); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "tc client certificate written to %s\n", out)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&caBundle, "ca-in", "", "path to CA bundle (default $HOME/.lockd/ca.pem)")
+	cmd.Flags().StringVar(&out, "out", "", "tc client output path (default $HOME/.lockd/tc-client.pem)")
+	cmd.Flags().StringVar(&cn, "cn", "lockd-tc-client", "tc client certificate common name")
 	cmd.Flags().DurationVar(&validity, "valid-for", 365*24*time.Hour, "certificate validity period")
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite existing file")
 	return cmd
@@ -345,7 +485,7 @@ func newAuthInspectClientCommand() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringSliceVar(&inputs, "in", nil, "path(s) to client bundle (default all client*.pem under config dir)")
+	cmd.Flags().StringSliceVar(&inputs, "in", nil, "path(s) to client bundle (default client*.pem + tc-client*.pem under config dir)")
 	return cmd
 }
 
@@ -359,6 +499,14 @@ func inspectClientBundle(cmd *cobra.Command, path string) error {
 	fmt.Fprintf(cmd.OutOrStdout(), "  Client: %s\n", clientCert.Subject.String())
 	fmt.Fprintf(cmd.OutOrStdout(), "    Serial: %s\n", clientCert.SerialNumber.Text(16))
 	fmt.Fprintf(cmd.OutOrStdout(), "    Expires: %s\n", clientCert.NotAfter.Format(time.RFC3339))
+	if len(clientCert.URIs) > 0 {
+		for idx, uri := range clientCert.URIs {
+			if uri == nil {
+				continue
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "    URI[%d]: %s\n", idx, uri.String())
+		}
+	}
 	for idx, ca := range bundle.CACerts {
 		fmt.Fprintf(cmd.OutOrStdout(), "  CA[%d]: %s (serial %s, expires %s)\n", idx, ca.Subject.String(), ca.SerialNumber.Text(16), ca.NotAfter.Format(time.RFC3339))
 	}
@@ -537,7 +685,7 @@ func newAuthVerifyClientCommand() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringSliceVar(&inputs, "in", nil, "path(s) to client bundle (default all client*.pem under config dir)")
+	cmd.Flags().StringSliceVar(&inputs, "in", nil, "path(s) to client bundle (default client*.pem + tc-client*.pem under config dir)")
 	cmd.Flags().StringVar(&serverBundlePath, "server-in", "", "path to server bundle used for verification (default $HOME/.lockd/server.pem)")
 	return cmd
 }
@@ -563,7 +711,7 @@ func resolveClientBundlePaths(inputs []string) ([]string, error) {
 			continue
 		}
 		name := entry.Name()
-		if strings.HasPrefix(name, "client") && strings.HasSuffix(name, ".pem") {
+		if (strings.HasPrefix(name, "client") || strings.HasPrefix(name, "tc-client")) && strings.HasSuffix(name, ".pem") {
 			targets = append(targets, filepath.Join(dir, name))
 		}
 	}

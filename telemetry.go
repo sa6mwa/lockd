@@ -23,7 +23,6 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/pslog"
 )
 
@@ -91,7 +90,9 @@ func setupTelemetry(ctx context.Context, endpoint string, logger pslog.Logger) (
 	if err != nil {
 		return nil, err
 	}
-	logger = loggingutil.EnsureLogger(logger)
+	if logger == nil {
+		logger = pslog.NoopLogger()
+	}
 	res, err := resource.New(ctx,
 		resource.WithSchemaURL(semconv.SchemaURL),
 		resource.WithAttributes(

@@ -27,6 +27,12 @@ type Store struct {
 	crypto  *storage.Crypto
 }
 
+// ManifestLoadResult captures a manifest and its ETag.
+type ManifestLoadResult struct {
+	Manifest *Manifest
+	ETag     string
+}
+
 // NewStore constructs an index store backed by the provided storage backend.
 func NewStore(backend storage.Backend, crypto *storage.Crypto) *Store {
 	if backend == nil {
@@ -36,34 +42,34 @@ func NewStore(backend storage.Backend, crypto *storage.Crypto) *Store {
 }
 
 // LoadManifest returns the index manifest and ETag for the namespace, defaulting to an empty manifest when missing.
-func (s *Store) LoadManifest(ctx context.Context, namespace string) (*Manifest, string, error) {
+func (s *Store) LoadManifest(ctx context.Context, namespace string) (ManifestLoadResult, error) {
 	if s == nil || s.backend == nil {
-		return NewManifest(), "", nil
+		return ManifestLoadResult{Manifest: NewManifest()}, nil
 	}
-	reader, info, err := s.backend.GetObject(ctx, namespace, manifestObject)
+	obj, err := s.backend.GetObject(ctx, namespace, manifestObject)
 	if err != nil {
 		if err == storage.ErrNotFound {
-			return NewManifest(), "", nil
+			return ManifestLoadResult{Manifest: NewManifest()}, nil
 		}
-		return nil, "", err
+		return ManifestLoadResult{}, err
 	}
-	defer reader.Close()
-	payload, err := io.ReadAll(reader)
+	defer obj.Reader.Close()
+	payload, err := io.ReadAll(obj.Reader)
 	if err != nil {
-		return nil, "", fmt.Errorf("read manifest: %w", err)
+		return ManifestLoadResult{}, fmt.Errorf("read manifest: %w", err)
 	}
 	if s.crypto != nil && s.crypto.Enabled() {
 		payload, err = s.crypto.DecryptMetadata(payload)
 		if err != nil {
-			return nil, "", fmt.Errorf("decrypt manifest: %w", err)
+			return ManifestLoadResult{}, fmt.Errorf("decrypt manifest: %w", err)
 		}
 	}
 	var msg indexproto.IndexManifest
 	if err := proto.Unmarshal(payload, &msg); err != nil {
-		return nil, "", fmt.Errorf("decode manifest: %w", err)
+		return ManifestLoadResult{}, fmt.Errorf("decode manifest: %w", err)
 	}
 	manifest := ManifestFromProto(&msg)
-	return manifest, info.ETag, nil
+	return ManifestLoadResult{Manifest: manifest, ETag: obj.Info.ETag}, nil
 }
 
 // SaveManifest writes the manifest with optional expected ETag for CAS semantics.
@@ -132,12 +138,12 @@ func (s *Store) LoadSegment(ctx context.Context, namespace, segmentID string) (*
 	if s == nil || s.backend == nil {
 		return nil, fmt.Errorf("index store unavailable")
 	}
-	reader, _, err := s.backend.GetObject(ctx, namespace, segmentObject(segmentID))
+	obj, err := s.backend.GetObject(ctx, namespace, segmentObject(segmentID))
 	if err != nil {
 		return nil, err
 	}
-	defer reader.Close()
-	payload, err := io.ReadAll(reader)
+	defer obj.Reader.Close()
+	payload, err := io.ReadAll(obj.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("read segment: %w", err)
 	}

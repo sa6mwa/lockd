@@ -20,15 +20,15 @@ func TestStoreMetaCAS(t *testing.T) {
 	if _, err := store.StoreMeta(ctx, namespace, key, meta, ""); err != nil {
 		t.Fatalf("store meta create: %v", err)
 	}
-	loaded, etag, err := store.LoadMeta(ctx, namespace, key)
+	metaRes, err := store.LoadMeta(ctx, namespace, key)
 	if err != nil {
 		t.Fatalf("load meta: %v", err)
 	}
-	if loaded.Version != 1 {
-		t.Fatalf("expected version 1, got %d", loaded.Version)
+	if metaRes.Meta.Version != 1 {
+		t.Fatalf("expected version 1, got %d", metaRes.Meta.Version)
 	}
 	meta.Version = 2
-	if _, err := store.StoreMeta(ctx, namespace, key, meta, etag); err != nil {
+	if _, err := store.StoreMeta(ctx, namespace, key, meta, metaRes.ETag); err != nil {
 		t.Fatalf("store meta cas: %v", err)
 	}
 	if _, err := store.StoreMeta(ctx, namespace, key, meta, "wrong"); !errors.Is(err, storage.ErrCASMismatch) {
@@ -58,13 +58,13 @@ func TestWriteStateCAS(t *testing.T) {
 		t.Fatalf("expected write metadata, got %+v", res)
 	}
 
-	reader, info, err := store.ReadState(ctx, namespace, stateKey)
+	readRes, err := store.ReadState(ctx, namespace, stateKey)
 	if err != nil {
 		t.Fatalf("read state: %v", err)
 	}
-	defer reader.Close()
-	if info.ETag != res.NewETag {
-		t.Fatalf("etag mismatch: %s vs %s", info.ETag, res.NewETag)
+	defer readRes.Reader.Close()
+	if readRes.Info.ETag != res.NewETag {
+		t.Fatalf("etag mismatch: %s vs %s", readRes.Info.ETag, res.NewETag)
 	}
 
 	newBody := bytes.NewBufferString(`{"cursor":2}`)

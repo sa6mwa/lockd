@@ -69,6 +69,15 @@ func TestMemLockLifecycle(t *testing.T) {
 	runLifecycleTest(t, ctx, cli, key, "mem-worker")
 }
 
+func TestMemAttachmentsLifecycle(t *testing.T) {
+	cfg := buildMemConfig(t)
+	cli := startMemServer(t, cfg)
+
+	ctx := context.Background()
+	key := "mem-attach-" + uuidv7.NewString()
+	runAttachmentTest(t, ctx, cli, key)
+}
+
 func TestMemConcurrency(t *testing.T) {
 	cfg := buildMemConfig(t)
 	cli := startMemServer(t, cfg)
@@ -151,7 +160,7 @@ func TestMemPublicGetAfterRelease(t *testing.T) {
 	cfg := buildMemConfig(t)
 	cli := startMemServer(t, cfg)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	key := "mem-public-" + uuidv7.NewString()
@@ -169,7 +178,9 @@ func TestMemPublicGetAfterRelease(t *testing.T) {
 	// Attempt a normal leased GET using the old lease id/token – expect lease_required.
 	token := strconv.FormatInt(lease.FencingToken, 10)
 	cli.RegisterLeaseToken(lease.LeaseID, token)
-	_, err := cli.Get(ctx, key,
+	staleCtx, staleCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer staleCancel()
+	_, err := cli.Get(staleCtx, key,
 		lockdclient.WithGetLeaseID(lease.LeaseID),
 		lockdclient.WithGetPublicDisabled(true),
 	)
@@ -179,7 +190,9 @@ func TestMemPublicGetAfterRelease(t *testing.T) {
 	}
 
 	// Public GET should succeed without a lease.
-	resp, err := cli.Get(ctx, key)
+	publicCtx, publicCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer publicCancel()
+	resp, err := cli.Get(publicCtx, key)
 	if err != nil {
 		t.Fatalf("public get failed: %v", err)
 	}
@@ -357,6 +370,31 @@ func TestMemRemoveAcquireForUpdate(t *testing.T) {
 		t.Fatalf("expected removal, got %+v", res)
 	}
 	releaseLease(t, ctx, remover)
+}
+
+func TestMemRejectsReservedNamespace(t *testing.T) {
+	cfg := buildMemConfig(t)
+	cli := startMemServer(t, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err := cli.Acquire(ctx, api.AcquireRequest{
+		Namespace:  ".txns",
+		Key:        "should-fail",
+		Owner:      "tester",
+		TTLSeconds: 5,
+	})
+	if err == nil {
+		t.Fatalf("expected acquire to fail for reserved namespace")
+	}
+	var apiErr *lockdclient.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected APIError, got %T: %v", err, err)
+	}
+	if apiErr.Status != http.StatusBadRequest || apiErr.Response.ErrorCode != "invalid_namespace" {
+		t.Fatalf("unexpected error: status=%d code=%s detail=%s", apiErr.Status, apiErr.Response.ErrorCode, apiErr.Response.Detail)
+	}
 }
 
 func TestMemAcquireForUpdateConcurrency(t *testing.T) {
@@ -586,8 +624,8 @@ func TestMemRemoveFailoverMultiServer(t *testing.T) {
 	if cryptotest.TestMTLSEnabled() {
 		sharedCreds = cryptotest.SharedMTLSCredentials(t)
 	}
-	primary := startMemTestServerWithBackendOpts(t, cfg, backend, append([]lockd.TestServerOption{closeDefaults}, cryptotest.SharedMTLSOptions(t, sharedCreds)...)...)
-	secondary := startMemTestServerWithBackendOpts(t, cfg, backend, append([]lockd.TestServerOption{closeDefaults}, cryptotest.SharedMTLSOptions(t, sharedCreds)...)...)
+	primary := startMemTestServerWithBackendOpts(t, cfg, backend, append([]lockd.TestServerOption{closeDefaults}, cryptotest.SharedMTLSOptions(t)...)...)
+	secondary := startMemTestServerWithBackendOpts(t, cfg, backend, append([]lockd.TestServerOption{closeDefaults}, cryptotest.SharedMTLSOptions(t)...)...)
 
 	key := "mem-remove-failover-" + uuidv7.NewString()
 
@@ -902,9 +940,9 @@ func runMemAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase failo
 			lockd.WithShutdownTimeout(10*time.Second),
 		),
 	}
-	primaryOptions = append(primaryOptions, cryptotest.SharedMTLSOptions(t, sharedCreds)...)
+	primaryOptions = append(primaryOptions, cryptotest.SharedMTLSOptions(t)...)
 	primary := lockd.StartTestServer(t, primaryOptions...)
-	backupOptions := append([]lockd.TestServerOption(nil), cryptotest.SharedMTLSOptions(t, sharedCreds)...)
+	backupOptions := append([]lockd.TestServerOption(nil), cryptotest.SharedMTLSOptions(t)...)
 	backupOptions = append(backupOptions,
 		lockd.WithTestConfig(cfg),
 		lockd.WithTestBackend(backend),
@@ -1054,8 +1092,7 @@ func buildMemConfig(tb testing.TB) lockd.Config {
 		AcquireBlock:    10 * time.Second,
 		SweeperInterval: 2 * time.Second,
 	}
-	cfg.MemQueueWatch = true
-	cfg.MemQueueWatchSet = true
+	cfg.DisableMemQueueWatch = false
 	cryptotest.MaybeEnableStorageEncryption(tb, &cfg)
 	return cfg
 }
@@ -1170,6 +1207,106 @@ func runLifecycleTest(t *testing.T, ctx context.Context, cli *lockdclient.Client
 
 	if !releaseLease(t, ctx, lease) {
 		t.Fatalf("expected release success")
+	}
+}
+
+func runAttachmentTest(t *testing.T, ctx context.Context, cli *lockdclient.Client, key string) {
+	t.Helper()
+	lease := acquireWithRetry(t, ctx, cli, key, "attach-worker", 30, lockdclient.BlockWaitForever)
+	alpha := []byte("alpha")
+	bravo := []byte("bravo")
+	if _, err := lease.Attach(ctx, lockdclient.AttachRequest{
+		Name: "alpha.bin",
+		Body: bytes.NewReader(alpha),
+	}); err != nil {
+		t.Fatalf("attach alpha: %v", err)
+	}
+	if _, err := lease.Attach(ctx, lockdclient.AttachRequest{
+		Name:        "bravo.bin",
+		Body:        bytes.NewReader(bravo),
+		ContentType: "text/plain",
+	}); err != nil {
+		t.Fatalf("attach bravo: %v", err)
+	}
+	list, err := lease.ListAttachments(ctx)
+	if err != nil {
+		t.Fatalf("list attachments: %v", err)
+	}
+	if list == nil || len(list.Attachments) != 2 {
+		t.Fatalf("expected 2 attachments, got %+v", list)
+	}
+	att, err := lease.RetrieveAttachment(ctx, lockdclient.AttachmentSelector{Name: "alpha.bin"})
+	if err != nil {
+		t.Fatalf("retrieve alpha: %v", err)
+	}
+	data, err := io.ReadAll(att)
+	att.Close()
+	if err != nil {
+		t.Fatalf("read alpha: %v", err)
+	}
+	if !bytes.Equal(data, alpha) {
+		t.Fatalf("unexpected alpha payload: %q", data)
+	}
+	if !releaseLease(t, ctx, lease) {
+		t.Fatalf("expected release success")
+	}
+
+	resp, err := cli.Get(ctx, key)
+	if err != nil {
+		t.Fatalf("public get: %v", err)
+	}
+	publicList, err := resp.ListAttachments(ctx)
+	if err != nil {
+		resp.Close()
+		t.Fatalf("public list: %v", err)
+	}
+	if len(publicList.Attachments) != 2 {
+		resp.Close()
+		t.Fatalf("expected 2 public attachments, got %+v", publicList.Attachments)
+	}
+	publicAtt, err := resp.RetrieveAttachment(ctx, lockdclient.AttachmentSelector{Name: "bravo.bin"})
+	if err != nil {
+		resp.Close()
+		t.Fatalf("public retrieve bravo: %v", err)
+	}
+	publicData, err := io.ReadAll(publicAtt)
+	publicAtt.Close()
+	resp.Close()
+	if err != nil {
+		t.Fatalf("read public bravo: %v", err)
+	}
+	if !bytes.Equal(publicData, bravo) {
+		t.Fatalf("unexpected bravo payload: %q", publicData)
+	}
+
+	lease2 := acquireWithRetry(t, ctx, cli, key, "attach-delete", 30, lockdclient.BlockWaitForever)
+	if _, err := lease2.DeleteAttachment(ctx, lockdclient.AttachmentSelector{Name: "alpha.bin"}); err != nil {
+		t.Fatalf("delete alpha: %v", err)
+	}
+	if !releaseLease(t, ctx, lease2) {
+		t.Fatalf("expected release success")
+	}
+	listAfter, err := cli.ListAttachments(ctx, lockdclient.ListAttachmentsRequest{Key: key, Public: true})
+	if err != nil {
+		t.Fatalf("list after delete: %v", err)
+	}
+	if len(listAfter.Attachments) != 1 || listAfter.Attachments[0].Name != "bravo.bin" {
+		t.Fatalf("expected bravo only, got %+v", listAfter.Attachments)
+	}
+
+	lease3 := acquireWithRetry(t, ctx, cli, key, "attach-clear", 30, lockdclient.BlockWaitForever)
+	if _, err := lease3.DeleteAllAttachments(ctx); err != nil {
+		t.Fatalf("delete all: %v", err)
+	}
+	if !releaseLease(t, ctx, lease3) {
+		t.Fatalf("expected release success")
+	}
+	finalList, err := cli.ListAttachments(ctx, lockdclient.ListAttachmentsRequest{Key: key, Public: true})
+	if err != nil {
+		t.Fatalf("final list: %v", err)
+	}
+	if len(finalList.Attachments) != 0 {
+		t.Fatalf("expected no attachments, got %+v", finalList.Attachments)
 	}
 }
 

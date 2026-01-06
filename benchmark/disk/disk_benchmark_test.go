@@ -21,11 +21,13 @@ import (
 
 	"pkt.systems/lockd"
 	"pkt.systems/lockd/api"
+	"pkt.systems/lockd/benchmark/internal/benchenv"
 	lockdclient "pkt.systems/lockd/client"
-	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/disk"
+	"pkt.systems/lockd/internal/svcfields"
 	"pkt.systems/lockd/internal/uuidv7"
+	"pkt.systems/lockd/namespaces"
 	"pkt.systems/pslog"
 )
 
@@ -99,9 +101,10 @@ func nfsBasePath() string {
 func buildDiskConfig(tb testing.TB, root string, retention time.Duration) lockd.Config {
 	tb.Helper()
 	storeURL := diskStoreURL(root)
+	mtlsEnabled := benchenv.TestMTLSEnabled()
 	cfg := lockd.Config{
 		Store:           storeURL,
-		DisableMTLS:     true,
+		DisableMTLS:     !mtlsEnabled,
 		Listen:          "127.0.0.1:0",
 		ListenProto:     "tcp",
 		DefaultTTL:      30 * time.Second,
@@ -110,6 +113,7 @@ func buildDiskConfig(tb testing.TB, root string, retention time.Duration) lockd.
 		SweeperInterval: 2 * time.Second,
 		DiskRetention:   retention,
 	}
+	benchenv.MaybeEnableStorageEncryption(tb, &cfg)
 	if err := cfg.Validate(); err != nil {
 		tb.Fatalf("config validation failed: %v", err)
 	}
@@ -137,10 +141,10 @@ func BenchmarkDiskRawLargeJSON(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		key := nextDiskKey("raw-large", i)
-		if _, err := env.store.WriteState(ctx, key, bytes.NewReader(payload), storage.PutStateOptions{}); err != nil {
+		if _, err := env.store.WriteState(ctx, namespaces.Default, key, bytes.NewReader(payload), storage.PutStateOptions{}); err != nil {
 			b.Fatalf("write state: %v", err)
 		}
-		if err := env.store.Remove(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+		if err := env.store.Remove(ctx, namespaces.Default, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 			b.Fatalf("remove state: %v", err)
 		}
 	}
@@ -163,7 +167,12 @@ func BenchmarkLockdDiskLargeJSON(b *testing.B) {
 		if _, err := cli.UpdateBytes(ctx, key, lease.LeaseID, payload, opts); err != nil {
 			b.Fatalf("update state: %v", err)
 		}
-		if _, err := cli.Release(ctx, api.ReleaseRequest{Key: key, LeaseID: lease.LeaseID}); err != nil {
+		if _, err := cli.Release(ctx, api.ReleaseRequest{
+			Namespace: namespaces.Default,
+			Key:       key,
+			LeaseID:   lease.LeaseID,
+			TxnID:     lease.TxnID,
+		}); err != nil {
 			b.Fatalf("release: %v", err)
 		}
 	}
@@ -186,7 +195,12 @@ func BenchmarkLockdDiskLargeJSONStream(b *testing.B) {
 		if _, err := cli.Update(ctx, key, lease.LeaseID, stream, opts); err != nil {
 			b.Fatalf("update state stream: %v", err)
 		}
-		if _, err := cli.Release(ctx, api.ReleaseRequest{Key: key, LeaseID: lease.LeaseID}); err != nil {
+		if _, err := cli.Release(ctx, api.ReleaseRequest{
+			Namespace: namespaces.Default,
+			Key:       key,
+			LeaseID:   lease.LeaseID,
+			TxnID:     lease.TxnID,
+		}); err != nil {
 			b.Fatalf("release: %v", err)
 		}
 	}
@@ -206,10 +220,10 @@ func BenchmarkDiskRawSmallJSON(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		for idx, payload := range batch {
 			key := nextDiskKey(fmt.Sprintf("raw-small-%d", idx), i)
-			if _, err := env.store.WriteState(ctx, key, bytes.NewReader(payload), storage.PutStateOptions{}); err != nil {
+			if _, err := env.store.WriteState(ctx, namespaces.Default, key, bytes.NewReader(payload), storage.PutStateOptions{}); err != nil {
 				b.Fatalf("write state: %v", err)
 			}
-			if err := env.store.Remove(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			if err := env.store.Remove(ctx, namespaces.Default, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 				b.Fatalf("remove state: %v", err)
 			}
 		}
@@ -238,7 +252,12 @@ func BenchmarkLockdDiskSmallJSONStream(b *testing.B) {
 		if _, err := cli.Update(ctx, key, lease.LeaseID, stream, lockdclient.UpdateOptions{IfVersion: strconv.FormatInt(lease.Version, 10)}); err != nil {
 			b.Fatalf("update state stream: %v", err)
 		}
-		if _, err := cli.Release(ctx, api.ReleaseRequest{Key: key, LeaseID: lease.LeaseID}); err != nil {
+		if _, err := cli.Release(ctx, api.ReleaseRequest{
+			Namespace: namespaces.Default,
+			Key:       key,
+			LeaseID:   lease.LeaseID,
+			TxnID:     lease.TxnID,
+		}); err != nil {
 			b.Fatalf("release: %v", err)
 		}
 	}
@@ -295,7 +314,12 @@ func runLockdDiskSmallJSON(b *testing.B, env *diskBenchmarkEnv) {
 			}
 			version = ""
 		}
-		if _, err := cli.Release(ctx, api.ReleaseRequest{Key: key, LeaseID: lease.LeaseID}); err != nil {
+		if _, err := cli.Release(ctx, api.ReleaseRequest{
+			Namespace: namespaces.Default,
+			Key:       key,
+			LeaseID:   lease.LeaseID,
+			TxnID:     lease.TxnID,
+		}); err != nil {
 			b.Fatalf("release: %v", err)
 		}
 	}
@@ -315,10 +339,10 @@ func BenchmarkDiskRawConcurrent(b *testing.B) {
 		for pb.Next() {
 			id := atomic.AddUint64(&counter, 1)
 			key := fmt.Sprintf("raw-concurrent-%d", id)
-			if _, err := env.store.WriteState(ctx, key, bytes.NewReader(payload), storage.PutStateOptions{}); err != nil {
+			if _, err := env.store.WriteState(ctx, namespaces.Default, key, bytes.NewReader(payload), storage.PutStateOptions{}); err != nil {
 				b.Fatalf("write state: %v", err)
 			}
-			if err := env.store.Remove(ctx, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			if err := env.store.Remove(ctx, namespaces.Default, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
 				b.Fatalf("remove state: %v", err)
 			}
 		}
@@ -346,7 +370,12 @@ func BenchmarkLockdDiskConcurrent(b *testing.B) {
 			if _, err := cli.UpdateBytes(ctx, key, lease.LeaseID, payload, opts); err != nil {
 				b.Fatalf("update state: %v", err)
 			}
-			if _, err := cli.Release(ctx, api.ReleaseRequest{Key: key, LeaseID: lease.LeaseID}); err != nil {
+			if _, err := cli.Release(ctx, api.ReleaseRequest{
+				Namespace: namespaces.Default,
+				Key:       key,
+				LeaseID:   lease.LeaseID,
+				TxnID:     lease.TxnID,
+			}); err != nil {
 				b.Fatalf("release: %v", err)
 			}
 		}
@@ -373,7 +402,12 @@ func BenchmarkLockdDiskLargeJSONNFS(b *testing.B) {
 		if _, err := cli.UpdateBytes(ctx, key, lease.LeaseID, payload, opts); err != nil {
 			b.Fatalf("update state: %v", err)
 		}
-		if _, err := cli.Release(ctx, api.ReleaseRequest{Key: key, LeaseID: lease.LeaseID}); err != nil {
+		if _, err := cli.Release(ctx, api.ReleaseRequest{
+			Namespace: namespaces.Default,
+			Key:       key,
+			LeaseID:   lease.LeaseID,
+			TxnID:     lease.TxnID,
+		}); err != nil {
 			b.Fatalf("release: %v", err)
 		}
 	}
@@ -471,7 +505,8 @@ func startDiskBenchServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client {
 
 	cfg.Listen = "127.0.0.1:0"
 	cfg.ListenProto = "tcp"
-	cfg.DisableMTLS = true
+	mtlsEnabled := benchenv.TestMTLSEnabled()
+	cfg.DisableMTLS = !mtlsEnabled
 
 	serverLoggerOpt, clientLoggerOpt := diskBenchLoggerOptions(tb)
 
@@ -482,12 +517,21 @@ func startDiskBenchServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client {
 		clientLoggerOpt,
 	}
 
-	ts := lockd.StartTestServer(tb,
+	opts := []lockd.TestServerOption{
 		lockd.WithTestConfig(cfg),
 		lockd.WithTestListener("tcp", "127.0.0.1:0"),
 		serverLoggerOpt,
 		lockd.WithTestClientOptions(clientOpts...),
-	)
+	}
+	if mtlsEnabled {
+		opts = append(opts, benchenv.SharedMTLSOptions(tb)...)
+	} else {
+		opts = append(opts,
+			lockd.WithoutTestMTLS(),
+			lockd.WithTestClientOptions(lockdclient.WithDisableMTLS(true)),
+		)
+	}
+	ts := lockd.StartTestServer(tb, opts...)
 	return ts.Client
 }
 
@@ -495,7 +539,7 @@ func diskBenchLoggerOptions(tb testing.TB) (lockd.TestServerOption, lockdclient.
 	tb.Helper()
 	levelStr := os.Getenv("LOCKD_BENCH_LOG_LEVEL")
 	if levelStr == "" {
-		return lockd.WithTestLogger(loggingutil.NoopLogger()), lockdclient.WithLogger(loggingutil.NoopLogger())
+		return lockd.WithTestLogger(pslog.NoopLogger()), lockdclient.WithLogger(pslog.NoopLogger())
 	}
 
 	logPath := os.Getenv("LOCKD_BENCH_LOG_PATH")
@@ -523,15 +567,15 @@ func diskBenchLoggerOptions(tb testing.TB) (lockd.TestServerOption, lockdclient.
 		tb.Cleanup(func() { _ = os.Remove(logPath) })
 	}
 
-	baseLogger := loggingutil.WithSubsystem(pslog.NewStructured(writer), "bench.disk")
+	baseLogger := svcfields.WithSubsystem(pslog.NewStructured(writer), "bench.disk")
 	if level, ok := pslog.ParseLevel(levelStr); ok {
 		baseLogger = baseLogger.LogLevel(level)
 	} else {
 		tb.Fatalf("invalid LOCKD_BENCH_LOG_LEVEL %q", levelStr)
 	}
 
-	serverLogger := loggingutil.WithSubsystem(baseLogger, "bench.disk.server").WithLogLevel()
-	clientLogger := loggingutil.WithSubsystem(baseLogger, "bench.disk.client").WithLogLevel()
+	serverLogger := svcfields.WithSubsystem(baseLogger, "bench.disk.server").WithLogLevel()
+	clientLogger := svcfields.WithSubsystem(baseLogger, "bench.disk.client").WithLogLevel()
 
 	return lockd.WithTestLogger(serverLogger), lockdclient.WithLogger(clientLogger)
 }

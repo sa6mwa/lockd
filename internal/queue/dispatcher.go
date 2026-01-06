@@ -9,13 +9,13 @@ import (
 	"sync"
 	"time"
 
-	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/storage"
+	"pkt.systems/lockd/internal/svcfields"
 	"pkt.systems/pslog"
 )
 
 type candidateProvider interface {
-	NextCandidate(ctx context.Context, namespace, queue string, startAfter string, pageSize int) (*MessageDescriptor, string, error)
+	NextCandidate(ctx context.Context, namespace, queue string, startAfter string, pageSize int) (MessageCandidateResult, error)
 }
 
 type messageReadiness interface {
@@ -179,11 +179,13 @@ func NewDispatcher(svc candidateProvider, opts ...DispatcherOption) *Dispatcher 
 	for _, opt := range opts {
 		opt(d)
 	}
-	d.logger = loggingutil.EnsureLogger(d.logger)
+	if d.logger == nil {
+		d.logger = pslog.NoopLogger()
+	}
 	if d.resilientPollInterval <= 0 {
 		d.resilientPollInterval = 5 * time.Minute
 	}
-	d.logger = loggingutil.WithSubsystem(d.logger, "queue.dispatcher.core")
+	d.logger = svcfields.WithSubsystem(d.logger, "queue.dispatcher.core")
 	return d
 }
 
@@ -973,7 +975,7 @@ func (qs *queueState) fetch() (*Candidate, error) {
 	qs.mu.Unlock()
 	qs.logger.Trace("queue.dispatcher.fetch.start", "cursor", cursor, "page_size", pageSize)
 
-	desc, next, err := qs.dispatcher.svc.NextCandidate(context.Background(), qs.namespace, qs.name, cursor, pageSize)
+	result, err := qs.dispatcher.svc.NextCandidate(context.Background(), qs.namespace, qs.name, cursor, pageSize)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			qs.logger.Trace("queue.dispatcher.fetch.empty", "cursor", cursor)
@@ -984,18 +986,19 @@ func (qs *queueState) fetch() (*Candidate, error) {
 		}
 		return nil, err
 	}
+	desc := result.Descriptor
 	if desc == nil {
-		qs.logger.Trace("queue.dispatcher.fetch.none", "cursor", cursor, "next", next)
+		qs.logger.Trace("queue.dispatcher.fetch.none", "cursor", cursor, "next", result.NextCursor)
 	} else {
-		qs.logger.Trace("queue.dispatcher.fetch.success", "cursor", cursor, "next", next, "mid", desc.Document.ID)
+		qs.logger.Trace("queue.dispatcher.fetch.success", "cursor", cursor, "next", result.NextCursor, "mid", desc.Document.ID)
 	}
 	if checker, ok := qs.dispatcher.svc.(messageReadiness); ok {
 		if err := checker.EnsureMessageReady(context.Background(), qs.namespace, desc.Document.Queue, desc.Document.ID); err != nil {
 			return nil, err
 		}
 	}
-	qs.logger.Trace("queue.dispatcher.fetch.success", "mid", desc.Document.ID, "next_cursor", next)
-	return &Candidate{Descriptor: *desc, NextCursor: next}, nil
+	qs.logger.Trace("queue.dispatcher.fetch.success", "mid", desc.Document.ID, "next_cursor", result.NextCursor)
+	return &Candidate{Descriptor: *desc, NextCursor: result.NextCursor}, nil
 }
 
 func (qs *queueState) fetchWithContext(ctx context.Context) (*Candidate, error) {
@@ -1008,7 +1011,7 @@ func (qs *queueState) fetchWithContext(ctx context.Context) (*Candidate, error) 
 	qs.mu.Unlock()
 
 	start := time.Now()
-	desc, next, err := qs.dispatcher.svc.NextCandidate(contextWithDefault(ctx), qs.namespace, qs.name, cursor, pageSize)
+	result, err := qs.dispatcher.svc.NextCandidate(contextWithDefault(ctx), qs.namespace, qs.name, cursor, pageSize)
 	elapsed := time.Since(start)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
@@ -1020,16 +1023,17 @@ func (qs *queueState) fetchWithContext(ctx context.Context) (*Candidate, error) 
 		}
 		return nil, err
 	}
-	cand := &Candidate{Descriptor: *desc, NextCursor: next}
+	desc := result.Descriptor
+	cand := &Candidate{Descriptor: *desc, NextCursor: result.NextCursor}
 	qs.mu.Lock()
-	qs.cursor = next
+	qs.cursor = result.NextCursor
 	qs.mu.Unlock()
 	if checker, ok := qs.dispatcher.svc.(messageReadiness); ok {
 		if err := checker.EnsureMessageReady(ctx, qs.namespace, desc.Document.Queue, desc.Document.ID); err != nil {
 			return nil, err
 		}
 	}
-	qs.logger.Trace("queue.dispatcher.fetch.success", "mid", desc.Document.ID, "next_cursor", next, "elapsed", elapsed)
+	qs.logger.Trace("queue.dispatcher.fetch.success", "mid", desc.Document.ID, "next_cursor", result.NextCursor, "elapsed", elapsed)
 	return cand, nil
 }
 

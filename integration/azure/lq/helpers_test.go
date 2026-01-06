@@ -57,13 +57,16 @@ func prepareAzureQueueConfig(t testing.TB, opts azureQueueOptions) lockd.Config 
 	cfg.Listen = "127.0.0.1:0"
 
 	cryptotest.MaybeEnableStorageEncryption(t, &cfg)
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("azure queue config validation failed: %v", err)
+	}
 	return cfg
 }
 
 func loadAzureQueueConfig(t testing.TB) lockd.Config {
 	store := strings.TrimSpace(os.Getenv("LOCKD_STORE"))
 	if store == "" {
-		t.Skip("LOCKD_STORE must reference an azure:// URI (see .env.azure)")
+		t.Fatalf("LOCKD_STORE must reference an azure:// URI (see .env.azure)")
 	}
 	if !strings.HasPrefix(store, "azure://") {
 		t.Fatalf("LOCKD_STORE must reference an azure:// URI, got %q", store)
@@ -99,6 +102,10 @@ func startAzureQueueServer(t testing.TB, cfg lockd.Config) *lockd.TestServer {
 	return startAzureQueueServerWithLogger(t, cfg, lockd.NewTestingLogger(t, pslog.TraceLevel))
 }
 
+func startAzureQueueServerWithOptions(t testing.TB, cfg lockd.Config, extra ...lockd.TestServerOption) *lockd.TestServer {
+	return startAzureQueueServerWithLogger(t, cfg, lockd.NewTestingLogger(t, pslog.TraceLevel), extra...)
+}
+
 func startAzureQueueServerWithCapture(t testing.TB, cfg lockd.Config) (*lockd.TestServer, *queuetestutil.LogCapture) {
 	capture := queuetestutil.NewLogCapture(t)
 	ts := startAzureQueueServerWithLogger(t, cfg, capture.Logger())
@@ -106,6 +113,7 @@ func startAzureQueueServerWithCapture(t testing.TB, cfg lockd.Config) (*lockd.Te
 }
 
 func startAzureQueueServerWithLogger(t testing.TB, cfg lockd.Config, logger pslog.Logger, extra ...lockd.TestServerOption) *lockd.TestServer {
+	cryptotest.ConfigureTCAuth(t, &cfg)
 	clientLogger := lockd.NewTestingLogger(t, pslog.TraceLevel)
 	clientOpts := []lockdclient.Option{
 		lockdclient.WithHTTPTimeout(120 * time.Second),

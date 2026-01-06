@@ -124,17 +124,23 @@ func (s *Store) Close() error {
 	return nil
 }
 
+// BackendHash returns the stable identity hash for this backend.
+func (s *Store) BackendHash(ctx context.Context) (string, error) {
+	result, err := storage.ResolveBackendHash(ctx, s, "")
+	return result.Hash, err
+}
+
 // LoadMeta returns a copy of the metadata stored for key.
-func (s *Store) LoadMeta(_ context.Context, namespace, key string) (*storage.Meta, string, error) {
+func (s *Store) LoadMeta(_ context.Context, namespace, key string) (storage.LoadMetaResult, error) {
 	storageKey, err := canonicalKey(namespace, key)
 	if err != nil {
-		return nil, "", err
+		return storage.LoadMetaResult{}, err
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	entry, ok := s.metas[storageKey]
 	if !ok {
-		return nil, "", storage.ErrNotFound
+		return storage.LoadMetaResult{}, storage.ErrNotFound
 	}
 	clone := *entry.data
 	if entry.data.Lease != nil {
@@ -144,7 +150,7 @@ func (s *Store) LoadMeta(_ context.Context, namespace, key string) (*storage.Met
 	if len(entry.data.StateDescriptor) > 0 {
 		clone.StateDescriptor = append([]byte(nil), entry.data.StateDescriptor...)
 	}
-	return &clone, entry.etag, nil
+	return storage.LoadMetaResult{Meta: &clone, ETag: entry.etag}, nil
 }
 
 // StoreMeta writes metadata for key, enforcing CAS when expectedETag is provided.
@@ -223,16 +229,16 @@ func (s *Store) ListMetaKeys(_ context.Context, namespace string) ([]string, err
 }
 
 // ReadState returns a streaming reader for the stored state blob.
-func (s *Store) ReadState(ctx context.Context, namespace, key string) (io.ReadCloser, *storage.StateInfo, error) {
+func (s *Store) ReadState(ctx context.Context, namespace, key string) (storage.ReadStateResult, error) {
 	storageKey, err := canonicalKey(namespace, key)
 	if err != nil {
-		return nil, nil, err
+		return storage.ReadStateResult{}, err
 	}
 	s.mu.RLock()
 	entry, ok := s.state[storageKey]
 	if !ok {
 		s.mu.RUnlock()
-		return nil, nil, storage.ErrNotFound
+		return storage.ReadStateResult{}, storage.ErrNotFound
 	}
 	payload := append([]byte(nil), entry.payload...)
 	descriptor := []byte{}
@@ -257,15 +263,15 @@ func (s *Store) ReadState(ctx context.Context, namespace, key string) (io.ReadCl
 			}
 		}
 		if len(descriptor) == 0 {
-			return nil, nil, fmt.Errorf("memory: missing state descriptor for %q", key)
+			return storage.ReadStateResult{}, fmt.Errorf("memory: missing state descriptor for %q", key)
 		}
 		mat, err := s.crypto.MaterialFromDescriptor(storage.StateObjectContext(storageKey), descriptor)
 		if err != nil {
-			return nil, nil, err
+			return storage.ReadStateResult{}, err
 		}
 		decReader, err := s.crypto.DecryptReaderForMaterial(bytes.NewReader(payload), mat)
 		if err != nil {
-			return nil, nil, err
+			return storage.ReadStateResult{}, err
 		}
 		reader = decReader
 	} else {
@@ -283,7 +289,7 @@ func (s *Store) ReadState(ctx context.Context, namespace, key string) (io.ReadCl
 	if len(descriptor) > 0 {
 		info.Descriptor = append([]byte(nil), descriptor...)
 	}
-	return reader, info, nil
+	return storage.ReadStateResult{Reader: reader, Info: info}, nil
 }
 
 // WriteState replaces the state blob for key and returns the new ETag.
@@ -306,11 +312,14 @@ func (s *Store) WriteState(ctx context.Context, namespace, key string, body io.R
 		if entry.etag != opts.ExpectedETag {
 			return nil, storage.ErrCASMismatch
 		}
+	} else if opts.IfNotExists {
+		if _, exists := s.state[storageKey]; exists {
+			return nil, storage.ErrCASMismatch
+		}
 	}
 	var ciphertext []byte
 	var descriptor []byte
 	if s.crypto != nil && s.crypto.Enabled() {
-		var descBytes []byte
 		descFromCtx, ok := storage.StateDescriptorFromContext(ctx)
 		var mat kryptograf.Material
 		if ok && len(descFromCtx) > 0 {
@@ -320,11 +329,13 @@ func (s *Store) WriteState(ctx context.Context, namespace, key string, body io.R
 				return nil, err
 			}
 		} else {
-			mat, descBytes, err = s.crypto.MintMaterial(storage.StateObjectContext(storageKey))
+			var minted storage.MaterialResult
+			minted, err = s.crypto.MintMaterial(storage.StateObjectContext(storageKey))
 			if err != nil {
 				return nil, err
 			}
-			descriptor = append([]byte(nil), descBytes...)
+			descriptor = append([]byte(nil), minted.Descriptor...)
+			mat = minted.Material
 		}
 		var buf bytes.Buffer
 		writer, err := s.crypto.EncryptWriterForMaterial(&buf, mat)
@@ -446,16 +457,16 @@ func (s *Store) ListObjects(_ context.Context, namespace string, opts storage.Li
 }
 
 // GetObject returns the payload for key if present.
-func (s *Store) GetObject(ctx context.Context, namespace, key string) (io.ReadCloser, *storage.ObjectInfo, error) {
+func (s *Store) GetObject(ctx context.Context, namespace, key string) (storage.GetObjectResult, error) {
 	storageKey, err := canonicalKey(namespace, key)
 	if err != nil {
-		return nil, nil, err
+		return storage.GetObjectResult{}, err
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	entry, ok := s.objs[storageKey]
 	if !ok {
-		return nil, nil, storage.ErrNotFound
+		return storage.GetObjectResult{}, storage.ErrNotFound
 	}
 	info := &storage.ObjectInfo{
 		Key:          key,
@@ -468,7 +479,7 @@ func (s *Store) GetObject(ctx context.Context, namespace, key string) (io.ReadCl
 	if plain, ok := storage.ObjectPlaintextSizeFromContext(ctx); ok && plain > 0 {
 		info.Size = plain
 	}
-	return io.NopCloser(bytes.NewReader(entry.payload)), info, nil
+	return storage.GetObjectResult{Reader: io.NopCloser(bytes.NewReader(entry.payload)), Info: info}, nil
 }
 
 // PutObject stores or replaces the object for key depending on opts.
@@ -592,11 +603,19 @@ func (s *Store) SubscribeQueueChanges(namespace, queue string) (storage.QueueCha
 }
 
 // QueueWatchStatus reports whether in-memory queue notifications are active.
-func (s *Store) QueueWatchStatus() (bool, string, string) {
+func (s *Store) QueueWatchStatus() storage.QueueWatchStatus {
 	if !s.queueWatchEnabled {
-		return false, "disabled", "memory_queue_watch_disabled"
+		return storage.QueueWatchStatus{
+			Enabled: false,
+			Mode:    "disabled",
+			Reason:  "memory_queue_watch_disabled",
+		}
 	}
-	return true, "inprocess", "memory_queue_watch_enabled"
+	return storage.QueueWatchStatus{
+		Enabled: true,
+		Mode:    "inprocess",
+		Reason:  "memory_queue_watch_enabled",
+	}
 }
 
 func (s *Store) notifyQueue(queue string) {

@@ -30,10 +30,12 @@ func TestBuildGenericS3Config(t *testing.T) {
 		S3SecretAccessKey: "minio123",
 		S3SessionToken:    "session",
 	}
-	s3cfg, summary, err := BuildGenericS3Config(cfg)
+	s3Result, err := BuildGenericS3Config(cfg)
 	if err != nil {
 		t.Fatalf("BuildGenericS3Config: %v", err)
 	}
+	s3cfg := s3Result.Config
+	summary := s3Result.Credentials
 	if s3cfg.Endpoint != "localhost:9000" {
 		t.Fatalf("unexpected endpoint: %s", s3cfg.Endpoint)
 	}
@@ -55,10 +57,10 @@ func TestBuildGenericS3Config(t *testing.T) {
 	if summary.AccessKey != "minio" || !summary.HasSecret || summary.Source != "config" {
 		t.Fatalf("unexpected credential summary: %+v", summary)
 	}
-	if _, _, err := BuildGenericS3Config(Config{Store: "s3://"}); err == nil {
+	if _, err := BuildGenericS3Config(Config{Store: "s3://"}); err == nil {
 		t.Fatalf("expected error for missing bucket")
 	}
-	if _, _, err := BuildGenericS3Config(Config{Store: "mem://"}); err == nil {
+	if _, err := BuildGenericS3Config(Config{Store: "mem://"}); err == nil {
 		t.Fatalf("expected error for non-s3 store")
 	}
 }
@@ -70,10 +72,12 @@ func TestBuildAWSConfig(t *testing.T) {
 		AWSKMSKeyID:   "aws-kms",
 		S3MaxPartSize: 4 << 20,
 	}
-	awsCfg, summary, err := BuildAWSConfig(cfg)
+	awsResult, err := BuildAWSConfig(cfg)
 	if err != nil {
 		t.Fatalf("BuildAWSConfig: %v", err)
 	}
+	awsCfg := awsResult.Config
+	summary := awsResult.Credentials
 	if awsCfg.Endpoint != "s3.us-west-2.amazonaws.com" {
 		t.Fatalf("unexpected endpoint: %s", awsCfg.Endpoint)
 	}
@@ -92,10 +96,10 @@ func TestBuildAWSConfig(t *testing.T) {
 	if summary.Source == "" {
 		t.Fatalf("expected credential summary source")
 	}
-	if _, _, err := BuildAWSConfig(Config{Store: "aws://"}); err == nil {
+	if _, err := BuildAWSConfig(Config{Store: "aws://"}); err == nil {
 		t.Fatalf("expected error for missing bucket")
 	}
-	if _, _, err := BuildAWSConfig(Config{Store: "aws://bucket"}); err == nil {
+	if _, err := BuildAWSConfig(Config{Store: "aws://bucket"}); err == nil {
 		t.Fatalf("expected error for missing region")
 	}
 }

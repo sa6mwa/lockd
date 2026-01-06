@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"runtime"
 	"strconv"
 	"sync"
@@ -110,7 +111,7 @@ func TestAzureLockLifecycle(t *testing.T) {
 		t.Fatalf("expected cursor 42, got %v", state["cursor"])
 	}
 
-	if !releaseLease(t, ctx, ts.Client, key, lease.LeaseID) {
+	if !releaseLease(t, ctx, lease) {
 		t.Fatalf("expected release success")
 	}
 
@@ -118,9 +119,21 @@ func TestAzureLockLifecycle(t *testing.T) {
 	if second.LeaseID == lease.LeaseID {
 		t.Fatal("expected distinct lease id")
 	}
-	if !releaseLease(t, ctx, ts.Client, key, second.LeaseID) {
+	if !releaseLease(t, ctx, second) {
 		t.Fatalf("expected release success")
 	}
+}
+
+func TestAzureAttachmentsLifecycle(t *testing.T) {
+	cfg := loadAzureConfig(t)
+	ensureAzureStoreReady(t, context.Background(), cfg)
+	ts := startAzureTestServer(t, cfg)
+
+	ctx := context.Background()
+	key := "azure-attach-" + uuidv7.NewString()
+	defer cleanupAzure(t, cfg, key)
+
+	runAttachmentTest(t, ctx, ts.Client, key)
 }
 
 func TestAzureLockConcurrency(t *testing.T) {
@@ -151,7 +164,7 @@ func TestAzureLockConcurrency(t *testing.T) {
 				lease := acquireWithRetry(t, ctx, ts.Client, key, owner, ttl, 10)
 				state, etag, version, err := getStateJSON(ctx, ts.Client, key, lease.LeaseID)
 				if err != nil {
-					_ = releaseLease(t, ctx, ts.Client, key, lease.LeaseID)
+					_ = releaseLease(t, ctx, lease)
 					continue
 				}
 				if version == "" {
@@ -171,14 +184,14 @@ func TestAzureLockConcurrency(t *testing.T) {
 					if errors.As(err, &apiErr) {
 						code := apiErr.Response.ErrorCode
 						if code == "meta_conflict" || code == "version_conflict" || code == "etag_mismatch" {
-							_ = releaseLease(t, ctx, ts.Client, key, lease.LeaseID)
+							_ = releaseLease(t, ctx, lease)
 							continue
 						}
 					}
 					t.Fatalf("update state: %v", err)
 				}
 				updates.Add(1)
-				_ = releaseLease(t, ctx, ts.Client, key, lease.LeaseID)
+				_ = releaseLease(t, ctx, lease)
 				iter++
 			}
 		}(id)
@@ -190,7 +203,7 @@ func TestAzureLockConcurrency(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get_state: %v", err)
 	}
-	if !releaseLease(t, ctx, ts.Client, key, verify.LeaseID) {
+	if !releaseLease(t, ctx, verify) {
 		t.Fatalf("expected release success")
 	}
 
@@ -203,6 +216,106 @@ func TestAzureLockConcurrency(t *testing.T) {
 	}
 	if updates.Load() != int64(expected) {
 		t.Fatalf("expected %d updates, observed %d", int64(expected), updates.Load())
+	}
+}
+
+func TestAzureTxnCommitAcrossNodes(t *testing.T) {
+	cfg := loadAzureConfig(t)
+	ensureAzureStoreReady(t, context.Background(), cfg)
+
+	cliRM := startAzureTestServer(t, cfg) // acts as RM holding the lease
+	cliTC := startAzureTestServer(t, cfg) // acts as TC issuing the decision
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	key := "azure-txn-cross-commit-" + uuidv7.NewString()
+	defer cleanupAzure(t, cfg, key)
+
+	lease := acquireWithRetry(t, ctx, cliRM.Client, key, "rm-node", 45, lockdclient.BlockWaitForever)
+	if err := lease.Save(ctx, map[string]any{"value": "from-rm"}); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+
+	resp, err := cliTC.Client.Release(ctx, api.ReleaseRequest{
+		Key:     key,
+		LeaseID: lease.LeaseID,
+		TxnID:   lease.TxnID,
+	})
+	if err != nil {
+		t.Fatalf("cross-node release (commit): %v", err)
+	}
+	if !resp.Released {
+		t.Fatalf("expected release=true")
+	}
+	// Drop the lease tracker on the originating server to avoid lingering in-memory trackers.
+	_, _ = cliRM.Client.Release(ctx, api.ReleaseRequest{
+		Key:     key,
+		LeaseID: lease.LeaseID,
+		TxnID:   lease.TxnID,
+	})
+
+	verifier := acquireWithRetry(t, ctx, cliRM.Client, key, "verifier", 45, lockdclient.BlockWaitForever)
+	state, _, _, err := getStateJSON(ctx, cliRM.Client, key, verifier.LeaseID)
+	if err != nil {
+		t.Fatalf("get_state: %v", err)
+	}
+	if !releaseLease(t, ctx, verifier) {
+		t.Fatalf("release verifier failed")
+	}
+	if state == nil || state["value"] != "from-rm" {
+		t.Fatalf("expected committed state from RM, got %+v", state)
+	}
+}
+
+func TestAzureTxnRollbackAcrossNodes(t *testing.T) {
+	cfg := loadAzureConfig(t)
+	ensureAzureStoreReady(t, context.Background(), cfg)
+
+	cliRM := startAzureTestServer(t, cfg)
+	cliTC := startAzureTestServer(t, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	key := "azure-txn-cross-rollback-" + uuidv7.NewString()
+	defer cleanupAzure(t, cfg, key)
+
+	lease := acquireWithRetry(t, ctx, cliRM.Client, key, "rm-node", 45, lockdclient.BlockWaitForever)
+	if err := lease.Save(ctx, map[string]any{"value": "should-rollback"}); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+
+	resp, err := cliTC.Client.Release(ctx, api.ReleaseRequest{
+		Key:      key,
+		LeaseID:  lease.LeaseID,
+		TxnID:    lease.TxnID,
+		Rollback: true,
+	})
+	if err != nil {
+		t.Fatalf("cross-node release (rollback): %v", err)
+	}
+	if !resp.Released {
+		t.Fatalf("expected release=true")
+	}
+	// Clear the lease tracker on the original server.
+	_, _ = cliRM.Client.Release(ctx, api.ReleaseRequest{
+		Key:      key,
+		LeaseID:  lease.LeaseID,
+		TxnID:    lease.TxnID,
+		Rollback: true,
+	})
+
+	verifier := acquireWithRetry(t, ctx, cliRM.Client, key, "verifier", 45, lockdclient.BlockWaitForever)
+	state, _, _, err := getStateJSON(ctx, cliRM.Client, key, verifier.LeaseID)
+	if err != nil {
+		t.Fatalf("get_state: %v", err)
+	}
+	if !releaseLease(t, ctx, verifier) {
+		t.Fatalf("release verifier failed")
+	}
+	if state != nil {
+		t.Fatalf("expected rollback to discard state, got %+v", state)
 	}
 }
 
@@ -242,7 +355,7 @@ func TestAzureAutoKeyAcquire(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get_state: %v", err)
 	}
-	if !releaseLease(t, ctx, ts.Client, key, verifyLease.LeaseID) {
+	if !releaseLease(t, ctx, verifyLease) {
 		t.Fatalf("verify release failed")
 	}
 	if owner, ok := state["owner"].(string); !ok || owner != "azure-auto" {
@@ -286,7 +399,7 @@ func TestAzureRemoveSingleServer(t *testing.T) {
 		if state != nil {
 			t.Fatalf("expected nil state after remove, got %+v", state)
 		}
-		releaseLease(t, ctx, ts.Client, key, lease.LeaseID)
+		releaseLease(t, ctx, lease)
 
 		verify := acquireWithRetry(t, ctx, ts.Client, key, "remover-update-verify", 30, lockdclient.BlockWaitForever)
 		state, _, _, err = getStateJSON(ctx, ts.Client, key, verify.LeaseID)
@@ -299,7 +412,7 @@ func TestAzureRemoveSingleServer(t *testing.T) {
 		if verify.Version != res.NewVersion {
 			t.Fatalf("expected version %d, got %d", res.NewVersion, verify.Version)
 		}
-		releaseLease(t, ctx, ts.Client, key, verify.LeaseID)
+		releaseLease(t, ctx, verify)
 	})
 
 	t.Run("remove-without-state", func(t *testing.T) {
@@ -324,7 +437,7 @@ func TestAzureRemoveSingleServer(t *testing.T) {
 		if state != nil {
 			t.Fatalf("expected nil state, got %+v", state)
 		}
-		releaseLease(t, ctx, ts.Client, key, lease.LeaseID)
+		releaseLease(t, ctx, lease)
 	})
 
 	t.Run("remove-after-reacquire", func(t *testing.T) {
@@ -335,7 +448,7 @@ func TestAzureRemoveSingleServer(t *testing.T) {
 		if err := writer.Save(ctx, map[string]any{"step": "written"}); err != nil {
 			t.Fatalf("writer save: %v", err)
 		}
-		releaseLease(t, ctx, ts.Client, key, writer.LeaseID)
+		releaseLease(t, ctx, writer)
 
 		remover := acquireWithRetry(t, ctx, ts.Client, key, "remover", 30, lockdclient.BlockWaitForever)
 		state, _, _, err := getStateJSON(ctx, ts.Client, key, remover.LeaseID)
@@ -352,7 +465,7 @@ func TestAzureRemoveSingleServer(t *testing.T) {
 		if !res.Removed {
 			t.Fatalf("expected removal, got %+v", res)
 		}
-		releaseLease(t, ctx, ts.Client, key, remover.LeaseID)
+		releaseLease(t, ctx, remover)
 
 		verify := acquireWithRetry(t, ctx, ts.Client, key, "remover-verify", 30, lockdclient.BlockWaitForever)
 		state, _, _, err = getStateJSON(ctx, ts.Client, key, verify.LeaseID)
@@ -362,7 +475,7 @@ func TestAzureRemoveSingleServer(t *testing.T) {
 		if state != nil {
 			t.Fatalf("expected empty state after remove, got %+v", state)
 		}
-		releaseLease(t, ctx, ts.Client, key, verify.LeaseID)
+		releaseLease(t, ctx, verify)
 	})
 }
 
@@ -388,7 +501,7 @@ func TestAzureRemoveAcquireForUpdate(t *testing.T) {
 		if err := lease.Save(ctx, payload); err != nil {
 			t.Fatalf("seed save: %v", err)
 		}
-		releaseLease(t, ctx, cli, key, lease.LeaseID)
+		releaseLease(t, ctx, lease)
 	}
 
 	t.Run("remove-in-handler", func(t *testing.T) {
@@ -438,7 +551,7 @@ func TestAzureRemoveAcquireForUpdate(t *testing.T) {
 		if state != nil {
 			t.Fatalf("expected empty state after handler remove, got %+v", state)
 		}
-		releaseLease(t, ctx, cli, key, verify.LeaseID)
+		releaseLease(t, ctx, verify)
 	})
 
 	t.Run("remove-and-recreate", func(t *testing.T) {
@@ -479,7 +592,7 @@ func TestAzureRemoveAcquireForUpdate(t *testing.T) {
 		if count, ok := state["count"].(float64); !ok || count != 2.0 {
 			t.Fatalf("expected count 2.0, got %+v", state["count"])
 		}
-		releaseLease(t, ctx, cli, key, verify.LeaseID)
+		releaseLease(t, ctx, verify)
 	})
 }
 
@@ -565,7 +678,7 @@ func TestAzureAcquireForUpdateCallbackSingleServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify get_state: %v", err)
 	}
-	if !releaseLease(t, verifyCtx, seedCli, key, verifyLease.LeaseID) {
+	if !releaseLease(t, verifyCtx, verifyLease) {
 		t.Fatalf("verify release failed")
 	}
 	if owner, ok := state["owner"].(string); !ok || owner != "reader-single" {
@@ -584,8 +697,8 @@ func TestAzureAcquireForUpdateCallbackFailover(t *testing.T) {
 	if cryptotest.TestMTLSEnabled() {
 		sharedCreds = cryptotest.SharedMTLSCredentials(t)
 	}
-	primary := startAzureTestServer(t, cfg, cryptotest.SharedMTLSOptions(t, sharedCreds)...)
-	backup := startAzureTestServer(t, cfg, cryptotest.SharedMTLSOptions(t, sharedCreds)...)
+	primary := startAzureTestServer(t, cfg, cryptotest.SharedMTLSOptions(t)...)
+	backup := startAzureTestServer(t, cfg, cryptotest.SharedMTLSOptions(t)...)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -683,7 +796,7 @@ func TestAzureAcquireForUpdateCallbackFailover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify get_state: %v", err)
 	}
-	if !releaseLease(t, ctx, seedClient, key, verifier.LeaseID) {
+	if !releaseLease(t, ctx, verifier) {
 		t.Fatalf("verify release failed")
 	}
 	if finalState == nil {
@@ -801,7 +914,7 @@ func TestAzureRemoveFailover(t *testing.T) {
 	if err := seedLease.Save(ctx, map[string]any{"payload": "seed", "count": 1.0}); err != nil {
 		t.Fatalf("seed save: %v", err)
 	}
-	releaseLease(t, ctx, seedClient, key, seedLease.LeaseID)
+	releaseLease(t, ctx, seedLease)
 
 	clientLogger, clientLogs := testlog.NewRecorder(t, pslog.TraceLevel)
 	clientOptions := []lockdclient.Option{
@@ -839,7 +952,7 @@ func TestAzureRemoveFailover(t *testing.T) {
 	if !res.Removed {
 		t.Fatalf("expected removal success, got %+v", res)
 	}
-	releaseLease(t, ctx, failoverClient, key, lease.LeaseID)
+	releaseLease(t, ctx, lease)
 
 	verify := acquireWithRetry(t, ctx, seedClient, key, "failover-verify", 45, lockdclient.BlockWaitForever)
 	state, _, _, err := getStateJSON(ctx, seedClient, key, verify.LeaseID)
@@ -849,7 +962,7 @@ func TestAzureRemoveFailover(t *testing.T) {
 	if state != nil {
 		t.Fatalf("expected empty state after failover remove, got %+v", state)
 	}
-	releaseLease(t, ctx, seedClient, key, verify.LeaseID)
+	releaseLease(t, ctx, verify)
 
 	assertAzureRemoveFailoverLogs(t, clientLogs, primary.URL(), backup.URL())
 }
@@ -901,7 +1014,7 @@ func TestAzureRemoveCASMismatch(t *testing.T) {
 	if !res.Removed {
 		t.Fatalf("expected removal, got %+v", res)
 	}
-	releaseLease(t, ctx, cli, key, lease.LeaseID)
+	releaseLease(t, ctx, lease)
 
 	verify := acquireWithRetry(t, ctx, cli, key, "cas-verify", 45, lockdclient.BlockWaitForever)
 	state, _, _, err := getStateJSON(ctx, cli, key, verify.LeaseID)
@@ -911,7 +1024,7 @@ func TestAzureRemoveCASMismatch(t *testing.T) {
 	if state != nil {
 		t.Fatalf("expected empty state after remove, got %+v", state)
 	}
-	releaseLease(t, ctx, cli, key, verify.LeaseID)
+	releaseLease(t, ctx, verify)
 }
 
 func TestAzureRemoveKeepAlive(t *testing.T) {
@@ -967,7 +1080,7 @@ func TestAzureRemoveKeepAlive(t *testing.T) {
 		t.Fatalf("save after remove: %v", err)
 	}
 	finalVersion := lease.Version
-	releaseLease(t, ctx, cli, key, lease.LeaseID)
+	releaseLease(t, ctx, lease)
 
 	verify := acquireWithRetry(t, ctx, cli, key, "keepalive-verify", 45, lockdclient.BlockWaitForever)
 	state, _, _, err := getStateJSON(ctx, cli, key, verify.LeaseID)
@@ -980,7 +1093,107 @@ func TestAzureRemoveKeepAlive(t *testing.T) {
 	if verify.Version != finalVersion {
 		t.Fatalf("expected version %d, got %d", finalVersion, verify.Version)
 	}
-	releaseLease(t, ctx, cli, key, verify.LeaseID)
+	releaseLease(t, ctx, verify)
+}
+
+func runAttachmentTest(t *testing.T, ctx context.Context, cli *lockdclient.Client, key string) {
+	t.Helper()
+	lease := acquireWithRetry(t, ctx, cli, key, "attach-worker", 45, lockdclient.BlockWaitForever)
+	alpha := []byte("alpha")
+	bravo := []byte("bravo")
+	if _, err := lease.Attach(ctx, lockdclient.AttachRequest{
+		Name: "alpha.bin",
+		Body: bytes.NewReader(alpha),
+	}); err != nil {
+		t.Fatalf("attach alpha: %v", err)
+	}
+	if _, err := lease.Attach(ctx, lockdclient.AttachRequest{
+		Name:        "bravo.bin",
+		Body:        bytes.NewReader(bravo),
+		ContentType: "text/plain",
+	}); err != nil {
+		t.Fatalf("attach bravo: %v", err)
+	}
+	list, err := lease.ListAttachments(ctx)
+	if err != nil {
+		t.Fatalf("list attachments: %v", err)
+	}
+	if list == nil || len(list.Attachments) != 2 {
+		t.Fatalf("expected 2 attachments, got %+v", list)
+	}
+	att, err := lease.RetrieveAttachment(ctx, lockdclient.AttachmentSelector{Name: "alpha.bin"})
+	if err != nil {
+		t.Fatalf("retrieve alpha: %v", err)
+	}
+	data, err := io.ReadAll(att)
+	att.Close()
+	if err != nil {
+		t.Fatalf("read alpha: %v", err)
+	}
+	if !bytes.Equal(data, alpha) {
+		t.Fatalf("unexpected alpha payload: %q", data)
+	}
+	if !releaseLease(t, ctx, lease) {
+		t.Fatalf("expected release success")
+	}
+
+	resp, err := cli.Get(ctx, key)
+	if err != nil {
+		t.Fatalf("public get: %v", err)
+	}
+	publicList, err := resp.ListAttachments(ctx)
+	if err != nil {
+		resp.Close()
+		t.Fatalf("public list: %v", err)
+	}
+	if len(publicList.Attachments) != 2 {
+		resp.Close()
+		t.Fatalf("expected 2 public attachments, got %+v", publicList.Attachments)
+	}
+	publicAtt, err := resp.RetrieveAttachment(ctx, lockdclient.AttachmentSelector{Name: "bravo.bin"})
+	if err != nil {
+		resp.Close()
+		t.Fatalf("public retrieve bravo: %v", err)
+	}
+	publicData, err := io.ReadAll(publicAtt)
+	publicAtt.Close()
+	resp.Close()
+	if err != nil {
+		t.Fatalf("read public bravo: %v", err)
+	}
+	if !bytes.Equal(publicData, bravo) {
+		t.Fatalf("unexpected bravo payload: %q", publicData)
+	}
+
+	lease2 := acquireWithRetry(t, ctx, cli, key, "attach-delete", 45, lockdclient.BlockWaitForever)
+	if _, err := lease2.DeleteAttachment(ctx, lockdclient.AttachmentSelector{Name: "alpha.bin"}); err != nil {
+		t.Fatalf("delete alpha: %v", err)
+	}
+	if !releaseLease(t, ctx, lease2) {
+		t.Fatalf("expected release success")
+	}
+	listAfter, err := cli.ListAttachments(ctx, lockdclient.ListAttachmentsRequest{Key: key, Public: true})
+	if err != nil {
+		t.Fatalf("list after delete: %v", err)
+	}
+	if len(listAfter.Attachments) != 1 || listAfter.Attachments[0].Name != "bravo.bin" {
+		t.Fatalf("expected bravo only, got %+v", listAfter.Attachments)
+	}
+
+	lease3 := acquireWithRetry(t, ctx, cli, key, "attach-clear", 45, lockdclient.BlockWaitForever)
+	if _, err := lease3.DeleteAllAttachments(ctx); err != nil {
+		t.Fatalf("delete all: %v", err)
+	}
+	if !releaseLease(t, ctx, lease3) {
+		t.Fatalf("expected release success")
+	}
+	finalList, err := cli.ListAttachments(ctx, lockdclient.ListAttachmentsRequest{Key: key, Public: true})
+	if err != nil {
+		t.Fatalf("final list: %v", err)
+	}
+	if len(finalList.Attachments) != 0 {
+		t.Fatalf("expected no attachments, got %+v", finalList.Attachments)
+	}
 }
 
 func acquireWithRetry(t *testing.T, ctx context.Context, cli *lockdclient.Client, key, owner string, ttl int64, block int64) *lockdclient.LeaseSession {
@@ -1035,10 +1248,9 @@ func getStateJSON(ctx context.Context, cli *lockdclient.Client, key, leaseID str
 	return payload, resp.ETag, resp.Version, nil
 }
 
-func releaseLease(t *testing.T, ctx context.Context, cli *lockdclient.Client, key, leaseID string) bool {
-	resp, err := cli.Release(ctx, api.ReleaseRequest{Key: key, LeaseID: leaseID})
-	if err != nil {
+func releaseLease(t *testing.T, ctx context.Context, lease *lockdclient.LeaseSession) bool {
+	if err := lease.Release(ctx); err != nil {
 		t.Fatalf("release: %v", err)
 	}
-	return resp.Released
+	return true
 }

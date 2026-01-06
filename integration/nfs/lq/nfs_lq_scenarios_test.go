@@ -8,4 +8,5 @@ func RunNFSLQScenarios(t *testing.T) {
 	t.Helper()
 	t.Run("PollingBasics", runNFSQueuePollingBasics)
 	t.Run("PollingIdleEnqueue", runNFSQueuePollingIdleEnqueueDoesNotPoll)
+	t.Run("TxnDecisionCommitRollback", runNFSQueueTxnDecision)
 }

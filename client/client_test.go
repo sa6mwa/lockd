@@ -951,6 +951,25 @@ func (t *downTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return nil, fmt.Errorf("connect: refused")
 }
 
+type acquireBlockSecsTransport struct {
+	t         *testing.T
+	blockSecs int64
+}
+
+func (tpt *acquireBlockSecsTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	tpt.t.Helper()
+	if req.URL.Path != "/v1/acquire" {
+		return newJSONResponse(req, http.StatusNotFound, `{"error":"not_found"}`), nil
+	}
+	var payload api.AcquireRequest
+	if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+		tpt.t.Fatalf("decode acquire request: %v", err)
+	}
+	tpt.blockSecs = payload.BlockSecs
+	body := fmt.Sprintf(`{"lease_id":"L1","key":"orders","owner":"worker","expires_at_unix":%d,"version":1,"fencing_token":1}`, time.Now().Unix()+30)
+	return newJSONResponse(req, http.StatusOK, body), nil
+}
+
 func TestClientAcquireAllEndpointsDown(t *testing.T) {
 	transport := &downTransport{}
 	httpClient := &http.Client{Transport: transport}
@@ -983,6 +1002,34 @@ func TestClientAcquireAllEndpointsDown(t *testing.T) {
 	transport.mu.Unlock()
 	if callCount < len(endpoints) {
 		t.Fatalf("expected at least %d attempts, got %d", len(endpoints), callCount)
+	}
+}
+
+func TestClientAcquireBlockWaitForeverHonorsContextDeadline(t *testing.T) {
+	transport := &acquireBlockSecsTransport{t: t}
+	httpClient := &http.Client{Transport: transport}
+	endpoints := []string{"http://hosta:9341"}
+	cli, err := client.NewWithEndpoints(endpoints,
+		client.WithDisableMTLS(true),
+		client.WithHTTPClient(httpClient),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	_, err = cli.Acquire(ctx, api.AcquireRequest{
+		Key:        "orders",
+		Owner:      "worker",
+		TTLSeconds: 5,
+		BlockSecs:  client.BlockWaitForever,
+	})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if transport.blockSecs <= 0 {
+		t.Fatalf("expected block_secs > 0 when context has deadline, got %d", transport.blockSecs)
 	}
 }
 
@@ -1460,6 +1507,78 @@ func TestClientEnqueue(t *testing.T) {
 	}
 	if !bytes.Equal(capturedPayload, payload) {
 		t.Fatalf("unexpected payload bytes %q", capturedPayload)
+	}
+}
+
+func TestClientTxnCommit(t *testing.T) {
+	var got api.TxnDecisionRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/txn/decide" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(api.TxnDecisionResponse{TxnID: got.TxnID, State: got.State})
+	}))
+	t.Cleanup(srv.Close)
+
+	cli, err := client.New(srv.URL, client.WithDisableMTLS(true), client.WithEndpointShuffle(false))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	req := api.TxnDecisionRequest{
+		TxnID: "abc123",
+		Participants: []api.TxnParticipant{
+			{Namespace: "n1", Key: "k1"},
+			{Namespace: "n2", Key: "k2"},
+		},
+	}
+	resp, err := cli.TxnCommit(context.Background(), req)
+	if err != nil {
+		t.Fatalf("txn commit: %v", err)
+	}
+	if resp == nil || resp.TxnID != "abc123" || resp.State != "commit" {
+		t.Fatalf("unexpected resp %+v", resp)
+	}
+	if got.State != "commit" || got.TxnID != "abc123" {
+		t.Fatalf("request not populated: %+v", got)
+	}
+	if len(got.Participants) != 2 {
+		t.Fatalf("expected 2 participants, got %d", len(got.Participants))
+	}
+}
+
+func TestClientTxnReplay(t *testing.T) {
+	var got api.TxnReplayRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/txn/replay" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(api.TxnReplayResponse{TxnID: got.TxnID, State: "commit"})
+	}))
+	t.Cleanup(srv.Close)
+
+	cli, err := client.New(srv.URL, client.WithDisableMTLS(true), client.WithEndpointShuffle(false))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	resp, err := cli.TxnReplay(context.Background(), "abc123")
+	if err != nil {
+		t.Fatalf("txn replay: %v", err)
+	}
+	if resp == nil || resp.TxnID != "abc123" || resp.State != "commit" {
+		t.Fatalf("unexpected resp %+v", resp)
+	}
+	if got.TxnID != "abc123" {
+		t.Fatalf("expected txn_id abc123, got %s", got.TxnID)
 	}
 }
 
@@ -2083,7 +2202,7 @@ func TestClientFlushIndexEnablesQueryResults(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, _, err = cli.UpdateNamespaceConfig(ctx, api.NamespaceConfigRequest{
+	_, err = cli.UpdateNamespaceConfig(ctx, api.NamespaceConfigRequest{
 		Namespace: namespaces.Default,
 		Query: &api.NamespaceQueryConfig{
 			PreferredEngine: "index",

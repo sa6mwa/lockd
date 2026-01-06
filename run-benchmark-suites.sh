@@ -6,6 +6,7 @@ crypto_enabled=1
 mtls_enabled=1
 benchtime=${BENCHTIME:-1x}
 prefetch_double=8
+isolate_mem=0
 
 print_usage() {
   cat <<'USAGE'
@@ -14,6 +15,7 @@ Usage: run-benchmark-suites.sh [--disable-crypto] [--disable-mtls] [--prefetch-d
 Options:
   --disable-crypto   Run benchmarks with LOCKD_TEST_STORAGE_ENCRYPTION=0 (default 1).
   --disable-mtls     Run benchmarks with LOCKD_TEST_WITH_MTLS=0 (default 1).
+  --isolate-mem      Run mem benchmarks one scenario per process.
   --prefetch-double N Set MEM_LQ_BENCH_PREFETCH_DOUBLE for multi-server mem benches (default 8).
   --benchtime DUR     Value passed to -benchtime (default 1x; e.g. 1s).
   --help, -h         Show this help text.
@@ -32,6 +34,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --disable-mtls)
       mtls_enabled=0
+      shift
+      ;;
+    --isolate-mem)
+      isolate_mem=1
       shift
       ;;
     --prefetch-double)
@@ -58,18 +64,27 @@ while [[ $# -gt 0 ]]; do
 done
 
 declare -a SUITES
-declare -A SUITE_DIR SUITE_TAGS
+declare -A SUITE_DIR SUITE_TAGS SUITE_ENVFILE
 
 add_suite() {
-  local name=$1 dir=$2 tags=$3
+  local name=$1 dir=$2 tags=$3 env_file=$4
   SUITES+=("$name")
   SUITE_DIR["$name"]=$dir
   SUITE_TAGS["$name"]=$tags
+  SUITE_ENVFILE["$name"]=$env_file
 }
 
-add_suite disk benchmark/disk "bench disk"
-add_suite minio benchmark/minio "bench minio"
-add_suite mem benchmark/mem/lq "bench mem lq"
+add_suite disk benchmark/disk "bench disk" ".env.disk"
+add_suite minio benchmark/minio "bench minio" ".env.minio"
+add_suite mem benchmark/mem/lq "bench mem lq" ""
+
+MEM_BENCH_SCENARIOS=(
+  "single_server_prefetch1_100p_100c"
+  "single_server_prefetch4_100p_100c"
+  "single_server_subscribe_100p_1c"
+  "single_server_dequeue_guard"
+  "double_server_prefetch4_100p_100c"
+)
 
 list_suites() {
   echo "Available benchmark suites:"
@@ -128,9 +143,43 @@ for suite in "${SUITES_TO_RUN[@]}"; do
     EXIT_CODE=1
     continue
   fi
+  env_file=${SUITE_ENVFILE[$suite]}
+  if [[ -n $env_file && ! -f $env_file ]]; then
+    echo "Missing environment file: $env_file (suite $suite)" >&2
+    EXIT_CODE=1
+    continue
+  fi
   log_file="$LOG_DIR/${suite//\//-}.log"
   echo "==> Running benchmark suite: $suite"
-  cmd="go test -run=^$ -bench=. -benchtime=$benchtime -count=1 -benchmem -tags '$tags' ./$dir"
+  if [[ $suite == "mem" && $isolate_mem -eq 1 ]]; then
+    suite_failed=0
+    for scenario in "${MEM_BENCH_SCENARIOS[@]}"; do
+      scenario_log="$LOG_DIR/${suite//\//-}-${scenario}.log"
+      echo "--> Scenario: $scenario"
+      if [[ -n $env_file ]]; then
+        cmd="set -a && source '$env_file' && set +a && go test -run=^$ -bench=BenchmarkMemQueueThroughput/$scenario -benchtime=$benchtime -count=1 -benchmem -tags '$tags' ./$dir"
+      else
+        cmd="go test -run=^$ -bench=BenchmarkMemQueueThroughput/$scenario -benchtime=$benchtime -count=1 -benchmem -tags '$tags' ./$dir"
+      fi
+      echo "Command: $cmd"
+      if bash -c "$cmd" 2>&1 | tee "$scenario_log"; then
+        :
+      else
+        suite_failed=1
+        EXIT_CODE=1
+      fi
+      echo "Log: $scenario_log"
+      echo
+    done
+    STATUS[$suite]=$suite_failed
+    continue
+  fi
+
+  if [[ -n $env_file ]]; then
+    cmd="set -a && source '$env_file' && set +a && go test -run=^$ -bench=. -benchtime=$benchtime -count=1 -benchmem -tags '$tags' ./$dir"
+  else
+    cmd="go test -run=^$ -bench=. -benchtime=$benchtime -count=1 -benchmem -tags '$tags' ./$dir"
+  fi
   echo "Command: $cmd"
   if bash -c "$cmd" 2>&1 | tee "$log_file"; then
     STATUS[$suite]=0

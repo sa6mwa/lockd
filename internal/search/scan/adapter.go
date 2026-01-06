@@ -98,11 +98,12 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 		if hasReservedPrefix(key) {
 			continue
 		}
-		meta, _, err := a.backend.LoadMeta(ctx, req.Namespace, key)
+		res, err := a.backend.LoadMeta(ctx, req.Namespace, key)
 		if err != nil {
 			a.logDebug("search.scan.load_meta", "namespace", req.Namespace, "key", key, "error", err)
 			continue
 		}
+		meta := res.Meta
 		if meta == nil {
 			continue
 		}
@@ -145,12 +146,12 @@ func (a *Adapter) loadDocument(ctx context.Context, namespace, key string, meta 
 	if meta.StatePlaintextBytes > 0 {
 		stateCtx = storage.ContextWithStatePlaintextSize(stateCtx, meta.StatePlaintextBytes)
 	}
-	reader, _, err := a.backend.ReadState(stateCtx, namespace, key)
+	stateRes, err := a.backend.ReadState(stateCtx, namespace, key)
 	if err != nil {
 		return nil, err
 	}
-	defer reader.Close()
-	data, err := readAllLimited(reader, a.maxDocumentBytes)
+	defer stateRes.Reader.Close()
+	data, err := readAllLimited(stateRes.Reader, a.maxDocumentBytes)
 	if err != nil {
 		return nil, err
 	}

@@ -10,6 +10,7 @@ type QueueDequeueCommand struct {
 	Namespace    string
 	Queue        string
 	Owner        string
+	TxnID        string
 	Stateful     bool
 	Visibility   time.Duration
 	BlockSeconds int64
@@ -45,11 +46,13 @@ type QueueMessage struct {
 	LeaseID                  string
 	LeaseExpiresAtUnix       int64
 	FencingToken             int64
+	TxnID                    string
 	MetaETag                 string
 	StateETag                string
 	StateLeaseID             string
 	StateLeaseExpiresAtUnix  int64
 	StateFencingToken        int64
+	StateTxnID               string
 }
 
 // QueueDequeueResult contains deliveries and the next cursor.
@@ -60,45 +63,48 @@ type QueueDequeueResult struct {
 
 // QueueAckCommand applies an acknowledgement.
 type QueueAckCommand struct {
-	Namespace    string
-	Queue        string
-	MessageID    string
-	MetaETag     string
-	StateETag    string
-	LeaseID      string
-	StateLeaseID string
-	Stateful     bool
-	FencingToken int64
+	Namespace         string
+	Queue             string
+	MessageID         string
+	MetaETag          string
+	StateETag         string
+	LeaseID           string
+	StateLeaseID      string
+	Stateful          bool
+	FencingToken      int64
 	StateFencingToken int64
+	TxnID             string
 }
 
 // QueueNackCommand returns a delivery to the queue.
 type QueueNackCommand struct {
-	Namespace    string
-	Queue        string
-	MessageID    string
-	MetaETag     string
-	StateETag    string
-	LeaseID      string
-	StateLeaseID string
-	Stateful     bool
-	Delay        time.Duration
-	LastError    any
-	FencingToken int64
+	Namespace         string
+	Queue             string
+	MessageID         string
+	MetaETag          string
+	StateETag         string
+	LeaseID           string
+	StateLeaseID      string
+	Stateful          bool
+	Delay             time.Duration
+	LastError         any
+	FencingToken      int64
 	StateFencingToken int64
+	TxnID             string
 }
 
 // QueueExtendCommand extends visibility for a delivery.
 type QueueExtendCommand struct {
-	Namespace    string
-	Queue        string
-	MessageID    string
-	MetaETag     string
-	StateETag    string
-	LeaseID      string
-	StateLeaseID string
-	Stateful     bool
-	Visibility   time.Duration
-	FencingToken int64
+	Namespace         string
+	Queue             string
+	MessageID         string
+	MetaETag          string
+	StateETag         string
+	LeaseID           string
+	StateLeaseID      string
+	Stateful          bool
+	Visibility        time.Duration
+	FencingToken      int64
 	StateFencingToken int64
+	TxnID             string
 }

@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
 	"runtime/pprof"
 	"strconv"
 	"strings"
@@ -19,11 +18,9 @@ import (
 	"time"
 
 	"pkt.systems/lockd"
+	"pkt.systems/lockd/benchmark/internal/benchenv"
 	lockdclient "pkt.systems/lockd/client"
-	"pkt.systems/lockd/internal/cryptoutil"
-	"pkt.systems/lockd/internal/loggingutil"
 	memorybackend "pkt.systems/lockd/internal/storage/memory"
-	"pkt.systems/lockd/tlsutil"
 	"pkt.systems/pslog"
 )
 
@@ -33,8 +30,6 @@ const (
 	memBenchTotalCap              = 2000
 	memBenchMinMessages           = 200
 )
-
-const memBenchEncryptionEnv = "LOCKD_TEST_STORAGE_ENCRYPTION"
 
 var errBenchmarkComplete = errors.New("mem queue benchmark complete")
 
@@ -57,6 +52,7 @@ type benchMetrics struct {
 	ackNanos     atomic.Int64
 	dequeueCount atomic.Int64
 	ackCount     atomic.Int64
+	ackLeaseMiss atomic.Int64
 	waitingCount atomic.Int64
 	batchCalls   atomic.Int64
 	batchTotal   atomic.Int64
@@ -193,6 +189,11 @@ func runMemQueueBenchmark(b *testing.B, scenario queueBenchmarkScenario, payload
 	}
 
 	backend := memorybackend.New()
+	b.Cleanup(func() {
+		if err := backend.Close(); err != nil {
+			b.Logf("membench backend close: %v", err)
+		}
+	})
 	logLevel := pslog.NoLevel
 	if os.Getenv("MEM_LQ_BENCH_TRACE") == "1" {
 		logLevel = pslog.TraceLevel
@@ -200,19 +201,17 @@ func runMemQueueBenchmark(b *testing.B, scenario queueBenchmarkScenario, payload
 		logLevel = pslog.DebugLevel
 	}
 	servers := make([]*lockd.TestServer, 0, scenario.servers)
-	var sharedCreds lockd.TestMTLSCredentials
-	credsReady := false
+	mtlsEnabled := benchenv.TestMTLSEnabled()
 
 	for i := 0; i < scenario.servers; i++ {
 		cfg := buildMemQueueConfig(b)
-		var opts []lockd.TestServerOption
 		var logger pslog.Logger
 		if logLevel == pslog.NoLevel {
-			logger = loggingutil.NoopLogger()
+			logger = pslog.NoopLogger()
 		} else {
 			logger = lockd.NewTestingLogger(b, logLevel)
 		}
-		opts = append(opts,
+		opts := []lockd.TestServerOption{
 			lockd.WithTestConfig(cfg),
 			lockd.WithTestLogger(logger),
 			lockd.WithTestClientOptions(
@@ -220,18 +219,9 @@ func runMemQueueBenchmark(b *testing.B, scenario queueBenchmarkScenario, payload
 				lockdclient.WithKeepAliveTimeout(5*time.Minute),
 				lockdclient.WithLogger(logger),
 			),
-		)
-		if !credsReady {
-			_, creds := maybeEnableStorageEncryption(b, &cfg)
-			if creds.Valid() {
-				sharedCreds = creds
-				credsReady = true
-			}
 		}
-		if sharedCreds.Valid() {
-			opts = append(opts,
-				lockd.WithTestMTLSCredentials(sharedCreds),
-			)
+		if mtlsEnabled {
+			opts = append(opts, benchenv.SharedMTLSOptions(b)...)
 		} else {
 			opts = append(opts, lockd.WithoutTestMTLS())
 			opts = append(opts, lockd.WithTestClientOptions(lockdclient.WithDisableMTLS(true)))
@@ -252,6 +242,9 @@ func runMemQueueBenchmark(b *testing.B, scenario queueBenchmarkScenario, payload
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			_ = ts.Stop(ctx)
+			if ts.Client != nil {
+				_ = ts.Client.Close()
+			}
 		})
 		servers = append(servers, ts)
 	}
@@ -485,7 +478,12 @@ func runMemQueueBenchmark(b *testing.B, scenario queueBenchmarkScenario, payload
 									return nil
 								}
 								if errors.As(ackErr, &apiErr) &&
-									(apiErr.Response.ErrorCode == "not_found" || apiErr.Response.ErrorCode == "cas_mismatch") {
+									(apiErr.Response.ErrorCode == "not_found" ||
+										apiErr.Response.ErrorCode == "cas_mismatch" ||
+										apiErr.Response.ErrorCode == "queue_message_lease_mismatch") {
+									if apiErr.Response.ErrorCode == "queue_message_lease_mismatch" {
+										metrics.ackLeaseMiss.Add(1)
+									}
 									if debug {
 										fmt.Fprintf(os.Stderr, "[%s] ack.idempotent mid=%s lease=%s err=%v\n",
 											time.Now().Format(time.RFC3339Nano),
@@ -593,6 +591,17 @@ func runMemQueueBenchmark(b *testing.B, scenario queueBenchmarkScenario, payload
 						ackErr := msg.Ack(ackCtx)
 						ackCancel()
 						if ackErr != nil {
+							var apiErr *lockdclient.APIError
+							if errors.As(ackErr, &apiErr) && apiErr.Response.ErrorCode == "queue_message_lease_mismatch" {
+								metrics.ackLeaseMiss.Add(1)
+								metrics.ackNanos.Add(time.Since(ackStart).Nanoseconds())
+								metrics.ackCount.Add(1)
+								total := atomic.AddInt64(&totalConsumed, 1)
+								if total >= targetMessages {
+									return
+								}
+								continue
+							}
 							if retryQueueError(ackErr) {
 								continue
 							}
@@ -644,6 +653,9 @@ func runMemQueueBenchmark(b *testing.B, scenario queueBenchmarkScenario, payload
 			b.ReportMetric(float64(maxGap)/1e6, "dequeue_gap_max_ms")
 		}
 	}
+	if count := metrics.ackLeaseMiss.Load(); count > 0 {
+		b.ReportMetric(float64(count), "ack_lease_mismatch_total")
+	}
 
 	if benchErr != nil {
 		if benchDebug {
@@ -684,9 +696,10 @@ func runMemQueueBenchmark(b *testing.B, scenario queueBenchmarkScenario, payload
 
 func buildMemQueueConfig(tb testing.TB) lockd.Config {
 	tb.Helper()
+	mtlsEnabled := benchenv.TestMTLSEnabled()
 	cfg := lockd.Config{
 		Store:                      "mem://",
-		DisableMTLS:                true,
+		DisableMTLS:                !mtlsEnabled,
 		ListenProto:                "tcp",
 		Listen:                     "127.0.0.1:0",
 		DefaultTTL:                 30 * time.Second,
@@ -699,70 +712,13 @@ func buildMemQueueConfig(tb testing.TB) lockd.Config {
 		DisableHTTPTracing:         true,
 		DisableStorageTracing:      true,
 	}
-	cfg.MemQueueWatch = true
-	cfg.MemQueueWatchSet = true
+	cfg.DisableMemQueueWatch = false
 	cfg.QRFEnabled = false
-	_, _ = maybeEnableStorageEncryption(tb, &cfg)
+	benchenv.MaybeEnableStorageEncryption(tb, &cfg)
 	if err := cfg.Validate(); err != nil {
 		tb.Fatalf("config validation failed: %v", err)
 	}
 	return cfg
-}
-
-func maybeEnableStorageEncryption(tb testing.TB, cfg *lockd.Config) (bool, lockd.TestMTLSCredentials) {
-	tb.Helper()
-	if cfg == nil {
-		tb.Fatalf("membench: nil config")
-	}
-	if os.Getenv(memBenchEncryptionEnv) != "1" {
-		cfg.DisableStorageEncryption = true
-		cfg.StorageEncryptionSnappy = false
-		return false, lockd.TestMTLSCredentials{}
-	}
-	dir := tb.TempDir()
-	ca, err := tlsutil.GenerateCA("lockd-bench-ca", 365*24*time.Hour)
-	if err != nil {
-		tb.Fatalf("generate ca: %v", err)
-	}
-	caBundle, err := tlsutil.EncodeCABundle(ca.CertPEM, ca.KeyPEM)
-	if err != nil {
-		tb.Fatalf("encode ca bundle: %v", err)
-	}
-	material, err := cryptoutil.MetadataMaterialFromBytes(caBundle)
-	if err != nil {
-		tb.Fatalf("extract metadata material: %v", err)
-	}
-	serverCert, serverKey, err := ca.IssueServer([]string{"127.0.0.1"}, "lockd-bench", 365*24*time.Hour)
-	if err != nil {
-		tb.Fatalf("issue server cert: %v", err)
-	}
-	serverBundle, err := tlsutil.EncodeServerBundle(ca.CertPEM, nil, serverCert, serverKey, nil)
-	if err != nil {
-		tb.Fatalf("encode server bundle: %v", err)
-	}
-	augmented, err := cryptoutil.ApplyMetadataMaterial(serverBundle, material)
-	if err != nil {
-		tb.Fatalf("apply metadata material: %v", err)
-	}
-	clientCert, clientKey, err := ca.IssueClient("lockd-bench-client", 365*24*time.Hour)
-	if err != nil {
-		tb.Fatalf("issue client cert: %v", err)
-	}
-	clientBundle, err := tlsutil.EncodeClientBundle(ca.CertPEM, clientCert, clientKey)
-	if err != nil {
-		tb.Fatalf("encode client bundle: %v", err)
-	}
-	creds, err := lockd.NewTestMTLSCredentialsFromBundles(augmented, clientBundle)
-	if err != nil {
-		tb.Fatalf("build test mtls creds: %v", err)
-	}
-	bundlePath := filepath.Join(dir, "server.pem")
-	if err := os.WriteFile(bundlePath, augmented, 0o600); err != nil {
-		tb.Fatalf("write bundle: %v", err)
-	}
-	cfg.DisableStorageEncryption = false
-	cfg.BundlePath = bundlePath
-	return true, creds
 }
 
 func prefillQueue(ctx context.Context, cli *lockdclient.Client, queue string, count int, payload []byte) (int, error) {

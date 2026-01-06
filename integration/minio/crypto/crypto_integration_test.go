@@ -152,7 +152,7 @@ func buildMinioConfig(t testing.TB) lockd.Config {
 	ensureMinioCredentials(t)
 	store := strings.TrimSpace(os.Getenv("LOCKD_STORE"))
 	if store == "" {
-		t.Skip("LOCKD_STORE not configured for MinIO tests")
+		t.Fatalf("LOCKD_STORE not configured for MinIO tests")
 	}
 	if !strings.HasPrefix(store, "s3://") {
 		t.Fatalf("LOCKD_STORE must reference an s3:// URI, got %q", store)
@@ -184,16 +184,17 @@ func ensureMinioCredentials(tb testing.TB) {
 	rootUser := strings.TrimSpace(os.Getenv("LOCKD_S3_ROOT_USER"))
 	rootPass := strings.TrimSpace(os.Getenv("LOCKD_S3_ROOT_PASSWORD"))
 	if (accessKey == "" || secretKey == "") && (rootUser == "" || rootPass == "") {
-		tb.Skip("MinIO credentials not configured")
+		tb.Fatalf("MinIO credentials not configured")
 	}
 }
 
 func ensureMinioBucket(tb testing.TB, cfg lockd.Config) {
 	tb.Helper()
-	minioCfg, _, err := lockd.BuildGenericS3Config(cfg)
+	minioResult, err := lockd.BuildGenericS3Config(cfg)
 	if err != nil {
 		tb.Fatalf("build s3 config: %v", err)
 	}
+	minioCfg := minioResult.Config
 	store, err := s3.New(minioCfg)
 	if err != nil {
 		tb.Fatalf("new s3 store: %v", err)
@@ -213,10 +214,11 @@ func ensureMinioBucket(tb testing.TB, cfg lockd.Config) {
 
 func cleanupMinioLock(tb testing.TB, cfg lockd.Config, key string) {
 	tb.Helper()
-	minioCfg, _, err := lockd.BuildGenericS3Config(cfg)
+	minioResult, err := lockd.BuildGenericS3Config(cfg)
 	if err != nil {
 		tb.Fatalf("build s3 config: %v", err)
 	}
+	minioCfg := minioResult.Config
 	store, err := s3.New(minioCfg)
 	if err != nil {
 		tb.Fatalf("new s3 store: %v", err)
@@ -233,10 +235,11 @@ func cleanupMinioLock(tb testing.TB, cfg lockd.Config, key string) {
 
 func cleanupMinioQueue(tb testing.TB, cfg lockd.Config, queue string) {
 	tb.Helper()
-	minioCfg, _, err := lockd.BuildGenericS3Config(cfg)
+	minioResult, err := lockd.BuildGenericS3Config(cfg)
 	if err != nil {
 		tb.Fatalf("build s3 config: %v", err)
 	}
+	minioCfg := minioResult.Config
 	store, err := s3.New(minioCfg)
 	if err != nil {
 		tb.Fatalf("new s3 store: %v", err)

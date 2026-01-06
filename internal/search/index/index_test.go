@@ -49,12 +49,13 @@ func TestStoreManifestLifecycle(t *testing.T) {
 	if _, err := idxStore.SaveManifest(ctx, "default", manifest, ""); err != nil {
 		t.Fatalf("save manifest: %v", err)
 	}
-	loaded, etag, err := idxStore.LoadManifest(ctx, "default")
+	manifestRes, err := idxStore.LoadManifest(ctx, "default")
 	if err != nil {
 		t.Fatalf("load manifest: %v", err)
 	}
-	if etag == "" || loaded.Seq != manifest.Seq {
-		t.Fatalf("unexpected manifest: %+v etag=%q", loaded, etag)
+	loaded := manifestRes.Manifest
+	if manifestRes.ETag == "" || loaded.Seq != manifest.Seq {
+		t.Fatalf("unexpected manifest: %+v etag=%q", loaded, manifestRes.ETag)
 	}
 }
 

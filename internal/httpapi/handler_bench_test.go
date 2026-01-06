@@ -45,12 +45,13 @@ func BenchmarkAcquireUpdate(b *testing.B) {
 		updateReq.Header.Set("Content-Type", "application/json")
 		updateReq.Header.Set("X-Lease-ID", acquireResp.LeaseID)
 		updateReq.Header.Set("X-Fencing-Token", fence)
+		updateReq.Header.Set("X-Txn-ID", acquireResp.TxnID)
 		if err := h.handleUpdate(rec, updateReq); err != nil {
 			b.Fatalf("update state: %v", err)
 		}
 
 		rec = httptest.NewRecorder()
-		releaseBody, _ := json.Marshal(api.ReleaseRequest{Key: key, LeaseID: acquireResp.LeaseID})
+		releaseBody, _ := json.Marshal(api.ReleaseRequest{Key: key, LeaseID: acquireResp.LeaseID, TxnID: acquireResp.TxnID})
 		releaseReq := httptest.NewRequest(http.MethodPost, "/v1/release", bytes.NewReader(releaseBody))
 		releaseReq.Header.Set("Content-Type", "application/json")
 		releaseReq.Header.Set("X-Fencing-Token", fence)

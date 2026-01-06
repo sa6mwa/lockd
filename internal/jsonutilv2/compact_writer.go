@@ -72,7 +72,7 @@ type compactor struct {
 
 func (c *compactor) run() error {
 	for {
-		kind, data, err := c.tok.Next()
+		token, err := c.tok.Next()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				if len(c.stack) != 0 {
@@ -86,12 +86,12 @@ func (c *compactor) run() error {
 			return err
 		}
 
-		switch kind {
+		switch token.Kind {
 		case jsonv2.TokenBeginObject:
 			if err := c.ensureValueContext(); err != nil {
 				return err
 			}
-			if err := c.writeBytes(data); err != nil {
+			if err := c.writeBytes(token.Raw); err != nil {
 				return err
 			}
 			c.pushObject()
@@ -104,7 +104,7 @@ func (c *compactor) run() error {
 			if frame.objPhase == objExpectColon || frame.objPhase == objExpectValue {
 				return fmt.Errorf("json: unexpected '}'")
 			}
-			if err := c.writeBytes(data); err != nil {
+			if err := c.writeBytes(token.Raw); err != nil {
 				return err
 			}
 			c.popFrame()
@@ -116,7 +116,7 @@ func (c *compactor) run() error {
 			if err := c.ensureValueContext(); err != nil {
 				return err
 			}
-			if err := c.writeBytes(data); err != nil {
+			if err := c.writeBytes(token.Raw); err != nil {
 				return err
 			}
 			c.pushArray()
@@ -129,7 +129,7 @@ func (c *compactor) run() error {
 			if frame.arrExpectValue && frame.arrCount != 0 {
 				return fmt.Errorf("json: expected array value")
 			}
-			if err := c.writeBytes(data); err != nil {
+			if err := c.writeBytes(token.Raw); err != nil {
 				return err
 			}
 			c.popFrame()
@@ -140,7 +140,7 @@ func (c *compactor) run() error {
 		case jsonv2.TokenString:
 			frame := c.currentFrame()
 			if frame != nil && frame.typ == '{' && frame.objPhase == objExpectKey {
-				if err := c.writeBytes(data); err != nil {
+				if err := c.writeBytes(token.Raw); err != nil {
 					return err
 				}
 				frame.objPhase = objExpectColon
@@ -149,7 +149,7 @@ func (c *compactor) run() error {
 			if err := c.ensureValueContext(); err != nil {
 				return err
 			}
-			if err := c.writeBytes(data); err != nil {
+			if err := c.writeBytes(token.Raw); err != nil {
 				return err
 			}
 			if err := c.valueComplete(); err != nil {
@@ -160,7 +160,7 @@ func (c *compactor) run() error {
 			if err := c.ensureValueContext(); err != nil {
 				return err
 			}
-			if err := c.writeBytes(data); err != nil {
+			if err := c.writeBytes(token.Raw); err != nil {
 				return err
 			}
 			if err := c.valueComplete(); err != nil {
@@ -172,7 +172,7 @@ func (c *compactor) run() error {
 			if frame == nil || frame.typ != '{' || frame.objPhase != objExpectColon {
 				return fmt.Errorf("json: unexpected colon")
 			}
-			if err := c.writeBytes(data); err != nil {
+			if err := c.writeBytes(token.Raw); err != nil {
 				return err
 			}
 			frame.objPhase = objExpectValue
@@ -186,7 +186,7 @@ func (c *compactor) run() error {
 				if frame.objPhase != objExpectComma {
 					return fmt.Errorf("json: unexpected comma")
 				}
-				if err := c.writeBytes(data); err != nil {
+				if err := c.writeBytes(token.Raw); err != nil {
 					return err
 				}
 				frame.objPhase = objExpectKey
@@ -194,7 +194,7 @@ func (c *compactor) run() error {
 				if !frame.arrNeedComma {
 					return fmt.Errorf("json: unexpected comma")
 				}
-				if err := c.writeBytes(data); err != nil {
+				if err := c.writeBytes(token.Raw); err != nil {
 					return err
 				}
 				frame.arrExpectValue = true

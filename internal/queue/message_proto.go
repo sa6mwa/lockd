@@ -31,6 +31,9 @@ func marshalMessageDocument(doc *messageDocument) ([]byte, error) {
 		PayloadBytes:             doc.PayloadBytes,
 		PayloadContentType:       doc.PayloadContentType,
 		CorrelationId:            doc.CorrelationID,
+		LeaseId:                  doc.LeaseID,
+		LeaseFencingToken:        doc.LeaseFencingToken,
+		LeaseTxnId:               doc.LeaseTxnID,
 	}
 	if len(doc.PayloadDescriptor) > 0 {
 		msg.PayloadDescriptor = append([]byte(nil), doc.PayloadDescriptor...)
@@ -83,6 +86,9 @@ func unmarshalMessageDocument(payload []byte) (*messageDocument, error) {
 		PayloadContentType: meta.GetPayloadContentType(),
 		VisibilityTimeout:  meta.GetVisibilityTimeoutSeconds(),
 		CorrelationID:      meta.GetCorrelationId(),
+		LeaseID:            meta.GetLeaseId(),
+		LeaseFencingToken:  meta.GetLeaseFencingToken(),
+		LeaseTxnID:         meta.GetLeaseTxnId(),
 	}
 	if meta.GetAttributes() != nil {
 		doc.Attributes = meta.GetAttributes().AsMap()

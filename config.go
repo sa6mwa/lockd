@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -48,6 +49,8 @@ const (
 	DefaultStore = "mem://"
 	// DefaultJSONMaxBytes bounds incoming JSON payloads.
 	DefaultJSONMaxBytes = 100 * 1024 * 1024
+	// DefaultAttachmentMaxBytes bounds attachment payloads when not specified by the caller.
+	DefaultAttachmentMaxBytes = int64(1 << 40)
 	// DefaultDefaultTTL is the baseline lease duration handed to new acquirers.
 	DefaultDefaultTTL = 30 * time.Second
 	// DefaultMaxTTL is the hard ceiling enforced on user-supplied TTLs.
@@ -60,6 +63,8 @@ const (
 	DefaultDrainGrace = 10 * time.Second
 	// DefaultShutdownTimeout caps the total shutdown time (drain + HTTP server).
 	DefaultShutdownTimeout = 10 * time.Second
+	// DefaultMaxConcurrentStreams sets the default HTTP/2 MaxConcurrentStreams when not explicitly configured.
+	DefaultMaxConcurrentStreams = 1024
 	// DefaultS3MaxPartSize tunes multipart uploads when writing state to S3-compatible stores.
 	DefaultS3MaxPartSize = 16 * 1024 * 1024
 	// DefaultStorageRetryMaxAttempts describes how many transient storage errors are retried.
@@ -91,6 +96,18 @@ const (
 	DefaultQRFEngagedRetryAfter = 500 * time.Millisecond
 	// DefaultQRFRecoveryRetryAfter moderates throttling while recovering.
 	DefaultQRFRecoveryRetryAfter = 200 * time.Millisecond
+	// DefaultTCFanoutTimeout bounds how long the TC waits per RM apply request.
+	DefaultTCFanoutTimeout = 5 * time.Second
+	// DefaultTCFanoutMaxAttempts describes how many times to retry RM apply calls.
+	DefaultTCFanoutMaxAttempts = 4
+	// DefaultTCFanoutBaseDelay configures the base backoff between RM apply retries.
+	DefaultTCFanoutBaseDelay = 100 * time.Millisecond
+	// DefaultTCFanoutMaxDelay caps RM apply retry backoff.
+	DefaultTCFanoutMaxDelay = 2 * time.Second
+	// DefaultTCFanoutMultiplier defines the exponential retry multiplier.
+	DefaultTCFanoutMultiplier = 2.0
+	// DefaultTCDecisionRetention retains decided txn records for recovery/fan-out.
+	DefaultTCDecisionRetention = 24 * time.Hour
 	// DefaultQRFRecoverySamples controls how many consecutive healthy samples are required before disengaging.
 	DefaultQRFRecoverySamples = 5
 	// DefaultQRFMemorySoftLimitPercent applies a soft guardrail when overall memory usage crosses this percentage.
@@ -154,13 +171,13 @@ type Config struct {
 	Store                 string
 	DefaultNamespace      string
 	JSONMaxBytes          int64
+	AttachmentMaxBytes    int64
 	JSONUtil              string
 	SpoolMemoryThreshold  int64
 	DiskRetention         time.Duration
 	DiskJanitorInterval   time.Duration
 	DiskQueueWatch        bool
-	MemQueueWatch         bool
-	MemQueueWatchSet      bool
+	DisableMemQueueWatch  bool
 	DefaultTTL            time.Duration
 	MaxTTL                time.Duration
 	AcquireBlock          time.Duration
@@ -178,6 +195,24 @@ type Config struct {
 	BundlePath   string
 	BundlePEM    []byte
 	DenylistPath string
+	// HTTP/2 tuning.
+	HTTP2MaxConcurrentStreams    int
+	HTTP2MaxConcurrentStreamsSet bool
+	// TC federation / auth
+	TCTrustDir       string
+	TCDisableAuth    bool
+	TCAllowDefaultCA bool
+	// TC leader election
+	SelfEndpoint    string
+	TCJoinEndpoints []string // optional seed endpoints for initial TC peer discovery
+	// TC coordinator / fan-out
+	TCFanoutTimeout     time.Duration
+	TCFanoutMaxAttempts int
+	TCFanoutBaseDelay   time.Duration
+	TCFanoutMaxDelay    time.Duration
+	TCFanoutMultiplier  float64
+	TCDecisionRetention time.Duration
+	TCClientBundlePath  string
 	// Storage encryption
 	DisableStorageEncryption bool
 	StorageEncryptionSnappy  bool
@@ -284,6 +319,9 @@ func (c *Config) Validate() error {
 	if c.JSONMaxBytes <= 0 {
 		c.JSONMaxBytes = DefaultJSONMaxBytes
 	}
+	if c.AttachmentMaxBytes <= 0 {
+		c.AttachmentMaxBytes = DefaultAttachmentMaxBytes
+	}
 	if c.JSONUtil == "" {
 		c.JSONUtil = JSONUtilLockd
 	}
@@ -292,9 +330,6 @@ func (c *Config) Validate() error {
 	}
 	if c.SpoolMemoryThreshold <= 0 {
 		c.SpoolMemoryThreshold = defaultSpoolMemoryThreshold
-	}
-	if !c.MemQueueWatchSet {
-		c.MemQueueWatch = true
 	}
 	if c.DefaultTTL <= 0 {
 		c.DefaultTTL = DefaultDefaultTTL
@@ -322,6 +357,15 @@ func (c *Config) Validate() error {
 	}
 	if !c.ShutdownTimeoutSet && c.ShutdownTimeout > 0 {
 		c.ShutdownTimeoutSet = true
+	}
+	if c.HTTP2MaxConcurrentStreams < 0 {
+		return fmt.Errorf("config: http2 max concurrent streams must be >= 0")
+	}
+	if c.HTTP2MaxConcurrentStreams != 0 {
+		c.HTTP2MaxConcurrentStreamsSet = true
+	}
+	if !c.HTTP2MaxConcurrentStreamsSet {
+		c.HTTP2MaxConcurrentStreams = DefaultMaxConcurrentStreams
 	}
 	if c.DiskRetention < 0 {
 		return fmt.Errorf("config: disk retention must be >= 0")
@@ -366,6 +410,90 @@ func (c *Config) Validate() error {
 	}
 	if !c.LSFLogIntervalSet {
 		c.LSFLogInterval = DefaultLSFLogInterval
+	}
+	if c.TCTrustDir == "" {
+		dir, err := DefaultTCTrustDir()
+		if err != nil {
+			return fmt.Errorf("config: resolve tc trust dir: %w", err)
+		}
+		c.TCTrustDir = dir
+	}
+	normalizeEndpoint := func(raw string) string {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			return ""
+		}
+		return strings.TrimSuffix(trimmed, "/")
+	}
+	if strings.TrimSpace(c.SelfEndpoint) != "" {
+		c.SelfEndpoint = normalizeEndpoint(c.SelfEndpoint)
+	}
+	if len(c.TCJoinEndpoints) > 0 {
+		normalized := make([]string, 0, len(c.TCJoinEndpoints))
+		seen := make(map[string]struct{}, len(c.TCJoinEndpoints))
+		for _, raw := range c.TCJoinEndpoints {
+			endpoint := normalizeEndpoint(raw)
+			if endpoint == "" {
+				continue
+			}
+			if _, ok := seen[endpoint]; ok {
+				return fmt.Errorf("config: duplicate tc-join endpoint %q", endpoint)
+			}
+			seen[endpoint] = struct{}{}
+			normalized = append(normalized, endpoint)
+		}
+		sort.Strings(normalized)
+		c.TCJoinEndpoints = normalized
+		if len(normalized) == 0 {
+			return fmt.Errorf("config: tc-join endpoints required when join is configured")
+		}
+		self := strings.TrimSpace(c.SelfEndpoint)
+		if self == "" {
+			return fmt.Errorf("config: self endpoint required when tc-join is set")
+		}
+		if !c.MTLSEnabled() {
+			nonSelf := make([]string, 0, len(c.TCJoinEndpoints))
+			for _, endpoint := range c.TCJoinEndpoints {
+				if endpoint != self {
+					nonSelf = append(nonSelf, endpoint)
+				}
+			}
+			if len(nonSelf) > 0 {
+				return fmt.Errorf("config: mTLS required when tc-join includes non-self endpoints")
+			}
+		}
+	}
+	if c.TCFanoutTimeout <= 0 {
+		c.TCFanoutTimeout = DefaultTCFanoutTimeout
+	}
+	if c.TCFanoutMaxAttempts <= 0 {
+		c.TCFanoutMaxAttempts = DefaultTCFanoutMaxAttempts
+	}
+	if c.TCFanoutBaseDelay <= 0 {
+		c.TCFanoutBaseDelay = DefaultTCFanoutBaseDelay
+	}
+	if c.TCFanoutMaxDelay <= 0 {
+		c.TCFanoutMaxDelay = DefaultTCFanoutMaxDelay
+	}
+	if c.TCFanoutMultiplier <= 1.0 {
+		c.TCFanoutMultiplier = DefaultTCFanoutMultiplier
+	}
+	if c.TCDecisionRetention <= 0 {
+		c.TCDecisionRetention = DefaultTCDecisionRetention
+	}
+	tcClientRequired := c.MTLSEnabled() && !c.TCDisableAuth && (len(c.TCJoinEndpoints) > 0 || strings.TrimSpace(c.SelfEndpoint) != "")
+	if c.MTLSEnabled() && strings.TrimSpace(c.TCClientBundlePath) != "" {
+		path, err := ResolveClientBundlePath(ClientBundleRoleTC, c.TCClientBundlePath)
+		if err != nil {
+			return fmt.Errorf("config: invalid tc client bundle: %w", err)
+		}
+		c.TCClientBundlePath = path
+	} else if tcClientRequired {
+		path, err := ResolveClientBundlePath(ClientBundleRoleTC, "")
+		if err != nil {
+			return fmt.Errorf("config: resolve tc client bundle: %w", err)
+		}
+		c.TCClientBundlePath = path
 	}
 	if c.QRFQueueSoftLimit < 0 {
 		return fmt.Errorf("config: qrf queue soft limit must be >= 0")
@@ -546,4 +674,13 @@ func DefaultCAPath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, "ca.pem"), nil
+}
+
+// DefaultTCTrustDir returns the default directory holding trusted TC CA certificates.
+func DefaultTCTrustDir() (string, error) {
+	dir, err := DefaultConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "tc-trust.d"), nil
 }

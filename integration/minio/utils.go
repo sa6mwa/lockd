@@ -39,10 +39,11 @@ func ResetMinioBucketForCrypto(tb testing.TB, cfg lockd.Config) {
 	if os.Getenv(cryptotest.EnvVar) != "1" {
 		return
 	}
-	minioCfg, _, err := lockd.BuildGenericS3Config(cfg)
+	minioResult, err := lockd.BuildGenericS3Config(cfg)
 	if err != nil {
 		tb.Fatalf("build s3 config: %v", err)
 	}
+	minioCfg := minioResult.Config
 	store, err := s3.New(minioCfg)
 	if err != nil {
 		tb.Fatalf("new minio store: %v", err)
@@ -98,10 +99,11 @@ func CleanupNamespaces(tb testing.TB, cfg lockd.Config, namespaces ...string) {
 	if len(namespaces) == 0 {
 		return
 	}
-	minioCfg, _, err := lockd.BuildGenericS3Config(cfg)
+	minioResult, err := lockd.BuildGenericS3Config(cfg)
 	if err != nil {
 		tb.Fatalf("build s3 config: %v", err)
 	}
+	minioCfg := minioResult.Config
 	store, err := s3.New(minioCfg)
 	if err != nil {
 		tb.Fatalf("new minio store: %v", err)
@@ -118,6 +120,7 @@ func CleanupNamespaces(tb testing.TB, cfg lockd.Config, namespaces ...string) {
 func cleanupMinioNamespace(tb testing.TB, store storage.Backend, ctx context.Context, namespace string) {
 	tb.Logf("minio cleanup: sweeping namespace %s", namespace)
 	cleanupMinioIndex(tb, store, ctx, namespace)
+	cleanupMinioPrefix(tb, store, ctx, namespace, ".staging/")
 	keys, err := store.ListMetaKeys(ctx, namespace)
 	if err != nil {
 		tb.Logf("minio cleanup list meta (%s): %v", namespace, err)
@@ -145,6 +148,26 @@ func cleanupMinioIndex(tb testing.TB, store storage.Backend, ctx context.Context
 		for _, obj := range res.Objects {
 			if err := store.DeleteObject(ctx, namespace, obj.Key, storage.DeleteObjectOptions{}); err != nil && !errors.Is(err, storage.ErrNotFound) {
 				tb.Logf("minio cleanup index %s/%s: %v", namespace, obj.Key, err)
+			}
+		}
+		if !res.Truncated || res.NextStartAfter == "" {
+			break
+		}
+		listOpts.StartAfter = res.NextStartAfter
+	}
+}
+
+func cleanupMinioPrefix(tb testing.TB, store storage.Backend, ctx context.Context, namespace, prefix string) {
+	listOpts := storage.ListOptions{Prefix: prefix, Limit: 1000}
+	for {
+		res, err := store.ListObjects(ctx, namespace, listOpts)
+		if err != nil {
+			tb.Logf("minio cleanup list prefix (%s/%s): %v", namespace, prefix, err)
+			return
+		}
+		for _, obj := range res.Objects {
+			if err := store.DeleteObject(ctx, namespace, obj.Key, storage.DeleteObjectOptions{}); err != nil && !errors.Is(err, storage.ErrNotFound) {
+				tb.Logf("minio cleanup delete %s/%s: %v", namespace, obj.Key, err)
 			}
 		}
 		if !res.Truncated || res.NextStartAfter == "" {

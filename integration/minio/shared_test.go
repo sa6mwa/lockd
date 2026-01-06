@@ -3,10 +3,12 @@
 package miniointegration
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -21,9 +23,9 @@ import (
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/integration/internal/cryptotest"
 	"pkt.systems/lockd/internal/diagnostics/storagecheck"
-	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/s3"
+	"pkt.systems/lockd/internal/svcfields"
 	"pkt.systems/lockd/namespaces"
 	"pkt.systems/pslog"
 )
@@ -58,10 +60,11 @@ func ensureMinioCredentials(tb testing.TB) {
 }
 
 func ensureMinioBucket(tb testing.TB, cfg lockd.Config) {
-	minioCfg, _, err := lockd.BuildGenericS3Config(cfg)
+	minioResult, err := lockd.BuildGenericS3Config(cfg)
 	if err != nil {
 		tb.Fatalf("build s3 config: %v", err)
 	}
+	minioCfg := minioResult.Config
 	store, err := s3.New(minioCfg)
 	if err != nil {
 		tb.Fatalf("new minio store: %v", err)
@@ -167,6 +170,7 @@ func startMinioTestServer(tb testing.TB, cfg lockd.Config, opts ...lockd.TestSer
 	if cfgCopy.StorageRetryMaxDelay < 15*time.Second {
 		cfgCopy.StorageRetryMaxDelay = 15 * time.Second
 	}
+	cryptotest.ConfigureTCAuth(tb, &cfgCopy)
 
 	options := []lockd.TestServerOption{
 		lockd.WithTestConfig(cfgCopy),
@@ -184,12 +188,8 @@ func startMinioTestServer(tb testing.TB, cfg lockd.Config, opts ...lockd.TestSer
 			lockd.WithShutdownTimeout(10*time.Second),
 		),
 	}
-	var sharedCreds lockd.TestMTLSCredentials
-	if cryptotest.TestMTLSEnabled() {
-		sharedCreds = cryptotest.SharedMTLSCredentials(tb)
-	}
-	options = append(options, cryptotest.SharedMTLSOptions(tb, sharedCreds)...)
 	options = append(options, opts...)
+	options = append(options, cryptotest.SharedMTLSOptions(tb)...)
 	ts := lockd.StartTestServer(tb, options...)
 	tb.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
@@ -257,7 +257,7 @@ func minioTestLoggerOption(tb testing.TB) lockd.TestServerOption {
 	}
 	tb.Cleanup(func() { _ = file.Close() })
 
-	logger := loggingutil.WithSubsystem(pslog.NewStructured(file).With("app", "lockd"), "bench.minio.harness")
+	logger := svcfields.WithSubsystem(pslog.NewStructured(file).With("app", "lockd"), "bench.minio.harness")
 	if level, ok := pslog.ParseLevel(levelStr); ok {
 		logger = logger.LogLevel(level)
 	} else {
@@ -313,22 +313,119 @@ func getStateJSON(ctx context.Context, cli *lockdclient.Client, key, leaseID str
 	return payload, resp.ETag, resp.Version, nil
 }
 
-func releaseLease(t *testing.T, ctx context.Context, cli *lockdclient.Client, key, leaseID string) bool {
-	resp, err := cli.Release(ctx, api.ReleaseRequest{Key: key, LeaseID: leaseID})
-	if err != nil {
-		t.Fatalf("release: %v", err)
+func runAttachmentTest(t *testing.T, ctx context.Context, cli *lockdclient.Client, key string) {
+	t.Helper()
+	lease := acquireWithRetry(t, ctx, cli, key, "attach-worker", 45, lockdclient.BlockWaitForever)
+	alpha := []byte("alpha")
+	bravo := []byte("bravo")
+	if _, err := lease.Attach(ctx, lockdclient.AttachRequest{
+		Name: "alpha.bin",
+		Body: bytes.NewReader(alpha),
+	}); err != nil {
+		t.Fatalf("attach alpha: %v", err)
 	}
-	if !resp.Released {
-		return false
+	if _, err := lease.Attach(ctx, lockdclient.AttachRequest{
+		Name:        "bravo.bin",
+		Body:        bytes.NewReader(bravo),
+		ContentType: "text/plain",
+	}); err != nil {
+		t.Fatalf("attach bravo: %v", err)
+	}
+	list, err := lease.ListAttachments(ctx)
+	if err != nil {
+		t.Fatalf("list attachments: %v", err)
+	}
+	if list == nil || len(list.Attachments) != 2 {
+		t.Fatalf("expected 2 attachments, got %+v", list)
+	}
+	att, err := lease.RetrieveAttachment(ctx, lockdclient.AttachmentSelector{Name: "alpha.bin"})
+	if err != nil {
+		t.Fatalf("retrieve alpha: %v", err)
+	}
+	data, err := io.ReadAll(att)
+	att.Close()
+	if err != nil {
+		t.Fatalf("read alpha: %v", err)
+	}
+	if !bytes.Equal(data, alpha) {
+		t.Fatalf("unexpected alpha payload: %q", data)
+	}
+	if !releaseLease(t, ctx, lease) {
+		t.Fatalf("expected release success")
+	}
+
+	resp, err := cli.Get(ctx, key)
+	if err != nil {
+		t.Fatalf("public get: %v", err)
+	}
+	publicList, err := resp.ListAttachments(ctx)
+	if err != nil {
+		resp.Close()
+		t.Fatalf("public list: %v", err)
+	}
+	if len(publicList.Attachments) != 2 {
+		resp.Close()
+		t.Fatalf("expected 2 public attachments, got %+v", publicList.Attachments)
+	}
+	publicAtt, err := resp.RetrieveAttachment(ctx, lockdclient.AttachmentSelector{Name: "bravo.bin"})
+	if err != nil {
+		resp.Close()
+		t.Fatalf("public retrieve bravo: %v", err)
+	}
+	publicData, err := io.ReadAll(publicAtt)
+	publicAtt.Close()
+	resp.Close()
+	if err != nil {
+		t.Fatalf("read public bravo: %v", err)
+	}
+	if !bytes.Equal(publicData, bravo) {
+		t.Fatalf("unexpected bravo payload: %q", publicData)
+	}
+
+	lease2 := acquireWithRetry(t, ctx, cli, key, "attach-delete", 45, lockdclient.BlockWaitForever)
+	if _, err := lease2.DeleteAttachment(ctx, lockdclient.AttachmentSelector{Name: "alpha.bin"}); err != nil {
+		t.Fatalf("delete alpha: %v", err)
+	}
+	if !releaseLease(t, ctx, lease2) {
+		t.Fatalf("expected release success")
+	}
+	listAfter, err := cli.ListAttachments(ctx, lockdclient.ListAttachmentsRequest{Key: key, Public: true})
+	if err != nil {
+		t.Fatalf("list after delete: %v", err)
+	}
+	if len(listAfter.Attachments) != 1 || listAfter.Attachments[0].Name != "bravo.bin" {
+		t.Fatalf("expected bravo only, got %+v", listAfter.Attachments)
+	}
+
+	lease3 := acquireWithRetry(t, ctx, cli, key, "attach-clear", 45, lockdclient.BlockWaitForever)
+	if _, err := lease3.DeleteAllAttachments(ctx); err != nil {
+		t.Fatalf("delete all: %v", err)
+	}
+	if !releaseLease(t, ctx, lease3) {
+		t.Fatalf("expected release success")
+	}
+	finalList, err := cli.ListAttachments(ctx, lockdclient.ListAttachmentsRequest{Key: key, Public: true})
+	if err != nil {
+		t.Fatalf("final list: %v", err)
+	}
+	if len(finalList.Attachments) != 0 {
+		t.Fatalf("expected no attachments, got %+v", finalList.Attachments)
+	}
+}
+
+func releaseLease(t *testing.T, ctx context.Context, lease *lockdclient.LeaseSession) bool {
+	if err := lease.Release(ctx); err != nil {
+		t.Fatalf("release: %v", err)
 	}
 	return true
 }
 
 func cleanupMinio(tb testing.TB, cfg lockd.Config, key string) {
-	minioCfg, _, err := lockd.BuildGenericS3Config(cfg)
+	minioResult, err := lockd.BuildGenericS3Config(cfg)
 	if err != nil {
 		tb.Fatalf("build s3 config: %v", err)
 	}
+	minioCfg := minioResult.Config
 	store, err := s3.New(minioCfg)
 	if err != nil {
 		tb.Fatalf("new minio store: %v", err)

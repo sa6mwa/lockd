@@ -99,7 +99,7 @@ func verifyAzure(ctx context.Context, azureCfg azurestore.Config, crypto *storag
 	})
 
 	run("GetMeta", func(ctx context.Context) error {
-	_, _, err := store.LoadMeta(ctx, namespace, diagKey)
+		_, err := store.LoadMeta(ctx, namespace, diagKey)
 		return err
 	})
 

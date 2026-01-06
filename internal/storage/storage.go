@@ -35,6 +35,25 @@ type Meta struct {
 	StateDescriptor     []byte            `json:"state_descriptor,omitempty"`
 	StatePlaintextBytes int64             `json:"state_plaintext_bytes,omitempty"`
 	Attributes          map[string]string `json:"attributes,omitempty"`
+	Attachments         []Attachment      `json:"attachments,omitempty"`
+	// Staged* capture pending transactional changes that will be committed or
+	// rolled back by Release.
+	StagedTxnID               string             `json:"staged_txn_id,omitempty"`
+	StagedVersion             int64              `json:"staged_version,omitempty"`
+	StagedStateETag           string             `json:"staged_state_etag,omitempty"`
+	StagedStateDescriptor     []byte             `json:"staged_state_descriptor,omitempty"`
+	StagedStatePlaintextBytes int64              `json:"staged_state_plaintext_bytes,omitempty"`
+	StagedAttributes          map[string]string  `json:"staged_attributes,omitempty"`
+	StagedRemove              bool               `json:"staged_remove,omitempty"`
+	StagedAttachments         []StagedAttachment `json:"staged_attachments,omitempty"`
+	StagedAttachmentDeletes   []string           `json:"staged_attachment_deletes,omitempty"`
+	StagedAttachmentsClear    bool               `json:"staged_attachments_clear,omitempty"`
+}
+
+// MetaRecord pairs metadata with its ETag for backends that persist them together.
+type MetaRecord struct {
+	ETag string
+	Meta *Meta
 }
 
 // Lease captures the server-side view of an active lease.
@@ -43,6 +62,7 @@ type Lease struct {
 	Owner         string `json:"owner"`
 	ExpiresAtUnix int64  `json:"expires_at_unix"`
 	FencingToken  int64  `json:"fencing_token,omitempty"`
+	TxnID         string `json:"txn_id,omitempty"`
 }
 
 // StateInfo provides metadata about a stored state blob.
@@ -55,6 +75,30 @@ type StateInfo struct {
 	Descriptor []byte
 }
 
+// Attachment captures metadata about a stored attachment object.
+type Attachment struct {
+	ID             string `json:"id,omitempty"`
+	Name           string `json:"name,omitempty"`
+	Size           int64  `json:"size,omitempty"`
+	PlaintextBytes int64  `json:"plaintext_bytes,omitempty"`
+	ContentType    string `json:"content_type,omitempty"`
+	Descriptor     []byte `json:"descriptor,omitempty"`
+	CreatedAtUnix  int64  `json:"created_at_unix,omitempty"`
+	UpdatedAtUnix  int64  `json:"updated_at_unix,omitempty"`
+}
+
+// StagedAttachment describes a pending attachment payload staged for a txn.
+type StagedAttachment struct {
+	ID               string `json:"id,omitempty"`
+	Name             string `json:"name,omitempty"`
+	Size             int64  `json:"size,omitempty"`
+	PlaintextBytes   int64  `json:"plaintext_bytes,omitempty"`
+	ContentType      string `json:"content_type,omitempty"`
+	StagedDescriptor []byte `json:"staged_descriptor,omitempty"`
+	CreatedAtUnix    int64  `json:"created_at_unix,omitempty"`
+	UpdatedAtUnix    int64  `json:"updated_at_unix,omitempty"`
+}
+
 // PutStateOptions controls the behaviour of state writes.
 type PutStateOptions struct {
 	// ExpectedETag enables CAS semantics. When empty, no CAS is enforced.
@@ -62,6 +106,9 @@ type PutStateOptions struct {
 	// TempSuffix allows callers to hint the suffix used for temp objects.
 	TempSuffix string
 	Descriptor []byte
+	// IfNotExists enforces creation-only semantics when true. Ignored when
+	// ExpectedETag is provided.
+	IfNotExists bool
 }
 
 // PutStateResult describes the outcome of PutState.
@@ -71,10 +118,22 @@ type PutStateResult struct {
 	Descriptor   []byte
 }
 
+// LoadMetaResult captures the metadata payload and its ETag.
+type LoadMetaResult struct {
+	Meta *Meta
+	ETag string
+}
+
+// ReadStateResult captures a state reader with its metadata.
+type ReadStateResult struct {
+	Reader io.ReadCloser
+	Info   *StateInfo
+}
+
 // Backend defines the storage contract expected by the server.
 type Backend interface {
 	// LoadMeta returns the current meta document and its opaque ETag.
-	LoadMeta(ctx context.Context, namespace, key string) (*Meta, string, error)
+	LoadMeta(ctx context.Context, namespace, key string) (LoadMetaResult, error)
 	// StoreMeta atomically writes meta if the existing ETag matches. Use empty
 	// expectedETag to create brand new entries.
 	StoreMeta(ctx context.Context, namespace, key string, meta *Meta, expectedETag string) (newETag string, err error)
@@ -84,7 +143,7 @@ type Backend interface {
 	ListMetaKeys(ctx context.Context, namespace string) ([]string, error)
 
 	// ReadState streams the JSON state blob with metadata.
-	ReadState(ctx context.Context, namespace, key string) (io.ReadCloser, *StateInfo, error)
+	ReadState(ctx context.Context, namespace, key string) (ReadStateResult, error)
 	// WriteState uploads a new state blob with optional CAS on the previous ETag.
 	WriteState(ctx context.Context, namespace, key string, body io.Reader, opts PutStateOptions) (*PutStateResult, error)
 	// Remove deletes stored state if present.
@@ -96,13 +155,16 @@ type Backend interface {
 	ListObjects(ctx context.Context, namespace string, opts ListOptions) (*ListResult, error)
 	// GetObject fetches the raw bytes for key and returns a reader alongside
 	// metadata. Callers must close the returned reader.
-	GetObject(ctx context.Context, namespace, key string) (io.ReadCloser, *ObjectInfo, error)
+	GetObject(ctx context.Context, namespace, key string) (GetObjectResult, error)
 	// PutObject writes a blob to the provided key, applying conditional
 	// semantics when opts.ExpectedETag or opts.IfNotExists are set.
 	PutObject(ctx context.Context, namespace, key string, body io.Reader, opts PutObjectOptions) (*ObjectInfo, error)
 	// DeleteObject removes the object identified by key, optionally enforcing a
 	// matching ETag when opts.ExpectedETag is set.
 	DeleteObject(ctx context.Context, namespace, key string, opts DeleteObjectOptions) error
+
+	// BackendHash returns the stable identity hash for this backend.
+	BackendHash(ctx context.Context) (string, error)
 
 	// Close releases backend resources.
 	Close() error
@@ -182,7 +244,20 @@ type QueueChangeFeed interface {
 // notifications are active (e.g. inotify/fsnotify) and why they may be
 // unavailable.
 type QueueWatchStatusProvider interface {
-	QueueWatchStatus() (enabled bool, mode string, reason string)
+	QueueWatchStatus() QueueWatchStatus
+}
+
+// QueueWatchStatus reports whether queue change notifications are active.
+type QueueWatchStatus struct {
+	Enabled bool
+	Mode    string
+	Reason  string
+}
+
+// GetObjectResult captures an object reader with its metadata.
+type GetObjectResult struct {
+	Reader io.ReadCloser
+	Info   *ObjectInfo
 }
 
 // IndexerDefaultsProvider allows storage backends to tune writer flush behaviour

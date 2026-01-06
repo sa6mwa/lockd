@@ -29,6 +29,7 @@ func TestCryptoAzureLocks(t *testing.T) {
 	cfg := buildAzureConfig(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	azuretest.ResetContainerForCrypto(t, cfg)
 	cleanupAzureKeys(t, cfg, "crypto-azure", "azure-")
 	ensureStoreReady(t, ctx, cfg)
 
@@ -74,6 +75,7 @@ func TestCryptoAzureQueues(t *testing.T) {
 	cfg := buildAzureConfig(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	azuretest.ResetContainerForCrypto(t, cfg)
 	ensureStoreReady(t, ctx, cfg)
 
 	cli := startServer(t, cfg)
@@ -147,7 +149,7 @@ func buildAzureConfig(t testing.TB) lockd.Config {
 	t.Helper()
 	store := strings.TrimSpace(os.Getenv("LOCKD_STORE"))
 	if store == "" {
-		t.Skip("LOCKD_STORE not configured for Azure tests")
+		t.Fatalf("LOCKD_STORE not configured for Azure tests")
 	}
 	if !strings.HasPrefix(store, "azure://") {
 		t.Fatalf("LOCKD_STORE must reference an azure:// URI, got %q", store)

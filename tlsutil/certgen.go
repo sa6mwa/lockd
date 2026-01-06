@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -20,6 +21,33 @@ type CA struct {
 	CertPEM []byte
 	Key     ed25519.PrivateKey
 	KeyPEM  []byte
+}
+
+// IssuedCert captures an issued certificate and its private key.
+type IssuedCert struct {
+	CertPEM []byte
+	KeyPEM  []byte
+}
+
+// ClientCertRequest describes the inputs used to issue a client certificate.
+type ClientCertRequest struct {
+	CommonName     string
+	Subject        pkix.Name
+	NotBefore      time.Time
+	NotAfter       time.Time
+	Validity       time.Duration
+	URIs           []*url.URL
+	DNSNames       []string
+	IPAddresses    []net.IP
+	EmailAddresses []string
+}
+
+// ServerCertRequest describes the inputs used to issue a server certificate.
+type ServerCertRequest struct {
+	CommonName string
+	Validity   time.Duration
+	Hosts      []string
+	URIs       []*url.URL
 }
 
 // GenerateCA creates a new self-signed certificate authority.
@@ -72,31 +100,41 @@ func GenerateCA(commonName string, validity time.Duration) (*CA, error) {
 }
 
 // IssueServer issues a server certificate for hosts.
-func (ca *CA) IssueServer(hosts []string, commonName string, validity time.Duration) ([]byte, []byte, error) {
+func (ca *CA) IssueServer(hosts []string, commonName string, validity time.Duration) (IssuedCert, error) {
+	return ca.IssueServerWithRequest(ServerCertRequest{
+		CommonName: commonName,
+		Validity:   validity,
+		Hosts:      hosts,
+	})
+}
+
+// IssueServerWithRequest issues a server certificate using the supplied request.
+func (ca *CA) IssueServerWithRequest(req ServerCertRequest) (IssuedCert, error) {
 	if ca == nil {
-		return nil, nil, fmt.Errorf("ca is nil")
+		return IssuedCert{}, fmt.Errorf("ca is nil")
 	}
+	validity := req.Validity
 	if validity <= 0 {
 		validity = 365 * 24 * time.Hour
 	}
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		return nil, nil, fmt.Errorf("generate server key: %w", err)
+		return IssuedCert{}, fmt.Errorf("generate server key: %w", err)
 	}
 	serial, err := rand.Int(rand.Reader, big.NewInt(1<<62))
 	if err != nil {
-		return nil, nil, fmt.Errorf("generate serial: %w", err)
+		return IssuedCert{}, fmt.Errorf("generate serial: %w", err)
 	}
 	now := time.Now().UTC()
 	template := &x509.Certificate{
 		SerialNumber: serial,
-		Subject:      pkixName(defaultString(commonName, "lockd-server")),
+		Subject:      pkixName(defaultString(req.CommonName, "lockd-server")),
 		NotBefore:    now.Add(-1 * time.Hour),
 		NotAfter:     now.Add(validity),
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 	}
-	for _, host := range hosts {
+	for _, host := range req.Hosts {
 		host = strings.TrimSpace(host)
 		if host == "" {
 			continue
@@ -110,55 +148,86 @@ func (ca *CA) IssueServer(hosts []string, commonName string, validity time.Durat
 	if len(template.DNSNames) == 0 && len(template.IPAddresses) == 0 {
 		template.DNSNames = append(template.DNSNames, "*")
 	}
+	for _, uri := range req.URIs {
+		if uri == nil {
+			continue
+		}
+		template.URIs = append(template.URIs, uri)
+	}
 	der, err := x509.CreateCertificate(rand.Reader, template, ca.Cert, pub, ca.Key)
 	if err != nil {
-		return nil, nil, fmt.Errorf("create server certificate: %w", err)
+		return IssuedCert{}, fmt.Errorf("create server certificate: %w", err)
 	}
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	keyBytes, err := x509.MarshalPKCS8PrivateKey(priv)
 	if err != nil {
-		return nil, nil, fmt.Errorf("marshal server key: %w", err)
+		return IssuedCert{}, fmt.Errorf("marshal server key: %w", err)
 	}
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyBytes})
-	return certPEM, keyPEM, nil
+	return IssuedCert{CertPEM: certPEM, KeyPEM: keyPEM}, nil
 }
 
 // IssueClient issues a mutually-authenticated client certificate.
-func (ca *CA) IssueClient(commonName string, validity time.Duration) ([]byte, []byte, error) {
+// IssueClient issues a mutually-authenticated client certificate.
+func (ca *CA) IssueClient(req ClientCertRequest) (IssuedCert, error) {
 	if ca == nil {
-		return nil, nil, fmt.Errorf("ca is nil")
-	}
-	if validity <= 0 {
-		validity = 365 * 24 * time.Hour
+		return IssuedCert{}, fmt.Errorf("ca is nil")
 	}
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		return nil, nil, fmt.Errorf("generate client key: %w", err)
+		return IssuedCert{}, fmt.Errorf("generate client key: %w", err)
 	}
 	serial, err := rand.Int(rand.Reader, big.NewInt(1<<62))
 	if err != nil {
-		return nil, nil, fmt.Errorf("generate serial: %w", err)
+		return IssuedCert{}, fmt.Errorf("generate serial: %w", err)
 	}
 	now := time.Now().UTC()
+	notBefore := req.NotBefore
+	if notBefore.IsZero() {
+		notBefore = now.Add(-1 * time.Hour)
+	}
+	notAfter := req.NotAfter
+	if notAfter.IsZero() {
+		validity := req.Validity
+		if validity <= 0 {
+			validity = 365 * 24 * time.Hour
+		}
+		if req.NotBefore.IsZero() {
+			notAfter = now.Add(validity)
+		} else {
+			notAfter = notBefore.Add(validity)
+		}
+	}
+	if notAfter.Before(notBefore) {
+		return IssuedCert{}, fmt.Errorf("client certificate notAfter before notBefore")
+	}
+	subject := req.Subject
+	if strings.TrimSpace(subject.CommonName) == "" {
+		subject.CommonName = defaultString(req.CommonName, "lockd-client")
+	}
 	template := &x509.Certificate{
-		SerialNumber: serial,
-		Subject:      pkixName(defaultString(commonName, "lockd-client")),
-		NotBefore:    now.Add(-1 * time.Hour),
-		NotAfter:     now.Add(validity),
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-		KeyUsage:     x509.KeyUsageDigitalSignature,
+		SerialNumber:   serial,
+		Subject:        subject,
+		NotBefore:      notBefore,
+		NotAfter:       notAfter,
+		ExtKeyUsage:    []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		KeyUsage:       x509.KeyUsageDigitalSignature,
+		URIs:           req.URIs,
+		DNSNames:       req.DNSNames,
+		IPAddresses:    req.IPAddresses,
+		EmailAddresses: req.EmailAddresses,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, template, ca.Cert, pub, ca.Key)
 	if err != nil {
-		return nil, nil, fmt.Errorf("create client certificate: %w", err)
+		return IssuedCert{}, fmt.Errorf("create client certificate: %w", err)
 	}
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	keyBytes, err := x509.MarshalPKCS8PrivateKey(priv)
 	if err != nil {
-		return nil, nil, fmt.Errorf("marshal client key: %w", err)
+		return IssuedCert{}, fmt.Errorf("marshal client key: %w", err)
 	}
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyBytes})
-	return certPEM, keyPEM, nil
+	return IssuedCert{CertPEM: certPEM, KeyPEM: keyPEM}, nil
 }
 
 func pkixName(cn string) pkix.Name {

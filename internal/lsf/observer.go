@@ -14,11 +14,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/pslog"
 
 	"golang.org/x/sys/unix"
 	"pkt.systems/lockd/internal/qrf"
+	"pkt.systems/lockd/internal/svcfields"
 )
 
 // Config controls the LSF sampling cadence.
@@ -60,11 +60,13 @@ func NewObserver(cfg Config, controller *qrf.Controller, logger pslog.Logger) *O
 	if cfg.LogInterval < 0 {
 		cfg.LogInterval = 0
 	}
-	logger = loggingutil.EnsureLogger(logger)
+	if logger == nil {
+		logger = pslog.NoopLogger()
+	}
 	return &Observer{
 		cfg:    cfg,
 		qrf:    controller,
-		logger: loggingutil.WithSubsystem(logger, "control.lsf.observer"),
+		logger: svcfields.WithSubsystem(logger, "control.lsf.observer"),
 	}
 }
 

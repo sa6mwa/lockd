@@ -18,4 +18,5 @@ func RunDiskLQScenarios(t *testing.T) {
 	t.Run("PollingHighFanInFanOutSingleServer", runDiskQueueHighFanInFanOutSingleServer)
 	t.Run("SubscribeBasics", runDiskQueueSubscribeBasics)
 	t.Run("SubscribeWithState", runDiskQueueSubscribeWithState)
+	t.Run("TxnDecisionCommitRollback", runDiskQueueTxnDecision)
 }

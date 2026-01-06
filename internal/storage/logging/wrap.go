@@ -10,7 +10,6 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"pkt.systems/lockd/internal/correlation"
-	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/pslog"
 
 	"pkt.systems/lockd/internal/storage"
@@ -26,7 +25,9 @@ type backend struct {
 
 // Wrap decorates inner with trace/debug logging.
 func Wrap(inner storage.Backend, logger pslog.Logger, sys string) storage.Backend {
-	logger = loggingutil.EnsureLogger(logger)
+	if logger == nil {
+		logger = pslog.NoopLogger()
+	}
 	return &backend{
 		inner:  inner,
 		logger: logger,
@@ -72,7 +73,7 @@ func (b *backend) start(ctx context.Context, op string) (context.Context, trace.
 	}
 }
 
-func (b *backend) LoadMeta(ctx context.Context, namespace, key string) (*storage.Meta, string, error) {
+func (b *backend) LoadMeta(ctx context.Context, namespace, key string) (storage.LoadMetaResult, error) {
 	ctx, span, _, verbose, begin, finish := b.start(ctx, "load_meta")
 	defer span.End()
 
@@ -81,12 +82,14 @@ func (b *backend) LoadMeta(ctx context.Context, namespace, key string) (*storage
 	verbose.Trace("storage.load_meta.begin", "key", key)
 	span.SetAttributes(attribute.Bool("lockd.storage.has_key", key != ""))
 
-	meta, etag, err := b.inner.LoadMeta(ctx, namespace, key)
+	result, err := b.inner.LoadMeta(ctx, namespace, key)
 	if err != nil {
 		finish("error", err)
 		verbose.Debug("storage.load_meta.error", "key", key, "error", err, "elapsed", time.Since(begin))
-		return nil, etag, err
+		return result, err
 	}
+	meta := result.Meta
+	etag := result.ETag
 	owner := ""
 	expires := int64(0)
 	fencing := int64(0)
@@ -119,7 +122,7 @@ func (b *backend) LoadMeta(ctx context.Context, namespace, key string) (*storage
 		"meta_etag", etag,
 		"elapsed", time.Since(begin),
 	)
-	return meta, etag, nil
+	return result, nil
 }
 
 func (b *backend) StoreMeta(ctx context.Context, namespace, key string, meta *storage.Meta, expectedETag string) (string, error) {
@@ -216,7 +219,7 @@ func (b *backend) ListMetaKeys(ctx context.Context, namespace string) ([]string,
 	return keys, nil
 }
 
-func (b *backend) ReadState(ctx context.Context, namespace, key string) (io.ReadCloser, *storage.StateInfo, error) {
+func (b *backend) ReadState(ctx context.Context, namespace, key string) (storage.ReadStateResult, error) {
 	ctx, span, _, verbose, begin, finish := b.start(ctx, "read_state")
 	defer span.End()
 
@@ -226,12 +229,13 @@ func (b *backend) ReadState(ctx context.Context, namespace, key string) (io.Read
 		attribute.Bool("lockd.storage.has_key", key != ""),
 	)
 	verbose.Trace("storage.read_state.begin", "key", key)
-	reader, info, err := b.inner.ReadState(ctx, namespace, key)
+	result, err := b.inner.ReadState(ctx, namespace, key)
 	if err != nil {
 		finish("error", err)
 		verbose.Debug("storage.read_state.error", "key", key, "error", err, "elapsed", time.Since(begin))
-		return nil, info, err
+		return result, err
 	}
+	info := result.Info
 	size := int64(-1)
 	stateETag := ""
 	version := int64(0)
@@ -255,7 +259,7 @@ func (b *backend) ReadState(ctx context.Context, namespace, key string) (io.Read
 		"version", version,
 		"elapsed", time.Since(begin),
 	)
-	return reader, info, nil
+	return result, nil
 }
 
 func (b *backend) WriteState(ctx context.Context, namespace, key string, body io.Reader, opts storage.PutStateOptions) (*storage.PutStateResult, error) {
@@ -358,7 +362,7 @@ func (b *backend) ListObjects(ctx context.Context, namespace string, opts storag
 	return result, nil
 }
 
-func (b *backend) GetObject(ctx context.Context, namespace, key string) (io.ReadCloser, *storage.ObjectInfo, error) {
+func (b *backend) GetObject(ctx context.Context, namespace, key string) (storage.GetObjectResult, error) {
 	ctx, span, _, verbose, begin, finish := b.start(ctx, "get_object")
 	defer span.End()
 
@@ -368,12 +372,13 @@ func (b *backend) GetObject(ctx context.Context, namespace, key string) (io.Read
 		attribute.Bool("lockd.storage.has_key", key != ""),
 	)
 	verbose.Trace("storage.get_object.begin", "key", key)
-	body, info, err := b.inner.GetObject(ctx, namespace, key)
+	result, err := b.inner.GetObject(ctx, namespace, key)
 	if err != nil {
 		finish("error", err)
 		verbose.Debug("storage.get_object.error", "key", key, "error", err, "elapsed", time.Since(begin))
-		return body, info, err
+		return result, err
 	}
+	info := result.Info
 	etag := ""
 	size := int64(0)
 	if info != nil {
@@ -387,7 +392,7 @@ func (b *backend) GetObject(ctx context.Context, namespace, key string) (io.Read
 	)
 	finish("ok", nil)
 	verbose.Debug("storage.get_object.success", "key", key, "etag", etag, "size", size, "elapsed", time.Since(begin))
-	return body, info, nil
+	return result, nil
 }
 
 func (b *backend) PutObject(ctx context.Context, namespace, key string, body io.Reader, opts storage.PutObjectOptions) (*storage.ObjectInfo, error) {
@@ -452,6 +457,22 @@ func (b *backend) DeleteObject(ctx context.Context, namespace, key string, opts 
 	return nil
 }
 
+func (b *backend) BackendHash(ctx context.Context) (string, error) {
+	ctx, span, _, verbose, begin, finish := b.start(ctx, "backend_hash")
+	defer span.End()
+
+	verbose.Trace("storage.backend_hash.begin")
+	hash, err := b.inner.BackendHash(ctx)
+	if err != nil {
+		finish("error", err)
+		verbose.Debug("storage.backend_hash.error", "error", err, "elapsed", time.Since(begin))
+		return "", err
+	}
+	finish("ok", nil)
+	verbose.Debug("storage.backend_hash.success", "elapsed", time.Since(begin))
+	return hash, nil
+}
+
 func (b *backend) Close() error {
 	_, span, _, verbose, begin, finish := b.start(context.Background(), "close")
 	defer span.End()
@@ -482,9 +503,9 @@ func (b *backend) SubscribeQueueChanges(namespace, queue string) (storage.QueueC
 	return nil, storage.ErrNotImplemented
 }
 
-func (b *backend) QueueWatchStatus() (bool, string, string) {
+func (b *backend) QueueWatchStatus() storage.QueueWatchStatus {
 	if provider, ok := b.inner.(storage.QueueWatchStatusProvider); ok {
 		return provider.QueueWatchStatus()
 	}
-	return false, "unknown", "backend_does_not_report"
+	return storage.QueueWatchStatus{Enabled: false, Mode: "unknown", Reason: "backend_does_not_report"}
 }

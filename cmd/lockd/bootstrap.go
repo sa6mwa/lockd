@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"pkt.systems/lockd"
 	"pkt.systems/lockd/internal/cryptoutil"
+	"pkt.systems/lockd/internal/uuidv7"
 	"pkt.systems/lockd/tlsutil"
 	"pkt.systems/pslog"
 )
@@ -19,6 +21,7 @@ const (
 	bootstrapStoreDefault = "mem://"
 	bootstrapServerCN     = "lockd-anywhere"
 	bootstrapClientCN     = "lockd-client"
+	bootstrapTCClientCN   = "lockd-tc-client"
 )
 
 func bootstrapConfigDir(dir string, logger pslog.Logger) error {
@@ -37,6 +40,7 @@ func bootstrapConfigDir(dir string, logger pslog.Logger) error {
 		"ca":       filepath.Join(abs, "ca.pem"),
 		"server":   filepath.Join(abs, "server.pem"),
 		"client":   filepath.Join(abs, "client.pem"),
+		"tcclient": filepath.Join(abs, "tc-client.pem"),
 		"config":   filepath.Join(abs, lockd.DefaultConfigFileName),
 		"denylist": filepath.Join(abs, "server.denylist"),
 	}
@@ -51,7 +55,10 @@ func bootstrapConfigDir(dir string, logger pslog.Logger) error {
 	if err := ensureBootstrapClient(paths["client"], ca, logger); err != nil {
 		return err
 	}
-	if err := ensureBootstrapConfig(paths["config"], paths["server"], paths["denylist"], logger); err != nil {
+	if err := ensureBootstrapTCClient(paths["tcclient"], ca, logger); err != nil {
+		return err
+	}
+	if err := ensureBootstrapConfig(paths["config"], paths["server"], paths["denylist"], paths["tcclient"], logger); err != nil {
 		return err
 	}
 	if err := ensureBootstrapFile(paths["denylist"], []byte{}); err != nil && !errors.Is(err, fs.ErrExist) {
@@ -92,11 +99,21 @@ func ensureBootstrapServer(path, caPath string, ca *tlsutil.CA, logger pslog.Log
 	if err != nil {
 		return fmt.Errorf("bootstrap: prepare metadata material: %w", err)
 	}
-	serverCert, serverKey, err := ca.IssueServer([]string{"*"}, bootstrapServerCN, 2*365*24*time.Hour)
+	nodeID := uuidv7.NewString()
+	spiffeURI, err := lockd.SPIFFEURIForServer(nodeID)
+	if err != nil {
+		return fmt.Errorf("bootstrap: spiffe uri: %w", err)
+	}
+	issued, err := ca.IssueServerWithRequest(tlsutil.ServerCertRequest{
+		CommonName: bootstrapServerCN,
+		Validity:   2 * 365 * 24 * time.Hour,
+		Hosts:      []string{"*"},
+		URIs:       []*url.URL{spiffeURI},
+	})
 	if err != nil {
 		return fmt.Errorf("bootstrap: issue server certificate: %w", err)
 	}
-	bundleBytes, err := tlsutil.EncodeServerBundle(ca.CertPEM, ca.KeyPEM, serverCert, serverKey, nil)
+	bundleBytes, err := tlsutil.EncodeServerBundle(ca.CertPEM, ca.KeyPEM, issued.CertPEM, issued.KeyPEM, nil)
 	if err != nil {
 		return fmt.Errorf("bootstrap: encode server bundle: %w", err)
 	}
@@ -117,11 +134,19 @@ func ensureBootstrapClient(path string, ca *tlsutil.CA, logger pslog.Logger) err
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("bootstrap: stat client bundle %s: %w", path, err)
 	}
-	clientCert, clientKey, err := ca.IssueClient(bootstrapClientCN, 365*24*time.Hour)
+	spiffeURI, err := lockd.SPIFFEURIForRole(lockd.ClientBundleRoleSDK, bootstrapClientCN)
+	if err != nil {
+		return fmt.Errorf("bootstrap: spiffe uri: %w", err)
+	}
+	issued, err := ca.IssueClient(tlsutil.ClientCertRequest{
+		CommonName: bootstrapClientCN,
+		Validity:   365 * 24 * time.Hour,
+		URIs:       []*url.URL{spiffeURI},
+	})
 	if err != nil {
 		return fmt.Errorf("bootstrap: issue client certificate: %w", err)
 	}
-	clientBundle, err := tlsutil.EncodeClientBundle(ca.CertPEM, clientCert, clientKey)
+	clientBundle, err := tlsutil.EncodeClientBundle(ca.CertPEM, issued.CertPEM, issued.KeyPEM)
 	if err != nil {
 		return fmt.Errorf("bootstrap: encode client bundle: %w", err)
 	}
@@ -132,7 +157,36 @@ func ensureBootstrapClient(path string, ca *tlsutil.CA, logger pslog.Logger) err
 	return nil
 }
 
-func ensureBootstrapConfig(path, bundlePath, denylistPath string, logger pslog.Logger) error {
+func ensureBootstrapTCClient(path string, ca *tlsutil.CA, logger pslog.Logger) error {
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("bootstrap: stat tc client bundle %s: %w", path, err)
+	}
+	spiffeURI, err := lockd.SPIFFEURIForRole(lockd.ClientBundleRoleTC, bootstrapTCClientCN)
+	if err != nil {
+		return fmt.Errorf("bootstrap: spiffe uri: %w", err)
+	}
+	issued, err := ca.IssueClient(tlsutil.ClientCertRequest{
+		CommonName: bootstrapTCClientCN,
+		Validity:   365 * 24 * time.Hour,
+		URIs:       []*url.URL{spiffeURI},
+	})
+	if err != nil {
+		return fmt.Errorf("bootstrap: issue tc client certificate: %w", err)
+	}
+	clientBundle, err := tlsutil.EncodeClientBundle(ca.CertPEM, issued.CertPEM, issued.KeyPEM)
+	if err != nil {
+		return fmt.Errorf("bootstrap: encode tc client bundle: %w", err)
+	}
+	if err := writeBootstrapFile(path, clientBundle); err != nil {
+		return fmt.Errorf("bootstrap: write tc client bundle: %w", err)
+	}
+	logger.Info("bootstrap: generated tc client bundle", "path", path)
+	return nil
+}
+
+func ensureBootstrapConfig(path, bundlePath, denylistPath, tcClientPath string, logger pslog.Logger) error {
 	if _, err := os.Stat(path); err == nil {
 		return nil
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -142,6 +196,7 @@ func ensureBootstrapConfig(path, bundlePath, denylistPath string, logger pslog.L
 		cfg.Store = bootstrapStoreDefault
 		cfg.Bundle = bundlePath
 		cfg.DenylistPath = denylistPath
+		cfg.TCClientBundle = tcClientPath
 	})
 	if err != nil {
 		return fmt.Errorf("bootstrap: render default config: %w", err)

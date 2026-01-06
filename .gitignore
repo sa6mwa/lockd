@@ -12,6 +12,7 @@ testdata/
 /.gocache
 /integration-logs
 /devenv/volumes
+/devenv/out
 bin/
 \#*\#
 .vscode/
@@ -22,6 +23,7 @@ bin/
 *.log
 *.test
 *.pprof
+*.out
 vendor/
 .env*
 .env.local

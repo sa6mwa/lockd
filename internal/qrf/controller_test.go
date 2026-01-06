@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"pkt.systems/lockd/internal/loggingutil"
+	"pkt.systems/pslog"
 )
 
 func TestControllerEngageAndRecover(t *testing.T) {
@@ -20,7 +20,7 @@ func TestControllerEngageAndRecover(t *testing.T) {
 		SoftRetryAfter:       50 * time.Millisecond,
 		EngagedRetryAfter:    200 * time.Millisecond,
 		RecoveryRetryAfter:   100 * time.Millisecond,
-		Logger:               loggingutil.NoopLogger(),
+		Logger:               pslog.NoopLogger(),
 	})
 
 	ctrl.Observe(Snapshot{
@@ -93,7 +93,7 @@ func TestConsumerLimitThrottlingBehaviour(t *testing.T) {
 		SoftRetryAfter:         25 * time.Millisecond,
 		EngagedRetryAfter:      150 * time.Millisecond,
 		RecoveryRetryAfter:     75 * time.Millisecond,
-		Logger:                 loggingutil.NoopLogger(),
+		Logger:                 pslog.NoopLogger(),
 	})
 
 	now := time.Now()
@@ -147,7 +147,7 @@ func TestControllerDisengageStopsQueueThrottling(t *testing.T) {
 		SoftRetryAfter:          50 * time.Millisecond,
 		EngagedRetryAfter:       200 * time.Millisecond,
 		RecoveryRetryAfter:      100 * time.Millisecond,
-		Logger:                  loggingutil.NoopLogger(),
+		Logger:                  pslog.NoopLogger(),
 		LoadSoftLimitMultiplier: 0,
 		LoadHardLimitMultiplier: 0,
 	}
@@ -221,7 +221,7 @@ func TestControllerSoftArm(t *testing.T) {
 		MemorySoftLimitBytes: 1 << 62,
 		MemoryHardLimitBytes: 1 << 63,
 		RecoverySamples:      1,
-		Logger:               loggingutil.NoopLogger(),
+		Logger:               pslog.NoopLogger(),
 	})
 
 	ctrl.Observe(Snapshot{
@@ -258,7 +258,7 @@ func TestConsumerBiasDuringEngaged(t *testing.T) {
 		SoftRetryAfter:     50 * time.Millisecond,
 		EngagedRetryAfter:  200 * time.Millisecond,
 		RecoveryRetryAfter: 100 * time.Millisecond,
-		Logger:             loggingutil.NoopLogger(),
+		Logger:             pslog.NoopLogger(),
 	})
 
 	ctrl.Observe(Snapshot{
@@ -289,7 +289,7 @@ func TestControllerThresholdTriggers(t *testing.T) {
 	baseCfg := Config{
 		Enabled:                 true,
 		RecoverySamples:         1,
-		Logger:                  loggingutil.NoopLogger(),
+		Logger:                  pslog.NoopLogger(),
 		QueueSoftLimit:          0,
 		QueueHardLimit:          0,
 		LockSoftLimit:           0,
@@ -566,8 +566,8 @@ func TestControllerThresholdTriggers(t *testing.T) {
 			if got := ctrl.State(); got != tc.wantState {
 				t.Fatalf("expected state %s, got %s", tc.wantState, got)
 			}
-			if _, reason, _ := ctrl.Status(); reason != tc.wantReason {
-				t.Fatalf("expected reason %q, got %q", tc.wantReason, reason)
+			if status := ctrl.Status(); status.Reason != tc.wantReason {
+				t.Fatalf("expected reason %q, got %q", tc.wantReason, status.Reason)
 			}
 		})
 	}
@@ -580,7 +580,7 @@ func TestControllerMemoryStrictHeadroom(t *testing.T) {
 		MemoryHardLimitPercent:      90,
 		MemoryStrictHeadroomPercent: 15,
 		RecoverySamples:             1,
-		Logger:                      loggingutil.NoopLogger(),
+		Logger:                      pslog.NoopLogger(),
 	})
 
 	now := time.Now()
@@ -599,9 +599,9 @@ func TestControllerMemoryStrictHeadroom(t *testing.T) {
 		SystemMemoryIncludesReclaimable: false,
 		CollectedAt:                     now.Add(5 * time.Millisecond),
 	})
-	state, reason, _ := ctrl.Status()
-	if state != StateSoftArm || reason != "memory_soft" {
-		t.Fatalf("expected soft arm with reason memory_soft, got state=%s reason=%s", state, reason)
+	status := ctrl.Status()
+	if status.State != StateSoftArm || status.Reason != "memory_soft" {
+		t.Fatalf("expected soft arm with reason memory_soft, got state=%s reason=%s", status.State, status.Reason)
 	}
 
 	ctrl.Observe(Snapshot{
@@ -609,8 +609,8 @@ func TestControllerMemoryStrictHeadroom(t *testing.T) {
 		SystemMemoryIncludesReclaimable: false,
 		CollectedAt:                     now.Add(10 * time.Millisecond),
 	})
-	state, reason, _ = ctrl.Status()
-	if state != StateEngaged || reason != "memory_hard" {
-		t.Fatalf("expected engaged with reason memory_hard, got state=%s reason=%s", state, reason)
+	status = ctrl.Status()
+	if status.State != StateEngaged || status.Reason != "memory_hard" {
+		t.Fatalf("expected engaged with reason memory_hard, got state=%s reason=%s", status.State, status.Reason)
 	}
 }

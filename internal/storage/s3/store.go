@@ -20,7 +20,6 @@ import (
 	"github.com/minio/minio-go/v7/pkg/encrypt"
 
 	"pkt.systems/kryptograf"
-	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/search"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/namespaces"
@@ -147,6 +146,16 @@ func New(cfg Config) (*Store, error) {
 // Close satisfies storage.Backend and is a no-op for the S3 client.
 func (s *Store) Close() error { return nil }
 
+// BackendHash returns the stable identity hash for this backend.
+func (s *Store) BackendHash(ctx context.Context) (string, error) {
+	endpoint := strings.TrimSpace(s.cfg.Endpoint)
+	bucket := strings.TrimSpace(s.cfg.Bucket)
+	prefix := strings.Trim(s.cfg.Prefix, "/")
+	desc := fmt.Sprintf("s3|endpoint=%s|bucket=%s|prefix=%s", endpoint, bucket, prefix)
+	result, err := storage.ResolveBackendHash(ctx, s, desc)
+	return result.Hash, err
+}
+
 // Client exposes the underlying MinIO client for diagnostics.
 func (s *Store) Client() *minio.Client {
 	return s.client
@@ -159,9 +168,6 @@ func (s *Store) Config() Config {
 
 func (s *Store) loggers(ctx context.Context) (pslog.Logger, pslog.Logger) {
 	logger := pslog.LoggerFromContext(ctx)
-	if logger == nil {
-		logger = loggingutil.NoopLogger()
-	}
 	logger = logger.With("storage_backend", "s3", "bucket", s.cfg.Bucket)
 	if s.cfg.Prefix != "" {
 		logger = logger.With("prefix", s.cfg.Prefix)
@@ -170,13 +176,13 @@ func (s *Store) loggers(ctx context.Context) (pslog.Logger, pslog.Logger) {
 }
 
 // LoadMeta downloads the metadata object for key and returns its ETag.
-func (s *Store) LoadMeta(ctx context.Context, namespace, key string) (*storage.Meta, string, error) {
+func (s *Store) LoadMeta(ctx context.Context, namespace, key string) (storage.LoadMetaResult, error) {
 	logger, verbose := s.loggers(ctx)
 	start := time.Now()
 	object, err := s.metaObject(namespace, key)
 	if err != nil {
 		logger.Debug("s3.load_meta.resolve_error", "namespace", namespace, "key", key, "error", err)
-		return nil, "", err
+		return storage.LoadMetaResult{}, err
 	}
 	verbose.Trace("s3.load_meta.begin", "namespace", namespace, "key", key, "object", object)
 
@@ -184,10 +190,10 @@ func (s *Store) LoadMeta(ctx context.Context, namespace, key string) (*storage.M
 	if err != nil {
 		if isNotFound(err) {
 			verbose.Debug("s3.load_meta.not_found", "key", key, "object", object, "elapsed", time.Since(start))
-			return nil, "", storage.ErrNotFound
+			return storage.LoadMetaResult{}, storage.ErrNotFound
 		}
 		logger.Debug("s3.load_meta.get_error", "key", key, "object", object, "error", err)
-		return nil, "", s.wrapError(err, "s3: get meta")
+		return storage.LoadMetaResult{}, s.wrapError(err, "s3: get meta")
 	}
 	defer obj.Close()
 
@@ -204,24 +210,24 @@ func (s *Store) LoadMeta(ctx context.Context, namespace, key string) (*storage.M
 		}
 		if foundErr {
 			verbose.Debug("s3.load_meta.not_found", "key", key, "object", object, "elapsed", time.Since(start))
-			return nil, "", storage.ErrNotFound
+			return storage.LoadMetaResult{}, storage.ErrNotFound
 		}
 		logger.Debug("s3.load_meta.read_error", "key", key, "object", object, "error", err)
-		return nil, "", fmt.Errorf("s3: read meta: %w", err)
+		return storage.LoadMetaResult{}, fmt.Errorf("s3: read meta: %w", err)
 	}
 	info, err := obj.Stat()
 	if err != nil {
 		if isNotFound(err) {
 			verbose.Debug("s3.load_meta.not_found", "key", key, "object", object, "elapsed", time.Since(start))
-			return nil, "", storage.ErrNotFound
+			return storage.LoadMetaResult{}, storage.ErrNotFound
 		}
 		logger.Debug("s3.load_meta.stat_error", "key", key, "object", object, "error", err)
-		return nil, "", s.wrapError(err, "s3: stat meta")
+		return storage.LoadMetaResult{}, s.wrapError(err, "s3: stat meta")
 	}
 	meta, err := storage.UnmarshalMeta(payload, s.crypto)
 	if err != nil {
 		logger.Debug("s3.load_meta.decode_error", "key", key, "object", object, "error", err)
-		return nil, "", err
+		return storage.LoadMetaResult{}, err
 	}
 	leaseOwner := ""
 	leaseExpires := int64(0)
@@ -240,7 +246,7 @@ func (s *Store) LoadMeta(ctx context.Context, namespace, key string) (*storage.M
 		"lease_expires_at", leaseExpires,
 		"elapsed", time.Since(start),
 	)
-	return meta, etag, nil
+	return storage.LoadMetaResult{Meta: meta, ETag: etag}, nil
 }
 
 // StoreMeta uploads the metadata protobuf, applying conditional copy semantics via expectedETag.
@@ -371,28 +377,28 @@ func (s *Store) ListMetaKeys(ctx context.Context, namespace string) ([]string, e
 }
 
 // ReadState streams the state object for key within the namespace and returns metadata.
-func (s *Store) ReadState(ctx context.Context, namespace, key string) (io.ReadCloser, *storage.StateInfo, error) {
+func (s *Store) ReadState(ctx context.Context, namespace, key string) (storage.ReadStateResult, error) {
 	logger, verbose := s.loggers(ctx)
 	start := time.Now()
 	object, err := s.stateObject(namespace, key)
 	if err != nil {
 		logger.Debug("s3.read_state.resolve_error", "namespace", namespace, "key", key, "error", err)
-		return nil, nil, err
+		return storage.ReadStateResult{}, err
 	}
 	verbose.Trace("s3.read_state.begin", "namespace", namespace, "key", key, "object", object)
 	info, err := s.client.StatObject(ctx, s.cfg.Bucket, object, minio.StatObjectOptions{})
 	if err != nil {
 		if isNotFound(err) {
 			verbose.Debug("s3.read_state.not_found", "namespace", namespace, "key", key, "object", object, "elapsed", time.Since(start))
-			return nil, nil, storage.ErrNotFound
+			return storage.ReadStateResult{}, storage.ErrNotFound
 		}
 		logger.Debug("s3.read_state.stat_error", "namespace", namespace, "key", key, "object", object, "error", err)
-		return nil, nil, s.wrapError(err, "s3: stat state")
+		return storage.ReadStateResult{}, s.wrapError(err, "s3: stat state")
 	}
 	obj, err := s.client.GetObject(ctx, s.cfg.Bucket, object, minio.GetObjectOptions{})
 	if err != nil {
 		logger.Debug("s3.read_state.get_error", "namespace", namespace, "key", key, "object", object, "error", err)
-		return nil, nil, s.wrapError(err, "s3: get state")
+		return storage.ReadStateResult{}, s.wrapError(err, "s3: get state")
 	}
 	etag := stripETag(info.ETag)
 	infoOut := &storage.StateInfo{
@@ -406,14 +412,14 @@ func (s *Store) ReadState(ctx context.Context, namespace, key string) (io.ReadCl
 		infoOut.Descriptor = append([]byte(nil), desc...)
 	} else if err != nil {
 		obj.Close()
-		return nil, nil, err
+		return storage.ReadStateResult{}, err
 	}
 	encrypted := s.crypto != nil && s.crypto.Enabled()
-	var descriptor []byte
-	if descFromCtx, ok := storage.StateDescriptorFromContext(ctx); ok && len(descFromCtx) > 0 {
-		descriptor = append([]byte(nil), descFromCtx...)
-	} else if len(infoOut.Descriptor) > 0 {
-		descriptor = append([]byte(nil), infoOut.Descriptor...)
+	descriptor := append([]byte(nil), infoOut.Descriptor...)
+	if len(descriptor) == 0 {
+		if descFromCtx, ok := storage.StateDescriptorFromContext(ctx); ok && len(descFromCtx) > 0 {
+			descriptor = append([]byte(nil), descFromCtx...)
+		}
 	}
 	if len(descriptor) > 0 && len(infoOut.Descriptor) == 0 {
 		infoOut.Descriptor = append([]byte(nil), descriptor...)
@@ -426,19 +432,19 @@ func (s *Store) ReadState(ctx context.Context, namespace, key string) (io.ReadCl
 		if len(descriptor) == 0 {
 			obj.Close()
 			logger.Debug("s3.read_state.missing_descriptor", "namespace", namespace, "key", key)
-			return nil, nil, fmt.Errorf("s3: missing state descriptor for %q", key)
+			return storage.ReadStateResult{}, fmt.Errorf("s3: missing state descriptor for %q", key)
 		}
 		mat, err := s.crypto.MaterialFromDescriptor(objectCtx, descriptor)
 		if err != nil {
 			obj.Close()
 			logger.Debug("s3.read_state.material_error", "namespace", namespace, "key", key, "error", err)
-			return nil, nil, err
+			return storage.ReadStateResult{}, err
 		}
 		decReader, err := s.crypto.DecryptReaderForMaterial(obj, mat)
 		if err != nil {
 			obj.Close()
 			logger.Debug("s3.read_state.decrypt_error", "namespace", namespace, "key", key, "error", err)
-			return nil, nil, err
+			return storage.ReadStateResult{}, err
 		}
 		verbose.Debug("s3.read_state.success",
 			"namespace", namespace,
@@ -449,7 +455,7 @@ func (s *Store) ReadState(ctx context.Context, namespace, key string) (io.ReadCl
 			"cipher_size", info.Size,
 			"elapsed", time.Since(start),
 		)
-		return decReader, infoOut, nil
+		return storage.ReadStateResult{Reader: decReader, Info: infoOut}, nil
 	}
 	verbose.Debug("s3.read_state.success",
 		"namespace", namespace,
@@ -460,7 +466,7 @@ func (s *Store) ReadState(ctx context.Context, namespace, key string) (io.ReadCl
 		"cipher_size", info.Size,
 		"elapsed", time.Since(start),
 	)
-	return obj, infoOut, nil
+	return storage.ReadStateResult{Reader: obj, Info: infoOut}, nil
 }
 
 // WriteState uploads a new state object, optionally guarding against stale ETags.
@@ -480,6 +486,8 @@ func (s *Store) WriteState(ctx context.Context, namespace, key string, body io.R
 	s.applySSE(&putOpts)
 	if opts.ExpectedETag != "" {
 		putOpts.SetMatchETag(opts.ExpectedETag)
+	} else if opts.IfNotExists {
+		putOpts.SetMatchETagExcept("*")
 	}
 	length := int64(-1)
 	encrypted := s.crypto != nil && s.crypto.Enabled()
@@ -495,18 +503,15 @@ func (s *Store) WriteState(ctx context.Context, namespace, key string, body io.R
 		if ok && len(descFromCtx) > 0 {
 			descriptor = append([]byte(nil), descFromCtx...)
 			mat, err = s.crypto.MaterialFromDescriptor(objectCtx, descriptor)
-			if err != nil {
-				logger.Debug("s3.write_state.material_error", "namespace", namespace, "key", key, "object", object, "error", err)
-				return nil, err
-			}
 		} else {
-			var descBytes []byte
-			mat, descBytes, err = s.crypto.MintMaterial(objectCtx)
+			var minted storage.MaterialResult
+			minted, err = s.crypto.MintMaterial(objectCtx)
 			if err != nil {
 				logger.Debug("s3.write_state.mint_descriptor_error", "namespace", namespace, "key", key, "object", object, "error", err)
 				return nil, err
 			}
-			descriptor = append([]byte(nil), descBytes...)
+			descriptor = append([]byte(nil), minted.Descriptor...)
+			mat = minted.Material
 		}
 		if len(descriptor) > 0 {
 			if putOpts.UserMetadata == nil {
@@ -563,6 +568,11 @@ func (s *Store) WriteState(ctx context.Context, namespace, key string, body io.R
 	result := &storage.PutStateResult{
 		BytesWritten: bytesWritten,
 		NewETag:      stripETag(info.ETag),
+	}
+	// Some S3 providers return a provisional ETag on streaming uploads. A quick
+	// stat after the upload gives us the final, durable ETag for CAS.
+	if statInfo, statErr := s.client.StatObject(ctx, s.cfg.Bucket, object, minio.StatObjectOptions{}); statErr == nil {
+		result.NewETag = stripETag(statInfo.ETag)
 	}
 	if len(descriptor) > 0 {
 		result.Descriptor = append([]byte(nil), descriptor...)
@@ -682,7 +692,7 @@ func (s *Store) ListObjects(ctx context.Context, namespace string, opts storage.
 }
 
 // GetObject downloads the raw payload for key within the namespace.
-func (s *Store) GetObject(ctx context.Context, namespace, key string) (io.ReadCloser, *storage.ObjectInfo, error) {
+func (s *Store) GetObject(ctx context.Context, namespace, key string) (storage.GetObjectResult, error) {
 	logger, verbose := s.loggers(ctx)
 	object := s.objectKey(namespace, key)
 	verbose.Trace("s3.get_object.begin", "namespace", namespace, "key", key, "object", object)
@@ -690,15 +700,15 @@ func (s *Store) GetObject(ctx context.Context, namespace, key string) (io.ReadCl
 	if err != nil {
 		if isNotFound(err) {
 			verbose.Debug("s3.get_object.not_found", "namespace", namespace, "key", key, "object", object)
-			return nil, nil, storage.ErrNotFound
+			return storage.GetObjectResult{}, storage.ErrNotFound
 		}
 		logger.Debug("s3.get_object.stat_error", "namespace", namespace, "key", key, "object", object, "error", err)
-		return nil, nil, s.wrapError(err, "s3: stat object")
+		return storage.GetObjectResult{}, s.wrapError(err, "s3: stat object")
 	}
 	obj, err := s.client.GetObject(ctx, s.cfg.Bucket, object, minio.GetObjectOptions{})
 	if err != nil {
 		logger.Debug("s3.get_object.get_error", "namespace", namespace, "key", key, "object", object, "error", err)
-		return nil, nil, s.wrapError(err, "s3: get object")
+		return storage.GetObjectResult{}, s.wrapError(err, "s3: get object")
 	}
 	reader := &notFoundAwareObject{object: obj}
 	meta := &storage.ObjectInfo{
@@ -712,13 +722,13 @@ func (s *Store) GetObject(ctx context.Context, namespace, key string) (io.ReadCl
 		meta.Descriptor = append([]byte(nil), desc...)
 	} else if err != nil {
 		obj.Close()
-		return nil, nil, err
+		return storage.GetObjectResult{}, err
 	}
 	if plain, ok := storage.ObjectPlaintextSizeFromContext(ctx); ok && plain > 0 {
 		meta.Size = plain
 	}
 	verbose.Debug("s3.get_object.success", "namespace", namespace, "key", key, "object", object, "etag", meta.ETag, "size", meta.Size)
-	return reader, meta, nil
+	return storage.GetObjectResult{Reader: reader, Info: meta}, nil
 }
 
 // PutObject uploads raw object bytes with conditional guards within the namespace.
@@ -939,7 +949,16 @@ func isNotFound(err error) bool {
 func isPreconditionFailed(err error) bool {
 	errResp := minio.ErrorResponse{}
 	if errors.As(err, &errResp) {
-		return errResp.StatusCode == http.StatusPreconditionFailed
+		if errResp.StatusCode == http.StatusPreconditionFailed {
+			return true
+		}
+		if errResp.StatusCode == http.StatusConflict {
+			switch errResp.Code {
+			case "ConditionalRequestConflict", "OperationAborted":
+				return true
+			}
+		}
+		return false
 	}
 	return false
 }

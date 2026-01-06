@@ -19,6 +19,7 @@ import (
 // domain services. It mirrors the HTTP handler wiring but is transport agnostic.
 type Config struct {
 	Store                  storage.Backend
+	BackendHash            string
 	Crypto                 *storage.Crypto
 	QueueService           QueueProvider
 	QueueDispatcher        QueueDispatcher
@@ -30,18 +31,21 @@ type Config struct {
 	Logger                 pslog.Logger
 	Clock                  clock.Clock
 
-	DefaultTTL       time.Duration
-	MaxTTL           time.Duration
-	AcquireBlock     time.Duration
-	JSONMaxBytes     int64
-	SpoolThreshold   int64
-	EnforceIdentity  bool
-	MetaWarmup       WarmupConfig
-	StateWarmup      WarmupConfig
-	LSFObserver      *lsf.Observer
-	QRFController    *qrf.Controller
-	ShutdownState    func() ShutdownState
-	NamespaceTracker *NamespaceTracker
+	DefaultTTL           time.Duration
+	MaxTTL               time.Duration
+	AcquireBlock         time.Duration
+	JSONMaxBytes         int64
+	AttachmentMaxBytes   int64
+	SpoolThreshold       int64
+	TxnDecisionRetention time.Duration
+	EnforceIdentity      bool
+	MetaWarmup           WarmupConfig
+	StateWarmup          WarmupConfig
+	LSFObserver          *lsf.Observer
+	QRFController        *qrf.Controller
+	ShutdownState        func() ShutdownState
+	NamespaceTracker     *NamespaceTracker
+	TCDecider            TCDecider
 }
 
 // WarmupConfig governs backend warmup retries for meta/state.

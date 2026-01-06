@@ -46,7 +46,7 @@ func TestLoadBundleMissingServerKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate ca: %v", err)
 	}
-	serverCertPEM, serverKeyPEM, err := ca.IssueServer([]string{"127.0.0.1"}, "srv", time.Hour)
+	serverIssued, err := ca.IssueServer([]string{"127.0.0.1"}, "srv", time.Hour)
 	if err != nil {
 		t.Fatalf("issue server: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestLoadBundleMissingServerKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("extract material: %v", err)
 	}
-	serverBundle, err := EncodeServerBundle(ca.CertPEM, ca.KeyPEM, serverCertPEM, serverKeyPEM, nil)
+	serverBundle, err := EncodeServerBundle(ca.CertPEM, ca.KeyPEM, serverIssued.CertPEM, serverIssued.KeyPEM, nil)
 	if err != nil {
 		t.Fatalf("encode server bundle: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestLoadBundleMissingServerKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("apply material: %v", err)
 	}
-	broken := bytes.Replace(serverBundle, serverKeyPEM, []byte{}, 1)
+	broken := bytes.Replace(serverBundle, serverIssued.KeyPEM, []byte{}, 1)
 	if _, err := LoadBundleFromBytes(broken); err == nil || !strings.Contains(err.Error(), "unable to match server key") {
 		t.Fatalf("expected missing key error, got %v", err)
 	}
@@ -77,23 +77,23 @@ func TestLoadClientBundleErrors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate ca: %v", err)
 	}
-	clientCertA, clientKeyA, err := ca.IssueClient("client-a", time.Hour)
+	clientIssuedA, err := ca.IssueClient(ClientCertRequest{CommonName: "client-a", Validity: time.Hour})
 	if err != nil {
 		t.Fatalf("issue client a: %v", err)
 	}
-	data := append([]byte{}, clientCertA...)
-	data = append(data, clientKeyA...)
+	data := append([]byte{}, clientIssuedA.CertPEM...)
+	data = append(data, clientIssuedA.KeyPEM...)
 	if _, err := LoadClientBundleFromBytes(data); err == nil || !strings.Contains(err.Error(), "CA certificate required") {
 		t.Fatalf("expected CA required error, got %v", err)
 	}
-	_, clientKeyB, err := ca.IssueClient("client-b", time.Hour)
+	clientIssuedB, err := ca.IssueClient(ClientCertRequest{CommonName: "client-b", Validity: time.Hour})
 	if err != nil {
 		t.Fatalf("issue client b: %v", err)
 	}
 	var buf bytes.Buffer
 	buf.Write(ca.CertPEM)
-	buf.Write(clientCertA)
-	buf.Write(clientKeyB)
+	buf.Write(clientIssuedA.CertPEM)
+	buf.Write(clientIssuedB.KeyPEM)
 	if _, err := LoadClientBundleFromBytes(buf.Bytes()); err == nil || !strings.Contains(err.Error(), "matching private key not found") {
 		t.Fatalf("expected mismatch error, got %v", err)
 	}

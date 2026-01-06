@@ -31,6 +31,9 @@ func retryableTransportError(err error) bool {
 	if err == nil {
 		return false
 	}
+	if strings.Contains(err.Error(), "all endpoints unreachable") {
+		return true
+	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return true
 	}
@@ -126,7 +129,7 @@ func TestMinioLockLifecycle(t *testing.T) {
 		t.Fatalf("expected cursor 7, got %v", state["cursor"])
 	}
 
-	if !releaseLease(t, ctx, cli, key, lease.LeaseID) {
+	if !releaseLease(t, ctx, lease) {
 		t.Fatalf("expected release success")
 	}
 
@@ -134,10 +137,22 @@ func TestMinioLockLifecycle(t *testing.T) {
 	if secondLease.LeaseID == lease.LeaseID {
 		t.Fatal("expected a new lease id")
 	}
-	if !releaseLease(t, ctx, cli, key, secondLease.LeaseID) {
+	if !releaseLease(t, ctx, secondLease) {
 		t.Fatalf("expected release success")
 	}
 
+	cleanupMinio(t, cfg, key)
+}
+
+func TestMinioAttachmentsLifecycle(t *testing.T) {
+	cfg := loadMinioConfig(t)
+	ensureMinioBucket(t, cfg)
+	ensureStoreReady(t, context.Background(), cfg)
+	cli := startLockdServer(t, cfg)
+
+	ctx := context.Background()
+	key := "minio-attach-" + uuidv7.NewString()
+	runAttachmentTest(t, ctx, cli, key)
 	cleanupMinio(t, cfg, key)
 }
 
@@ -163,7 +178,7 @@ func TestMinioLockConcurrency(t *testing.T) {
 				lease := acquireWithRetry(t, ctx, cli, key, owner, ttl, 20)
 				state, etag, version, err := getStateJSON(ctx, cli, key, lease.LeaseID)
 				if err != nil {
-					_ = releaseLease(t, ctx, cli, key, lease.LeaseID)
+					_ = releaseLease(t, ctx, lease)
 					continue
 				}
 				if version == "" {
@@ -180,7 +195,7 @@ func TestMinioLockConcurrency(t *testing.T) {
 				if _, err := cli.UpdateBytes(ctx, key, lease.LeaseID, body, lockdclient.UpdateOptions{IfETag: etag, IfVersion: version}); err != nil {
 					t.Fatalf("update state: %v", err)
 				}
-				_ = releaseLease(t, ctx, cli, key, lease.LeaseID)
+				_ = releaseLease(t, ctx, lease)
 				iter++
 			}
 		}(id)
@@ -192,7 +207,7 @@ func TestMinioLockConcurrency(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get_state: %v", err)
 	}
-	if !releaseLease(t, ctx, cli, key, verifier.LeaseID) {
+	if !releaseLease(t, ctx, verifier) {
 		t.Fatalf("expected release success")
 	}
 	cleanupMinio(t, cfg, key)
@@ -363,7 +378,7 @@ func TestMinioAcquireForUpdateCallbackSingleServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify get_state: %v", err)
 	}
-	if !releaseLease(t, verifyCtx, seedCli, key, verifyLease.LeaseID) {
+	if !releaseLease(t, verifyCtx, verifyLease) {
 		t.Fatalf("verify release failed")
 	}
 	if state["owner"] != "reader-single" {
@@ -398,7 +413,7 @@ func TestMinioRemoveAcquireForUpdate(t *testing.T) {
 		if err := lease.Save(ctx, payload); err != nil {
 			t.Fatalf("seed save: %v", err)
 		}
-		releaseLease(t, ctx, cli, key, lease.LeaseID)
+		releaseLease(t, ctx, lease)
 	}
 
 	t.Run("remove-in-handler", func(t *testing.T) {
@@ -448,7 +463,7 @@ func TestMinioRemoveAcquireForUpdate(t *testing.T) {
 		if state != nil {
 			t.Fatalf("expected empty state after handler remove, got %+v", state)
 		}
-		releaseLease(t, ctx, cli, key, verify.LeaseID)
+		releaseLease(t, ctx, verify)
 	})
 
 	t.Run("remove-and-recreate", func(t *testing.T) {
@@ -489,7 +504,7 @@ func TestMinioRemoveAcquireForUpdate(t *testing.T) {
 		if count, ok := state["count"].(float64); !ok || count != 2.0 {
 			t.Fatalf("expected count 2.0, got %+v", state["count"])
 		}
-		releaseLease(t, ctx, cli, key, verify.LeaseID)
+		releaseLease(t, ctx, verify)
 	})
 }
 func TestMinioRemoveSingleServer(t *testing.T) {
@@ -525,7 +540,7 @@ func TestMinioRemoveSingleServer(t *testing.T) {
 		if state != nil {
 			t.Fatalf("expected nil state after remove, got %+v", state)
 		}
-		releaseLease(t, ctx, cli, key, lease.LeaseID)
+		releaseLease(t, ctx, lease)
 
 		verify := acquireWithRetry(t, ctx, cli, key, "remover-update-verify", 30, lockdclient.BlockWaitForever)
 		state, _, _, err = getStateJSON(ctx, cli, key, verify.LeaseID)
@@ -535,7 +550,7 @@ func TestMinioRemoveSingleServer(t *testing.T) {
 		if state != nil {
 			t.Fatalf("expected empty state post-remove, got %+v", state)
 		}
-		releaseLease(t, ctx, cli, key, verify.LeaseID)
+		releaseLease(t, ctx, verify)
 		cleanupMinio(t, cfg, key)
 	})
 
@@ -556,7 +571,7 @@ func TestMinioRemoveSingleServer(t *testing.T) {
 		if state != nil {
 			t.Fatalf("expected nil state, got %+v", state)
 		}
-		releaseLease(t, ctx, cli, key, lease.LeaseID)
+		releaseLease(t, ctx, lease)
 		cleanupMinio(t, cfg, key)
 	})
 
@@ -566,7 +581,7 @@ func TestMinioRemoveSingleServer(t *testing.T) {
 		if err := writer.Save(ctx, map[string]any{"step": "written"}); err != nil {
 			t.Fatalf("writer save: %v", err)
 		}
-		releaseLease(t, ctx, cli, key, writer.LeaseID)
+		releaseLease(t, ctx, writer)
 
 		remover := acquireWithRetry(t, ctx, cli, key, "remover", 30, lockdclient.BlockWaitForever)
 		state, _, _, err := getStateJSON(ctx, cli, key, remover.LeaseID)
@@ -583,7 +598,7 @@ func TestMinioRemoveSingleServer(t *testing.T) {
 		if !res.Removed {
 			t.Fatalf("expected removal, got %+v", res)
 		}
-		releaseLease(t, ctx, cli, key, remover.LeaseID)
+		releaseLease(t, ctx, remover)
 
 		verify := acquireWithRetry(t, ctx, cli, key, "remover-verify", 30, lockdclient.BlockWaitForever)
 		state, _, _, err = getStateJSON(ctx, cli, key, verify.LeaseID)
@@ -593,9 +608,111 @@ func TestMinioRemoveSingleServer(t *testing.T) {
 		if state != nil {
 			t.Fatalf("expected empty state after remove, got %+v", state)
 		}
-		releaseLease(t, ctx, cli, key, verify.LeaseID)
+		releaseLease(t, ctx, verify)
 		cleanupMinio(t, cfg, key)
 	})
+}
+
+func TestMinioTxnCommitAcrossNodes(t *testing.T) {
+	cfg := loadMinioConfig(t)
+	ensureMinioBucket(t, cfg)
+	ensureStoreReady(t, context.Background(), cfg)
+
+	cliRM := startLockdServer(t, cfg) // acts as RM holding the lease
+	cliTC := startLockdServer(t, cfg) // acts as TC issuing the decision
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	key := "minio-txn-cross-commit-" + uuidv7.NewString()
+
+	lease := acquireWithRetry(t, ctx, cliRM, key, "rm-node", 45, lockdclient.BlockWaitForever)
+	if err := lease.Save(ctx, map[string]any{"value": "from-rm"}); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+
+	resp, err := cliTC.Release(ctx, api.ReleaseRequest{
+		Key:     key,
+		LeaseID: lease.LeaseID,
+		TxnID:   lease.TxnID,
+	})
+	if err != nil {
+		t.Fatalf("cross-node release (commit): %v", err)
+	}
+	if !resp.Released {
+		t.Fatalf("expected release=true")
+	}
+	// Clear lease tracker on originating server to avoid lingering active lease during shutdown.
+	_, _ = cliRM.Release(ctx, api.ReleaseRequest{
+		Key:     key,
+		LeaseID: lease.LeaseID,
+		TxnID:   lease.TxnID,
+	})
+
+	verifier := acquireWithRetry(t, ctx, cliRM, key, "verifier", 45, lockdclient.BlockWaitForever)
+	state, _, _, err := getStateJSON(ctx, cliRM, key, verifier.LeaseID)
+	if err != nil {
+		t.Fatalf("get_state: %v", err)
+	}
+	if !releaseLease(t, ctx, verifier) {
+		t.Fatalf("release verifier failed")
+	}
+	if state == nil || state["value"] != "from-rm" {
+		t.Fatalf("expected committed state from RM, got %+v", state)
+	}
+	cleanupMinio(t, cfg, key)
+}
+
+func TestMinioTxnRollbackAcrossNodes(t *testing.T) {
+	cfg := loadMinioConfig(t)
+	ensureMinioBucket(t, cfg)
+	ensureStoreReady(t, context.Background(), cfg)
+
+	cliRM := startLockdServer(t, cfg)
+	cliTC := startLockdServer(t, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	key := "minio-txn-cross-rollback-" + uuidv7.NewString()
+
+	lease := acquireWithRetry(t, ctx, cliRM, key, "rm-node", 45, lockdclient.BlockWaitForever)
+	if err := lease.Save(ctx, map[string]any{"value": "should-rollback"}); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+
+	resp, err := cliTC.Release(ctx, api.ReleaseRequest{
+		Key:      key,
+		LeaseID:  lease.LeaseID,
+		TxnID:    lease.TxnID,
+		Rollback: true,
+	})
+	if err != nil {
+		t.Fatalf("cross-node release (rollback): %v", err)
+	}
+	if !resp.Released {
+		t.Fatalf("expected release=true")
+	}
+	// Clear lease tracker on originating server.
+	_, _ = cliRM.Release(ctx, api.ReleaseRequest{
+		Key:      key,
+		LeaseID:  lease.LeaseID,
+		TxnID:    lease.TxnID,
+		Rollback: true,
+	})
+
+	verifier := acquireWithRetry(t, ctx, cliRM, key, "verifier", 45, lockdclient.BlockWaitForever)
+	state, _, _, err := getStateJSON(ctx, cliRM, key, verifier.LeaseID)
+	if err != nil {
+		t.Fatalf("get_state: %v", err)
+	}
+	if !releaseLease(t, ctx, verifier) {
+		t.Fatalf("release verifier failed")
+	}
+	if state != nil {
+		t.Fatalf("expected rollback to discard state, got %+v", state)
+	}
+	cleanupMinio(t, cfg, key)
 }
 
 func TestMinioAcquireForUpdateCallbackFailover(t *testing.T) {
@@ -710,7 +827,7 @@ func TestMinioAcquireForUpdateCallbackFailover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify get_state: %v", err)
 	}
-	if !releaseLease(t, ctx, seedClient, key, verifier.LeaseID) {
+	if !releaseLease(t, ctx, verifier) {
 		t.Fatalf("verify release failed")
 	}
 	if finalState == nil {
@@ -838,7 +955,7 @@ func TestMinioRemoveFailover(t *testing.T) {
 	if err := seedLease.Save(ctx, map[string]any{"payload": "seed", "count": 1.0}); err != nil {
 		t.Fatalf("seed save: %v", err)
 	}
-	releaseLease(t, ctx, seedClient, key, seedLease.LeaseID)
+	releaseLease(t, ctx, seedLease)
 
 	clientLogger, clientLogs := testlog.NewRecorder(t, pslog.TraceLevel)
 	clientOptions := []lockdclient.Option{
@@ -879,7 +996,7 @@ func TestMinioRemoveFailover(t *testing.T) {
 	if !res.Removed {
 		t.Fatalf("expected removal success, got %+v", res)
 	}
-	releaseLease(t, ctx, failoverClient, key, lease.LeaseID)
+	releaseLease(t, ctx, lease)
 
 	verify := acquireWithRetry(t, ctx, seedClient, key, "failover-verify", 45, lockdclient.BlockWaitForever)
 	state, _, _, err := getStateJSON(ctx, seedClient, key, verify.LeaseID)
@@ -889,7 +1006,7 @@ func TestMinioRemoveFailover(t *testing.T) {
 	if state != nil {
 		t.Fatalf("expected empty state after failover remove, got %+v", state)
 	}
-	releaseLease(t, ctx, seedClient, key, verify.LeaseID)
+	releaseLease(t, ctx, verify)
 
 	assertMinioRemoveFailoverLogs(t, clientLogs, primary.URL(), backup.URL())
 }
@@ -931,7 +1048,7 @@ func TestMinioRemoveCASMismatch(t *testing.T) {
 	if !res.Removed {
 		t.Fatalf("expected removal, got %+v", res)
 	}
-	releaseLease(t, ctx, cli, key, lease.LeaseID)
+	releaseLease(t, ctx, lease)
 
 	verify := acquireWithRetry(t, ctx, cli, key, "cas-verify", 45, lockdclient.BlockWaitForever)
 	state, _, _, err := getStateJSON(ctx, cli, key, verify.LeaseID)
@@ -941,7 +1058,7 @@ func TestMinioRemoveCASMismatch(t *testing.T) {
 	if state != nil {
 		t.Fatalf("expected empty state after remove, got %+v", state)
 	}
-	releaseLease(t, ctx, cli, key, verify.LeaseID)
+	releaseLease(t, ctx, verify)
 	cleanupMinio(t, cfg, key)
 }
 
@@ -988,7 +1105,7 @@ func TestMinioRemoveKeepAlive(t *testing.T) {
 		t.Fatalf("save after remove: %v", err)
 	}
 	finalVersion := lease.Version
-	releaseLease(t, ctx, cli, key, lease.LeaseID)
+	releaseLease(t, ctx, lease)
 
 	verify := acquireWithRetry(t, ctx, cli, key, "keepalive-verify", 45, lockdclient.BlockWaitForever)
 	state, _, _, err := getStateJSON(ctx, cli, key, verify.LeaseID)
@@ -1001,6 +1118,6 @@ func TestMinioRemoveKeepAlive(t *testing.T) {
 	if verify.Version != finalVersion {
 		t.Fatalf("expected version %d, got %d", finalVersion, verify.Version)
 	}
-	releaseLease(t, ctx, cli, key, verify.LeaseID)
+	releaseLease(t, ctx, verify)
 	cleanupMinio(t, cfg, key)
 }

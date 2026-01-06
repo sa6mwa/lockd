@@ -82,34 +82,48 @@ func newConfigGenCommand() *cobra.Command {
 }
 
 type configDefaults struct {
-	Listen                   string  `yaml:"listen"`
-	ListenProto              string  `yaml:"listen-proto"`
-	Store                    string  `yaml:"store"`
-	DefaultNamespace         string  `yaml:"default-namespace"`
-	JSONMax                  string  `yaml:"json-max"`
-	JSONUtil                 string  `yaml:"json-util"`
-	PayloadSpoolMem          string  `yaml:"payload-spool-mem"`
-	DefaultTTL               string  `yaml:"default-ttl"`
-	MaxTTL                   string  `yaml:"max-ttl"`
-	AcquireBlock             string  `yaml:"acquire-block"`
-	SweeperInterval          string  `yaml:"sweeper-interval"`
-	DrainGrace               string  `yaml:"drain-grace"`
-	ShutdownTimeout          string  `yaml:"shutdown-timeout"`
-	DisableMTLS              bool    `yaml:"disable-mtls"`
-	DisableStorageEncryption bool    `yaml:"disable-storage-encryption"`
-	StorageEncryptionSnappy  bool    `yaml:"storage-encryption-snappy"`
-	Bundle                   string  `yaml:"bundle"`
-	DenylistPath             string  `yaml:"denylist-path"`
-	StoreSSE                 string  `yaml:"s3-sse"`
-	StoreKMSKeyID            string  `yaml:"s3-kms-key-id"`
-	StoreMaxPartSize         string  `yaml:"s3-max-part-size"`
-	AWSRegion                string  `yaml:"aws-region"`
-	AWSKMSKeyID              string  `yaml:"aws-kms-key-id"`
-	StorageRetryMaxAttempts  int     `yaml:"storage-retry-attempts"`
-	StorageRetryBaseDelay    string  `yaml:"storage-retry-base-delay"`
-	StorageRetryMaxDelay     string  `yaml:"storage-retry-max-delay"`
-	StorageRetryMultiplier   float64 `yaml:"storage-retry-multiplier"`
-	LogLevel                 string  `yaml:"log-level"`
+	Listen                    string   `yaml:"listen"`
+	ListenProto               string   `yaml:"listen-proto"`
+	Store                     string   `yaml:"store"`
+	DefaultNamespace          string   `yaml:"default-namespace"`
+	JSONMax                   string   `yaml:"json-max"`
+	JSONUtil                  string   `yaml:"json-util"`
+	PayloadSpoolMem           string   `yaml:"payload-spool-mem"`
+	DefaultTTL                string   `yaml:"default-ttl"`
+	MaxTTL                    string   `yaml:"max-ttl"`
+	AcquireBlock              string   `yaml:"acquire-block"`
+	SweeperInterval           string   `yaml:"sweeper-interval"`
+	DrainGrace                string   `yaml:"drain-grace"`
+	ShutdownTimeout           string   `yaml:"shutdown-timeout"`
+	DisableMTLS               bool     `yaml:"disable-mtls"`
+	HTTP2MaxConcurrentStreams int      `yaml:"http2-max-concurrent-streams"`
+	DisableStorageEncryption  bool     `yaml:"disable-storage-encryption"`
+	StorageEncryptionSnappy   bool     `yaml:"storage-encryption-snappy"`
+	Bundle                    string   `yaml:"bundle"`
+	DenylistPath              string   `yaml:"denylist-path"`
+	DisableMemQueueWatch      bool     `yaml:"disable-mem-queue-watch"`
+	TCTrustDir                string   `yaml:"tc-trust-dir"`
+	TCDisableAuth             bool     `yaml:"tc-disable-auth"`
+	TCAllowDefaultCA          bool     `yaml:"tc-allow-default-ca"`
+	SelfEndpoint              string   `yaml:"self"`
+	TCJoinEndpoints           []string `yaml:"tc-join"`
+	TCFanoutTimeout           string   `yaml:"tc-fanout-timeout"`
+	TCFanoutAttempts          int      `yaml:"tc-fanout-attempts"`
+	TCFanoutBaseDelay         string   `yaml:"tc-fanout-base-delay"`
+	TCFanoutMaxDelay          string   `yaml:"tc-fanout-max-delay"`
+	TCFanoutMultiplier        float64  `yaml:"tc-fanout-multiplier"`
+	TCDecisionRetention       string   `yaml:"tc-decision-retention"`
+	TCClientBundle            string   `yaml:"tc-client-bundle"`
+	StoreSSE                  string   `yaml:"s3-sse"`
+	StoreKMSKeyID             string   `yaml:"s3-kms-key-id"`
+	StoreMaxPartSize          string   `yaml:"s3-max-part-size"`
+	AWSRegion                 string   `yaml:"aws-region"`
+	AWSKMSKeyID               string   `yaml:"aws-kms-key-id"`
+	StorageRetryMaxAttempts   int      `yaml:"storage-retry-attempts"`
+	StorageRetryBaseDelay     string   `yaml:"storage-retry-base-delay"`
+	StorageRetryMaxDelay      string   `yaml:"storage-retry-max-delay"`
+	StorageRetryMultiplier    float64  `yaml:"storage-retry-multiplier"`
+	LogLevel                  string   `yaml:"log-level"`
 }
 
 func configHumanizeBytes(n int64) string {
@@ -117,35 +131,53 @@ func configHumanizeBytes(n int64) string {
 }
 
 func defaultConfigYAML(overrides ...func(*configDefaults)) ([]byte, error) {
+	tcTrustDir := ""
+	if dir, err := lockd.DefaultTCTrustDir(); err == nil {
+		tcTrustDir = dir
+	}
 	defaults := configDefaults{
-		Listen:                   lockd.DefaultListen,
-		ListenProto:              lockd.DefaultListenProto,
-		Store:                    lockd.DefaultStore,
-		DefaultNamespace:         lockd.DefaultNamespace,
-		JSONMax:                  configHumanizeBytes(lockd.DefaultJSONMaxBytes),
-		JSONUtil:                 lockd.JSONUtilLockd,
-		PayloadSpoolMem:          configHumanizeBytes(lockd.DefaultPayloadSpoolMemoryThreshold),
-		DefaultTTL:               lockd.DefaultDefaultTTL.String(),
-		MaxTTL:                   lockd.DefaultMaxTTL.String(),
-		AcquireBlock:             lockd.DefaultAcquireBlock.String(),
-		SweeperInterval:          lockd.DefaultSweeperInterval.String(),
-		DrainGrace:               lockd.DefaultDrainGrace.String(),
-		ShutdownTimeout:          lockd.DefaultShutdownTimeout.String(),
-		DisableMTLS:              false,
-		DisableStorageEncryption: false,
-		StorageEncryptionSnappy:  false,
-		Bundle:                   "",
-		DenylistPath:             "",
-		StoreSSE:                 "",
-		StoreKMSKeyID:            "",
-		StoreMaxPartSize:         configHumanizeBytes(lockd.DefaultS3MaxPartSize),
-		AWSRegion:                "",
-		AWSKMSKeyID:              "",
-		StorageRetryMaxAttempts:  lockd.DefaultStorageRetryMaxAttempts,
-		StorageRetryBaseDelay:    lockd.DefaultStorageRetryBaseDelay.String(),
-		StorageRetryMaxDelay:     lockd.DefaultStorageRetryMaxDelay.String(),
-		StorageRetryMultiplier:   lockd.DefaultStorageRetryMultiplier,
-		LogLevel:                 "info",
+		Listen:                    lockd.DefaultListen,
+		ListenProto:               lockd.DefaultListenProto,
+		Store:                     lockd.DefaultStore,
+		DefaultNamespace:          lockd.DefaultNamespace,
+		JSONMax:                   configHumanizeBytes(lockd.DefaultJSONMaxBytes),
+		JSONUtil:                  lockd.JSONUtilLockd,
+		PayloadSpoolMem:           configHumanizeBytes(lockd.DefaultPayloadSpoolMemoryThreshold),
+		DefaultTTL:                lockd.DefaultDefaultTTL.String(),
+		MaxTTL:                    lockd.DefaultMaxTTL.String(),
+		AcquireBlock:              lockd.DefaultAcquireBlock.String(),
+		SweeperInterval:           lockd.DefaultSweeperInterval.String(),
+		DrainGrace:                lockd.DefaultDrainGrace.String(),
+		ShutdownTimeout:           lockd.DefaultShutdownTimeout.String(),
+		DisableMTLS:               false,
+		HTTP2MaxConcurrentStreams: lockd.DefaultMaxConcurrentStreams,
+		DisableStorageEncryption:  false,
+		StorageEncryptionSnappy:   false,
+		Bundle:                    "",
+		DenylistPath:              "",
+		DisableMemQueueWatch:      false,
+		TCTrustDir:                tcTrustDir,
+		TCDisableAuth:             false,
+		TCAllowDefaultCA:          false,
+		SelfEndpoint:              "",
+		TCJoinEndpoints:           nil,
+		TCFanoutTimeout:           lockd.DefaultTCFanoutTimeout.String(),
+		TCFanoutAttempts:          lockd.DefaultTCFanoutMaxAttempts,
+		TCFanoutBaseDelay:         lockd.DefaultTCFanoutBaseDelay.String(),
+		TCFanoutMaxDelay:          lockd.DefaultTCFanoutMaxDelay.String(),
+		TCFanoutMultiplier:        lockd.DefaultTCFanoutMultiplier,
+		TCDecisionRetention:       lockd.DefaultTCDecisionRetention.String(),
+		TCClientBundle:            "",
+		StoreSSE:                  "",
+		StoreKMSKeyID:             "",
+		StoreMaxPartSize:          configHumanizeBytes(lockd.DefaultS3MaxPartSize),
+		AWSRegion:                 "",
+		AWSKMSKeyID:               "",
+		StorageRetryMaxAttempts:   lockd.DefaultStorageRetryMaxAttempts,
+		StorageRetryBaseDelay:     lockd.DefaultStorageRetryBaseDelay.String(),
+		StorageRetryMaxDelay:      lockd.DefaultStorageRetryMaxDelay.String(),
+		StorageRetryMultiplier:    lockd.DefaultStorageRetryMultiplier,
+		LogLevel:                  "info",
 	}
 	for _, fn := range overrides {
 		if fn != nil {

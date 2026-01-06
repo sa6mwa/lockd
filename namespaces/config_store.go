@@ -30,6 +30,12 @@ type ConfigStore struct {
 	defaultCfg Config
 }
 
+// ConfigLoadResult captures a namespace config and its ETag.
+type ConfigLoadResult struct {
+	Config Config
+	ETag   string
+}
+
 // NewConfigStore builds a ConfigStore backed by backend. When backend is nil a nil
 // store is returned.
 func NewConfigStore(backend storage.Backend, crypto *storage.Crypto, logger pslog.Logger, defaultCfg Config) *ConfigStore {
@@ -50,42 +56,42 @@ func NewConfigStore(backend storage.Backend, crypto *storage.Crypto, logger pslo
 
 // Load retrieves the namespace config and its ETag. When no config exists the
 // default configuration is returned with an empty ETag.
-func (s *ConfigStore) Load(ctx context.Context, namespace string) (Config, string, error) {
+func (s *ConfigStore) Load(ctx context.Context, namespace string) (ConfigLoadResult, error) {
 	var empty Config
 	if s == nil {
-		return cloneConfig(DefaultConfig()), "", nil
+		return ConfigLoadResult{Config: cloneConfig(DefaultConfig())}, nil
 	}
 	if s.backend == nil {
-		return cloneConfig(s.defaultCfg), "", nil
+		return ConfigLoadResult{Config: cloneConfig(s.defaultCfg)}, nil
 	}
-	reader, info, err := s.backend.GetObject(ctx, namespace, namespaceConfigKey)
+	obj, err := s.backend.GetObject(ctx, namespace, namespaceConfigKey)
 	if err != nil {
 		if err == storage.ErrNotFound {
-			return cloneConfig(s.defaultCfg), "", nil
+			return ConfigLoadResult{Config: cloneConfig(s.defaultCfg)}, nil
 		}
-		return empty, "", err
+		return ConfigLoadResult{Config: empty}, err
 	}
-	defer reader.Close()
-	payload, err := io.ReadAll(reader)
+	defer obj.Reader.Close()
+	payload, err := io.ReadAll(obj.Reader)
 	if err != nil {
-		return empty, "", fmt.Errorf("read namespace config: %w", err)
+		return ConfigLoadResult{Config: empty}, fmt.Errorf("read namespace config: %w", err)
 	}
 	if s.crypto != nil && s.crypto.Enabled() {
 		payload, err = s.crypto.DecryptMetadata(payload)
 		if err != nil {
-			return empty, "", fmt.Errorf("decrypt namespace config: %w", err)
+			return ConfigLoadResult{Config: empty}, fmt.Errorf("decrypt namespace config: %w", err)
 		}
 	}
 	var msg lockdproto.NamespaceConfig
 	if err := proto.Unmarshal(payload, &msg); err != nil {
-		return empty, "", fmt.Errorf("decode namespace config: %w", err)
+		return ConfigLoadResult{Config: empty}, fmt.Errorf("decode namespace config: %w", err)
 	}
 	cfg := ConfigFromProto(&msg)
 	cfg.Normalize()
 	if err := cfg.Validate(); err != nil {
-		return empty, "", err
+		return ConfigLoadResult{Config: empty}, err
 	}
-	return cfg, info.ETag, nil
+	return ConfigLoadResult{Config: cfg, ETag: obj.Info.ETag}, nil
 }
 
 // Save persists the namespace configuration enforcing the provided ETag when non-empty.

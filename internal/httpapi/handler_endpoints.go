@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rs/xid"
 	"go.opentelemetry.io/otel/trace"
 
 	"pkt.systems/lockd/api"
@@ -25,6 +26,9 @@ import (
 	"pkt.systems/lockd/internal/queue"
 	"pkt.systems/lockd/internal/search"
 	"pkt.systems/lockd/internal/storage"
+	"pkt.systems/lockd/internal/tccluster"
+	"pkt.systems/lockd/internal/tcrm"
+	"pkt.systems/lockd/internal/txncoord"
 	"pkt.systems/lockd/internal/uuidv7"
 	"pkt.systems/lockd/lql"
 	"pkt.systems/lockd/namespaces"
@@ -37,12 +41,13 @@ var benchLogErrors = os.Getenv("MEM_LQ_BENCH_LOG_ERRORS") == "1"
 
 // handleAcquire godoc
 // @Summary      Acquire an exclusive lease
-// @Description  Acquire or wait for an exclusive lease on a key. When block_seconds > 0 the request will long-poll until a lease becomes available or the timeout elapses.
+// @Description  Acquire or wait for an exclusive lease on a key. When block_seconds > 0 the request will long-poll until a lease becomes available or the timeout elapses. Returns a compact xid-based `lease_id` and `txn_id` (20-char lowercase base32, e.g. `c5v9d0sl70b3m3q8ndg0`) that must be echoed on write operations. Namespaces starting with `.` are reserved (e.g. `.txns`) and will be rejected.
 // @Tags         lease
 // @Accept       json
 // @Produce      json
 // @Param        namespace  query    string  false  "Namespace override when the request body omits it"
 // @Param        key        query    string  false  "Key to acquire when the request body omits it"
+// @Param        X-Txn-ID   header   string  false  "Existing transaction identifier (xid) to join a multi-key transaction"
 // @Param        request  body      api.AcquireRequest  true  "Lease acquisition parameters"
 // @Success      200      {object}  api.AcquireResponse
 // @Failure      400      {object}  api.ErrorResponse
@@ -66,6 +71,9 @@ func (h *Handler) handleAcquire(w http.ResponseWriter, r *http.Request) error {
 	if payload.Key == "" {
 		payload.Key = r.URL.Query().Get("key")
 	}
+	if payload.TxnID == "" {
+		payload.TxnID = strings.TrimSpace(r.Header.Get("X-Txn-ID"))
+	}
 	if id := clientIdentityFromContext(ctx); id != "" {
 		payload.Owner = fmt.Sprintf("%s/%s", payload.Owner, id)
 	}
@@ -75,7 +83,7 @@ func (h *Handler) handleAcquire(w http.ResponseWriter, r *http.Request) error {
 		Owner:        payload.Owner,
 		TTLSeconds:   payload.TTLSeconds,
 		BlockSeconds: payload.BlockSecs,
-		Idempotency:  strings.TrimSpace(r.Header.Get("X-Idempotency-Key")),
+		TxnID:        strings.TrimSpace(payload.TxnID),
 		ClientHint:   h.clientKeyFromRequest(r),
 	}
 	res, err := h.core.Acquire(ctx, cmd)
@@ -95,6 +103,7 @@ func (h *Handler) handleAcquire(w http.ResponseWriter, r *http.Request) error {
 	h.writeJSON(w, http.StatusOK, api.AcquireResponse{
 		Namespace:     res.Namespace,
 		LeaseID:       res.LeaseID,
+		TxnID:         res.TxnID,
 		Key:           res.Key,
 		Owner:         res.Owner,
 		ExpiresAt:     res.ExpiresAt,
@@ -108,13 +117,15 @@ func (h *Handler) handleAcquire(w http.ResponseWriter, r *http.Request) error {
 
 // handleKeepAlive godoc
 // @Summary      Extend an active lease TTL
-// @Description  Refresh an existing lease before it expires. Returns the new expiration timestamp.
+// @Description  Refresh an existing lease before it expires. Requires the xid lease identifier minted by Acquire and its fencing token; returns the new expiration timestamp.
 // @Tags         lease
 // @Accept       json
 // @Produce      json
 // @Param        namespace  query    string  false  "Namespace override when the request body omits it"
 // @Param        key        query    string  false  "Key override when the request body omits it"
 // @Param        request  body      api.KeepAliveRequest  true  "Lease keepalive parameters"
+// @Param        X-Fencing-Token  header  string  true   "Fencing token associated with the lease (from Acquire response)"
+// @Param        X-Txn-ID   header   string  false  "Transaction identifier (required when the lease is enlisted in a txn)"
 // @Success      200      {object}  api.KeepAliveResponse
 // @Failure      400      {object}  api.ErrorResponse
 // @Failure      404      {object}  api.ErrorResponse
@@ -167,17 +178,15 @@ func (h *Handler) handleKeepAlive(w http.ResponseWriter, r *http.Request) error 
 	if queue.IsQueueStateKey(keyComponent) {
 		return httpError{Status: http.StatusForbidden, Code: "queue_state_keepalive_unsupported", Detail: "queue state leases must be extended via queue extend"}
 	}
+	txnID := strings.TrimSpace(payload.TxnID)
+	if hdr := strings.TrimSpace(r.Header.Get("X-Txn-ID")); hdr != "" {
+		txnID = hdr
+	}
 	logger := pslog.LoggerFromContext(ctx)
 	if logger == nil {
 		logger = h.logger
 	}
 	verbose := logger
-	verbose.Debug("keepalive.begin",
-		"namespace", namespace,
-		"key", key,
-		"lease_id", payload.LeaseID,
-		"ttl_seconds", ttl.Seconds(),
-	)
 	// Prefer cached meta to avoid extra LoadMeta round-trips.
 	var knownMeta *storage.Meta
 	knownETag := ""
@@ -185,11 +194,19 @@ func (h *Handler) handleKeepAlive(w http.ResponseWriter, r *http.Request) error 
 		knownMeta = &cachedMeta
 		knownETag = cachedETag
 	}
+	verbose.Debug("keepalive.begin",
+		"namespace", namespace,
+		"key", key,
+		"lease_id", payload.LeaseID,
+		"txn_id", txnID,
+		"ttl_seconds", ttl.Seconds(),
+	)
 	res, err := h.core.KeepAlive(ctx, core.KeepAliveCommand{
 		Namespace:     namespace,
 		Key:           key,
 		LeaseID:       payload.LeaseID,
 		TTLSeconds:    payload.TTLSeconds,
+		TxnID:         txnID,
 		FencingToken:  token,
 		KnownMeta:     knownMeta,
 		KnownMetaETag: knownETag,
@@ -202,6 +219,9 @@ func (h *Handler) handleKeepAlive(w http.ResponseWriter, r *http.Request) error 
 	}
 	if res.Meta != nil {
 		h.cacheLease(payload.LeaseID, storageKey, *res.Meta, res.MetaETag)
+		if res.Meta.Lease != nil && res.Meta.Lease.TxnID != "" {
+			txnID = res.Meta.Lease.TxnID
+		}
 	}
 	w.Header().Set(headerFencingToken, strconv.FormatInt(res.FencingToken, 10))
 	h.writeJSON(w, http.StatusOK, api.KeepAliveResponse{ExpiresAt: res.ExpiresAt}, nil)
@@ -209,15 +229,875 @@ func (h *Handler) handleKeepAlive(w http.ResponseWriter, r *http.Request) error 
 		"namespace", namespace,
 		"key", key,
 		"lease_id", payload.LeaseID,
+		"txn_id", txnID,
 		"expires_at", res.ExpiresAt,
 		"fencing", res.FencingToken,
 	)
 	return nil
 }
 
+// handleTxnReplay godoc
+// @Summary      Replay a transaction decision
+// @Description  Apply the recorded decision for a transaction (commit or rollback) to its participants. Pending transactions remain unchanged unless expired, in which case they roll back. Idempotent and safe to retry. Requires TC-auth when mTLS is enabled (unless tc-disable-auth is set).
+// @Tags         transaction
+// @Accept       json
+// @Produce      json
+// @Param        request  body      api.TxnReplayRequest  true  "Txn replay request"
+// @Success      200      {object}  api.TxnReplayResponse
+// @Failure      400      {object}  api.ErrorResponse
+// @Failure      403      {object}  api.ErrorResponse
+// @Failure      404      {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/txn/replay [post]
+func (h *Handler) handleTxnReplay(w http.ResponseWriter, r *http.Request) error {
+	if err := h.requireTCClient(r); err != nil {
+		return err
+	}
+	ctx := r.Context()
+	logger := pslog.LoggerFromContext(ctx)
+	if logger == nil {
+		logger = h.logger
+	}
+	reqBody := http.MaxBytesReader(w, r.Body, h.jsonMaxBytes)
+	defer reqBody.Close()
+	var payload api.TxnReplayRequest
+	if err := json.NewDecoder(reqBody).Decode(&payload); err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_body", Detail: err.Error()}
+	}
+	if payload.TxnID == "" {
+		payload.TxnID = strings.TrimSpace(r.URL.Query().Get("txn_id"))
+	}
+	if payload.TxnID == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_txn_id", Detail: "txn_id is required"}
+	}
+	if _, err := xid.FromString(payload.TxnID); err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_txn_id", Detail: "txn_id must be an xid"}
+	}
+	start := time.Now()
+	txnLogger := logger.With("txn_id", payload.TxnID)
+	txnLogger.Debug("txn.rm.replay.begin")
+	state, err := h.core.ReplayTxn(ctx, payload.TxnID)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			httpErr := httpError{Status: http.StatusNotFound, Code: "txn_not_found", Detail: "transaction not found"}
+			logTxnRMError(txnLogger, "txn.rm.replay.error", httpErr, "duration_ms", time.Since(start).Milliseconds())
+			return httpErr
+		}
+		httpErr := convertCoreError(err)
+		logTxnRMError(txnLogger, "txn.rm.replay.error", httpErr, "duration_ms", time.Since(start).Milliseconds())
+		return httpErr
+	}
+	txnLogger.Debug("txn.rm.replay.complete",
+		"state", state,
+		"duration_ms", time.Since(start).Milliseconds(),
+	)
+	h.writeJSON(w, http.StatusOK, api.TxnReplayResponse{TxnID: payload.TxnID, State: string(state)}, nil)
+	return nil
+}
+
+// handleTxnDecide godoc
+// @Summary      Record a transaction decision
+// @Description  Record a transaction decision (pending|commit|rollback). Commit/rollback decisions are applied locally and fan out to RMs. TC-auth only; called by lockd RMs or TC tooling. Any TC endpoint can receive this call; non-leaders forward to the leader, which stamps the tc_term fencing token. Requires TC-auth when mTLS is enabled (unless tc-disable-auth is set).
+// @Tags         transaction
+// @Accept       json
+// @Produce      json
+// @Param        request  body      api.TxnDecisionRequest  true  "Txn decision request"
+// @Success      200      {object}  api.TxnDecisionResponse
+// @Failure      400      {object}  api.ErrorResponse
+// @Failure      403      {object}  api.ErrorResponse
+// @Failure      404      {object}  api.ErrorResponse
+// @Failure      502      {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/txn/decide [post]
+func (h *Handler) handleTxnDecide(w http.ResponseWriter, r *http.Request) error {
+	if err := h.requireTCClient(r); err != nil {
+		return err
+	}
+	ctx := r.Context()
+	reqBody := http.MaxBytesReader(w, r.Body, h.jsonMaxBytes)
+	defer reqBody.Close()
+	var payload api.TxnDecisionRequest
+	if err := json.NewDecoder(reqBody).Decode(&payload); err != nil {
+		if !errors.Is(err, io.EOF) {
+			return httpError{Status: http.StatusBadRequest, Code: "invalid_body", Detail: err.Error()}
+		}
+	}
+	if payload.TxnID == "" {
+		payload.TxnID = strings.TrimSpace(r.URL.Query().Get("txn_id"))
+	}
+	if payload.TxnID == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_txn_id", Detail: "txn_id is required"}
+	}
+	if _, err := xid.FromString(payload.TxnID); err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_txn_id", Detail: "txn_id must be an xid"}
+	}
+	if payload.State == "" {
+		payload.State = strings.TrimSpace(r.URL.Query().Get("state"))
+	}
+	state := core.TxnState(strings.ToLower(strings.TrimSpace(payload.State)))
+	switch state {
+	case core.TxnStatePending, core.TxnStateCommit, core.TxnStateRollback:
+	default:
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_state", Detail: "state must be pending|commit|rollback"}
+	}
+	rec := core.TxnRecord{
+		TxnID:         payload.TxnID,
+		State:         state,
+		ExpiresAtUnix: payload.ExpiresAtUnix,
+		TCTerm:        payload.TCTerm,
+	}
+	for _, p := range payload.Participants {
+		if p.Namespace == "" || strings.HasPrefix(p.Namespace, ".") {
+			return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: "participant namespace is required and must not start with '.'"}
+		}
+		if strings.TrimSpace(p.Key) == "" {
+			return httpError{Status: http.StatusBadRequest, Code: "invalid_key", Detail: "participant key is required"}
+		}
+		backendHash := strings.TrimSpace(p.BackendHash)
+		if p.BackendHash != "" && backendHash == "" {
+			return httpError{Status: http.StatusBadRequest, Code: "invalid_backend_hash", Detail: "participant backend_hash is invalid"}
+		}
+		rec.Participants = append(rec.Participants, core.TxnParticipant{Namespace: p.Namespace, Key: p.Key, BackendHash: backendHash})
+	}
+	decided, err := h.core.DecideTxnViaTC(ctx, rec)
+	if err != nil {
+		var fanoutErr *txncoord.FanoutError
+		if errors.As(err, &fanoutErr) {
+			return httpError{Status: http.StatusBadGateway, Code: "txn_fanout_failed", Detail: err.Error()}
+		}
+		return convertCoreError(err)
+	}
+	h.writeJSON(w, http.StatusOK, api.TxnDecisionResponse{TxnID: payload.TxnID, State: string(decided)}, nil)
+	return nil
+}
+
+// handleTCLeaseAcquire godoc
+// @Summary      Acquire a TC leader lease
+// @Description  Acquire a TC leader lease as part of the TC election quorum. Requires TC-auth when mTLS is enabled (unless tc-disable-auth is set).
+// @Tags         transaction
+// @Accept       json
+// @Produce      json
+// @Param        request  body      api.TCLeaseAcquireRequest  true  "TC lease acquire request"
+// @Success      200      {object}  api.TCLeaseAcquireResponse
+// @Failure      400      {object}  api.ErrorResponse
+// @Failure      403      {object}  api.ErrorResponse
+// @Failure      409      {object}  api.ErrorResponse
+// @Failure      503      {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/tc/lease/acquire [post]
+func (h *Handler) handleTCLeaseAcquire(w http.ResponseWriter, r *http.Request) error {
+	if err := h.requireTCClient(r); err != nil {
+		return err
+	}
+	store, err := h.tcLeaseStore()
+	if err != nil {
+		return err
+	}
+	reqBody := http.MaxBytesReader(w, r.Body, h.jsonMaxBytes)
+	defer reqBody.Close()
+	var payload api.TCLeaseAcquireRequest
+	if err := json.NewDecoder(reqBody).Decode(&payload); err != nil {
+		if !errors.Is(err, io.EOF) {
+			return httpError{Status: http.StatusBadRequest, Code: "invalid_body", Detail: err.Error()}
+		}
+	}
+	payload.CandidateID = strings.TrimSpace(payload.CandidateID)
+	payload.CandidateEndpoint = strings.TrimSpace(payload.CandidateEndpoint)
+	if payload.CandidateID == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_candidate_id", Detail: "candidate_id is required"}
+	}
+	if payload.CandidateEndpoint == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_candidate_endpoint", Detail: "candidate_endpoint is required"}
+	}
+	if payload.Term == 0 {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_term", Detail: "term must be > 0"}
+	}
+	if payload.TTLMillis <= 0 {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_ttl", Detail: "ttl_ms must be > 0"}
+	}
+	ttl := time.Duration(payload.TTLMillis) * time.Millisecond
+	rec, leaseErr := store.Acquire(h.clock.Now(), payload.CandidateID, payload.CandidateEndpoint, payload.Term, ttl)
+	if leaseErr != nil {
+		status := http.StatusConflict
+		if leaseErr.Code == "tc_invalid_ttl" {
+			status = http.StatusBadRequest
+		}
+		return httpError{Status: status, Code: leaseErr.Code, Detail: leaseErr.Detail, LeaderEndpoint: leaseErr.LeaderEndpoint}
+	}
+	h.writeJSON(w, http.StatusOK, api.TCLeaseAcquireResponse{
+		Granted:        true,
+		LeaderID:       rec.LeaderID,
+		LeaderEndpoint: rec.LeaderEndpoint,
+		Term:           rec.Term,
+		ExpiresAtUnix:  rec.ExpiresAt.UnixMilli(),
+	}, nil)
+	return nil
+}
+
+// handleTCLeaseRenew godoc
+// @Summary      Renew a TC leader lease
+// @Description  Renew a TC leader lease as part of the TC election quorum. Requires TC-auth when mTLS is enabled (unless tc-disable-auth is set).
+// @Tags         transaction
+// @Accept       json
+// @Produce      json
+// @Param        request  body      api.TCLeaseRenewRequest  true  "TC lease renew request"
+// @Success      200      {object}  api.TCLeaseRenewResponse
+// @Failure      400      {object}  api.ErrorResponse
+// @Failure      403      {object}  api.ErrorResponse
+// @Failure      409      {object}  api.ErrorResponse
+// @Failure      503      {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/tc/lease/renew [post]
+func (h *Handler) handleTCLeaseRenew(w http.ResponseWriter, r *http.Request) error {
+	if err := h.requireTCClient(r); err != nil {
+		return err
+	}
+	store, err := h.tcLeaseStore()
+	if err != nil {
+		return err
+	}
+	reqBody := http.MaxBytesReader(w, r.Body, h.jsonMaxBytes)
+	defer reqBody.Close()
+	var payload api.TCLeaseRenewRequest
+	if err := json.NewDecoder(reqBody).Decode(&payload); err != nil {
+		if !errors.Is(err, io.EOF) {
+			return httpError{Status: http.StatusBadRequest, Code: "invalid_body", Detail: err.Error()}
+		}
+	}
+	payload.LeaderID = strings.TrimSpace(payload.LeaderID)
+	if payload.LeaderID == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_leader_id", Detail: "leader_id is required"}
+	}
+	if payload.Term == 0 {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_term", Detail: "term must be > 0"}
+	}
+	if payload.TTLMillis <= 0 {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_ttl", Detail: "ttl_ms must be > 0"}
+	}
+	ttl := time.Duration(payload.TTLMillis) * time.Millisecond
+	rec, leaseErr := store.Renew(h.clock.Now(), payload.LeaderID, payload.Term, ttl)
+	if leaseErr != nil {
+		status := http.StatusConflict
+		if leaseErr.Code == "tc_invalid_ttl" {
+			status = http.StatusBadRequest
+		}
+		return httpError{Status: status, Code: leaseErr.Code, Detail: leaseErr.Detail, LeaderEndpoint: leaseErr.LeaderEndpoint}
+	}
+	h.writeJSON(w, http.StatusOK, api.TCLeaseRenewResponse{
+		Renewed:        true,
+		LeaderID:       rec.LeaderID,
+		LeaderEndpoint: rec.LeaderEndpoint,
+		Term:           rec.Term,
+		ExpiresAtUnix:  rec.ExpiresAt.UnixMilli(),
+	}, nil)
+	return nil
+}
+
+// handleTCLeaseRelease godoc
+// @Summary      Release a TC leader lease
+// @Description  Release a TC leader lease as part of the TC election quorum. Requires TC-auth when mTLS is enabled (unless tc-disable-auth is set).
+// @Tags         transaction
+// @Accept       json
+// @Produce      json
+// @Param        request  body      api.TCLeaseReleaseRequest  true  "TC lease release request"
+// @Success      200      {object}  api.TCLeaseReleaseResponse
+// @Failure      400      {object}  api.ErrorResponse
+// @Failure      403      {object}  api.ErrorResponse
+// @Failure      409      {object}  api.ErrorResponse
+// @Failure      503      {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/tc/lease/release [post]
+func (h *Handler) handleTCLeaseRelease(w http.ResponseWriter, r *http.Request) error {
+	if err := h.requireTCClient(r); err != nil {
+		return err
+	}
+	store, err := h.tcLeaseStore()
+	if err != nil {
+		return err
+	}
+	reqBody := http.MaxBytesReader(w, r.Body, h.jsonMaxBytes)
+	defer reqBody.Close()
+	var payload api.TCLeaseReleaseRequest
+	if err := json.NewDecoder(reqBody).Decode(&payload); err != nil {
+		if !errors.Is(err, io.EOF) {
+			return httpError{Status: http.StatusBadRequest, Code: "invalid_body", Detail: err.Error()}
+		}
+	}
+	payload.LeaderID = strings.TrimSpace(payload.LeaderID)
+	if payload.LeaderID == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_leader_id", Detail: "leader_id is required"}
+	}
+	if payload.Term == 0 {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_term", Detail: "term must be > 0"}
+	}
+	_, leaseErr := store.Release(h.clock.Now(), payload.LeaderID, payload.Term)
+	if leaseErr != nil {
+		return httpError{Status: http.StatusConflict, Code: leaseErr.Code, Detail: leaseErr.Detail, LeaderEndpoint: leaseErr.LeaderEndpoint}
+	}
+	h.writeJSON(w, http.StatusOK, api.TCLeaseReleaseResponse{Released: true}, nil)
+	return nil
+}
+
+// handleTCLeader godoc
+// @Summary      Return TC leader state
+// @Description  Returns the observed TC leader state. Requires TC-auth when mTLS is enabled (unless tc-disable-auth is set).
+// @Tags         transaction
+// @Produce      json
+// @Success      200  {object}  api.TCLeaderResponse
+// @Failure      403  {object}  api.ErrorResponse
+// @Failure      503  {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/tc/leader [get]
+func (h *Handler) handleTCLeader(w http.ResponseWriter, r *http.Request) error {
+	if err := h.requireTCClient(r); err != nil {
+		return err
+	}
+	if h.tcLeader == nil || !h.tcLeader.Enabled() {
+		return httpError{Status: http.StatusServiceUnavailable, Code: "tc_unavailable", Detail: "tc leader election not configured"}
+	}
+	info := h.tcLeader.Leader(h.clock.Now())
+	resp := api.TCLeaderResponse{
+		LeaderID:       info.LeaderID,
+		LeaderEndpoint: info.LeaderEndpoint,
+		Term:           info.Term,
+	}
+	if !info.ExpiresAt.IsZero() {
+		resp.ExpiresAtUnix = info.ExpiresAt.UnixMilli()
+	}
+	h.writeJSON(w, http.StatusOK, resp, nil)
+	return nil
+}
+
+// handleTCClusterAnnounce godoc
+// @Summary      Announce TC cluster membership
+// @Description  Refreshes the caller's membership lease. Requires TC-auth with a server certificate when mTLS is enabled (unless tc-disable-auth is set).
+// @Tags         transaction
+// @Accept       json
+// @Produce      json
+// @Param        request  body      api.TCClusterAnnounceRequest  true  "TC cluster announce request"
+// @Success      200      {object}  api.TCClusterAnnounceResponse
+// @Failure      400      {object}  api.ErrorResponse
+// @Failure      403      {object}  api.ErrorResponse
+// @Failure      503      {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/tc/cluster/announce [post]
+func (h *Handler) handleTCClusterAnnounce(w http.ResponseWriter, r *http.Request) error {
+	if err := h.requireTCServer(r); err != nil {
+		return err
+	}
+	store, err := h.tcClusterStore()
+	if err != nil {
+		return err
+	}
+	reqBody := http.MaxBytesReader(w, r.Body, h.jsonMaxBytes)
+	defer reqBody.Close()
+	var payload api.TCClusterAnnounceRequest
+	if err := json.NewDecoder(reqBody).Decode(&payload); err != nil {
+		if !errors.Is(err, io.EOF) {
+			return httpError{Status: http.StatusBadRequest, Code: "invalid_body", Detail: err.Error()}
+		}
+	}
+	payload.SelfEndpoint = strings.TrimSpace(payload.SelfEndpoint)
+	if payload.SelfEndpoint == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_self_endpoint", Detail: "self_endpoint is required"}
+	}
+	normalized := tccluster.NormalizeEndpoints([]string{payload.SelfEndpoint})
+	if len(normalized) == 0 {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_self_endpoint", Detail: "self_endpoint is required"}
+	}
+	payload.SelfEndpoint = normalized[0]
+	peerCert := peerCertificate(r)
+	if peerCert == nil {
+		return httpError{Status: http.StatusForbidden, Code: "tc_cluster_identity_missing", Detail: "peer certificate identity required"}
+	}
+	identity := tccluster.IdentityFromCertificate(peerCert)
+	if identity == "" {
+		return httpError{Status: http.StatusForbidden, Code: "tc_cluster_identity_missing", Detail: "peer certificate identity required"}
+	}
+	isSelf := h != nil && strings.TrimSpace(h.tcClusterIdentity) != "" && identity == strings.TrimSpace(h.tcClusterIdentity)
+	ttl := tccluster.DeriveLeaseTTL(0)
+	if h.tcLeader != nil {
+		ttl = tccluster.DeriveLeaseTTL(h.tcLeader.LeaseTTL())
+	}
+	record, err := store.Announce(r.Context(), identity, payload.SelfEndpoint, ttl)
+	if err != nil {
+		return httpError{Status: http.StatusServiceUnavailable, Code: "tc_cluster_unavailable", Detail: err.Error()}
+	}
+	active, err := store.Active(r.Context())
+	if err != nil {
+		return httpError{Status: http.StatusServiceUnavailable, Code: "tc_cluster_unavailable", Detail: err.Error()}
+	}
+	if err := h.syncTCLeader(active.Endpoints); err != nil {
+		return httpError{Status: http.StatusInternalServerError, Code: "tc_cluster_sync_failed", Detail: err.Error()}
+	}
+	if isSelf && h.tcClusterJoinSelf != nil {
+		h.tcClusterJoinSelf()
+	}
+	h.writeJSON(w, http.StatusOK, api.TCClusterAnnounceResponse{
+		Endpoints:     active.Endpoints,
+		UpdatedAtUnix: active.UpdatedAtUnix,
+		ExpiresAtUnix: record.ExpiresAtUnix,
+	}, nil)
+	return nil
+}
+
+// handleTCClusterLeave godoc
+// @Summary      Leave the TC cluster
+// @Description  Deletes the caller's membership lease. Requires TC-auth with a server certificate when mTLS is enabled (unless tc-disable-auth is set).
+// @Tags         transaction
+// @Accept       json
+// @Produce      json
+// @Param        request  body      api.TCClusterLeaveRequest  true  "TC cluster leave request"
+// @Success      200      {object}  api.TCClusterLeaveResponse
+// @Failure      403      {object}  api.ErrorResponse
+// @Failure      503      {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/tc/cluster/leave [post]
+func (h *Handler) handleTCClusterLeave(w http.ResponseWriter, r *http.Request) error {
+	if err := h.requireTCServer(r); err != nil {
+		return err
+	}
+	store, err := h.tcClusterStore()
+	if err != nil {
+		return err
+	}
+	identity := tccluster.IdentityFromCertificate(peerCertificate(r))
+	if identity == "" {
+		return httpError{Status: http.StatusForbidden, Code: "tc_cluster_identity_missing", Detail: "peer certificate identity required"}
+	}
+	isSelf := h != nil && strings.TrimSpace(h.tcClusterIdentity) != "" && identity == strings.TrimSpace(h.tcClusterIdentity)
+	if isSelf && h.tcClusterLeaveSelf != nil {
+		h.tcClusterLeaveSelf()
+	}
+	store.Pause(identity)
+	if h.tcLeaveFanout != nil && strings.TrimSpace(r.Header.Get(headerTCLeaveFanout)) == "" {
+		if err := h.tcLeaveFanout(r.Context()); err != nil {
+			if h.logger != nil {
+				h.logger.Warn("tc.cluster.leave.fanout_failed", "error", err)
+			}
+			if isSelf {
+				store.Resume(identity)
+				if h.tcClusterJoinSelf != nil {
+					h.tcClusterJoinSelf()
+				}
+			}
+			return httpError{Status: http.StatusServiceUnavailable, Code: "tc_cluster_unavailable", Detail: err.Error()}
+		}
+	}
+	if err := store.Leave(r.Context(), identity); err != nil {
+		if isSelf {
+			store.Resume(identity)
+			if h.tcClusterJoinSelf != nil {
+				h.tcClusterJoinSelf()
+			}
+		}
+		return httpError{Status: http.StatusServiceUnavailable, Code: "tc_cluster_unavailable", Detail: err.Error()}
+	}
+	active, err := store.Active(r.Context())
+	if err != nil {
+		return httpError{Status: http.StatusServiceUnavailable, Code: "tc_cluster_unavailable", Detail: err.Error()}
+	}
+	if isSelf {
+		if h.tcLeader != nil {
+			if err := h.tcLeader.SetEndpoints(nil); err != nil {
+				return httpError{Status: http.StatusInternalServerError, Code: "tc_cluster_sync_failed", Detail: err.Error()}
+			}
+		}
+	} else {
+		if err := h.syncTCLeader(active.Endpoints); err != nil {
+			return httpError{Status: http.StatusInternalServerError, Code: "tc_cluster_sync_failed", Detail: err.Error()}
+		}
+	}
+	h.writeJSON(w, http.StatusOK, api.TCClusterLeaveResponse{
+		Endpoints:     active.Endpoints,
+		UpdatedAtUnix: active.UpdatedAtUnix,
+	}, nil)
+	return nil
+}
+
+// handleTCClusterList godoc
+// @Summary      List TC cluster membership
+// @Description  List the current active TC cluster membership list. Requires TC-auth when mTLS is enabled (unless tc-disable-auth is set).
+// @Tags         transaction
+// @Produce      json
+// @Success      200  {object}  api.TCClusterListResponse
+// @Failure      403  {object}  api.ErrorResponse
+// @Failure      503  {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/tc/cluster/list [get]
+func (h *Handler) handleTCClusterList(w http.ResponseWriter, r *http.Request) error {
+	if err := h.requireTCClient(r); err != nil {
+		return err
+	}
+	store, err := h.tcClusterStore()
+	if err != nil {
+		return err
+	}
+	result, err := store.Active(r.Context())
+	if err != nil {
+		return httpError{Status: http.StatusServiceUnavailable, Code: "tc_cluster_unavailable", Detail: err.Error()}
+	}
+	resp := api.TCClusterListResponse{
+		Endpoints:     result.Endpoints,
+		UpdatedAtUnix: result.UpdatedAtUnix,
+	}
+	h.writeJSON(w, http.StatusOK, resp, nil)
+	return nil
+}
+
+// handleTCRMRegister godoc
+// @Summary      Register an RM endpoint
+// @Description  Register an RM endpoint for a backend hash. Replicates across the TC cluster. Requires TC-auth with a server certificate when mTLS is enabled (unless tc-disable-auth is set).
+// @Tags         transaction
+// @Accept       json
+// @Produce      json
+// @Param        request  body      api.TCRMRegisterRequest  true  "RM register request"
+// @Success      200      {object}  api.TCRMRegisterResponse
+// @Failure      400      {object}  api.ErrorResponse
+// @Failure      403      {object}  api.ErrorResponse
+// @Failure      502      {object}  api.ErrorResponse
+// @Failure      503      {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/tc/rm/register [post]
+func (h *Handler) handleTCRMRegister(w http.ResponseWriter, r *http.Request) error {
+	if err := h.requireTCServer(r); err != nil {
+		return err
+	}
+	store, err := h.tcRMStore()
+	if err != nil {
+		return err
+	}
+	reqBody := http.MaxBytesReader(w, r.Body, h.jsonMaxBytes)
+	defer reqBody.Close()
+	var payload api.TCRMRegisterRequest
+	if err := json.NewDecoder(reqBody).Decode(&payload); err != nil {
+		if !errors.Is(err, io.EOF) {
+			return httpError{Status: http.StatusBadRequest, Code: "invalid_body", Detail: err.Error()}
+		}
+	}
+	backendHash := strings.TrimSpace(payload.BackendHash)
+	if backendHash == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_backend_hash", Detail: "backend_hash is required"}
+	}
+	endpoint := strings.TrimSpace(payload.Endpoint)
+	if endpoint == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_endpoint", Detail: "endpoint is required"}
+	}
+	replica := strings.TrimSpace(r.Header.Get(headerTCReplica)) != ""
+	var updated tcrm.UpdateResult
+	if h.tcRMReplicator != nil {
+		if replica {
+			updated, err = h.tcRMReplicator.RegisterLocal(r.Context(), backendHash, endpoint)
+		} else {
+			headers := http.Header{headerTCReplica: []string{"1"}}
+			updated, err = h.tcRMReplicator.Register(r.Context(), backendHash, endpoint, headers)
+		}
+	} else {
+		updated, err = store.Register(r.Context(), backendHash, endpoint)
+	}
+	if err != nil {
+		var repErr *tcrm.ReplicationError
+		if errors.As(err, &repErr) {
+			return httpError{Status: http.StatusBadGateway, Code: "tc_rm_replication_failed", Detail: err.Error()}
+		}
+		return httpError{Status: http.StatusServiceUnavailable, Code: "tc_rm_unavailable", Detail: err.Error()}
+	}
+	endpoints, updatedAt := findRMBackend(updated.Members, backendHash)
+	h.writeJSON(w, http.StatusOK, api.TCRMRegisterResponse{
+		BackendHash:   backendHash,
+		Endpoints:     endpoints,
+		UpdatedAtUnix: updatedAt,
+	}, nil)
+	return nil
+}
+
+// handleTCRMUnregister godoc
+// @Summary      Unregister an RM endpoint
+// @Description  Unregister an RM endpoint for a backend hash. Replicates across the TC cluster. Requires TC-auth with a server certificate when mTLS is enabled (unless tc-disable-auth is set).
+// @Tags         transaction
+// @Accept       json
+// @Produce      json
+// @Param        request  body      api.TCRMUnregisterRequest  true  "RM unregister request"
+// @Success      200      {object}  api.TCRMUnregisterResponse
+// @Failure      400      {object}  api.ErrorResponse
+// @Failure      403      {object}  api.ErrorResponse
+// @Failure      502      {object}  api.ErrorResponse
+// @Failure      503      {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/tc/rm/unregister [post]
+func (h *Handler) handleTCRMUnregister(w http.ResponseWriter, r *http.Request) error {
+	if err := h.requireTCServer(r); err != nil {
+		return err
+	}
+	store, err := h.tcRMStore()
+	if err != nil {
+		return err
+	}
+	reqBody := http.MaxBytesReader(w, r.Body, h.jsonMaxBytes)
+	defer reqBody.Close()
+	var payload api.TCRMUnregisterRequest
+	if err := json.NewDecoder(reqBody).Decode(&payload); err != nil {
+		if !errors.Is(err, io.EOF) {
+			return httpError{Status: http.StatusBadRequest, Code: "invalid_body", Detail: err.Error()}
+		}
+	}
+	backendHash := strings.TrimSpace(payload.BackendHash)
+	if backendHash == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_backend_hash", Detail: "backend_hash is required"}
+	}
+	endpoint := strings.TrimSpace(payload.Endpoint)
+	if endpoint == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_endpoint", Detail: "endpoint is required"}
+	}
+	replica := strings.TrimSpace(r.Header.Get(headerTCReplica)) != ""
+	var updated tcrm.UpdateResult
+	if h.tcRMReplicator != nil {
+		if replica {
+			updated, err = h.tcRMReplicator.UnregisterLocal(r.Context(), backendHash, endpoint)
+		} else {
+			headers := http.Header{headerTCReplica: []string{"1"}}
+			updated, err = h.tcRMReplicator.Unregister(r.Context(), backendHash, endpoint, headers)
+		}
+	} else {
+		updated, err = store.Unregister(r.Context(), backendHash, endpoint)
+	}
+	if err != nil {
+		var repErr *tcrm.ReplicationError
+		if errors.As(err, &repErr) {
+			return httpError{Status: http.StatusBadGateway, Code: "tc_rm_replication_failed", Detail: err.Error()}
+		}
+		return httpError{Status: http.StatusServiceUnavailable, Code: "tc_rm_unavailable", Detail: err.Error()}
+	}
+	endpoints, updatedAt := findRMBackend(updated.Members, backendHash)
+	h.writeJSON(w, http.StatusOK, api.TCRMUnregisterResponse{
+		BackendHash:   backendHash,
+		Endpoints:     endpoints,
+		UpdatedAtUnix: updatedAt,
+	}, nil)
+	return nil
+}
+
+// handleTCRMList godoc
+// @Summary      List RM registry entries
+// @Description  List RM endpoints by backend hash. Requires TC-auth when mTLS is enabled (unless tc-disable-auth is set).
+// @Tags         transaction
+// @Produce      json
+// @Success      200  {object}  api.TCRMListResponse
+// @Failure      403  {object}  api.ErrorResponse
+// @Failure      503  {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/tc/rm/list [get]
+func (h *Handler) handleTCRMList(w http.ResponseWriter, r *http.Request) error {
+	if err := h.requireTCClient(r); err != nil {
+		return err
+	}
+	store, err := h.tcRMStore()
+	if err != nil {
+		return err
+	}
+	result, err := store.Load(r.Context())
+	if err != nil {
+		return httpError{Status: http.StatusServiceUnavailable, Code: "tc_rm_unavailable", Detail: err.Error()}
+	}
+	resp := api.TCRMListResponse{
+		Backends:      buildRMBackends(result.Members),
+		UpdatedAtUnix: result.Members.UpdatedAtUnix,
+	}
+	h.writeJSON(w, http.StatusOK, resp, nil)
+	return nil
+}
+
+func findRMBackend(members tcrm.Members, backendHash string) ([]string, int64) {
+	for _, backend := range members.Backends {
+		if backend.BackendHash == backendHash {
+			return append([]string(nil), backend.Endpoints...), backend.UpdatedAtUnix
+		}
+	}
+	return nil, 0
+}
+
+func buildRMBackends(members tcrm.Members) []api.TCRMBackend {
+	if len(members.Backends) == 0 {
+		return nil
+	}
+	out := make([]api.TCRMBackend, 0, len(members.Backends))
+	for _, backend := range members.Backends {
+		out = append(out, api.TCRMBackend{
+			BackendHash:   backend.BackendHash,
+			Endpoints:     append([]string(nil), backend.Endpoints...),
+			UpdatedAtUnix: backend.UpdatedAtUnix,
+		})
+	}
+	return out
+}
+
+// handleTxnCommit godoc
+// @Summary      Apply a commit decision on an RM
+// @Description  Apply a commit decision for a transaction on the local RM. Requires tc_term when TC leadership is enabled. Requires TC-auth when mTLS is enabled (unless tc-disable-auth is set).
+// @Tags         transaction
+// @Accept       json
+// @Produce      json
+// @Param        request  body      api.TxnDecisionRequest  true  "Txn decision request"
+// @Success      200      {object}  api.TxnDecisionResponse
+// @Failure      400      {object}  api.ErrorResponse
+// @Failure      403      {object}  api.ErrorResponse
+// @Failure      404      {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/txn/commit [post]
+func (h *Handler) handleTxnCommit(w http.ResponseWriter, r *http.Request) error {
+	return h.handleTxnApply(w, r, core.TxnStateCommit)
+}
+
+// handleTxnRollback godoc
+// @Summary      Apply a rollback decision on an RM
+// @Description  Apply a rollback decision for a transaction on the local RM. Requires tc_term when TC leadership is enabled. Requires TC-auth when mTLS is enabled (unless tc-disable-auth is set).
+// @Tags         transaction
+// @Accept       json
+// @Produce      json
+// @Param        request  body      api.TxnDecisionRequest  true  "Txn decision request"
+// @Success      200      {object}  api.TxnDecisionResponse
+// @Failure      400      {object}  api.ErrorResponse
+// @Failure      403      {object}  api.ErrorResponse
+// @Failure      404      {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/txn/rollback [post]
+func (h *Handler) handleTxnRollback(w http.ResponseWriter, r *http.Request) error {
+	return h.handleTxnApply(w, r, core.TxnStateRollback)
+}
+
+// handleTxnApply applies a decided transaction on an RM.
+func (h *Handler) handleTxnApply(w http.ResponseWriter, r *http.Request, decision core.TxnState) error {
+	if err := h.requireTCClient(r); err != nil {
+		return err
+	}
+	ctx := r.Context()
+	logger := pslog.LoggerFromContext(ctx)
+	if logger == nil {
+		logger = h.logger
+	}
+	reqBody := http.MaxBytesReader(w, r.Body, h.jsonMaxBytes)
+	defer reqBody.Close()
+	var payload api.TxnDecisionRequest
+	if err := json.NewDecoder(reqBody).Decode(&payload); err != nil {
+		if !errors.Is(err, io.EOF) {
+			return httpError{Status: http.StatusBadRequest, Code: "invalid_body", Detail: err.Error()}
+		}
+	}
+	if payload.TxnID == "" {
+		payload.TxnID = strings.TrimSpace(r.URL.Query().Get("txn_id"))
+	}
+	if payload.TxnID == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_txn_id", Detail: "txn_id is required"}
+	}
+	if _, err := xid.FromString(payload.TxnID); err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_txn_id", Detail: "txn_id must be an xid"}
+	}
+	if h.tcLeader != nil && h.tcLeader.Enabled() {
+		info, ok := h.currentTCLeader(h.clock.Now())
+		if !ok {
+			return httpError{Status: http.StatusServiceUnavailable, Code: "tc_unavailable", Detail: "tc leader unavailable"}
+		}
+		if payload.TCTerm == 0 {
+			return httpError{Status: http.StatusBadRequest, Code: "tc_term_required", Detail: "tc_term is required"}
+		}
+		if payload.TCTerm != info.Term {
+			return httpError{Status: http.StatusConflict, Code: "tc_term_stale", Detail: "tc_term does not match current leader term", LeaderEndpoint: info.LeaderEndpoint}
+		}
+	}
+	start := time.Now()
+	txnLogger := logger.With("txn_id", payload.TxnID, "state", decision, "tc_term", payload.TCTerm)
+	targetHash := strings.TrimSpace(payload.TargetBackendHash)
+	if targetHash != "" {
+		localHash := strings.TrimSpace(h.core.BackendHash())
+		if localHash == "" {
+			httpErr := httpError{Status: http.StatusServiceUnavailable, Code: "backend_hash_unavailable", Detail: "backend hash unavailable"}
+			logTxnRMError(txnLogger, "txn.rm.apply.error", httpErr, "duration_ms", time.Since(start).Milliseconds())
+			return httpErr
+		}
+		if targetHash != localHash {
+			httpErr := httpError{Status: http.StatusConflict, Code: "txn_backend_mismatch", Detail: fmt.Sprintf("target backend hash %s does not match local backend", targetHash)}
+			logTxnRMError(txnLogger, "txn.rm.apply.error", httpErr, "duration_ms", time.Since(start).Milliseconds())
+			return httpErr
+		}
+	}
+	rec := core.TxnRecord{
+		TxnID:         payload.TxnID,
+		State:         decision,
+		ExpiresAtUnix: payload.ExpiresAtUnix,
+		TCTerm:        payload.TCTerm,
+	}
+	for _, p := range payload.Participants {
+		if p.Namespace == "" || strings.HasPrefix(p.Namespace, ".") {
+			return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: "participant namespace is required and must not start with '.'"}
+		}
+		if strings.TrimSpace(p.Key) == "" {
+			return httpError{Status: http.StatusBadRequest, Code: "invalid_key", Detail: "participant key is required"}
+		}
+		backendHash := strings.TrimSpace(p.BackendHash)
+		if p.BackendHash != "" && backendHash == "" {
+			return httpError{Status: http.StatusBadRequest, Code: "invalid_backend_hash", Detail: "participant backend_hash is invalid"}
+		}
+		rec.Participants = append(rec.Participants, core.TxnParticipant{Namespace: p.Namespace, Key: p.Key, BackendHash: backendHash})
+	}
+	if targetHash != "" {
+		txnLogger = txnLogger.With("target_backend_hash", targetHash)
+	}
+	txnLogger = txnLogger.With("participants", len(rec.Participants))
+	txnLogger.Debug("txn.rm.apply.begin")
+
+	if len(rec.Participants) == 0 {
+		state, err := h.core.ApplyTxnDecision(ctx, payload.TxnID)
+		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				httpErr := httpError{Status: http.StatusNotFound, Code: "txn_not_found", Detail: "transaction not found"}
+				logTxnRMError(txnLogger, "txn.rm.apply.error", httpErr, "duration_ms", time.Since(start).Milliseconds())
+				return httpErr
+			}
+			httpErr := convertCoreError(err)
+			logTxnRMError(txnLogger, "txn.rm.apply.error", httpErr, "duration_ms", time.Since(start).Milliseconds())
+			return httpErr
+		}
+		if state == core.TxnStatePending {
+			httpErr := httpError{Status: http.StatusConflict, Code: "txn_pending", Detail: "transaction decision not recorded"}
+			logTxnRMError(txnLogger, "txn.rm.apply.error", httpErr, "duration_ms", time.Since(start).Milliseconds())
+			return httpErr
+		}
+		txnLogger.Debug("txn.rm.apply.complete",
+			"applied_state", state,
+			"duration_ms", time.Since(start).Milliseconds(),
+		)
+		h.writeJSON(w, http.StatusOK, api.TxnDecisionResponse{TxnID: payload.TxnID, State: string(state)}, nil)
+		return nil
+	}
+
+	var (
+		state core.TxnState
+		err   error
+	)
+	switch decision {
+	case core.TxnStateCommit:
+		state, err = h.core.CommitTxn(ctx, rec)
+	case core.TxnStateRollback:
+		state, err = h.core.RollbackTxn(ctx, rec)
+	default:
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_state", Detail: "state must be commit|rollback"}
+	}
+	if err != nil {
+		httpErr := convertCoreError(err)
+		logTxnRMError(txnLogger, "txn.rm.apply.error", httpErr, "duration_ms", time.Since(start).Milliseconds())
+		return httpErr
+	}
+	txnLogger.Debug("txn.rm.apply.complete",
+		"applied_state", state,
+		"duration_ms", time.Since(start).Milliseconds(),
+	)
+	h.writeJSON(w, http.StatusOK, api.TxnDecisionResponse{TxnID: payload.TxnID, State: string(state)}, nil)
+	return nil
+}
+
 // handleRelease godoc
 // @Summary      Release a held lease
-// @Description  Releases the lease associated with the provided key and lease identifier.
+// @Description  Releases the lease associated with the provided key and lease identifier. The request must include the xid `txn_id` from Acquire; set `rollback=true` to abandon staged changes, otherwise the release commits the staged state.
 // @Tags         lease
 // @Accept       json
 // @Produce      json
@@ -259,26 +1139,23 @@ func (h *Handler) handleRelease(w http.ResponseWriter, r *http.Request) error {
 	if payload.LeaseID == "" {
 		return httpError{Status: http.StatusBadRequest, Code: "missing_lease", Detail: "lease_id required"}
 	}
-	storageKey, err := h.namespacedKey(namespace, payload.Key)
-	if err != nil {
-		return httpError{Status: http.StatusBadRequest, Code: "invalid_key", Detail: err.Error()}
+	if strings.TrimSpace(payload.TxnID) == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_txn", Detail: "txn_id required"}
 	}
 	logger := pslog.LoggerFromContext(ctx)
 	if logger == nil {
 		logger = h.logger
 	}
 	verbose := logger
-	verbose.Debug("release.begin", "namespace", namespace, "key", payload.Key, "lease_id", payload.LeaseID)
+	verbose.Debug("release.begin", "namespace", namespace, "key", payload.Key, "lease_id", payload.LeaseID, "txn_id", payload.TxnID)
 	var knownMeta *storage.Meta
 	knownETag := ""
-	if cachedMeta, cachedETag, cachedKey, ok := h.leaseSnapshot(payload.LeaseID); ok && cachedKey == storageKey {
-		knownMeta = &cachedMeta
-		knownETag = cachedETag
-	}
 	res, err := h.core.Release(ctx, core.ReleaseCommand{
 		Namespace:     namespace,
 		Key:           payload.Key,
 		LeaseID:       payload.LeaseID,
+		TxnID:         payload.TxnID,
+		Rollback:      payload.Rollback,
 		FencingToken:  fencingToken,
 		KnownMeta:     knownMeta,
 		KnownMetaETag: knownETag,
@@ -291,7 +1168,7 @@ func (h *Handler) handleRelease(w http.ResponseWriter, r *http.Request) error {
 	}
 	h.dropLease(payload.LeaseID)
 	h.writeJSON(w, http.StatusOK, api.ReleaseResponse{Released: res.Released}, nil)
-	verbose.Debug("release.success", "namespace", namespace, "key", payload.Key, "lease_id", payload.LeaseID)
+	verbose.Debug("release.success", "namespace", namespace, "key", payload.Key, "lease_id", payload.LeaseID, "txn_id", payload.TxnID)
 	return nil
 }
 
@@ -642,7 +1519,8 @@ func (h *Handler) handleIndexFlush(w http.ResponseWriter, r *http.Request) error
 // @Produce      json
 // @Param        namespace          query   string  false  "Namespace override (defaults to server setting)"
 // @Param        key                query   string  true   "Lease key"
-// @Param        X-Lease-ID         header  string  true   "Lease identifier"
+// @Param        X-Lease-ID         header  string  true   "Lease identifier (xid from Acquire, 20-char lowercase base32)"
+// @Param        X-Txn-ID           header  string  true   "Transaction identifier (xid from Acquire)"
 // @Param        X-Fencing-Token    header  string  false  "Optional fencing token proof"
 // @Param        X-If-Version       header  string  false  "Conditionally update when the current version matches"
 // @Param        X-If-State-ETag    header  string  false  "Conditionally update when the state ETag matches"
@@ -672,6 +1550,10 @@ func (h *Handler) handleUpdate(w http.ResponseWriter, r *http.Request) error {
 	if leaseID == "" {
 		return httpError{Status: http.StatusBadRequest, Code: "missing_lease", Detail: "X-Lease-ID required"}
 	}
+	txnID := strings.TrimSpace(r.Header.Get("X-Txn-ID"))
+	if txnID == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_txn", Detail: "X-Txn-ID required"}
+	}
 	fencingToken, err := parseFencingToken(r)
 	if err != nil {
 		return err
@@ -700,6 +1582,7 @@ func (h *Handler) handleUpdate(w http.ResponseWriter, r *http.Request) error {
 		Namespace:      r.URL.Query().Get("namespace"),
 		Key:            key,
 		LeaseID:        leaseID,
+		TxnID:          txnID,
 		FencingToken:   fencingToken,
 		IfVersion:      expectVersion,
 		IfStateETag:    expectETag,
@@ -737,7 +1620,8 @@ func (h *Handler) handleUpdate(w http.ResponseWriter, r *http.Request) error {
 // @Produce      json
 // @Param        namespace          query   string  false  "Namespace override (defaults to server setting)"
 // @Param        key                query   string  true   "Lease key"
-// @Param        X-Lease-ID         header  string  true   "Lease identifier"
+// @Param        X-Lease-ID         header  string  true   "Lease identifier (xid from Acquire, 20-char lowercase base32)"
+// @Param        X-Txn-ID           header  string  true   "Transaction identifier (xid from Acquire)"
 // @Param        X-Fencing-Token    header  string  false  "Optional fencing token proof"
 // @Param        X-If-Version       header  string  false  "Conditionally update when the current version matches"
 // @Param        metadata           body    metadataMutation  true  "Metadata payload"
@@ -755,6 +1639,10 @@ func (h *Handler) handleMetadata(w http.ResponseWriter, r *http.Request) error {
 	leaseID := r.Header.Get("X-Lease-ID")
 	if leaseID == "" {
 		return httpError{Status: http.StatusBadRequest, Code: "missing_lease", Detail: "X-Lease-ID required"}
+	}
+	txnID := strings.TrimSpace(r.Header.Get("X-Txn-ID"))
+	if txnID == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_txn", Detail: "X-Txn-ID required"}
 	}
 	fencingToken, err := parseFencingToken(r)
 	if err != nil {
@@ -804,6 +1692,7 @@ func (h *Handler) handleMetadata(w http.ResponseWriter, r *http.Request) error {
 		Namespace:     ns,
 		Key:           key,
 		LeaseID:       leaseID,
+		TxnID:         txnID,
 		FencingToken:  fencingToken,
 		Mutation:      core.MetadataMutation{QueryHidden: patch.QueryHidden},
 		KnownMeta:     knownMeta,
@@ -830,6 +1719,18 @@ func (h *Handler) handleMetadata(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
+func logTxnRMError(logger pslog.Logger, event string, err error, fields ...any) {
+	if logger == nil || err == nil {
+		return
+	}
+	fields = append(fields, "error", err)
+	if httpErr, ok := err.(httpError); ok && httpErr.Status >= http.StatusBadRequest && httpErr.Status < http.StatusInternalServerError {
+		logger.Debug(event, fields...)
+		return
+	}
+	logger.Warn(event, fields...)
+}
+
 // handleRemove godoc
 // @Summary      Delete the JSON state for a key
 // @Description  Removes the stored state blob if the caller holds the lease. Optional CAS headers guard against concurrent updates.
@@ -838,7 +1739,8 @@ func (h *Handler) handleMetadata(w http.ResponseWriter, r *http.Request) error {
 // @Produce      json
 // @Param        namespace        query   string  false  "Namespace override (defaults to server setting)"
 // @Param        key              query   string  true   "Lease key"
-// @Param        X-Lease-ID       header  string  true   "Lease identifier"
+// @Param        X-Lease-ID       header  string  true   "Lease identifier (xid from Acquire, 20-char lowercase base32)"
+// @Param        X-Txn-ID         header  string  true   "Transaction identifier (xid from Acquire)"
 // @Param        X-Fencing-Token  header  string  false  "Optional fencing token proof"
 // @Param        X-If-Version     header  string  false  "Conditionally remove when version matches"
 // @Param        X-If-State-ETag  header  string  false  "Conditionally remove when state ETag matches"
@@ -866,6 +1768,10 @@ func (h *Handler) handleRemove(w http.ResponseWriter, r *http.Request) error {
 	if leaseID == "" {
 		return httpError{Status: http.StatusBadRequest, Code: "missing_lease", Detail: "X-Lease-ID required"}
 	}
+	txnID := strings.TrimSpace(r.Header.Get("X-Txn-ID"))
+	if txnID == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_txn", Detail: "X-Txn-ID required"}
+	}
 	fencingToken, err := parseFencingToken(r)
 	if err != nil {
 		return err
@@ -890,6 +1796,7 @@ func (h *Handler) handleRemove(w http.ResponseWriter, r *http.Request) error {
 		Namespace:     namespace,
 		Key:           key,
 		LeaseID:       leaseID,
+		TxnID:         txnID,
 		FencingToken:  fencingToken,
 		IfStateETag:   ifMatch,
 		IfVersion:     versionVal,
@@ -1068,7 +1975,7 @@ func (h *Handler) handleQueueEnqueue(w http.ResponseWriter, r *http.Request) err
 	if h.queueDisp != nil {
 		h.queueDisp.Notify(resolvedNamespace, msg.Queue)
 	}
-	enqueueLogger.Info("queue.enqueue.success",
+	enqueueLogger.Debug("queue.enqueue.success",
 		"message_id", msg.ID,
 		"payload_bytes", msg.PayloadBytes,
 		"attempts", msg.Attempts,
@@ -1093,7 +2000,7 @@ func (h *Handler) handleQueueEnqueue(w http.ResponseWriter, r *http.Request) err
 
 // handleQueueDequeue godoc
 // @Summary      Dequeue messages
-// @Description  Dequeues one or more messages from the specified queue. Supports long polling via wait_seconds.
+// @Description  Dequeues one or more messages from the specified queue. Supports long polling via wait_seconds. If txn_id is provided, the message is enlisted as a transaction participant.
 // @Tags         queue
 // @Accept       json
 // @Produce      json
@@ -1218,6 +2125,7 @@ func (h *Handler) handleQueueDequeue(w http.ResponseWriter, r *http.Request) err
 		Namespace:    resolvedNamespace,
 		Queue:        queueName,
 		Owner:        owner,
+		TxnID:        req.TxnID,
 		Stateful:     false,
 		Visibility:   visibility,
 		BlockSeconds: blockSeconds,
@@ -1285,8 +2193,8 @@ func (h *Handler) handleQueueDequeue(w http.ResponseWriter, r *http.Request) err
 }
 
 // handleQueueDequeueWithState godoc
-// @Summary      Fetch queue messages with state attachments
-// @Description  Dequeues messages and includes their associated state blobs in the multipart response when available.
+// @Summary      Fetch queue messages with state sidecars
+// @Description  Dequeues messages and includes their associated state blobs in the multipart response when available. If txn_id is provided, the message and state sidecar are enlisted as transaction participants.
 // @Tags         queue
 // @Accept       json
 // @Produce      multipart/related
@@ -1294,7 +2202,7 @@ func (h *Handler) handleQueueDequeue(w http.ResponseWriter, r *http.Request) err
 // @Param        queue      query    string  false  "Queue name override when the request body omits it"
 // @Param        owner      query    string  false  "Owner override when the request body omits it"
 // @Param        request  body      api.DequeueRequest  true  "Dequeue parameters"
-// @Success      200      {string}  string  "Multipart response with message metadata, payload, and state attachments"
+// @Success      200      {string}  string  "Multipart response with message metadata, payload, and state sidecar"
 // @Failure      400      {object}  api.ErrorResponse
 // @Failure      404      {object}  api.ErrorResponse
 // @Failure      409      {object}  api.ErrorResponse
@@ -1400,6 +2308,7 @@ func (h *Handler) handleQueueDequeueWithState(w http.ResponseWriter, r *http.Req
 		Namespace:    resolvedNamespace,
 		Queue:        queueName,
 		Owner:        owner,
+		TxnID:        req.TxnID,
 		Stateful:     true,
 		Visibility:   visibility,
 		BlockSeconds: blockSeconds,
@@ -1454,7 +2363,7 @@ func (h *Handler) handleQueueDequeueWithState(w http.ResponseWriter, r *http.Req
 
 // handleQueueSubscribe godoc
 // @Summary      Stream queue deliveries
-// @Description  Opens a long-lived multipart stream of deliveries for the specified queue owner. Each part contains message metadata and payload.
+// @Description  Opens a long-lived multipart stream of deliveries for the specified queue owner. Each part contains message metadata and payload. If txn_id is provided, each delivery is enlisted as a transaction participant.
 // @Tags         queue
 // @Accept       json
 // @Produce      multipart/related
@@ -1475,7 +2384,7 @@ func (h *Handler) handleQueueSubscribe(w http.ResponseWriter, r *http.Request) e
 
 // handleQueueSubscribeWithState godoc
 // @Summary      Stream queue deliveries with state
-// @Description  Opens a long-lived multipart stream where each part contains message metadata, payload, and state snapshot when available.
+// @Description  Opens a long-lived multipart stream where each part contains message metadata, payload, and state snapshot when available. If txn_id is provided, the message and state sidecar are enlisted as transaction participants.
 // @Tags         queue
 // @Accept       json
 // @Produce      multipart/related
@@ -1701,6 +2610,7 @@ func (h *Handler) handleQueueSubscribeInternal(w http.ResponseWriter, r *http.Re
 			Namespace:    resolvedNamespace,
 			Queue:        queueName,
 			Owner:        owner,
+			TxnID:        req.TxnID,
 			Stateful:     stateful,
 			Visibility:   visibility,
 			BlockSeconds: loopBlock,
@@ -1830,9 +2740,25 @@ func (h *Handler) handleQueueSubscribeInternal(w http.ResponseWriter, r *http.Re
 	return nil
 }
 
+func (h *Handler) lookupQueueTxnID(ctx context.Context, namespace, queueName, messageID string) string {
+	key, err := queue.MessageLeaseKey(namespace, queueName, messageID)
+	if err != nil {
+		return ""
+	}
+	rel := relativeKey(namespace, key)
+	desc, err := h.core.Describe(ctx, core.DescribeCommand{
+		Namespace: namespace,
+		Key:       rel,
+	})
+	if err != nil || desc == nil || desc.Meta == nil || desc.Meta.Lease == nil {
+		return ""
+	}
+	return desc.Meta.Lease.TxnID
+}
+
 // handleQueueAck godoc
 // @Summary      Acknowledge a delivered message
-// @Description  Confirms processing of a delivery and deletes the message or its retry lease.
+// @Description  Confirms processing of a delivery and deletes the message or its retry lease. If a txn_id is present (or the lease is already enlisted) and TC is enabled, this records a commit decision via the TC.
 // @Tags         queue
 // @Accept       json
 // @Produce      json
@@ -1883,12 +2809,13 @@ func (h *Handler) handleQueueAck(w http.ResponseWriter, r *http.Request) error {
 	if req.StateLeaseID != "" {
 		queueLogger = queueLogger.With("state_lease", req.StateLeaseID)
 	}
+	txnID := ""
 	queueLogger.Debug("queue.ack.begin")
-
 	res, err := h.core.Ack(ctx, core.QueueAckCommand{
 		Namespace:         resolvedNamespace,
 		Queue:             req.Queue,
 		MessageID:         req.MessageID,
+		TxnID:             req.TxnID,
 		MetaETag:          req.MetaETag,
 		StateETag:         req.StateETag,
 		LeaseID:           req.LeaseID,
@@ -1898,8 +2825,14 @@ func (h *Handler) handleQueueAck(w http.ResponseWriter, r *http.Request) error {
 		StateFencingToken: req.StateFencingToken,
 	})
 	if err != nil {
-		queueLogger.Warn("queue.ack.error", "error", err)
+		if txnID == "" {
+			txnID = h.lookupQueueTxnID(ctx, resolvedNamespace, req.Queue, req.MessageID)
+		}
+		queueLogger.With("txn_id", txnID).Warn("queue.ack.error", "error", err)
 		return convertCoreError(err)
+	}
+	if res != nil && res.TxnID != "" {
+		txnID = res.TxnID
 	}
 
 	if res.LeaseOwner != "" {
@@ -1910,6 +2843,7 @@ func (h *Handler) handleQueueAck(w http.ResponseWriter, r *http.Request) error {
 	if res.CorrelationID != "" {
 		headers[headerCorrelationID] = res.CorrelationID
 	}
+	queueLogger = queueLogger.With("txn_id", txnID)
 	queueLogger.Debug("queue.ack.success",
 		"owner", res.LeaseOwner,
 		"correlation", res.CorrelationID,
@@ -1920,7 +2854,7 @@ func (h *Handler) handleQueueAck(w http.ResponseWriter, r *http.Request) error {
 
 // handleQueueNack godoc
 // @Summary      Return a message to the queue
-// @Description  Requeues the delivery with optional delay and last error metadata.
+// @Description  Requeues the delivery with optional delay and last error metadata. If a txn_id is present (or the lease is already enlisted) and TC is enabled, this records a rollback decision via the TC.
 // @Tags         queue
 // @Accept       json
 // @Produce      json
@@ -1974,12 +2908,14 @@ func (h *Handler) handleQueueNack(w http.ResponseWriter, r *http.Request) error 
 	if req.DelaySeconds > 0 {
 		queueLogger = queueLogger.With("delay_seconds", req.DelaySeconds)
 	}
+	txnID := ""
 	queueLogger.Debug("queue.nack.begin")
 	delay := time.Duration(req.DelaySeconds) * time.Second
 	res, err := h.core.Nack(ctx, core.QueueNackCommand{
 		Namespace:         resolvedNamespace,
 		Queue:             req.Queue,
 		MessageID:         req.MessageID,
+		TxnID:             req.TxnID,
 		MetaETag:          req.MetaETag,
 		LeaseID:           req.LeaseID,
 		StateLeaseID:      req.StateLeaseID,
@@ -1990,14 +2926,21 @@ func (h *Handler) handleQueueNack(w http.ResponseWriter, r *http.Request) error 
 		StateFencingToken: req.StateFencingToken,
 	})
 	if err != nil {
-		queueLogger.Warn("queue.nack.error", "error", err)
+		if txnID == "" {
+			txnID = h.lookupQueueTxnID(ctx, resolvedNamespace, req.Queue, req.MessageID)
+		}
+		queueLogger.With("txn_id", txnID).Warn("queue.nack.error", "error", err)
 		return convertCoreError(err)
+	}
+	if res != nil && res.TxnID != "" {
+		txnID = res.TxnID
 	}
 	resp := api.NackResponse{
 		Requeued:      res.Requeued,
 		MetaETag:      res.MetaETag,
 		CorrelationID: res.CorrelationID,
 	}
+	queueLogger = queueLogger.With("txn_id", txnID)
 	queueLogger.Debug("queue.nack.success",
 		"correlation", res.CorrelationID,
 	)
@@ -2011,7 +2954,7 @@ func (h *Handler) handleQueueNack(w http.ResponseWriter, r *http.Request) error 
 
 // handleQueueExtend godoc
 // @Summary      Extend a delivery lease
-// @Description  Extends the visibility timeout and lease window for an in-flight message.
+// @Description  Extends the visibility timeout and lease window for an in-flight message. txn_id is optional; if omitted the server uses the lease's txn_id (if any).
 // @Tags         queue
 // @Accept       json
 // @Produce      json
@@ -2064,6 +3007,7 @@ func (h *Handler) handleQueueExtend(w http.ResponseWriter, r *http.Request) erro
 	if req.StateLeaseID != "" {
 		queueLogger = queueLogger.With("state_lease", req.StateLeaseID)
 	}
+	txnID := ""
 	queueLogger.Debug("queue.extend.begin")
 
 	extension := time.Duration(req.ExtendBySeconds) * time.Second
@@ -2071,6 +3015,7 @@ func (h *Handler) handleQueueExtend(w http.ResponseWriter, r *http.Request) erro
 		Namespace:         resolvedNamespace,
 		Queue:             req.Queue,
 		MessageID:         req.MessageID,
+		TxnID:             req.TxnID,
 		MetaETag:          req.MetaETag,
 		LeaseID:           req.LeaseID,
 		StateLeaseID:      req.StateLeaseID,
@@ -2080,8 +3025,14 @@ func (h *Handler) handleQueueExtend(w http.ResponseWriter, r *http.Request) erro
 		StateFencingToken: req.StateFencingToken,
 	})
 	if err != nil {
-		queueLogger.Warn("queue.extend.error", "error", err)
+		if txnID == "" {
+			txnID = h.lookupQueueTxnID(ctx, resolvedNamespace, req.Queue, req.MessageID)
+		}
+		queueLogger.With("txn_id", txnID).Warn("queue.extend.error", "error", err)
 		return convertCoreError(err)
+	}
+	if res != nil && res.TxnID != "" {
+		txnID = res.TxnID
 	}
 	resp := api.ExtendResponse{
 		LeaseExpiresAtUnix:       res.LeaseExpiresAtUnix,
@@ -2090,6 +3041,7 @@ func (h *Handler) handleQueueExtend(w http.ResponseWriter, r *http.Request) erro
 		StateLeaseExpiresAtUnix:  res.StateLeaseExpiresAtUnix,
 		CorrelationID:            res.CorrelationID,
 	}
+	queueLogger = queueLogger.With("txn_id", txnID)
 	queueLogger.Debug("queue.extend.success",
 		"lease_expires_at", resp.LeaseExpiresAtUnix,
 		"state_lease_expires_at", resp.StateLeaseExpiresAtUnix,
@@ -2140,6 +3092,7 @@ func (h *Handler) handleError(ctx context.Context, w http.ResponseWriter, err er
 			"status", httpErr.Status,
 			"code", httpErr.Code,
 			"detail", httpErr.Detail,
+			"leader_endpoint", httpErr.LeaderEndpoint,
 			"version", httpErr.Version,
 			"etag", httpErr.ETag,
 			"retry_after", httpErr.RetryAfter,
@@ -2147,6 +3100,7 @@ func (h *Handler) handleError(ctx context.Context, w http.ResponseWriter, err er
 		resp := api.ErrorResponse{
 			ErrorCode:         httpErr.Code,
 			Detail:            httpErr.Detail,
+			LeaderEndpoint:    httpErr.LeaderEndpoint,
 			CurrentVersion:    httpErr.Version,
 			CurrentETag:       httpErr.ETag,
 			RetryAfterSeconds: httpErr.RetryAfter,
@@ -2211,10 +3165,12 @@ func (h *Handler) handleNamespaceConfigGet(w http.ResponseWriter, r *http.Reques
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
 	}
 	h.observeNamespace(namespace)
-	cfg, etag, err := h.namespaceConfigs.Load(r.Context(), namespace)
+	loadRes, err := h.namespaceConfigs.Load(r.Context(), namespace)
 	if err != nil {
 		return fmt.Errorf("load namespace config: %w", err)
 	}
+	cfg := loadRes.Config
+	etag := loadRes.ETag
 	resp := api.NamespaceConfigResponse{
 		Namespace: namespace,
 		Query: api.NamespaceQueryConfig{
@@ -2265,10 +3221,11 @@ func (h *Handler) handleNamespaceConfigSet(w http.ResponseWriter, r *http.Reques
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace_request", Detail: "query configuration required"}
 	}
 	h.observeNamespace(namespace)
-	cfg, _, err := h.namespaceConfigs.Load(r.Context(), namespace)
+	loadRes, err := h.namespaceConfigs.Load(r.Context(), namespace)
 	if err != nil {
 		return fmt.Errorf("load namespace config: %w", err)
 	}
+	cfg := loadRes.Config
 	if val := strings.TrimSpace(payload.Query.PreferredEngine); val != "" {
 		cfg.Query.Preferred = search.EngineHint(strings.ToLower(val))
 	}
@@ -2300,4 +3257,403 @@ func (h *Handler) handleNamespaceConfigSet(w http.ResponseWriter, r *http.Reques
 	}
 	h.writeJSON(w, http.StatusOK, resp, headers)
 	return nil
+}
+
+// handleAttachments godoc
+// @Summary      Manage state attachments
+// @Description  Upload, list, or delete attachments for a key depending on the HTTP method.
+// @Tags         lease
+// @Accept       octet-stream
+// @Produce      json
+// @Param        namespace          query   string  false  "Namespace override (defaults to server setting)"
+// @Param        key                query   string  true   "Lease key"
+// @Param        name               query   string  false  "Attachment name (upload/delete)"
+// @Param        id                 query   string  false  "Attachment id (delete)"
+// @Param        public             query   bool    false  "Set to true to read without a lease (list)"
+// @Param        content_type       query   string  false  "Attachment content type (upload)"
+// @Param        max_bytes          query   int64   false  "Maximum attachment size (0 = unlimited)"
+// @Param        prevent_overwrite  query   bool    false  "Do not overwrite existing attachments (upload)"
+// @Param        X-Lease-ID         header  string false  "Lease identifier (required unless public=1)"
+// @Param        X-Txn-ID           header  string false  "Transaction identifier (required for lease operations)"
+// @Param        X-Fencing-Token    header  string false  "Optional fencing token proof"
+// @Success      200                {object} api.AttachmentListResponse
+// @Failure      400                {object} api.ErrorResponse
+// @Failure      404                {object} api.ErrorResponse
+// @Failure      409                {object} api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/attachments [get]
+// @Router       /v1/attachments [post]
+// @Router       /v1/attachments [delete]
+func (h *Handler) handleAttachments(w http.ResponseWriter, r *http.Request) error {
+	switch r.Method {
+	case http.MethodGet:
+		return h.handleAttachmentList(w, r)
+	case http.MethodPost:
+		return h.handleAttachmentUpload(w, r)
+	case http.MethodDelete:
+		return h.handleAttachmentDeleteAll(w, r)
+	default:
+		return httpError{Status: http.StatusMethodNotAllowed, Code: "method_not_allowed", Detail: "unsupported method"}
+	}
+}
+
+// handleAttachment godoc
+// @Summary      Retrieve or delete a state attachment
+// @Description  Streams a single attachment (GET) or stages its deletion (DELETE).
+// @Tags         lease
+// @Accept       json
+// @Produce      octet-stream
+// @Param        namespace          query   string  false  "Namespace override (defaults to server setting)"
+// @Param        key                query   string  true   "Lease key"
+// @Param        name               query   string  false  "Attachment name"
+// @Param        id                 query   string  false  "Attachment id"
+// @Param        public             query   bool    false  "Set to true to read without a lease (GET)"
+// @Param        X-Lease-ID         header  string false  "Lease identifier (required unless public=1)"
+// @Param        X-Txn-ID           header  string false  "Transaction identifier (required for lease operations)"
+// @Param        X-Fencing-Token    header  string false  "Optional fencing token proof"
+// @Success      200                {string}  string  "Attachment payload"
+// @Failure      400                {object} api.ErrorResponse
+// @Failure      404                {object} api.ErrorResponse
+// @Failure      409                {object} api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/attachment [get]
+// @Router       /v1/attachment [delete]
+func (h *Handler) handleAttachment(w http.ResponseWriter, r *http.Request) error {
+	switch r.Method {
+	case http.MethodGet:
+		return h.handleAttachmentGet(w, r)
+	case http.MethodDelete:
+		return h.handleAttachmentDelete(w, r)
+	default:
+		return httpError{Status: http.StatusMethodNotAllowed, Code: "method_not_allowed", Detail: "unsupported method"}
+	}
+}
+
+func (h *Handler) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) error {
+	key := strings.TrimSpace(r.URL.Query().Get("key"))
+	if key == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_key", Detail: "key query required"}
+	}
+	name := strings.TrimSpace(r.URL.Query().Get("name"))
+	if name == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_attachment", Detail: "attachment name required"}
+	}
+	namespace, err := h.resolveNamespace(r.URL.Query().Get("namespace"))
+	if err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
+	}
+	h.observeNamespace(namespace)
+	storageKey, err := h.namespacedKey(namespace, key)
+	if err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_key", Detail: err.Error()}
+	}
+	leaseID := strings.TrimSpace(r.Header.Get("X-Lease-ID"))
+	if leaseID == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_lease", Detail: "X-Lease-ID required"}
+	}
+	txnID := strings.TrimSpace(r.Header.Get("X-Txn-ID"))
+	if txnID == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_txn", Detail: "X-Txn-ID required"}
+	}
+	fencingToken, err := parseFencingToken(r)
+	if err != nil {
+		return err
+	}
+	maxBytes, maxBytesSet, err := parseMaxBytesQuery(r.URL.Query().Get("max_bytes"))
+	if err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_max_bytes", Detail: err.Error()}
+	}
+	preventOverwrite := parseBoolQuery(r.URL.Query().Get("prevent_overwrite"))
+	contentType := strings.TrimSpace(r.URL.Query().Get("content_type"))
+	if contentType == "" {
+		contentType = strings.TrimSpace(r.Header.Get("Content-Type"))
+	}
+
+	res, err := h.core.Attach(r.Context(), core.AttachCommand{
+		Namespace:        namespace,
+		Key:              key,
+		LeaseID:          leaseID,
+		FencingToken:     fencingToken,
+		TxnID:            txnID,
+		Name:             name,
+		ContentType:      contentType,
+		MaxBytes:         maxBytes,
+		MaxBytesSet:      maxBytesSet,
+		PreventOverwrite: preventOverwrite,
+		Body:             r.Body,
+	})
+	if err != nil {
+		return convertCoreError(err)
+	}
+	if res.Meta != nil {
+		h.cacheLease(leaseID, storageKey, *res.Meta, res.MetaETag)
+		if res.Meta.Lease != nil {
+			w.Header().Set(headerFencingToken, strconv.FormatInt(res.Meta.Lease.FencingToken, 10))
+		}
+	}
+	if res.Version > 0 {
+		w.Header().Set("X-Key-Version", strconv.FormatInt(res.Version, 10))
+	}
+	if res.Attachment.ID != "" {
+		w.Header().Set(headerAttachmentID, res.Attachment.ID)
+	}
+	h.writeJSON(w, http.StatusOK, api.AttachResponse{
+		Attachment: attachmentInfoToAPI(res.Attachment),
+		Noop:       res.Noop,
+		Version:    res.Version,
+	}, nil)
+	return nil
+}
+
+func (h *Handler) handleAttachmentList(w http.ResponseWriter, r *http.Request) error {
+	key := strings.TrimSpace(r.URL.Query().Get("key"))
+	if key == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_key", Detail: "key query required"}
+	}
+	publicRequested := parseBoolQuery(r.URL.Query().Get("public"))
+	leaseID := strings.TrimSpace(r.Header.Get("X-Lease-ID"))
+	publicRead := publicRequested && leaseID == ""
+	fencingToken := int64(0)
+	if !publicRead {
+		var err error
+		fencingToken, err = parseFencingToken(r)
+		if err != nil {
+			return err
+		}
+	}
+	namespace, err := h.resolveNamespace(r.URL.Query().Get("namespace"))
+	if err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
+	}
+	h.observeNamespace(namespace)
+	txnID := strings.TrimSpace(r.Header.Get("X-Txn-ID"))
+	if !publicRead && txnID == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_txn", Detail: "X-Txn-ID required"}
+	}
+	res, err := h.core.ListAttachments(r.Context(), core.ListAttachmentsCommand{
+		Namespace:    namespace,
+		Key:          key,
+		LeaseID:      leaseID,
+		FencingToken: fencingToken,
+		TxnID:        txnID,
+		Public:       publicRead,
+	})
+	if err != nil {
+		return convertCoreError(err)
+	}
+	out := api.AttachmentListResponse{
+		Namespace:   namespace,
+		Key:         key,
+		Attachments: convertAttachmentList(res.Attachments),
+	}
+	h.writeJSON(w, http.StatusOK, out, nil)
+	return nil
+}
+
+func (h *Handler) handleAttachmentGet(w http.ResponseWriter, r *http.Request) error {
+	key := strings.TrimSpace(r.URL.Query().Get("key"))
+	if key == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_key", Detail: "key query required"}
+	}
+	selector := core.AttachmentSelector{
+		Name: strings.TrimSpace(r.URL.Query().Get("name")),
+		ID:   strings.TrimSpace(r.URL.Query().Get("id")),
+	}
+	publicRequested := parseBoolQuery(r.URL.Query().Get("public"))
+	leaseID := strings.TrimSpace(r.Header.Get("X-Lease-ID"))
+	publicRead := publicRequested && leaseID == ""
+	fencingToken := int64(0)
+	if !publicRead {
+		var err error
+		fencingToken, err = parseFencingToken(r)
+		if err != nil {
+			return err
+		}
+	}
+	namespace, err := h.resolveNamespace(r.URL.Query().Get("namespace"))
+	if err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
+	}
+	h.observeNamespace(namespace)
+	txnID := strings.TrimSpace(r.Header.Get("X-Txn-ID"))
+	if !publicRead && txnID == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_txn", Detail: "X-Txn-ID required"}
+	}
+	res, err := h.core.RetrieveAttachment(r.Context(), core.RetrieveAttachmentCommand{
+		Namespace:    namespace,
+		Key:          key,
+		LeaseID:      leaseID,
+		FencingToken: fencingToken,
+		TxnID:        txnID,
+		Public:       publicRead,
+		Selector:     selector,
+	})
+	if err != nil {
+		return convertCoreError(err)
+	}
+	defer res.Reader.Close()
+	contentType := strings.TrimSpace(res.Attachment.ContentType)
+	if contentType == "" {
+		contentType = storage.ContentTypeOctetStream
+	}
+	w.Header().Set("Content-Type", contentType)
+	if res.Attachment.Size > 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(res.Attachment.Size, 10))
+		w.Header().Set(headerAttachmentSize, strconv.FormatInt(res.Attachment.Size, 10))
+	}
+	if res.Attachment.ID != "" {
+		w.Header().Set(headerAttachmentID, res.Attachment.ID)
+	}
+	if res.Attachment.Name != "" {
+		w.Header().Set(headerAttachmentName, res.Attachment.Name)
+	}
+	if res.Attachment.CreatedAtUnix > 0 {
+		w.Header().Set(headerAttachmentCreatedAt, strconv.FormatInt(res.Attachment.CreatedAtUnix, 10))
+	}
+	if res.Attachment.UpdatedAtUnix > 0 {
+		w.Header().Set(headerAttachmentUpdatedAt, strconv.FormatInt(res.Attachment.UpdatedAtUnix, 10))
+	}
+	w.WriteHeader(http.StatusOK)
+	_, err = io.Copy(w, res.Reader)
+	return err
+}
+
+func (h *Handler) handleAttachmentDelete(w http.ResponseWriter, r *http.Request) error {
+	key := strings.TrimSpace(r.URL.Query().Get("key"))
+	if key == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_key", Detail: "key query required"}
+	}
+	selector := core.AttachmentSelector{
+		Name: strings.TrimSpace(r.URL.Query().Get("name")),
+		ID:   strings.TrimSpace(r.URL.Query().Get("id")),
+	}
+	namespace, err := h.resolveNamespace(r.URL.Query().Get("namespace"))
+	if err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
+	}
+	h.observeNamespace(namespace)
+	storageKey, err := h.namespacedKey(namespace, key)
+	if err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_key", Detail: err.Error()}
+	}
+	leaseID := strings.TrimSpace(r.Header.Get("X-Lease-ID"))
+	if leaseID == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_lease", Detail: "X-Lease-ID required"}
+	}
+	txnID := strings.TrimSpace(r.Header.Get("X-Txn-ID"))
+	if txnID == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_txn", Detail: "X-Txn-ID required"}
+	}
+	fencingToken, err := parseFencingToken(r)
+	if err != nil {
+		return err
+	}
+	res, err := h.core.DeleteAttachment(r.Context(), core.DeleteAttachmentCommand{
+		Namespace:    namespace,
+		Key:          key,
+		LeaseID:      leaseID,
+		FencingToken: fencingToken,
+		TxnID:        txnID,
+		Selector:     selector,
+	})
+	if err != nil {
+		return convertCoreError(err)
+	}
+	if res.Meta != nil {
+		h.cacheLease(leaseID, storageKey, *res.Meta, res.MetaETag)
+		if res.Meta.Lease != nil {
+			w.Header().Set(headerFencingToken, strconv.FormatInt(res.Meta.Lease.FencingToken, 10))
+		}
+	}
+	if res.Version > 0 {
+		w.Header().Set("X-Key-Version", strconv.FormatInt(res.Version, 10))
+	}
+	h.writeJSON(w, http.StatusOK, api.DeleteAttachmentResponse{Deleted: res.Deleted, Version: res.Version}, nil)
+	return nil
+}
+
+func (h *Handler) handleAttachmentDeleteAll(w http.ResponseWriter, r *http.Request) error {
+	key := strings.TrimSpace(r.URL.Query().Get("key"))
+	if key == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_key", Detail: "key query required"}
+	}
+	namespace, err := h.resolveNamespace(r.URL.Query().Get("namespace"))
+	if err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
+	}
+	h.observeNamespace(namespace)
+	storageKey, err := h.namespacedKey(namespace, key)
+	if err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_key", Detail: err.Error()}
+	}
+	leaseID := strings.TrimSpace(r.Header.Get("X-Lease-ID"))
+	if leaseID == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_lease", Detail: "X-Lease-ID required"}
+	}
+	txnID := strings.TrimSpace(r.Header.Get("X-Txn-ID"))
+	if txnID == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_txn", Detail: "X-Txn-ID required"}
+	}
+	fencingToken, err := parseFencingToken(r)
+	if err != nil {
+		return err
+	}
+	res, err := h.core.DeleteAllAttachments(r.Context(), core.DeleteAllAttachmentsCommand{
+		Namespace:    namespace,
+		Key:          key,
+		LeaseID:      leaseID,
+		FencingToken: fencingToken,
+		TxnID:        txnID,
+	})
+	if err != nil {
+		return convertCoreError(err)
+	}
+	if res.Meta != nil {
+		h.cacheLease(leaseID, storageKey, *res.Meta, res.MetaETag)
+		if res.Meta.Lease != nil {
+			w.Header().Set(headerFencingToken, strconv.FormatInt(res.Meta.Lease.FencingToken, 10))
+		}
+	}
+	if res.Version > 0 {
+		w.Header().Set("X-Key-Version", strconv.FormatInt(res.Version, 10))
+	}
+	h.writeJSON(w, http.StatusOK, api.DeleteAllAttachmentsResponse{Deleted: res.Deleted, Version: res.Version}, nil)
+	return nil
+}
+
+func parseMaxBytesQuery(raw string) (int64, bool, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, false, nil
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, true, err
+	}
+	if value < 0 {
+		return value, true, fmt.Errorf("max_bytes must be >= 0")
+	}
+	return value, true, nil
+}
+
+func attachmentInfoToAPI(info core.AttachmentInfo) api.AttachmentInfo {
+	return api.AttachmentInfo{
+		ID:            info.ID,
+		Name:          info.Name,
+		Size:          info.Size,
+		ContentType:   info.ContentType,
+		CreatedAtUnix: info.CreatedAtUnix,
+		UpdatedAtUnix: info.UpdatedAtUnix,
+	}
+}
+
+func convertAttachmentList(items []core.AttachmentInfo) []api.AttachmentInfo {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]api.AttachmentInfo, 0, len(items))
+	for _, item := range items {
+		out = append(out, attachmentInfoToAPI(item))
+	}
+	return out
 }

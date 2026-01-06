@@ -124,8 +124,8 @@ queue by running multiple lockd deployments with different configuration.
   * `queue.dispatcher.qrf_throttle` (and similar) – per-request decisions.
 * **Runtime inspection**:
   * `Server.QRFState()` returns the current posture.
-  * `Server.QRFStatus()` reports state, last reason, and last snapshot (useful in
-    unit/integration tests or health endpoints).
+  * `Server.QRFStatus()` returns a status struct with state, last reason, and
+    latest snapshot (useful in unit/integration tests or health endpoints).
   * `/v1/readyz` stays green even while the QRF is engaged; consumers should rely
     on HTTP status codes and headers for pacing.
 

@@ -26,6 +26,18 @@ type CredentialSummary struct {
 	Source    string
 }
 
+// S3ConfigResult captures S3 configuration and selected credentials.
+type S3ConfigResult struct {
+	Config      s3.Config
+	Credentials CredentialSummary
+}
+
+// DiskConfigResult captures disk configuration and its root path.
+type DiskConfigResult struct {
+	Config disk.Config
+	Root   string
+}
+
 func openBackend(cfg Config, crypto *storage.Crypto) (storage.Backend, error) {
 	if cfg.StorageEncryptionEnabled() && (crypto == nil || !crypto.Enabled()) {
 		return nil, fmt.Errorf("config: storage encryption enabled but crypto material missing")
@@ -36,14 +48,14 @@ func openBackend(cfg Config, crypto *storage.Crypto) (storage.Backend, error) {
 	}
 	switch u.Scheme {
 	case "memory", "mem", "":
-		return memory.NewWithConfig(memory.Config{QueueWatch: cfg.MemQueueWatch, Crypto: crypto}), nil
+		return memory.NewWithConfig(memory.Config{QueueWatch: !cfg.DisableMemQueueWatch, Crypto: crypto}), nil
 	case "s3":
-		s3cfg, _, err := BuildGenericS3Config(cfg)
+		s3Result, err := BuildGenericS3Config(cfg)
 		if err != nil {
 			return nil, err
 		}
-		s3cfg.Crypto = crypto
-		backend, err := s3.New(s3cfg)
+		s3Result.Config.Crypto = crypto
+		backend, err := s3.New(s3Result.Config)
 		if err != nil {
 			return nil, err
 		}
@@ -53,12 +65,12 @@ func openBackend(cfg Config, crypto *storage.Crypto) (storage.Backend, error) {
 		}
 		return backend, nil
 	case "aws":
-		awscfg, _, err := BuildAWSConfig(cfg)
+		awsResult, err := BuildAWSConfig(cfg)
 		if err != nil {
 			return nil, err
 		}
-		awscfg.Crypto = crypto
-		backend, err := s3.New(awscfg)
+		awsResult.Config.Crypto = crypto
+		backend, err := s3.New(awsResult.Config)
 		if err != nil {
 			return nil, err
 		}
@@ -68,18 +80,18 @@ func openBackend(cfg Config, crypto *storage.Crypto) (storage.Backend, error) {
 		}
 		return backend, nil
 	case "disk":
-		diskCfg, _, err := BuildDiskConfig(cfg)
+		diskResult, err := BuildDiskConfig(cfg)
 		if err != nil {
 			return nil, err
 		}
-		diskCfg.Crypto = crypto
-		checks := disk.Verify(context.Background(), diskCfg)
+		diskResult.Config.Crypto = crypto
+		checks := disk.Verify(context.Background(), diskResult.Config)
 		for _, check := range checks {
 			if check.Err != nil {
 				return nil, fmt.Errorf("disk store verification failed: %s: %v", check.Name, check.Err)
 			}
 		}
-		return disk.New(diskCfg)
+		return disk.New(diskResult.Config)
 	case "azure":
 		azureCfg, err := BuildAzureConfig(cfg)
 		if err != nil {
@@ -93,26 +105,26 @@ func openBackend(cfg Config, crypto *storage.Crypto) (storage.Backend, error) {
 }
 
 // BuildGenericS3Config parses s3:// URLs that target generic S3-compatible services (MinIO, etc.).
-func BuildGenericS3Config(cfg Config) (s3.Config, CredentialSummary, error) {
+func BuildGenericS3Config(cfg Config) (S3ConfigResult, error) {
 	u, err := url.Parse(cfg.Store)
 	if err != nil {
-		return s3.Config{}, CredentialSummary{}, fmt.Errorf("parse store URL: %w", err)
+		return S3ConfigResult{}, fmt.Errorf("parse store URL: %w", err)
 	}
 	if u.Scheme != "s3" {
-		return s3.Config{}, CredentialSummary{}, fmt.Errorf("store scheme %q not supported", u.Scheme)
+		return S3ConfigResult{}, fmt.Errorf("store scheme %q not supported", u.Scheme)
 	}
 	endpoint := strings.TrimSpace(u.Host)
 	if endpoint == "" {
-		return s3.Config{}, CredentialSummary{}, fmt.Errorf("s3 store missing host (expected s3://host[:port]/bucket[/prefix])")
+		return S3ConfigResult{}, fmt.Errorf("s3 store missing host (expected s3://host[:port]/bucket[/prefix])")
 	}
 	path := strings.Trim(strings.TrimPrefix(u.Path, "/"), "/")
 	if path == "" {
-		return s3.Config{}, CredentialSummary{}, fmt.Errorf("s3 store missing bucket (expected s3://host[:port]/bucket[/prefix])")
+		return S3ConfigResult{}, fmt.Errorf("s3 store missing bucket (expected s3://host[:port]/bucket[/prefix])")
 	}
 	parts := strings.SplitN(path, "/", 2)
 	bucket := strings.TrimSpace(parts[0])
 	if bucket == "" {
-		return s3.Config{}, CredentialSummary{}, fmt.Errorf("s3 store missing bucket name")
+		return S3ConfigResult{}, fmt.Errorf("s3 store missing bucket name")
 	}
 	var prefix string
 	if len(parts) == 2 {
@@ -150,33 +162,36 @@ func BuildGenericS3Config(cfg Config) (s3.Config, CredentialSummary, error) {
 	}
 	cred, summary, err := resolveGenericS3Credentials(cfg)
 	if err != nil {
-		return s3.Config{}, summary, err
+		return S3ConfigResult{Credentials: summary}, err
 	}
-	return s3.Config{
-		Endpoint:       endpoint,
-		Bucket:         bucket,
-		Prefix:         prefix,
-		Insecure:       !secure,
-		ForcePathStyle: forcePath,
-		PartSize:       cfg.S3MaxPartSize,
-		ServerSideEnc:  cfg.S3SSE,
-		KMSKeyID:       kmsKey,
-		CustomCreds:    cred,
-	}, summary, nil
+	return S3ConfigResult{
+		Config: s3.Config{
+			Endpoint:       endpoint,
+			Bucket:         bucket,
+			Prefix:         prefix,
+			Insecure:       !secure,
+			ForcePathStyle: forcePath,
+			PartSize:       cfg.S3MaxPartSize,
+			ServerSideEnc:  cfg.S3SSE,
+			KMSKeyID:       kmsKey,
+			CustomCreds:    cred,
+		},
+		Credentials: summary,
+	}, nil
 }
 
 // BuildAWSConfig parses aws:// URLs that target AWS S3 with regional configuration.
-func BuildAWSConfig(cfg Config) (s3.Config, CredentialSummary, error) {
+func BuildAWSConfig(cfg Config) (S3ConfigResult, error) {
 	u, err := url.Parse(cfg.Store)
 	if err != nil {
-		return s3.Config{}, CredentialSummary{}, fmt.Errorf("parse store URL: %w", err)
+		return S3ConfigResult{}, fmt.Errorf("parse store URL: %w", err)
 	}
 	if u.Scheme != "aws" {
-		return s3.Config{}, CredentialSummary{}, fmt.Errorf("store scheme %q not supported", u.Scheme)
+		return S3ConfigResult{}, fmt.Errorf("store scheme %q not supported", u.Scheme)
 	}
 	bucket := strings.TrimSpace(u.Host)
 	if bucket == "" {
-		return s3.Config{}, CredentialSummary{}, fmt.Errorf("aws store missing bucket (expected aws://bucket[/prefix])")
+		return S3ConfigResult{}, fmt.Errorf("aws store missing bucket (expected aws://bucket[/prefix])")
 	}
 	prefix := strings.Trim(strings.TrimPrefix(u.Path, "/"), "/")
 	region := strings.TrimSpace(cfg.AWSRegion)
@@ -185,7 +200,7 @@ func BuildAWSConfig(cfg Config) (s3.Config, CredentialSummary, error) {
 		region = v
 	}
 	if region == "" {
-		return s3.Config{}, CredentialSummary{}, fmt.Errorf("aws store requires region (set --aws-region or LOCKD_AWS_REGION)")
+		return S3ConfigResult{}, fmt.Errorf("aws store requires region (set --aws-region or LOCKD_AWS_REGION)")
 	}
 	secure := true
 	if v := query.Get("insecure"); v != "" {
@@ -205,18 +220,21 @@ func BuildAWSConfig(cfg Config) (s3.Config, CredentialSummary, error) {
 		endpoint = fmt.Sprintf("s3.%s.amazonaws.com", region)
 	}
 	cred, summary := resolveAWSCredentials()
-	return s3.Config{
-		Endpoint:       endpoint,
-		Region:         region,
-		Bucket:         bucket,
-		Prefix:         prefix,
-		Insecure:       !secure,
-		ForcePathStyle: false,
-		PartSize:       cfg.S3MaxPartSize,
-		ServerSideEnc:  cfg.S3SSE,
-		KMSKeyID:       kmsKey,
-		CustomCreds:    cred,
-	}, summary, nil
+	return S3ConfigResult{
+		Config: s3.Config{
+			Endpoint:       endpoint,
+			Region:         region,
+			Bucket:         bucket,
+			Prefix:         prefix,
+			Insecure:       !secure,
+			ForcePathStyle: false,
+			PartSize:       cfg.S3MaxPartSize,
+			ServerSideEnc:  cfg.S3SSE,
+			KMSKeyID:       kmsKey,
+			CustomCreds:    cred,
+		},
+		Credentials: summary,
+	}, nil
 }
 
 func resolveGenericS3Credentials(cfg Config) (*minioCredentials.Credentials, CredentialSummary, error) {
@@ -356,13 +374,13 @@ func firstEnv(names ...string) string {
 }
 
 // BuildDiskConfig parses disk:// URLs into a disk.Config.
-func BuildDiskConfig(cfg Config) (disk.Config, string, error) {
+func BuildDiskConfig(cfg Config) (DiskConfigResult, error) {
 	u, err := url.Parse(cfg.Store)
 	if err != nil {
-		return disk.Config{}, "", fmt.Errorf("parse store URL: %w", err)
+		return DiskConfigResult{}, fmt.Errorf("parse store URL: %w", err)
 	}
 	if u.Scheme != "disk" {
-		return disk.Config{}, "", fmt.Errorf("store scheme %q not supported", u.Scheme)
+		return DiskConfigResult{}, fmt.Errorf("store scheme %q not supported", u.Scheme)
 	}
 	pathPart := strings.TrimSpace(u.Path)
 	host := strings.TrimSpace(u.Host)
@@ -374,7 +392,7 @@ func BuildDiskConfig(cfg Config) (disk.Config, string, error) {
 		}
 	}
 	if pathPart == "" || pathPart == "/" {
-		return disk.Config{}, "", fmt.Errorf("disk store path required (e.g. disk:///var/lib/lockd-data)")
+		return DiskConfigResult{}, fmt.Errorf("disk store path required (e.g. disk:///var/lib/lockd-data)")
 	}
 	root := filepath.Clean(pathPart)
 	cfgDisk := disk.Config{
@@ -383,5 +401,5 @@ func BuildDiskConfig(cfg Config) (disk.Config, string, error) {
 		JanitorInterval: cfg.DiskJanitorInterval,
 		QueueWatch:      cfg.DiskQueueWatch,
 	}
-	return cfgDisk, root, nil
+	return DiskConfigResult{Config: cfgDisk, Root: root}, nil
 }

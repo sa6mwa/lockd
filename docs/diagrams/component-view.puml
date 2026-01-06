@@ -4,25 +4,35 @@ skinparam shadowing false
 skinparam roundcorner 8
 skinparam wrapWidth 200
 skinparam defaultTextAlignment center
-skinparam packageBackgroundColor white
+skinparam ArrowColor #8B949E
+skinparam LineColor #8B949E
+skinparam packageBorderColor #8B949E
+skinparam packageBackgroundColor #242A33
+skinparam packageFontColor #E5E7EB
+skinparam componentBorderColor #8B949E
+skinparam componentFontColor #F8FAFC
+skinparam databaseBorderColor #8B949E
+skinparam databaseFontColor #F8FAFC
 
-!define COLOR_CLIENT #E8F1FF
-!define COLOR_CONTROL #F1E8FF
-!define COLOR_HTTP #FFF3E0
-!define COLOR_SERVICE #E7F8EF
-!define COLOR_QUEUE #EDEAFF
-!define COLOR_SEARCH #FFEDED
-!define COLOR_STORAGE #F0F0F0
+!define COLOR_CLIENT #2F3742
+!define COLOR_CONTROL #343B46
+!define COLOR_HTTP #3A414D
+!define COLOR_SERVICE #2F3B35
+!define COLOR_QUEUE #2E3646
+!define COLOR_SEARCH #3B3131
+!define COLOR_STORAGE #33363D
 
 ' Clients / CLI
 package "Client Tier" {
   component clientSdk as "client.sdk" COLOR_CLIENT
   component clientCli as "client.cli" COLOR_CLIENT
+  component cliTxn as "cli.txn (TC auth)" COLOR_CLIENT
   component cliRoot as "cli.root" COLOR_CLIENT
   component cliVerify as "cli.verify" COLOR_CLIENT
 }
 
 clientCli --> clientSdk
+cliTxn --> clientSdk
 cliRoot --> clientCli
 cliVerify --> clientCli
 
@@ -33,16 +43,48 @@ lsf --> qrf : samples
 
 ' HTTP front door
 component apiRouter as "api.http.router.*\n/api.http.server" COLOR_HTTP
-clientSdk --> apiRouter
+component apiRouterRemote as "api.http.router.* (remote)" COLOR_HTTP
+clientSdk --> apiRouter : RM endpoints
+cliTxn --> apiRouter : /v1/txn/* + /v1/tc/*
 qrf --> apiRouter : throttle decisions
 
-' Namespace/config + lifecycle (shown implicitly)
+' Transaction coordination
+package "Transaction coordination" {
+  component txnDecider as "txncoord.decider\n(implicit XA)" COLOR_CONTROL
+  component txnApply as "txn.rm.apply\n(txn.apply + sweep)" COLOR_SERVICE
+  component tcLeader as "tc.leader.manager" COLOR_CONTROL
+  component tcCluster as "tc.cluster.store" COLOR_CONTROL
+  component tcRMRegistry as "tc.rm.registry" COLOR_CONTROL
+  component tcRMReplicator as "tc.rm.replicator" COLOR_CONTROL
+}
+
+apiRouter --> txnDecider : release/ack/nack
+apiRouter --> txnApply : /v1/txn/commit|rollback|replay
+txnDecider --> txnApply : local apply
+
+txnDecider --> apiRouterRemote : fan-out /v1/txn/commit|rollback
+
+apiRouter --> tcLeader : /v1/tc/leader + /v1/tc/lease*
+apiRouter --> tcCluster : /v1/tc/join|leave|list
+apiRouter --> tcRMRegistry : /v1/tc/rm/list
+apiRouter --> tcRMReplicator : /v1/tc/rm/register|unregister
+
+tcLeader --> apiRouterRemote : lease quorum
+tcLeader --> tcCluster : read/write
+
+tcRMReplicator --> tcRMRegistry : local update
+tcRMReplicator --> apiRouterRemote : replicate /v1/tc/rm/*
+
+txnApply --> tcRMRegistry : RM lookup
+
+' Namespace/config + lifecycle
 component nsConfig as "namespace.config" COLOR_SERVICE
 apiRouter --> nsConfig
 
 ' Lease/state services
-component leaseSvc as "server.lease.manager \n server.lease.sweeper" COLOR_SERVICE
+component leaseSvc as "server.lease.manager\nserver.lease.sweeper" COLOR_SERVICE
 apiRouter --> leaseSvc
+leaseSvc --> txnApply : expire pending txn
 
 ' Queue services
 component queueSvc as "queue.service.meta/state" COLOR_QUEUE
@@ -87,6 +129,10 @@ leaseSvc --> snappy : state blobs
 queueSvc --> snappy : queue payloads
 searchScan --> snappy : state reads (scan)
 searchIndex --> snappy : index segments
+
+txnApply --> snappy : staging + decision records
+tcCluster --> snappy : tc cluster members
+tcRMRegistry --> snappy : rm registry
 
 snappy --> crypto
 crypto --> backend

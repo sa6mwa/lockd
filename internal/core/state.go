@@ -77,6 +77,10 @@ func (s *Service) Get(ctx context.Context, cmd GetCommand) (*GetResult, error) {
 	}
 	expectState := meta.StateETag != ""
 	publicRead := cmd.Public && cmd.LeaseID == ""
+	txnID := ""
+	if meta.Lease != nil {
+		txnID = meta.Lease.TxnID
+	}
 	if publicRead {
 		if !expectState || publishedVersion == 0 {
 			return &GetResult{NoContent: true, Public: true, Meta: meta, PublishedVersion: publishedVersion}, nil
@@ -92,9 +96,50 @@ func (s *Service) Get(ctx context.Context, cmd GetCommand) (*GetResult, error) {
 		if cmd.LeaseID == "" {
 			return nil, Failure{Code: "missing_params", Detail: "lease_id required (or use public=1)", HTTPStatus: http.StatusBadRequest}
 		}
-		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, s.clock.Now()); err != nil {
+		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, txnID, s.clock.Now()); err != nil {
 			return nil, err
 		}
+	}
+
+	relKey := relativeKey(namespace, storageKey)
+	if meta.StagedTxnID != "" && meta.StagedTxnID == txnID {
+		if meta.StagedRemove {
+			return &GetResult{NoContent: true, Public: publicRead, Meta: meta, PublishedVersion: publishedVersion}, nil
+		}
+		if s.staging == nil {
+			return nil, Failure{Code: "staging_unavailable", Detail: "staging backend missing", HTTPStatus: http.StatusServiceUnavailable}
+		}
+		stateRes, err := s.staging.LoadStagedState(ctx, namespace, relKey, meta.StagedTxnID)
+		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				return nil, Failure{Code: "staged_state_missing", Detail: "staged state missing", HTTPStatus: http.StatusNotFound}
+			}
+			return nil, fmt.Errorf("load staged state: %w", err)
+		}
+		reader := stateRes.Reader
+		info := stateRes.Info
+		if info == nil {
+			info = &storage.StateInfo{}
+		}
+		if info.ETag == "" {
+			info.ETag = meta.StagedStateETag
+		}
+		if info.Version == 0 {
+			info.Version = meta.StagedVersion
+		}
+		if info.Size == 0 {
+			info.Size = meta.StagedStatePlaintextBytes
+		}
+		if len(info.Descriptor) == 0 {
+			info.Descriptor = meta.StagedStateDescriptor
+		}
+		return &GetResult{
+			Meta:             meta,
+			Info:             info,
+			Reader:           reader,
+			PublishedVersion: publishedVersion,
+			Public:           publicRead,
+		}, nil
 	}
 
 	stateCtx := ctx
@@ -122,7 +167,9 @@ func (s *Service) Get(ctx context.Context, cmd GetCommand) (*GetResult, error) {
 
 func (s *Service) readStateWithWarmup(ctx context.Context, namespace, key string, expectState bool) (io.ReadCloser, *storage.StateInfo, error) {
 	relKey := relativeKey(namespace, key)
-	reader, info, err := s.store.ReadState(ctx, namespace, relKey)
+	result, err := s.store.ReadState(ctx, namespace, relKey)
+	reader := result.Reader
+	info := result.Info
 	if err == nil || !expectState || !errors.Is(err, storage.ErrNotFound) {
 		return reader, info, err
 	}
@@ -136,7 +183,9 @@ func (s *Service) readStateWithWarmup(ctx context.Context, namespace, key string
 			}
 			delay = nextWarmupDelay(delay, maxDelay)
 		}
-		reader, info, err = s.store.ReadState(ctx, namespace, relKey)
+		result, err = s.store.ReadState(ctx, namespace, relKey)
+		reader = result.Reader
+		info = result.Info
 		if err == nil || !errors.Is(err, storage.ErrNotFound) {
 			return reader, info, err
 		}

@@ -30,11 +30,12 @@ func ExampleClient_Acquire() {
 		Listen:      socketPath,
 		DisableMTLS: true,
 	}
-	_, stop, err := lockd.StartServer(ctx, cfg)
+	handle, err := lockd.StartServer(ctx, cfg)
 	if err != nil {
 		fmt.Println("error:", err)
 		return
 	}
+	stop := handle.Stop
 	defer stop(context.Background(), lockd.WithDrainLeases(0), lockd.WithShutdownTimeout(500*time.Millisecond))
 	cli, err := client.New("unix://" + socketPath)
 	if err != nil {
@@ -86,11 +87,12 @@ func ExampleClient_Get_public() {
 		Listen:      socketPath,
 		DisableMTLS: true,
 	}
-	_, stop, err := lockd.StartServer(ctx, cfg)
+	handle, err := lockd.StartServer(ctx, cfg)
 	if err != nil {
 		fmt.Println("error:", err)
 		return
 	}
+	stop := handle.Stop
 	defer stop(context.Background(), lockd.WithDrainLeases(0), lockd.WithShutdownTimeout(500*time.Millisecond))
 	cli, err := client.New("unix://" + socketPath)
 	if err != nil {
@@ -152,11 +154,12 @@ func ExampleClient_AcquireForUpdate() {
 		Listen:      socketPath,
 		DisableMTLS: true,
 	}
-	_, stop, err := lockd.StartServer(ctx, cfg)
+	handle, err := lockd.StartServer(ctx, cfg)
 	if err != nil {
 		fmt.Println("error:", err)
 		return
 	}
+	stop := handle.Stop
 	defer stop(context.Background(), lockd.WithDrainLeases(0), lockd.WithShutdownTimeout(500*time.Millisecond))
 	cli, err := client.New("unix://" + socketPath)
 	if err != nil {
@@ -200,11 +203,12 @@ func ExampleClient_Query() {
 		Listen:      socketPath,
 		DisableMTLS: true,
 	}
-	_, stop, err := lockd.StartServer(ctx, cfg)
+	handle, err := lockd.StartServer(ctx, cfg)
 	if err != nil {
 		fmt.Println("error:", err)
 		return
 	}
+	stop := handle.Stop
 	defer stop(context.Background(), lockd.WithDrainLeases(0), lockd.WithShutdownTimeout(500*time.Millisecond))
 	cli, err := client.New("unix://" + socketPath)
 	if err != nil {

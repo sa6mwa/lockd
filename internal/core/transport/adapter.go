@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"errors"
 	"net/http"
 
 	"pkt.systems/lockd/internal/core"
@@ -15,6 +16,7 @@ type HTTPError struct {
 	RetryAfter int64
 	Version    int64
 	ETag       string
+	LeaderEndpoint string
 }
 
 // ToHTTP maps a core error into HTTP-friendly fields.
@@ -34,24 +36,11 @@ func ToHTTP(err error) (*HTTPError, bool) {
 		RetryAfter: failure.RetryAfter,
 		Version:    failure.Version,
 		ETag:       failure.ETag,
+		LeaderEndpoint: failure.LeaderEndpoint,
 	}, true
 }
 
 // errorAs is a tiny local helper to avoid importing errors in callers.
 func errorAs(err error, target interface{}) bool {
-	type causer interface{ As(any) bool }
-	if err == nil {
-		return false
-	}
-	if c, ok := err.(causer); ok {
-		return c.As(target)
-	}
-	switch t := target.(type) {
-	case *core.Failure:
-		if f, ok := err.(core.Failure); ok {
-			*t = f
-			return true
-		}
-	}
-	return false
+	return errors.As(err, target)
 }

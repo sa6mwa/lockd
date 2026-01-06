@@ -46,7 +46,7 @@ func TestMinioOTLPExternalTraceEmission(t *testing.T) {
 	ctx := context.Background()
 	key := "minio-otlp-external-" + uuidv7.NewString()
 	lease := acquireWithRetry(t, ctx, cli, key, "otlp-external-worker", 30, 5)
-	if !releaseLease(t, ctx, cli, key, lease.LeaseID) {
+	if !releaseLease(t, ctx, lease) {
 		t.Fatalf("release failed")
 	}
 

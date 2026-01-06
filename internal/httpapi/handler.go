@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,15 +25,20 @@ import (
 	"pkt.systems/lockd/internal/core"
 	"pkt.systems/lockd/internal/correlation"
 	"pkt.systems/lockd/internal/jsonutil"
-	"pkt.systems/lockd/internal/loggingutil"
 	"pkt.systems/lockd/internal/lsf"
 	"pkt.systems/lockd/internal/qrf"
 	"pkt.systems/lockd/internal/queue"
 	"pkt.systems/lockd/internal/search"
 	indexer "pkt.systems/lockd/internal/search/index"
 	"pkt.systems/lockd/internal/storage"
+	"pkt.systems/lockd/internal/svcfields"
+	"pkt.systems/lockd/internal/tccluster"
+	"pkt.systems/lockd/internal/tcleader"
+	"pkt.systems/lockd/internal/tcrm"
+	"pkt.systems/lockd/internal/txncoord"
 	"pkt.systems/lockd/internal/uuidv7"
 	"pkt.systems/lockd/namespaces"
+	"pkt.systems/lockd/tlsutil"
 	"pkt.systems/pslog"
 )
 
@@ -44,6 +50,13 @@ const (
 	headerQueryIndexSeq       = "X-Lockd-Query-Index-Seq"
 	headerQueryMetadata       = "X-Lockd-Query-Metadata"
 	headerQueryReturn         = "X-Lockd-Query-Return"
+	headerTCReplica           = "X-Lockd-TC-Replicate"
+	headerTCLeaveFanout       = "X-Lockd-TC-Leave-Fanout"
+	headerAttachmentID        = "X-Attachment-ID"
+	headerAttachmentName      = "X-Attachment-Name"
+	headerAttachmentSize      = "X-Attachment-Size"
+	headerAttachmentCreatedAt = "X-Attachment-Created-At"
+	headerAttachmentUpdatedAt = "X-Attachment-Updated-At"
 )
 const headerCorrelationID = "X-Correlation-Id"
 const headerShutdownImminent = "Shutdown-Imminent"
@@ -112,6 +125,20 @@ type Handler struct {
 	pendingDeliveries      *core.PendingDeliveries
 	shutdownState          func() ShutdownState
 	httpTracingEnabled     bool
+	tcAuthEnabled          bool
+	tcTrustPool            *x509.CertPool
+	tcAllowDefaultCA       bool
+	defaultCAPool          *x509.CertPool
+	tcLeader               *tcleader.Manager
+	tcCluster              *tccluster.Store
+	tcRM                   *tcrm.Store
+	tcRMReplicator         *tcrm.Replicator
+	selfEndpoint           string
+	tcClusterIdentity      string
+	tcJoinEndpoints        []string
+	tcLeaveFanout          func(context.Context) error
+	tcClusterLeaveSelf     func()
+	tcClusterJoinSelf      func()
 }
 
 type indexFlushController interface {
@@ -255,6 +282,132 @@ func (h *Handler) clientKeyFromRequest(r *http.Request) string {
 	return ""
 }
 
+func (h *Handler) requireTCClient(r *http.Request) error {
+	if !h.tcAuthEnabled {
+		return nil
+	}
+	if r == nil || r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+		return httpError{Status: http.StatusForbidden, Code: "tc_client_required", Detail: "client certificate required for transaction coordinator operations"}
+	}
+	leaf := r.TLS.PeerCertificates[0]
+	intermediates := x509.NewCertPool()
+	for _, cert := range r.TLS.PeerCertificates[1:] {
+		intermediates.AddCert(cert)
+	}
+	verify := func(pool *x509.CertPool) bool {
+		if pool == nil {
+			return false
+		}
+		_, err := leaf.Verify(x509.VerifyOptions{
+			Roots:         pool,
+			Intermediates: intermediates,
+			CurrentTime:   time.Now(),
+			KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		})
+		return err == nil
+	}
+	if h.tcTrustPool != nil && verify(h.tcTrustPool) {
+		return nil
+	}
+	if h.tcAllowDefaultCA && verify(h.defaultCAPool) {
+		return nil
+	}
+	return httpError{Status: http.StatusForbidden, Code: "tc_forbidden", Detail: "client certificate not trusted for transaction coordinator operations"}
+}
+
+func (h *Handler) requireTCServer(r *http.Request) error {
+	if !h.tcAuthEnabled {
+		return nil
+	}
+	if r == nil || r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+		return httpError{Status: http.StatusForbidden, Code: "tc_server_required", Detail: "server certificate required for RM registration"}
+	}
+	leaf := r.TLS.PeerCertificates[0]
+	intermediates := x509.NewCertPool()
+	for _, cert := range r.TLS.PeerCertificates[1:] {
+		intermediates.AddCert(cert)
+	}
+	verify := func(pool *x509.CertPool) bool {
+		if pool == nil {
+			return false
+		}
+		_, err := leaf.Verify(x509.VerifyOptions{
+			Roots:         pool,
+			Intermediates: intermediates,
+			CurrentTime:   time.Now(),
+			KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		})
+		return err == nil
+	}
+	if h.tcTrustPool != nil && verify(h.tcTrustPool) {
+		return nil
+	}
+	if h.tcAllowDefaultCA && verify(h.defaultCAPool) {
+		return nil
+	}
+	return httpError{Status: http.StatusForbidden, Code: "tc_forbidden", Detail: "server certificate not trusted for RM registration"}
+}
+
+func (h *Handler) currentTCLeader(now time.Time) (tcleader.LeaderInfo, bool) {
+	if h == nil || h.tcLeader == nil || !h.tcLeader.Enabled() {
+		return tcleader.LeaderInfo{}, false
+	}
+	info := h.tcLeader.Leader(now)
+	if info.LeaderEndpoint == "" || info.Term == 0 {
+		return info, false
+	}
+	if !info.ExpiresAt.IsZero() && !info.ExpiresAt.After(now) {
+		return info, false
+	}
+	return info, true
+}
+
+func (h *Handler) tcLeaseStore() (*tcleader.LeaseStore, error) {
+	if h == nil || h.tcLeader == nil || !h.tcLeader.Enabled() {
+		return nil, httpError{Status: http.StatusServiceUnavailable, Code: "tc_unavailable", Detail: "tc leader election not configured"}
+	}
+	store := h.tcLeader.LeaseStore()
+	if store == nil {
+		return nil, httpError{Status: http.StatusServiceUnavailable, Code: "tc_unavailable", Detail: "tc lease store unavailable"}
+	}
+	return store, nil
+}
+
+func (h *Handler) tcClusterStore() (*tccluster.Store, error) {
+	if h == nil || h.tcCluster == nil {
+		return nil, httpError{Status: http.StatusServiceUnavailable, Code: "tc_unavailable", Detail: "tc cluster store not configured"}
+	}
+	return h.tcCluster, nil
+}
+
+func (h *Handler) tcRMStore() (*tcrm.Store, error) {
+	if h == nil || h.tcRM == nil {
+		return nil, httpError{Status: http.StatusServiceUnavailable, Code: "tc_unavailable", Detail: "tc RM registry not configured"}
+	}
+	return h.tcRM, nil
+}
+
+func (h *Handler) syncTCLeader(endpoints []string) error {
+	if h == nil || h.tcLeader == nil {
+		return nil
+	}
+	normalized := tccluster.NormalizeEndpoints(endpoints)
+	self := strings.TrimSpace(h.selfEndpoint)
+	var leaderEndpoints []string
+	useMembership := len(normalized) > 0 && (self == "" || tccluster.ContainsEndpoint(normalized, self))
+	if useMembership {
+		leaderEndpoints = normalized
+	} else {
+		if len(h.tcJoinEndpoints) > 0 {
+			leaderEndpoints = tccluster.NormalizeEndpoints(append([]string(nil), h.tcJoinEndpoints...))
+		}
+		if self != "" && !tccluster.ContainsEndpoint(leaderEndpoints, self) {
+			leaderEndpoints = tccluster.NormalizeEndpoints(append(leaderEndpoints, self))
+		}
+	}
+	return h.tcLeader.SetEndpoints(leaderEndpoints)
+}
+
 // Config groups the dependencies required by Handler.
 type Config struct {
 	Store                      storage.Backend
@@ -268,11 +421,13 @@ type Config struct {
 	Clock                      clock.Clock
 	DefaultNamespace           string
 	JSONMaxBytes               int64
+	AttachmentMaxBytes         int64
 	CompactWriter              func(io.Writer, io.Reader, int64) error
 	DefaultTTL                 time.Duration
 	MaxTTL                     time.Duration
 	AcquireBlock               time.Duration
 	SpoolMemoryThreshold       int64
+	TxnDecisionRetention       time.Duration
 	EnforceClientIdentity      bool
 	MetaWarmupAttempts         int
 	MetaWarmupInitialDelay     time.Duration
@@ -289,11 +444,35 @@ type Config struct {
 	ShutdownState              func() ShutdownState
 	NamespaceTracker           *NamespaceTracker
 	DisableHTTPTracing         bool
+	TCAuthEnabled              bool
+	TCTrustPool                *x509.CertPool
+	DefaultCAPool              *x509.CertPool
+	TCAllowDefaultCA           bool
+	TCLeader                   *tcleader.Manager
+	SelfEndpoint               string
+	TCClusterIdentity          string
+	TCJoinEndpoints            []string
+	TCFanoutTimeout            time.Duration
+	TCFanoutMaxAttempts        int
+	TCFanoutBaseDelay          time.Duration
+	TCFanoutMaxDelay           time.Duration
+	TCFanoutMultiplier         float64
+	TCFanoutGate               txncoord.FanoutGate
+	TCFanoutTrustPEM           [][]byte
+	TCLeaveFanout              func(context.Context) error
+	TCClusterLeaveSelf         func()
+	TCClusterJoinSelf          func()
+	TCClientBundlePath         string
+	TCServerBundle             *tlsutil.Bundle
+	DisableMTLS                bool
 }
 
 // New constructs a Handler using the supplied configuration.
 func New(cfg Config) *Handler {
-	baseLogger := loggingutil.EnsureLogger(cfg.Logger)
+	baseLogger := cfg.Logger
+	if baseLogger == nil {
+		baseLogger = pslog.NoopLogger()
+	}
 	logger := baseLogger
 	clk := cfg.Clock
 	if clk == nil {
@@ -344,7 +523,7 @@ func New(cfg Config) *Handler {
 	}
 	var queueDisp *queue.Dispatcher
 	if queueSvc != nil {
-		queueLogger := loggingutil.WithSubsystem(baseLogger, "queue.dispatcher.core")
+		queueLogger := svcfields.WithSubsystem(baseLogger, "queue.dispatcher.core")
 		opts := []queue.DispatcherOption{
 			queue.WithLogger(queueLogger),
 			queue.WithMaxConsumers(cfg.QueueMaxConsumers),
@@ -376,11 +555,11 @@ func New(cfg Config) *Handler {
 			"watch_reason", watchReason,
 		)
 		if provider, ok := cfg.Store.(storage.QueueWatchStatusProvider); ok {
-			enabled, mode, reason := provider.QueueWatchStatus()
+			status := provider.QueueWatchStatus()
 			queueLogger.Info("queue.dispatcher.watch_status",
-				"enabled", enabled,
-				"mode", mode,
-				"reason", reason,
+				"enabled", status.Enabled,
+				"mode", status.Mode,
+				"reason", status.Reason,
 			)
 		}
 	}
@@ -404,8 +583,22 @@ func New(cfg Config) *Handler {
 		tracker.Observe(defaultNamespace)
 	}
 	coreTracker := core.NewNamespaceTracker(defaultNamespace)
+	backendHash := ""
+	if cfg.Store != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		hash, err := cfg.Store.BackendHash(ctx)
+		cancel()
+		if err != nil {
+			logger.Warn("storage.backend_hash.error", "error", err)
+		}
+		backendHash = strings.TrimSpace(hash)
+		if backendHash == "" {
+			logger.Warn("storage.backend_hash.empty")
+		}
+	}
 	coreSvc := core.New(core.Config{
 		Store:                  cfg.Store,
+		BackendHash:            backendHash,
 		Crypto:                 crypto,
 		QueueService:           queueSvc,
 		QueueDispatcher:        queueDisp,
@@ -420,7 +613,9 @@ func New(cfg Config) *Handler {
 		MaxTTL:                 cfg.MaxTTL,
 		AcquireBlock:           cfg.AcquireBlock,
 		JSONMaxBytes:           cfg.JSONMaxBytes,
+		AttachmentMaxBytes:     cfg.AttachmentMaxBytes,
 		SpoolThreshold:         threshold,
+		TxnDecisionRetention:   cfg.TxnDecisionRetention,
 		EnforceIdentity:        cfg.EnforceClientIdentity,
 		MetaWarmup: core.WarmupConfig{
 			Attempts: metaWarmupAttempts,
@@ -447,6 +642,75 @@ func New(cfg Config) *Handler {
 		},
 		NamespaceTracker: coreTracker,
 	})
+	var rmStore *tcrm.Store
+	if cfg.Store != nil {
+		rmStore = tcrm.NewStore(cfg.Store, svcfields.WithSubsystem(logger, "tc.rm.store"))
+	}
+	coordLogger := svcfields.WithSubsystem(baseLogger, "txn.coordinator")
+	coord, coordErr := txncoord.New(txncoord.Config{
+		Core:              coreSvc,
+		Logger:            coordLogger,
+		DecisionRetention: cfg.TxnDecisionRetention,
+		FanoutProvider:    rmStore,
+		FanoutGate:        cfg.TCFanoutGate,
+		FanoutTimeout:     cfg.TCFanoutTimeout,
+		FanoutMaxAttempts: cfg.TCFanoutMaxAttempts,
+		FanoutBaseDelay:   cfg.TCFanoutBaseDelay,
+		FanoutMaxDelay:    cfg.TCFanoutMaxDelay,
+		FanoutMultiplier:  cfg.TCFanoutMultiplier,
+		DisableMTLS:       cfg.DisableMTLS,
+		ClientBundlePath:  cfg.TCClientBundlePath,
+		FanoutTrustPEM:    cfg.TCFanoutTrustPEM,
+	})
+	if coordErr != nil {
+		logger.Warn("txn.coordinator.init_failed", "error", coordErr)
+	}
+	var tcDecider core.TCDecider
+	if coordErr != nil {
+		tcDecider = txncoord.NewErrorDecider(coordErr)
+	} else if coord != nil {
+		decider, err := txncoord.NewDecider(txncoord.DeciderConfig{
+			Coordinator:      coord,
+			Leader:           cfg.TCLeader,
+			Logger:           svcfields.WithSubsystem(baseLogger, "txn.decider"),
+			ForwardTimeout:   cfg.TCFanoutTimeout,
+			DisableMTLS:      cfg.DisableMTLS,
+			ClientBundlePath: cfg.TCClientBundlePath,
+			ForwardTrustPEM:  cfg.TCFanoutTrustPEM,
+		})
+		if err != nil {
+			logger.Warn("txn.decider.init_failed", "error", err)
+			tcDecider = txncoord.NewErrorDecider(err)
+		} else {
+			tcDecider = decider
+		}
+	}
+	if tcDecider != nil {
+		coreSvc.SetTCDecider(tcDecider)
+	}
+	var clusterStore *tccluster.Store
+	if cfg.Store != nil {
+		clusterStore = tccluster.NewStore(cfg.Store, svcfields.WithSubsystem(logger, "tc.cluster.store"), clk)
+	}
+	var rmReplicator *tcrm.Replicator
+	if rmStore != nil {
+		replicator, err := tcrm.NewReplicator(tcrm.ReplicatorConfig{
+			Store:            rmStore,
+			Cluster:          clusterStore,
+			SelfEndpoint:     strings.TrimSpace(cfg.SelfEndpoint),
+			Logger:           svcfields.WithSubsystem(baseLogger, "tc.rm.replicator"),
+			Timeout:          cfg.TCFanoutTimeout,
+			DisableMTLS:      cfg.DisableMTLS,
+			ClientBundlePath: cfg.TCClientBundlePath,
+			ServerBundle:     cfg.TCServerBundle,
+			TrustPEM:         cfg.TCFanoutTrustPEM,
+		})
+		if err != nil {
+			logger.Warn("tc.rm.replicator.init_failed", "error", err)
+		} else {
+			rmReplicator = replicator
+		}
+	}
 	return &Handler{
 		core:                   coreSvc,
 		store:                  cfg.Store,
@@ -481,6 +745,20 @@ func New(cfg Config) *Handler {
 		namespaceTracker:       tracker,
 		pendingDeliveries:      core.NewPendingDeliveries(),
 		httpTracingEnabled:     !cfg.DisableHTTPTracing,
+		tcAuthEnabled:          cfg.TCAuthEnabled,
+		tcTrustPool:            cfg.TCTrustPool,
+		tcAllowDefaultCA:       cfg.TCAllowDefaultCA,
+		defaultCAPool:          cfg.DefaultCAPool,
+		tcLeader:               cfg.TCLeader,
+		tcCluster:              clusterStore,
+		tcRM:                   rmStore,
+		tcRMReplicator:         rmReplicator,
+		selfEndpoint:           strings.TrimSpace(cfg.SelfEndpoint),
+		tcClusterIdentity:      strings.TrimSpace(cfg.TCClusterIdentity),
+		tcJoinEndpoints:        tccluster.NormalizeEndpoints(append([]string(nil), cfg.TCJoinEndpoints...)),
+		tcLeaveFanout:          cfg.TCLeaveFanout,
+		tcClusterLeaveSelf:     cfg.TCClusterLeaveSelf,
+		tcClusterJoinSelf:      cfg.TCClusterJoinSelf,
 	}
 }
 
@@ -490,6 +768,8 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle("/v1/keepalive", h.wrap("keepalive", h.handleKeepAlive))
 	mux.Handle("/v1/release", h.wrap("release", h.handleRelease))
 	mux.Handle("/v1/get", h.wrap("get", h.handleGet))
+	mux.Handle("/v1/attachments", h.wrap("attachments", h.handleAttachments))
+	mux.Handle("/v1/attachment", h.wrap("attachment", h.handleAttachment))
 	mux.Handle("/v1/query", h.wrap("query", h.handleQuery))
 	mux.Handle("/v1/update", h.wrap("update", h.handleUpdate))
 	mux.Handle("/v1/metadata", h.wrap("update_metadata", h.handleMetadata))
@@ -505,6 +785,20 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle("/v1/queue/ack", h.wrap("queue.ack", h.handleQueueAck))
 	mux.Handle("/v1/queue/nack", h.wrap("queue.nack", h.handleQueueNack))
 	mux.Handle("/v1/queue/extend", h.wrap("queue.extend", h.handleQueueExtend))
+	mux.Handle("/v1/txn/replay", h.wrap("txn.replay", h.handleTxnReplay))
+	mux.Handle("/v1/txn/decide", h.wrap("txn.decide", h.handleTxnDecide))
+	mux.Handle("/v1/txn/commit", h.wrap("txn.commit", h.handleTxnCommit))
+	mux.Handle("/v1/txn/rollback", h.wrap("txn.rollback", h.handleTxnRollback))
+	mux.Handle("/v1/tc/lease/acquire", h.wrap("tc.lease.acquire", h.handleTCLeaseAcquire))
+	mux.Handle("/v1/tc/lease/renew", h.wrap("tc.lease.renew", h.handleTCLeaseRenew))
+	mux.Handle("/v1/tc/lease/release", h.wrap("tc.lease.release", h.handleTCLeaseRelease))
+	mux.Handle("/v1/tc/leader", h.wrap("tc.leader", h.handleTCLeader))
+	mux.Handle("/v1/tc/cluster/announce", h.wrap("tc.cluster.announce", h.handleTCClusterAnnounce))
+	mux.Handle("/v1/tc/cluster/leave", h.wrap("tc.cluster.leave", h.handleTCClusterLeave))
+	mux.Handle("/v1/tc/cluster/list", h.wrap("tc.cluster.list", h.handleTCClusterList))
+	mux.Handle("/v1/tc/rm/register", h.wrap("tc.rm.register", h.handleTCRMRegister))
+	mux.Handle("/v1/tc/rm/unregister", h.wrap("tc.rm.unregister", h.handleTCRMUnregister))
+	mux.Handle("/v1/tc/rm/list", h.wrap("tc.rm.list", h.handleTCRMList))
 	mux.Handle("/healthz", h.wrap("healthz", h.handleHealth))
 	mux.Handle("/readyz", h.wrap("readyz", h.handleReady))
 }
@@ -518,7 +812,6 @@ type acquireParams struct {
 	TTL           time.Duration
 	Block         time.Duration
 	WaitForever   bool
-	Idempotency   string
 	GeneratedKey  bool
 	CorrelationID string
 }
@@ -558,7 +851,7 @@ func (h *Handler) wrap(operation string, fn handlerFunc) http.Handler {
 
 		ctx = correlation.Ensure(ctx)
 
-		logger := loggingutil.WithSubsystem(h.logger, sys).With(
+		logger := svcfields.WithSubsystem(h.logger, sys).With(
 			"req_id", reqID,
 			"method", r.Method,
 			"path", r.URL.Path,
@@ -743,8 +1036,8 @@ func (h *Handler) selectQueryEngine(ctx context.Context, namespace string, hint 
 	}
 	cfg := h.defaultNamespaceConfig
 	if h.namespaceConfigs != nil {
-		if loaded, _, loadErr := h.namespaceConfigs.Load(ctx, namespace); loadErr == nil {
-			cfg = loaded
+		if loaded, loadErr := h.namespaceConfigs.Load(ctx, namespace); loadErr == nil {
+			cfg = loaded.Config
 		} else {
 			logger := pslog.LoggerFromContext(ctx)
 			if logger != nil {
@@ -820,7 +1113,6 @@ func (h *Handler) acquireLeaseForKey(ctx context.Context, _ pslog.Logger, params
 		Owner:            params.Owner,
 		TTLSeconds:       int64(params.TTL.Seconds()),
 		BlockSeconds:     blockSeconds,
-		Idempotency:      params.Idempotency,
 		ClientHint:       params.CorrelationID,
 		ForceQueryHidden: isQueueStateKey,
 	}
@@ -836,6 +1128,7 @@ func (h *Handler) acquireLeaseForKey(ctx context.Context, _ pslog.Logger, params
 	resp := api.AcquireResponse{
 		Namespace:     res.Namespace,
 		LeaseID:       res.LeaseID,
+		TxnID:         res.TxnID,
 		Key:           relativeKey(res.Namespace, res.Key),
 		Owner:         res.Owner,
 		ExpiresAt:     res.ExpiresAt,
@@ -924,7 +1217,14 @@ func (h *Handler) leaseSnapshot(leaseID string) (storage.Meta, string, string, b
 
 func (h *Handler) resolveNamespace(ns string) (string, error) {
 	if h == nil {
-		return namespaces.Normalize(ns, namespaces.Default)
+		norm, err := namespaces.Normalize(ns, namespaces.Default)
+		if err != nil {
+			return "", err
+		}
+		if strings.HasPrefix(norm, ".") {
+			return "", fmt.Errorf("namespace %q is reserved", norm)
+		}
+		return norm, nil
 	}
 	if ns == "" {
 		return h.defaultNamespace, nil
@@ -932,6 +1232,9 @@ func (h *Handler) resolveNamespace(ns string) (string, error) {
 	normalized, err := namespaces.Normalize(ns, h.defaultNamespace)
 	if err != nil {
 		return "", err
+	}
+	if strings.HasPrefix(normalized, ".") {
+		return "", fmt.Errorf("namespace %q is reserved", normalized)
 	}
 	return normalized, nil
 }
@@ -974,13 +1277,22 @@ func (h *Handler) dropLease(leaseID string) {
 	h.leaseCache.Delete(leaseID)
 }
 
+// SweepTransactions replays committed/expired transaction records for recovery.
+func (h *Handler) SweepTransactions(ctx context.Context, now time.Time) error {
+	if h == nil || h.core == nil {
+		return nil
+	}
+	return h.core.SweepTxnRecords(ctx, now)
+}
+
 type httpError struct {
-	Status     int
-	Code       string
-	Detail     string
-	Version    int64
-	ETag       string
-	RetryAfter int64
+	Status         int
+	Code           string
+	Detail         string
+	LeaderEndpoint string
+	Version        int64
+	ETag           string
+	RetryAfter     int64
 }
 
 func (h httpError) Error() string {

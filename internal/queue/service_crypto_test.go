@@ -50,10 +50,12 @@ func TestQueueEnqueueEncryptsMetadataAndPayload(t *testing.T) {
 		t.Fatalf("enqueue: %v", err)
 	}
 
-	metaReader, metaInfo, err := store.GetObject(ctx, msg.Namespace, msg.MetadataObject)
+	metaObj, err := store.GetObject(ctx, msg.Namespace, msg.MetadataObject)
 	if err != nil {
 		t.Fatalf("get metadata object: %v", err)
 	}
+	metaReader := metaObj.Reader
+	metaInfo := metaObj.Info
 	if metaInfo == nil {
 		t.Fatalf("expected metadata info")
 	}
@@ -89,10 +91,12 @@ func TestQueueEnqueueEncryptsMetadataAndPayload(t *testing.T) {
 		t.Fatalf("decoded document mismatch: got id=%s queue=%s want id=%s queue=%s", doc.ID, doc.Queue, msg.ID, msg.Queue)
 	}
 
-	payloadReader, payloadInfo, err := store.GetObject(ctx, msg.Namespace, msg.PayloadObject)
+	payloadObj, err := store.GetObject(ctx, msg.Namespace, msg.PayloadObject)
 	if err != nil {
 		t.Fatalf("get payload object: %v", err)
 	}
+	payloadReader := payloadObj.Reader
+	payloadInfo := payloadObj.Info
 	if payloadInfo == nil {
 		t.Fatalf("expected payload info")
 	}
@@ -141,10 +145,12 @@ func TestQueueEnqueueWithoutCryptoStoresPlaintext(t *testing.T) {
 		t.Fatalf("enqueue: %v", err)
 	}
 
-	metaReader, metaInfo, err := store.GetObject(ctx, msg.Namespace, msg.MetadataObject)
+	metaObj, err := store.GetObject(ctx, msg.Namespace, msg.MetadataObject)
 	if err != nil {
 		t.Fatalf("get metadata object: %v", err)
 	}
+	metaReader := metaObj.Reader
+	metaInfo := metaObj.Info
 	if metaInfo == nil {
 		t.Fatalf("expected metadata info")
 	}
@@ -170,10 +176,12 @@ func TestQueueEnqueueWithoutCryptoStoresPlaintext(t *testing.T) {
 		t.Fatalf("decoded doc id = %s want %s", doc.ID, msg.ID)
 	}
 
-	payloadReader, payloadInfo, err := store.GetObject(ctx, msg.Namespace, msg.PayloadObject)
+	payloadObj, err := store.GetObject(ctx, msg.Namespace, msg.PayloadObject)
 	if err != nil {
 		t.Fatalf("get payload object: %v", err)
 	}
+	payloadReader := payloadObj.Reader
+	payloadInfo := payloadObj.Info
 	if payloadInfo == nil {
 		t.Fatalf("expected payload info")
 	}
@@ -208,18 +216,21 @@ func TestQueueGetMessageMissingDescriptor(t *testing.T) {
 	var tampered bool
 	svc.store = &tamperBackend{
 		Backend: svc.store,
-		getObjectHook: func(ctx context.Context, namespace, key string, reader io.ReadCloser, info *storage.ObjectInfo) (io.ReadCloser, *storage.ObjectInfo, error) {
+		getObjectHook: func(ctx context.Context, namespace, key string, obj storage.GetObjectResult) (storage.GetObjectResult, error) {
 			if !tampered && namespace == result.Namespace && strings.HasSuffix(key, ".pb") && strings.Contains(key, "/msg/") {
 				tampered = true
-				infoCopy := *info
-				infoCopy.Descriptor = nil
-				return reader, &infoCopy, nil
+				if obj.Info != nil {
+					infoCopy := *obj.Info
+					infoCopy.Descriptor = nil
+					obj.Info = &infoCopy
+				}
+				return obj, nil
 			}
-			return reader, info, nil
+			return obj, nil
 		},
 	}
 
-	if _, _, err := svc.GetMessage(ctx, namespaces.Default, result.Queue, result.ID); err == nil || !strings.Contains(err.Error(), "missing metadata descriptor") {
+	if _, err := svc.GetMessage(ctx, namespaces.Default, result.Queue, result.ID); err == nil || !strings.Contains(err.Error(), "missing metadata descriptor") {
 		if err == nil {
 			t.Fatalf("expected missing descriptor error")
 		}
@@ -241,18 +252,21 @@ func TestQueueGetPayloadMissingDescriptor(t *testing.T) {
 	var tampered bool
 	svc.store = &tamperBackend{
 		Backend: svc.store,
-		getObjectHook: func(ctx context.Context, namespace, key string, reader io.ReadCloser, info *storage.ObjectInfo) (io.ReadCloser, *storage.ObjectInfo, error) {
+		getObjectHook: func(ctx context.Context, namespace, key string, obj storage.GetObjectResult) (storage.GetObjectResult, error) {
 			if !tampered && namespace == result.Namespace && strings.HasSuffix(key, ".bin") && strings.Contains(key, "/msg/") {
 				tampered = true
-				infoCopy := *info
-				infoCopy.Descriptor = nil
-				return reader, &infoCopy, nil
+				if obj.Info != nil {
+					infoCopy := *obj.Info
+					infoCopy.Descriptor = nil
+					obj.Info = &infoCopy
+				}
+				return obj, nil
 			}
-			return reader, info, nil
+			return obj, nil
 		},
 	}
 
-	if _, _, err := svc.GetPayload(ctx, namespaces.Default, result.Queue, result.ID); err == nil || !strings.Contains(err.Error(), "missing payload descriptor") {
+	if _, err := svc.GetPayload(ctx, namespaces.Default, result.Queue, result.ID); err == nil || !strings.Contains(err.Error(), "missing payload descriptor") {
 		if err == nil {
 			t.Fatalf("expected missing descriptor error")
 		}
@@ -277,14 +291,17 @@ func TestQueueCopyObjectMissingDescriptor(t *testing.T) {
 	var tampered bool
 	svc.store = &tamperBackend{
 		Backend: svc.store,
-		getObjectHook: func(ctx context.Context, namespace, key string, reader io.ReadCloser, info *storage.ObjectInfo) (io.ReadCloser, *storage.ObjectInfo, error) {
+		getObjectHook: func(ctx context.Context, namespace, key string, obj storage.GetObjectResult) (storage.GetObjectResult, error) {
 			if !tampered && namespace == result.Namespace && key == payloadKey {
 				tampered = true
-				infoCopy := *info
-				infoCopy.Descriptor = nil
-				return reader, &infoCopy, nil
+				if obj.Info != nil {
+					infoCopy := *obj.Info
+					infoCopy.Descriptor = nil
+					obj.Info = &infoCopy
+				}
+				return obj, nil
 			}
-			return reader, info, nil
+			return obj, nil
 		},
 	}
 
@@ -298,18 +315,18 @@ func TestQueueCopyObjectMissingDescriptor(t *testing.T) {
 
 type tamperBackend struct {
 	storage.Backend
-	getObjectHook func(context.Context, string, string, io.ReadCloser, *storage.ObjectInfo) (io.ReadCloser, *storage.ObjectInfo, error)
+	getObjectHook func(context.Context, string, string, storage.GetObjectResult) (storage.GetObjectResult, error)
 }
 
-func (t *tamperBackend) GetObject(ctx context.Context, namespace, key string) (io.ReadCloser, *storage.ObjectInfo, error) {
-	reader, info, err := t.Backend.GetObject(ctx, namespace, key)
+func (t *tamperBackend) GetObject(ctx context.Context, namespace, key string) (storage.GetObjectResult, error) {
+	obj, err := t.Backend.GetObject(ctx, namespace, key)
 	if err != nil {
-		return reader, info, err
+		return obj, err
 	}
 	if t.getObjectHook == nil {
-		return reader, info, nil
+		return obj, nil
 	}
-	return t.getObjectHook(ctx, namespace, key, reader, info)
+	return t.getObjectHook(ctx, namespace, key, obj)
 }
 
 func newEncryptedQueueService(t *testing.T) (*memory.Store, *Service) {

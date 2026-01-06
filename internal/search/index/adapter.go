@@ -58,10 +58,11 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 	if req.Namespace == "" {
 		return search.Result{}, fmt.Errorf("index adapter: namespace required")
 	}
-	manifest, _, err := a.store.LoadManifest(ctx, req.Namespace)
+	manifestRes, err := a.store.LoadManifest(ctx, req.Namespace)
 	if err != nil {
 		return search.Result{}, fmt.Errorf("load manifest: %w", err)
 	}
+	manifest := manifestRes.Manifest
 	if manifest == nil {
 		manifest = NewManifest()
 	}
@@ -106,13 +107,14 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 			return search.Result{}, err
 		}
 		key := sortedKeys[i]
-		meta, _, metaErr := a.store.backend.LoadMeta(ctx, req.Namespace, key)
+		metaRes, metaErr := a.store.backend.LoadMeta(ctx, req.Namespace, key)
 		if metaErr != nil {
 			if errors.Is(metaErr, storage.ErrNotFound) {
 				continue
 			}
 			return search.Result{}, fmt.Errorf("load meta %s: %w", key, metaErr)
 		}
+		meta := metaRes.Meta
 		if meta == nil || meta.PublishedVersion == 0 || meta.QueryExcluded() {
 			continue
 		}

@@ -1,19 +1,19 @@
 package disk
 
 import (
-    "bytes"
-    "context"
-    "errors"
-    "io"
-    "os"
-    "path/filepath"
-    "strings"
-    "sync"
-    "testing"
-    "time"
+	"bytes"
+	"context"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
 
-    "pkt.systems/lockd/internal/storage"
-    "pkt.systems/lockd/namespaces"
+	"pkt.systems/lockd/internal/storage"
+	"pkt.systems/lockd/namespaces"
 )
 
 const testNamespace = namespaces.Default
@@ -52,41 +52,41 @@ func TestDiskStoreRoundTrip(t *testing.T) {
 		t.Fatalf("expected new etag")
 	}
 
-	reader, info, err := store.ReadState(ctx, testNamespace, key)
+	readRes, err := store.ReadState(ctx, testNamespace, key)
 	if err != nil {
 		t.Fatalf("read state: %v", err)
 	}
-	defer reader.Close()
-	body, err := io.ReadAll(reader)
+	defer readRes.Reader.Close()
+	body, err := io.ReadAll(readRes.Reader)
 	if err != nil {
 		t.Fatalf("read body: %v", err)
 	}
 	if !bytes.Equal(payload, body) {
 		t.Fatalf("body mismatch")
 	}
-	if info.Size != int64(len(payload)) {
-		t.Fatalf("size = %d want %d", info.Size, len(payload))
+	if readRes.Info.Size != int64(len(payload)) {
+		t.Fatalf("size = %d want %d", readRes.Info.Size, len(payload))
 	}
-	if info.ETag != res.NewETag {
-		t.Fatalf("etag = %s want %s", info.ETag, res.NewETag)
+	if readRes.Info.ETag != res.NewETag {
+		t.Fatalf("etag = %s want %s", readRes.Info.ETag, res.NewETag)
 	}
 
-	metaLoaded, metaETag, err := store.LoadMeta(ctx, testNamespace, key)
+	metaRes, err := store.LoadMeta(ctx, testNamespace, key)
 	if err != nil {
 		t.Fatalf("load meta: %v", err)
 	}
-	if metaETag != etag {
-		t.Fatalf("meta etag = %s want %s", metaETag, etag)
+	if metaRes.ETag != etag {
+		t.Fatalf("meta etag = %s want %s", metaRes.ETag, etag)
 	}
-	if metaLoaded.Version != meta.Version {
-		t.Fatalf("version = %d want %d", metaLoaded.Version, meta.Version)
+	if metaRes.Meta.Version != meta.Version {
+		t.Fatalf("version = %d want %d", metaRes.Meta.Version, meta.Version)
 	}
 
 	if err := store.Remove(ctx, testNamespace, key, res.NewETag); err != nil {
 		t.Fatalf("remove state: %v", err)
 	}
 
-	if _, _, err := store.ReadState(ctx, testNamespace, key); !errors.Is(err, storage.ErrNotFound) {
+	if _, err := store.ReadState(ctx, testNamespace, key); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected not found, got %v", err)
 	}
 }
@@ -143,11 +143,11 @@ func TestDiskRetentionSweep(t *testing.T) {
 
 	store.sweepOnce()
 
-	if _, _, err := store.LoadMeta(ctx, testNamespace, key); !errors.Is(err, storage.ErrNotFound) {
+	if _, err := store.LoadMeta(ctx, testNamespace, key); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected meta cleanup, got %v", err)
 	}
 
-	if _, _, err := store.ReadState(ctx, testNamespace, key); !errors.Is(err, storage.ErrNotFound) {
+	if _, err := store.ReadState(ctx, testNamespace, key); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected state cleanup, got %v", err)
 	}
 
@@ -222,10 +222,11 @@ func TestDiskStoreConcurrentMeta(t *testing.T) {
 		t.Fatalf("expected exactly one successful meta update, got %d", success)
 	}
 
-	meta, _, err := store1.LoadMeta(ctx, testNamespace, key)
+	metaRes, err := store1.LoadMeta(ctx, testNamespace, key)
 	if err != nil {
 		t.Fatalf("load meta: %v", err)
 	}
+	meta := metaRes.Meta
 	if meta.Version != 2 && meta.Version != 3 {
 		t.Fatalf("unexpected version after concurrent update: %d", meta.Version)
 	}
@@ -283,19 +284,19 @@ func TestDiskStoreConcurrentState(t *testing.T) {
 		t.Fatalf("expected exactly one successful state update, got %d", success)
 	}
 
-	reader, info, err := store1.ReadState(ctx, testNamespace, key)
+	readRes, err := store1.ReadState(ctx, testNamespace, key)
 	if err != nil {
 		t.Fatalf("read state: %v", err)
 	}
-	defer reader.Close()
-	body, err := io.ReadAll(reader)
+	defer readRes.Reader.Close()
+	body, err := io.ReadAll(readRes.Reader)
 	if err != nil {
 		t.Fatalf("read body: %v", err)
 	}
 	if string(body) != "alpha" && string(body) != "beta" {
 		t.Fatalf("unexpected final body: %s", string(body))
 	}
-	if info.ETag == res.NewETag {
+	if readRes.Info.ETag == res.NewETag {
 		t.Fatalf("etag not updated")
 	}
 }

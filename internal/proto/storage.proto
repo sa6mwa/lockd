@@ -11,6 +11,7 @@ message Lease {
   string owner = 2;
   int64 expires_at_unix = 3;
   int64 fencing_token = 4;
+  string txn_id = 5;
 }
 
 message LockMeta {
@@ -23,6 +24,39 @@ message LockMeta {
   int64 state_plaintext_bytes = 7;
   int64 published_version = 8;
   google.protobuf.Struct attributes = 9;
+  string staged_txn_id = 10;
+  string staged_state_etag = 11;
+  bytes staged_state_descriptor = 12;
+  int64 staged_state_plaintext_bytes = 13;
+  int64 staged_version = 14;
+  map<string,string> staged_attributes = 15;
+  bool staged_remove = 16;
+  repeated Attachment attachments = 17;
+  repeated StagedAttachment staged_attachments = 18;
+  repeated string staged_attachment_deletes = 19;
+  bool staged_attachments_clear = 20;
+}
+
+message Attachment {
+  string id = 1;
+  string name = 2;
+  int64 size = 3;
+  string content_type = 4;
+  bytes descriptor = 5;
+  int64 created_at_unix = 6;
+  int64 updated_at_unix = 7;
+  int64 plaintext_bytes = 8;
+}
+
+message StagedAttachment {
+  string id = 1;
+  string name = 2;
+  int64 size = 3;
+  string content_type = 4;
+  bytes staged_descriptor = 5;
+  int64 created_at_unix = 6;
+  int64 updated_at_unix = 7;
+  int64 plaintext_bytes = 8;
 }
 
 message MetaRecord {
@@ -57,4 +91,7 @@ message QueueMessageMeta {
   string correlation_id = 15;
   bytes payload_descriptor = 16;
   bytes meta_descriptor = 17;
+  string lease_id = 18;
+  int64 lease_fencing_token = 19;
+  string lease_txn_id = 20;
 }

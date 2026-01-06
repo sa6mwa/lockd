@@ -22,6 +22,8 @@ definitions:
         type: integer
       state_lease_id:
         type: string
+      txn_id:
+        type: string
     type: object
   api.AckResponse:
     properties:
@@ -42,6 +44,8 @@ definitions:
         type: string
       ttl_seconds:
         type: integer
+      txn_id:
+        type: string
     type: object
   api.AcquireResponse:
     properties:
@@ -63,8 +67,36 @@ definitions:
         type: integer
       state_etag:
         type: string
+      txn_id:
+        type: string
       version:
         type: integer
+    type: object
+  api.AttachmentInfo:
+    properties:
+      content_type:
+        type: string
+      created_at_unix:
+        type: integer
+      id:
+        type: string
+      name:
+        type: string
+      size:
+        type: integer
+      updated_at_unix:
+        type: integer
+    type: object
+  api.AttachmentListResponse:
+    properties:
+      attachments:
+        items:
+          $ref: '#/definitions/api.AttachmentInfo'
+        type: array
+      key:
+        type: string
+      namespace:
+        type: string
     type: object
   api.DequeueRequest:
     properties:
@@ -78,10 +110,19 @@ definitions:
         type: string
       start_after:
         type: string
+      txn_id:
+        type: string
       visibility_timeout_seconds:
         type: integer
       wait_seconds:
         type: integer
+    type: object
+  api.DequeueResponse:
+    properties:
+      message:
+        $ref: '#/definitions/api.Message'
+      next_cursor:
+        type: string
     type: object
   api.DescribeResponse:
     properties:
@@ -135,6 +176,8 @@ definitions:
         type: string
       error:
         type: string
+      leader_endpoint:
+        type: string
       retry_after_seconds:
         type: integer
     type: object
@@ -157,6 +200,8 @@ definitions:
       state_fencing_token:
         type: integer
       state_lease_id:
+        type: string
+      txn_id:
         type: string
     type: object
   api.ExtendResponse:
@@ -206,10 +251,58 @@ definitions:
         type: string
       ttl_seconds:
         type: integer
+      txn_id:
+        type: string
     type: object
   api.KeepAliveResponse:
     properties:
       expires_at_unix:
+        type: integer
+    type: object
+  api.Message:
+    properties:
+      attempts:
+        type: integer
+      attributes:
+        additionalProperties: {}
+        type: object
+      correlation_id:
+        type: string
+      fencing_token:
+        type: integer
+      lease_expires_at_unix:
+        type: integer
+      lease_id:
+        type: string
+      max_attempts:
+        type: integer
+      message_id:
+        type: string
+      meta_etag:
+        type: string
+      namespace:
+        type: string
+      not_visible_until_unix:
+        type: integer
+      payload_bytes:
+        type: integer
+      payload_content_type:
+        type: string
+      queue:
+        type: string
+      state_etag:
+        type: string
+      state_fencing_token:
+        type: integer
+      state_lease_expires_at_unix:
+        type: integer
+      state_lease_id:
+        type: string
+      state_txn_id:
+        type: string
+      txn_id:
+        type: string
+      visibility_timeout_seconds:
         type: integer
     type: object
   api.MetadataAttributes:
@@ -245,9 +338,13 @@ definitions:
         type: string
       queue:
         type: string
+      state_etag:
+        type: string
       state_fencing_token:
         type: integer
       state_lease_id:
+        type: string
+      txn_id:
         type: string
     type: object
   api.NackResponse:
@@ -330,6 +427,10 @@ definitions:
         type: string
       namespace:
         type: string
+      rollback:
+        type: boolean
+      txn_id:
+        type: string
     type: object
   api.ReleaseResponse:
     properties:
@@ -342,6 +443,217 @@ definitions:
         type: integer
       removed:
         type: boolean
+    type: object
+  api.TCClusterAnnounceRequest:
+    properties:
+      self_endpoint:
+        type: string
+    type: object
+  api.TCClusterAnnounceResponse:
+    properties:
+      endpoints:
+        items:
+          type: string
+        type: array
+      expires_at_unix:
+        type: integer
+      updated_at_unix:
+        type: integer
+    type: object
+  api.TCClusterLeaveRequest:
+    type: object
+  api.TCClusterLeaveResponse:
+    properties:
+      endpoints:
+        items:
+          type: string
+        type: array
+      updated_at_unix:
+        type: integer
+    type: object
+  api.TCClusterListResponse:
+    properties:
+      endpoints:
+        items:
+          type: string
+        type: array
+      updated_at_unix:
+        type: integer
+    type: object
+  api.TCLeaderResponse:
+    properties:
+      expires_at:
+        type: integer
+      leader_endpoint:
+        type: string
+      leader_id:
+        type: string
+      term:
+        type: integer
+    type: object
+  api.TCLeaseAcquireRequest:
+    properties:
+      candidate_endpoint:
+        type: string
+      candidate_id:
+        type: string
+      term:
+        type: integer
+      ttl_ms:
+        type: integer
+    type: object
+  api.TCLeaseAcquireResponse:
+    properties:
+      expires_at:
+        type: integer
+      granted:
+        type: boolean
+      leader_endpoint:
+        type: string
+      leader_id:
+        type: string
+      term:
+        type: integer
+    type: object
+  api.TCLeaseReleaseRequest:
+    properties:
+      leader_id:
+        type: string
+      term:
+        type: integer
+    type: object
+  api.TCLeaseReleaseResponse:
+    properties:
+      released:
+        type: boolean
+    type: object
+  api.TCLeaseRenewRequest:
+    properties:
+      leader_id:
+        type: string
+      term:
+        type: integer
+      ttl_ms:
+        type: integer
+    type: object
+  api.TCLeaseRenewResponse:
+    properties:
+      expires_at:
+        type: integer
+      leader_endpoint:
+        type: string
+      leader_id:
+        type: string
+      renewed:
+        type: boolean
+      term:
+        type: integer
+    type: object
+  api.TCRMBackend:
+    properties:
+      backend_hash:
+        type: string
+      endpoints:
+        items:
+          type: string
+        type: array
+      updated_at_unix:
+        type: integer
+    type: object
+  api.TCRMListResponse:
+    properties:
+      backends:
+        items:
+          $ref: '#/definitions/api.TCRMBackend'
+        type: array
+      updated_at_unix:
+        type: integer
+    type: object
+  api.TCRMRegisterRequest:
+    properties:
+      backend_hash:
+        type: string
+      endpoint:
+        type: string
+    type: object
+  api.TCRMRegisterResponse:
+    properties:
+      backend_hash:
+        type: string
+      endpoints:
+        items:
+          type: string
+        type: array
+      updated_at_unix:
+        type: integer
+    type: object
+  api.TCRMUnregisterRequest:
+    properties:
+      backend_hash:
+        type: string
+      endpoint:
+        type: string
+    type: object
+  api.TCRMUnregisterResponse:
+    properties:
+      backend_hash:
+        type: string
+      endpoints:
+        items:
+          type: string
+        type: array
+      updated_at_unix:
+        type: integer
+    type: object
+  api.TxnDecisionRequest:
+    properties:
+      expires_at_unix:
+        type: integer
+      participants:
+        items:
+          $ref: '#/definitions/api.TxnParticipant'
+        type: array
+      state:
+        description: pending|commit|rollback
+        type: string
+      target_backend_hash:
+        description: TargetBackendHash scopes RM apply requests to a specific backend
+          island.
+        type: string
+      tc_term:
+        description: TCTerm is the current TC leader term for this decision.
+        type: integer
+      txn_id:
+        type: string
+    type: object
+  api.TxnDecisionResponse:
+    properties:
+      state:
+        type: string
+      txn_id:
+        type: string
+    type: object
+  api.TxnParticipant:
+    properties:
+      backend_hash:
+        description: BackendHash identifies the storage backend island for this participant.
+        type: string
+      key:
+        type: string
+      namespace:
+        type: string
+    type: object
+  api.TxnReplayRequest:
+    properties:
+      txn_id:
+        type: string
+    type: object
+  api.TxnReplayResponse:
+    properties:
+      state:
+        type: string
+      txn_id:
+        type: string
     type: object
   api.UpdateResponse:
     properties:
@@ -402,7 +714,9 @@ paths:
       - application/json
       description: Acquire or wait for an exclusive lease on a key. When block_seconds
         > 0 the request will long-poll until a lease becomes available or the timeout
-        elapses.
+        elapses. Returns a compact xid-based `lease_id` and `txn_id` (20-char lowercase
+        base32, e.g. `c5v9d0sl70b3m3q8ndg0`) that must be echoed on write operations.
+        Namespaces starting with `.` are reserved (e.g. `.txns`) and will be rejected.
       parameters:
       - description: Namespace override when the request body omits it
         in: query
@@ -411,6 +725,10 @@ paths:
       - description: Key to acquire when the request body omits it
         in: query
         name: key
+        type: string
+      - description: Existing transaction identifier (xid) to join a multi-key transaction
+        in: header
+        name: X-Txn-ID
         type: string
       - description: Lease acquisition parameters
         in: body
@@ -440,6 +758,360 @@ paths:
       security:
       - mTLS: []
       summary: Acquire an exclusive lease
+      tags:
+      - lease
+  /v1/attachment:
+    delete:
+      consumes:
+      - application/json
+      description: Streams a single attachment (GET) or stages its deletion (DELETE).
+      parameters:
+      - description: Namespace override (defaults to server setting)
+        in: query
+        name: namespace
+        type: string
+      - description: Lease key
+        in: query
+        name: key
+        required: true
+        type: string
+      - description: Attachment name
+        in: query
+        name: name
+        type: string
+      - description: Attachment id
+        in: query
+        name: id
+        type: string
+      - description: Set to true to read without a lease (GET)
+        in: query
+        name: public
+        type: boolean
+      - description: Lease identifier (required unless public=1)
+        in: header
+        name: X-Lease-ID
+        type: string
+      - description: Transaction identifier (required for lease operations)
+        in: header
+        name: X-Txn-ID
+        type: string
+      - description: Optional fencing token proof
+        in: header
+        name: X-Fencing-Token
+        type: string
+      produces:
+      - application/octet-stream
+      responses:
+        "200":
+          description: Attachment payload
+          schema:
+            type: string
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - mTLS: []
+      summary: Retrieve or delete a state attachment
+      tags:
+      - lease
+    get:
+      consumes:
+      - application/json
+      description: Streams a single attachment (GET) or stages its deletion (DELETE).
+      parameters:
+      - description: Namespace override (defaults to server setting)
+        in: query
+        name: namespace
+        type: string
+      - description: Lease key
+        in: query
+        name: key
+        required: true
+        type: string
+      - description: Attachment name
+        in: query
+        name: name
+        type: string
+      - description: Attachment id
+        in: query
+        name: id
+        type: string
+      - description: Set to true to read without a lease (GET)
+        in: query
+        name: public
+        type: boolean
+      - description: Lease identifier (required unless public=1)
+        in: header
+        name: X-Lease-ID
+        type: string
+      - description: Transaction identifier (required for lease operations)
+        in: header
+        name: X-Txn-ID
+        type: string
+      - description: Optional fencing token proof
+        in: header
+        name: X-Fencing-Token
+        type: string
+      produces:
+      - application/octet-stream
+      responses:
+        "200":
+          description: Attachment payload
+          schema:
+            type: string
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - mTLS: []
+      summary: Retrieve or delete a state attachment
+      tags:
+      - lease
+  /v1/attachments:
+    delete:
+      consumes:
+      - application/octet-stream
+      description: Upload, list, or delete attachments for a key depending on the
+        HTTP method.
+      parameters:
+      - description: Namespace override (defaults to server setting)
+        in: query
+        name: namespace
+        type: string
+      - description: Lease key
+        in: query
+        name: key
+        required: true
+        type: string
+      - description: Attachment name (upload/delete)
+        in: query
+        name: name
+        type: string
+      - description: Attachment id (delete)
+        in: query
+        name: id
+        type: string
+      - description: Set to true to read without a lease (list)
+        in: query
+        name: public
+        type: boolean
+      - description: Attachment content type (upload)
+        in: query
+        name: content_type
+        type: string
+      - description: Maximum attachment size (0 = unlimited)
+        format: int64
+        in: query
+        name: max_bytes
+        type: integer
+      - description: Do not overwrite existing attachments (upload)
+        in: query
+        name: prevent_overwrite
+        type: boolean
+      - description: Lease identifier (required unless public=1)
+        in: header
+        name: X-Lease-ID
+        type: string
+      - description: Transaction identifier (required for lease operations)
+        in: header
+        name: X-Txn-ID
+        type: string
+      - description: Optional fencing token proof
+        in: header
+        name: X-Fencing-Token
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.AttachmentListResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - mTLS: []
+      summary: Manage state attachments
+      tags:
+      - lease
+    get:
+      consumes:
+      - application/octet-stream
+      description: Upload, list, or delete attachments for a key depending on the
+        HTTP method.
+      parameters:
+      - description: Namespace override (defaults to server setting)
+        in: query
+        name: namespace
+        type: string
+      - description: Lease key
+        in: query
+        name: key
+        required: true
+        type: string
+      - description: Attachment name (upload/delete)
+        in: query
+        name: name
+        type: string
+      - description: Attachment id (delete)
+        in: query
+        name: id
+        type: string
+      - description: Set to true to read without a lease (list)
+        in: query
+        name: public
+        type: boolean
+      - description: Attachment content type (upload)
+        in: query
+        name: content_type
+        type: string
+      - description: Maximum attachment size (0 = unlimited)
+        format: int64
+        in: query
+        name: max_bytes
+        type: integer
+      - description: Do not overwrite existing attachments (upload)
+        in: query
+        name: prevent_overwrite
+        type: boolean
+      - description: Lease identifier (required unless public=1)
+        in: header
+        name: X-Lease-ID
+        type: string
+      - description: Transaction identifier (required for lease operations)
+        in: header
+        name: X-Txn-ID
+        type: string
+      - description: Optional fencing token proof
+        in: header
+        name: X-Fencing-Token
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.AttachmentListResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - mTLS: []
+      summary: Manage state attachments
+      tags:
+      - lease
+    post:
+      consumes:
+      - application/octet-stream
+      description: Upload, list, or delete attachments for a key depending on the
+        HTTP method.
+      parameters:
+      - description: Namespace override (defaults to server setting)
+        in: query
+        name: namespace
+        type: string
+      - description: Lease key
+        in: query
+        name: key
+        required: true
+        type: string
+      - description: Attachment name (upload/delete)
+        in: query
+        name: name
+        type: string
+      - description: Attachment id (delete)
+        in: query
+        name: id
+        type: string
+      - description: Set to true to read without a lease (list)
+        in: query
+        name: public
+        type: boolean
+      - description: Attachment content type (upload)
+        in: query
+        name: content_type
+        type: string
+      - description: Maximum attachment size (0 = unlimited)
+        format: int64
+        in: query
+        name: max_bytes
+        type: integer
+      - description: Do not overwrite existing attachments (upload)
+        in: query
+        name: prevent_overwrite
+        type: boolean
+      - description: Lease identifier (required unless public=1)
+        in: header
+        name: X-Lease-ID
+        type: string
+      - description: Transaction identifier (required for lease operations)
+        in: header
+        name: X-Txn-ID
+        type: string
+      - description: Optional fencing token proof
+        in: header
+        name: X-Fencing-Token
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.AttachmentListResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - mTLS: []
+      summary: Manage state attachments
       tags:
       - lease
   /v1/describe:
@@ -585,7 +1257,8 @@ paths:
     post:
       consumes:
       - application/json
-      description: Refresh an existing lease before it expires. Returns the new expiration
+      description: Refresh an existing lease before it expires. Requires the xid lease
+        identifier minted by Acquire and its fencing token; returns the new expiration
         timestamp.
       parameters:
       - description: Namespace override when the request body omits it
@@ -602,6 +1275,16 @@ paths:
         required: true
         schema:
           $ref: '#/definitions/api.KeepAliveRequest'
+      - description: Fencing token associated with the lease (from Acquire response)
+        in: header
+        name: X-Fencing-Token
+        required: true
+        type: string
+      - description: Transaction identifier (required when the lease is enlisted in
+          a txn)
+        in: header
+        name: X-Txn-ID
+        type: string
       produces:
       - application/json
       responses:
@@ -646,9 +1329,14 @@ paths:
         name: key
         required: true
         type: string
-      - description: Lease identifier
+      - description: Lease identifier (xid from Acquire, 20-char lowercase base32)
         in: header
         name: X-Lease-ID
+        required: true
+        type: string
+      - description: Transaction identifier (xid from Acquire)
+        in: header
+        name: X-Txn-ID
         required: true
         type: string
       - description: Optional fencing token proof
@@ -816,7 +1504,8 @@ paths:
       consumes:
       - application/json
       description: Confirms processing of a delivery and deletes the message or its
-        retry lease.
+        retry lease. If a txn_id is present (or the lease is already enlisted) and
+        TC is enabled, this records a commit decision via the TC.
       parameters:
       - description: Namespace override when the request body omits it
         in: query
@@ -856,9 +1545,9 @@ paths:
     post:
       consumes:
       - application/json
-      description: Performs a single dequeue attempt, optionally waiting for availability.
-        Responses stream as multipart/related parts containing message metadata and
-        payload.
+      description: Dequeues one or more messages from the specified queue. Supports
+        long polling via wait_seconds. If txn_id is provided, the message is enlisted
+        as a transaction participant.
       parameters:
       - description: Namespace override when the request body omits it
         in: query
@@ -872,25 +1561,21 @@ paths:
         in: query
         name: owner
         type: string
-      - description: Dequeue parameters
+      - description: Dequeue parameters (queue, owner, wait_seconds, visibility)
         in: body
         name: request
         required: true
         schema:
           $ref: '#/definitions/api.DequeueRequest'
       produces:
-      - multipart/related
+      - application/json
       responses:
         "200":
-          description: Multipart response with message metadata and optional payload
+          description: OK
           schema:
-            type: string
+            $ref: '#/definitions/api.DequeueResponse'
         "400":
           description: Bad Request
-          schema:
-            $ref: '#/definitions/api.ErrorResponse'
-        "404":
-          description: Not Found
           schema:
             $ref: '#/definitions/api.ErrorResponse'
         "409":
@@ -903,7 +1588,7 @@ paths:
             $ref: '#/definitions/api.ErrorResponse'
       security:
       - mTLS: []
-      summary: Fetch one or more queue messages
+      summary: Dequeue messages
       tags:
       - queue
   /v1/queue/dequeueWithState:
@@ -911,7 +1596,8 @@ paths:
       consumes:
       - application/json
       description: Dequeues messages and includes their associated state blobs in
-        the multipart response when available.
+        the multipart response when available. If txn_id is provided, the message
+        and state sidecar are enlisted as transaction participants.
       parameters:
       - description: Namespace override when the request body omits it
         in: query
@@ -936,7 +1622,7 @@ paths:
       responses:
         "200":
           description: Multipart response with message metadata, payload, and state
-            attachments
+            sidecar
           schema:
             type: string
         "400":
@@ -957,7 +1643,7 @@ paths:
             $ref: '#/definitions/api.ErrorResponse'
       security:
       - mTLS: []
-      summary: Fetch queue messages with state attachments
+      summary: Fetch queue messages with state sidecars
       tags:
       - queue
   /v1/queue/enqueue:
@@ -1017,7 +1703,8 @@ paths:
       consumes:
       - application/json
       description: Extends the visibility timeout and lease window for an in-flight
-        message.
+        message. txn_id is optional; if omitted the server uses the lease's txn_id
+        (if any).
       parameters:
       - description: Namespace override when the request body omits it
         in: query
@@ -1058,6 +1745,8 @@ paths:
       consumes:
       - application/json
       description: Requeues the delivery with optional delay and last error metadata.
+        If a txn_id is present (or the lease is already enlisted) and TC is enabled,
+        this records a rollback decision via the TC.
       parameters:
       - description: Namespace override when the request body omits it
         in: query
@@ -1098,7 +1787,8 @@ paths:
       consumes:
       - application/json
       description: Opens a long-lived multipart stream of deliveries for the specified
-        queue owner. Each part contains message metadata and payload.
+        queue owner. Each part contains message metadata and payload. If txn_id is
+        provided, each delivery is enlisted as a transaction participant.
       parameters:
       - description: Namespace override when the request body omits it
         in: query
@@ -1151,7 +1841,8 @@ paths:
       consumes:
       - application/json
       description: Opens a long-lived multipart stream where each part contains message
-        metadata, payload, and state snapshot when available.
+        metadata, payload, and state snapshot when available. If txn_id is provided,
+        the message and state sidecar are enlisted as transaction participants.
       parameters:
       - description: Namespace override when the request body omits it
         in: query
@@ -1204,6 +1895,8 @@ paths:
       consumes:
       - application/json
       description: Releases the lease associated with the provided key and lease identifier.
+        The request must include the xid `txn_id` from Acquire; set `rollback=true`
+        to abandon staged changes, otherwise the release commits the staged state.
       parameters:
       - description: Namespace override when the request body omits it
         in: query
@@ -1259,9 +1952,14 @@ paths:
         name: key
         required: true
         type: string
-      - description: Lease identifier
+      - description: Lease identifier (xid from Acquire, 20-char lowercase base32)
         in: header
         name: X-Lease-ID
+        required: true
+        type: string
+      - description: Transaction identifier (xid from Acquire)
+        in: header
+        name: X-Txn-ID
         required: true
         type: string
       - description: Optional fencing token proof
@@ -1300,6 +1998,514 @@ paths:
       summary: Delete the JSON state for a key
       tags:
       - lease
+  /v1/tc/cluster/announce:
+    post:
+      consumes:
+      - application/json
+      description: Refreshes the caller's membership lease. Requires TC-auth with
+        a server certificate when mTLS is enabled (unless tc-disable-auth is set).
+      parameters:
+      - description: TC cluster announce request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/api.TCClusterAnnounceRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.TCClusterAnnounceResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - mTLS: []
+      summary: Announce TC cluster membership
+      tags:
+      - transaction
+  /v1/tc/cluster/leave:
+    post:
+      consumes:
+      - application/json
+      description: Deletes the caller's membership lease. Requires TC-auth with a
+        server certificate when mTLS is enabled (unless tc-disable-auth is set).
+      parameters:
+      - description: TC cluster leave request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/api.TCClusterLeaveRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.TCClusterLeaveResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - mTLS: []
+      summary: Leave the TC cluster
+      tags:
+      - transaction
+  /v1/tc/cluster/list:
+    get:
+      description: List the current active TC cluster membership list. Requires TC-auth
+        when mTLS is enabled (unless tc-disable-auth is set).
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.TCClusterListResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - mTLS: []
+      summary: List TC cluster membership
+      tags:
+      - transaction
+  /v1/tc/leader:
+    get:
+      description: Returns the observed TC leader state. Requires TC-auth when mTLS
+        is enabled (unless tc-disable-auth is set).
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.TCLeaderResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - mTLS: []
+      summary: Return TC leader state
+      tags:
+      - transaction
+  /v1/tc/lease/acquire:
+    post:
+      consumes:
+      - application/json
+      description: Acquire a TC leader lease as part of the TC election quorum. Requires
+        TC-auth when mTLS is enabled (unless tc-disable-auth is set).
+      parameters:
+      - description: TC lease acquire request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/api.TCLeaseAcquireRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.TCLeaseAcquireResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - mTLS: []
+      summary: Acquire a TC leader lease
+      tags:
+      - transaction
+  /v1/tc/lease/release:
+    post:
+      consumes:
+      - application/json
+      description: Release a TC leader lease as part of the TC election quorum. Requires
+        TC-auth when mTLS is enabled (unless tc-disable-auth is set).
+      parameters:
+      - description: TC lease release request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/api.TCLeaseReleaseRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.TCLeaseReleaseResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - mTLS: []
+      summary: Release a TC leader lease
+      tags:
+      - transaction
+  /v1/tc/lease/renew:
+    post:
+      consumes:
+      - application/json
+      description: Renew a TC leader lease as part of the TC election quorum. Requires
+        TC-auth when mTLS is enabled (unless tc-disable-auth is set).
+      parameters:
+      - description: TC lease renew request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/api.TCLeaseRenewRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.TCLeaseRenewResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - mTLS: []
+      summary: Renew a TC leader lease
+      tags:
+      - transaction
+  /v1/tc/rm/list:
+    get:
+      description: List RM endpoints by backend hash. Requires TC-auth when mTLS is
+        enabled (unless tc-disable-auth is set).
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.TCRMListResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - mTLS: []
+      summary: List RM registry entries
+      tags:
+      - transaction
+  /v1/tc/rm/register:
+    post:
+      consumes:
+      - application/json
+      description: Register an RM endpoint for a backend hash. Replicates across the
+        TC cluster. Requires TC-auth with a server certificate when mTLS is enabled
+        (unless tc-disable-auth is set).
+      parameters:
+      - description: RM register request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/api.TCRMRegisterRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.TCRMRegisterResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "502":
+          description: Bad Gateway
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - mTLS: []
+      summary: Register an RM endpoint
+      tags:
+      - transaction
+  /v1/tc/rm/unregister:
+    post:
+      consumes:
+      - application/json
+      description: Unregister an RM endpoint for a backend hash. Replicates across
+        the TC cluster. Requires TC-auth with a server certificate when mTLS is enabled
+        (unless tc-disable-auth is set).
+      parameters:
+      - description: RM unregister request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/api.TCRMUnregisterRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.TCRMUnregisterResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "502":
+          description: Bad Gateway
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - mTLS: []
+      summary: Unregister an RM endpoint
+      tags:
+      - transaction
+  /v1/txn/commit:
+    post:
+      consumes:
+      - application/json
+      description: Apply a commit decision for a transaction on the local RM. Requires
+        tc_term when TC leadership is enabled. Requires TC-auth when mTLS is enabled
+        (unless tc-disable-auth is set).
+      parameters:
+      - description: Txn decision request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/api.TxnDecisionRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.TxnDecisionResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - mTLS: []
+      summary: Apply a commit decision on an RM
+      tags:
+      - transaction
+  /v1/txn/decide:
+    post:
+      consumes:
+      - application/json
+      description: Record a transaction decision (pending|commit|rollback). Commit/rollback
+        decisions are applied locally and fan out to RMs. TC-auth only; called by
+        lockd RMs or TC tooling. Any TC endpoint can receive this call; non-leaders
+        forward to the leader, which stamps the tc_term fencing token. Requires TC-auth
+        when mTLS is enabled (unless tc-disable-auth is set).
+      parameters:
+      - description: Txn decision request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/api.TxnDecisionRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.TxnDecisionResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "502":
+          description: Bad Gateway
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - mTLS: []
+      summary: Record a transaction decision
+      tags:
+      - transaction
+  /v1/txn/replay:
+    post:
+      consumes:
+      - application/json
+      description: Apply the recorded decision for a transaction (commit or rollback)
+        to its participants. Pending transactions remain unchanged unless expired,
+        in which case they roll back. Idempotent and safe to retry. Requires TC-auth
+        when mTLS is enabled (unless tc-disable-auth is set).
+      parameters:
+      - description: Txn replay request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/api.TxnReplayRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.TxnReplayResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - mTLS: []
+      summary: Replay a transaction decision
+      tags:
+      - transaction
+  /v1/txn/rollback:
+    post:
+      consumes:
+      - application/json
+      description: Apply a rollback decision for a transaction on the local RM. Requires
+        tc_term when TC leadership is enabled. Requires TC-auth when mTLS is enabled
+        (unless tc-disable-auth is set).
+      parameters:
+      - description: Txn decision request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/api.TxnDecisionRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.TxnDecisionResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - mTLS: []
+      summary: Apply a rollback decision on an RM
+      tags:
+      - transaction
   /v1/update:
     post:
       consumes:
@@ -1317,9 +2523,14 @@ paths:
         name: key
         required: true
         type: string
-      - description: Lease identifier
+      - description: Lease identifier (xid from Acquire, 20-char lowercase base32)
         in: header
         name: X-Lease-ID
+        required: true
+        type: string
+      - description: Transaction identifier (xid from Acquire)
+        in: header
+        name: X-Txn-ID
         required: true
         type: string
       - description: Optional fencing token proof

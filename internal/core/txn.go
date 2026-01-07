@@ -32,6 +32,8 @@ type TxnParticipant struct {
 	Key       string `json:"key"`
 	// BackendHash identifies the storage backend island for this participant.
 	BackendHash string `json:"backend_hash,omitempty"`
+	// Applied tracks whether the txn decision has been applied for this participant.
+	Applied bool `json:"applied,omitempty"`
 }
 
 // TxnRecord is the durable coordination record for a local transaction.
@@ -76,12 +78,19 @@ func (s *Service) putTxnRecord(ctx context.Context, rec *TxnRecord, expectedETag
 	return info.ETag, nil
 }
 
+func participantMatches(a, b TxnParticipant) bool {
+	if a.Namespace != b.Namespace || a.Key != b.Key {
+		return false
+	}
+	if a.BackendHash == "" || b.BackendHash == "" {
+		return true
+	}
+	return a.BackendHash == b.BackendHash
+}
+
 func participantIndex(list []TxnParticipant, p TxnParticipant) int {
 	for i, existing := range list {
-		if existing.Namespace != p.Namespace || existing.Key != p.Key {
-			continue
-		}
-		if existing.BackendHash == p.BackendHash || existing.BackendHash == "" || p.BackendHash == "" {
+		if participantMatches(existing, p) {
 			return i
 		}
 	}
@@ -105,8 +114,13 @@ func mergeParticipants(dst []TxnParticipant, src []TxnParticipant) []TxnParticip
 	for _, p := range src {
 		if idx := participantIndex(dst, p); idx == -1 {
 			dst = append(dst, p)
-		} else if dst[idx].BackendHash == "" && p.BackendHash != "" {
-			dst[idx].BackendHash = p.BackendHash
+		} else {
+			if dst[idx].BackendHash == "" && p.BackendHash != "" {
+				dst[idx].BackendHash = p.BackendHash
+			}
+			if p.Applied && !dst[idx].Applied {
+				dst[idx].Applied = true
+			}
 		}
 	}
 	sortParticipants(dst)
@@ -125,6 +139,35 @@ func (s *Service) normalizeParticipants(list []TxnParticipant) []TxnParticipant 
 		}
 	}
 	return out
+}
+
+func allParticipantsApplied(list []TxnParticipant) bool {
+	for _, p := range list {
+		if !p.Applied {
+			return false
+		}
+	}
+	return true
+}
+
+func markAppliedParticipants(rec *TxnRecord, applied []TxnParticipant) bool {
+	if rec == nil || len(applied) == 0 {
+		return false
+	}
+	changed := false
+	for i := range rec.Participants {
+		if rec.Participants[i].Applied {
+			continue
+		}
+		for _, p := range applied {
+			if participantMatches(rec.Participants[i], p) {
+				rec.Participants[i].Applied = true
+				changed = true
+				break
+			}
+		}
+	}
+	return changed
 }
 
 func (s *Service) normalizeTxnRecord(rec TxnRecord) TxnRecord {
@@ -470,6 +513,52 @@ func applyHintFromContext(ctx context.Context) *txnApplyHint {
 	return nil
 }
 
+// MarkTxnParticipantsApplied records applied participants and deletes the txn record once all are applied.
+func (s *Service) MarkTxnParticipantsApplied(ctx context.Context, txnID string, applied []TxnParticipant) error {
+	if s == nil {
+		return nil
+	}
+	txnID = strings.TrimSpace(txnID)
+	if txnID == "" {
+		return nil
+	}
+	for {
+		rec, etag, err := s.loadTxnRecord(ctx, txnID)
+		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) || errors.Is(err, storage.ErrNotImplemented) {
+				return nil
+			}
+			return err
+		}
+		changed := markAppliedParticipants(rec, applied)
+		allApplied := allParticipantsApplied(rec.Participants)
+		if !changed && !allApplied {
+			return nil
+		}
+		now := s.clock.Now().Unix()
+		rec.UpdatedAtUnix = now
+		if allApplied && rec.State != TxnStatePending {
+			if err := s.store.DeleteObject(ctx, txnNamespace, rec.TxnID, storage.DeleteObjectOptions{}); err != nil {
+				if errors.Is(err, storage.ErrNotFound) || errors.Is(err, storage.ErrNotImplemented) {
+					return nil
+				}
+				return err
+			}
+			return nil
+		}
+		if _, err := s.putTxnRecord(ctx, rec, etag); err != nil {
+			if errors.Is(err, storage.ErrCASMismatch) {
+				continue
+			}
+			if errors.Is(err, storage.ErrNotImplemented) {
+				return nil
+			}
+			return err
+		}
+		return nil
+	}
+}
+
 func (s *Service) applyTxnDecision(ctx context.Context, rec *TxnRecord) error {
 	return s.applyTxnDecisionWithOptions(ctx, rec, txnApplyOptions{})
 }
@@ -488,11 +577,17 @@ func (s *Service) applyTxnDecisionWithOptions(ctx context.Context, rec *TxnRecor
 	var firstErr error
 	var failedCount int
 	var appliedCount int
+	var alreadyApplied int
 	var retryCount int
+	appliedParticipants := make([]TxnParticipant, 0, len(rec.Participants))
 	start := s.clock.Now()
 	localHash := s.backendHash
 	applyHint := applyHintFromContext(ctx)
 	for _, p := range rec.Participants {
+		if p.Applied {
+			alreadyApplied++
+			continue
+		}
 		if localHash == "" && p.BackendHash != "" {
 			if s.logger != nil {
 				s.logger.Debug("txn.apply.skip.backend_missing",
@@ -545,6 +640,7 @@ func (s *Service) applyTxnDecisionWithOptions(ctx context.Context, rec *TxnRecor
 			} else {
 				s.txnDecisionApplied.Add(1)
 				appliedCount++
+				appliedParticipants = append(appliedParticipants, p)
 			}
 			continue
 		}
@@ -568,6 +664,7 @@ func (s *Service) applyTxnDecisionWithOptions(ctx context.Context, rec *TxnRecor
 		}
 		s.txnDecisionApplied.Add(1)
 		appliedCount++
+		appliedParticipants = append(appliedParticipants, p)
 	}
 	duration := s.clock.Now().Sub(start)
 	if s.logger != nil {
@@ -576,6 +673,7 @@ func (s *Service) applyTxnDecisionWithOptions(ctx context.Context, rec *TxnRecor
 			"state", rec.State,
 			"participants", len(rec.Participants),
 			"applied", appliedCount,
+			"already_applied", alreadyApplied,
 			"failed", failedCount,
 			"retries", retryCount,
 			"duration_ms", duration.Milliseconds(),
@@ -586,14 +684,23 @@ func (s *Service) applyTxnDecisionWithOptions(ctx context.Context, rec *TxnRecor
 		case duration > txnApplySlowThreshold:
 			s.logger.Warn("txn.apply.slow", fields...)
 		default:
-			s.logger.Info("txn.apply.complete", fields...)
+			s.logger.Trace("txn.apply.complete", fields...)
 		}
 	}
 	if s.txnMetrics != nil {
 		s.txnMetrics.recordApply(ctx, rec.State, appliedCount, failedCount, retryCount, duration)
 	}
 	if firstErr != nil {
+		if err := s.MarkTxnParticipantsApplied(ctx, rec.TxnID, appliedParticipants); err != nil && s.logger != nil {
+			s.logger.Warn("txn.apply.mark_applied.failed", "txn_id", rec.TxnID, "state", rec.State, "error", err)
+		}
 		return fmt.Errorf("txn apply failed for %d/%d participants: %w", failedCount, len(rec.Participants), firstErr)
+	}
+	if err := s.MarkTxnParticipantsApplied(ctx, rec.TxnID, appliedParticipants); err != nil {
+		if s.logger != nil {
+			s.logger.Warn("txn.apply.mark_applied.failed", "txn_id", rec.TxnID, "state", rec.State, "error", err)
+		}
+		return err
 	}
 	return nil
 }
@@ -1172,6 +1279,19 @@ func (s *Service) SweepTxnRecords(ctx context.Context, now time.Time) error {
 				pendingSkipped++
 				continue
 			}
+			if allParticipantsApplied(rec.Participants) {
+				if err := s.store.DeleteObject(ctx, txnNamespace, rec.TxnID, storage.DeleteObjectOptions{}); err != nil {
+					if !errors.Is(err, storage.ErrNotFound) && !errors.Is(err, storage.ErrNotImplemented) {
+						if s.logger != nil {
+							s.logger.Debug("txn.cleanup.failed", "txn_id", rec.TxnID, "error", err)
+						}
+						cleanupFailed++
+					}
+				} else {
+					cleanupDeleted++
+				}
+				continue
+			}
 			if s.logger != nil {
 				s.logger.Debug("txn.sweeper.replay",
 					"txn_id", rec.TxnID,
@@ -1220,7 +1340,7 @@ func (s *Service) SweepTxnRecords(ctx context.Context, now time.Time) error {
 				case duration > txnSweepSlowThreshold:
 					s.logger.Warn("txn.sweeper.summary", fields...)
 				case work > 0:
-					s.logger.Info("txn.sweeper.summary", fields...)
+					s.logger.Debug("txn.sweeper.summary", fields...)
 				default:
 					s.logger.Debug("txn.sweeper.summary", fields...)
 				}

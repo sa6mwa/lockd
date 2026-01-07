@@ -244,16 +244,28 @@ func recordTxnDecision(t testing.TB, backend storage.Backend, txnID string, stat
 		if len(rec.Participants) == 0 {
 			rec.Participants = append([]core.TxnParticipant(nil), participants...)
 		} else {
-			existing := make(map[core.TxnParticipant]struct{}, len(rec.Participants))
+			type participantKey struct {
+				namespace   string
+				key         string
+				backendHash string
+			}
+			keyFor := func(p core.TxnParticipant) participantKey {
+				return participantKey{
+					namespace:   p.Namespace,
+					key:         p.Key,
+					backendHash: p.BackendHash,
+				}
+			}
+			existing := make(map[participantKey]struct{}, len(rec.Participants))
 			for _, p := range rec.Participants {
-				existing[p] = struct{}{}
+				existing[keyFor(p)] = struct{}{}
 			}
 			for _, p := range participants {
-				if _, ok := existing[p]; ok {
+				if _, ok := existing[keyFor(p)]; ok {
 					continue
 				}
 				rec.Participants = append(rec.Participants, p)
-				existing[p] = struct{}{}
+				existing[keyFor(p)] = struct{}{}
 			}
 		}
 	}

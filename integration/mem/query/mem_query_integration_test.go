@@ -1271,11 +1271,7 @@ func waitForTxnRecordDecided(ctx context.Context, backend storage.Backend, txnID
 		obj, err := backend.GetObject(ctx, ".txns", txnID)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
-				if ctx.Err() != nil {
-					return fmt.Errorf("txn record %s not found before timeout", txnID)
-				}
-				time.Sleep(25 * time.Millisecond)
-				continue
+				return nil
 			}
 			if errors.Is(err, context.DeadlineExceeded) {
 				if ctx.Err() != nil {

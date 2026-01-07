@@ -1390,7 +1390,18 @@ func waitForTxnRecordsDecided(ctx context.Context, backend storage.Backend) erro
 			if decodeErr != nil {
 				return decodeErr
 			}
-			if rec.State == "" || rec.State == core.TxnStatePending {
+			allApplied := true
+			for _, p := range rec.Participants {
+				if !p.Applied {
+					allApplied = false
+					break
+				}
+			}
+			if rec.State == "" || rec.State == core.TxnStatePending || !allApplied {
+				pending++
+				continue
+			}
+			if allApplied {
 				pending++
 			}
 		}
@@ -1398,7 +1409,7 @@ func waitForTxnRecordsDecided(ctx context.Context, backend storage.Backend) erro
 			return nil
 		}
 		if ctx.Err() != nil {
-			return fmt.Errorf("txn records still pending: %d", pending)
+			return fmt.Errorf("txn records still present: %d", pending)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}

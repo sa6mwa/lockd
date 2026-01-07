@@ -277,6 +277,16 @@ func (c *Coordinator) fanout(ctx context.Context, txnID string, state core.TxnSt
 			break
 		}
 		if applied {
+			if err := c.core.MarkTxnParticipantsApplied(ctx, txnID, participants); err != nil {
+				if c.metrics != nil {
+					c.metrics.recordFanoutFailure(ctx, state, backendHash, "apply_record_failed")
+				}
+				if c.logger != nil {
+					c.logger.Warn("txn.coordinator.fanout.mark_applied.failed", "txn_id", txnID, "state", state, "backend_hash", backendHash, "error", err)
+				}
+				failures = append(failures, EndpointFailure{BackendHash: backendHash, Err: err})
+				continue
+			}
 			continue
 		}
 		if len(backendFailures) > 0 {
@@ -475,6 +485,9 @@ func groupParticipantsByBackend(list []core.TxnParticipant, localHash string) ma
 	localHash = strings.TrimSpace(localHash)
 	out := make(map[string][]core.TxnParticipant)
 	for _, p := range list {
+		if p.Applied {
+			continue
+		}
 		hash := strings.TrimSpace(p.BackendHash)
 		if hash == "" {
 			if localHash == "" {

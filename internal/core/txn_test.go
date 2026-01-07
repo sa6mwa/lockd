@@ -552,17 +552,8 @@ func TestSweepTxnRecordsRollsBackExpiredPending(t *testing.T) {
 	if updated.Lease != nil {
 		t.Fatalf("expected lease cleared after sweep")
 	}
-	recObj, err := svc.store.GetObject(ctx, txnNamespace, txnID)
-	if err != nil {
-		t.Fatalf("expected txn record to remain after sweep: %v", err)
-	}
-	defer recObj.Reader.Close()
-	var updatedRec TxnRecord
-	if err := json.NewDecoder(recObj.Reader).Decode(&updatedRec); err != nil {
-		t.Fatalf("decode txn record: %v", err)
-	}
-	if updatedRec.State != TxnStateRollback {
-		t.Fatalf("expected txn record to be rollback, got %s", updatedRec.State)
+	if _, err := svc.store.GetObject(ctx, txnNamespace, txnID); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected txn record to be deleted after sweep, got %v", err)
 	}
 }
 
@@ -641,6 +632,43 @@ func TestTxnDecisionCounters(t *testing.T) {
 	applied, failed = svc.TxnDecisionCounters()
 	if applied != 1 || failed != 1 {
 		t.Fatalf("unexpected counters after failure: applied=%d failed=%d", applied, failed)
+	}
+}
+
+func TestCommitTxnDeletesRecordAfterApply(t *testing.T) {
+	ctx := context.Background()
+	svc := newTestService(t)
+
+	txnID := "c5v9d0sl70b3m3q8ndga"
+	ns, key := "default", "commit-cleanup"
+
+	stageRes, err := svc.staging.StageState(ctx, ns, key, txnID, bytes.NewBufferString(`{"v":1}`), storage.PutStateOptions{})
+	if err != nil {
+		t.Fatalf("stage state: %v", err)
+	}
+	meta := &storage.Meta{
+		Lease:                 &storage.Lease{ID: "lease-1", Owner: "test", ExpiresAtUnix: time.Now().Add(time.Minute).Unix(), TxnID: txnID},
+		StagedTxnID:           txnID,
+		StagedStateETag:       stageRes.NewETag,
+		StagedVersion:         1,
+		StagedStateDescriptor: stageRes.Descriptor,
+	}
+	if _, err := svc.store.StoreMeta(ctx, ns, key, meta, ""); err != nil {
+		t.Fatalf("store meta: %v", err)
+	}
+
+	state, err := svc.CommitTxn(ctx, TxnRecord{
+		TxnID:        txnID,
+		Participants: []TxnParticipant{{Namespace: ns, Key: key}},
+	})
+	if err != nil {
+		t.Fatalf("commit txn: %v", err)
+	}
+	if state != TxnStateCommit {
+		t.Fatalf("expected commit state, got %s", state)
+	}
+	if _, err := svc.store.GetObject(ctx, txnNamespace, txnID); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected txn record to be deleted after apply, got %v", err)
 	}
 }
 

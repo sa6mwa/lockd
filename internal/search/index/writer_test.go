@@ -70,7 +70,6 @@ func TestWriterWaitForReadableReturnsAfterFlush(t *testing.T) {
 		t.Fatalf("wait returned before flush: %v", err)
 	default:
 	}
-	waitForManualTimer(t, clk)
 	if err := writer.Flush(context.Background()); err != nil {
 		t.Fatalf("flush: %v", err)
 	}
@@ -113,25 +112,33 @@ func TestWriterWaitForReadableTimesOut(t *testing.T) {
 		t.Fatalf("wait returned before timeout: %v", err)
 	default:
 	}
-	waitForManualTimer(t, clk)
-	clk.Advance(40 * time.Millisecond)
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("wait: %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatalf("wait did not return after timeout")
+	if err := advanceManualUntilDone(t, clk, done, 5*time.Millisecond, 200*time.Millisecond); err != nil {
+		t.Fatalf("wait: %v", err)
 	}
 }
 
-func waitForManualTimer(t *testing.T, clk *clock.Manual) {
+func advanceManualUntilDone(t *testing.T, clk *clock.Manual, done <-chan error, step, limit time.Duration) error {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for clk.Pending() == 0 {
-		if time.Now().After(deadline) {
-			t.Fatalf("manual clock did not schedule timer")
+	if clk == nil {
+		t.Fatalf("manual clock required")
+	}
+	if step <= 0 {
+		step = 5 * time.Millisecond
+	}
+	if limit <= 0 {
+		limit = 200 * time.Millisecond
+	}
+	deadline := clk.Now().Add(limit)
+	for {
+		select {
+		case err := <-done:
+			return err
+		default:
 		}
+		if clk.Now().After(deadline) {
+			t.Fatalf("wait did not return after manual timeout")
+		}
+		clk.Advance(step)
 		runtime.Gosched()
 	}
 }

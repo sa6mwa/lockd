@@ -1,44 +1,31 @@
 # lockd
 
-> ⚠️ **This is v0.0, beware of bugs and breaking changes.**
+`lockd` is a single-binary coordination plane that fuses **exclusive leases**,
+**atomic JSON state + attachments**, **indexed document search with streaming
+queries**, and an **at-least-once queue** into one API—so you don’t need a lock
+service, a document store, and a message broker just to run reliable workflows.
+It runs its own TC leader election and implicit XA, so multi-key updates and
+queue acknowledgements commit safely across nodes and even across backend
+_"islands"_ without external consensus systems. The same storage abstraction
+powers disk, S3/MinIO, Azure Blob, or in-memory backends with optional envelope
+encryption and mTLS, while built-in back-pressure (QRF/LSF) keeps the service
+stable under load. You get a production-grade Go SDK + CLI in a CGO-free,
+statically linked binary that’s happy as PID 1 yet feature-rich enough for
+orchestration, ETL checkpoints, IoT fleets, and long-running services.
 
-`lockd` is a single-binary coordination plane that combines **exclusive leases**,
-**atomic JSON state**, **searchable document storage**, and an **at-least-once
-queue** (with optional envelope encryption) behind one API. It stays CGO-free,
-statically linked, and happy as PID 1 in tiny containers or VMs.
+### Typical flow
 
-### What is lockd?
+In production, a worker claims a shard/tenant with a lease, loads the last
+committed state (and any attachments), stages updates under a transaction,
+optionally advances work via the queue, then commits. If the worker crashes or
+the lease expires, staging is rolled back and the next worker resumes from the
+last committed checkpoint.
 
-Think of lockd as a coordination kernel for workflows and services. It lets you:
-
-- **Protect shared work** with leases so only one worker advances a checkpoint at a time.
-- **Persist JSON documents** directly on disks, S3/MinIO, or Azure Blob, then query them with selectors or stream them back as whole documents.
-- **Move work between stages** using the built-in queue (enqueue/dequeue/ack/nack/extend) without deploying a separate message bus.
-
-Because everything rides on the same storage abstraction, you can run lockd as a
-lightweight state/queue service in your own cluster, push it behind mTLS on the
-edge, or layer it over cloud object stores to create a simple hosted NoSQL-style
-document store with queues attached. Typical real-world uses include workflow
-runners, ETL checkpoints, IoT or fleet coordination, long-running ML tasks, or
-any system that needs “small database + queue + leasing” without managing three
-separate products.
-
-Typical flow:
-
-1. A worker acquires a lease for a key (e.g. `orders`).
-2. The worker reads the last committed JSON state / checkpoint.
-3. Work is performed, the JSON state is updated atomically (CAS).
-4. The lease is released so the next worker can continue.
-
-If the worker crashes or the connection drops, TTL expiry allows the next
-worker to resume from the last committed state.
-
-**Identifiers:** lease IDs and transaction IDs are compact `xid` strings (20
-lowercase base32 chars, e.g. `c5v9d0sl70b3m3q8ndg0`). Keys/manifests/segments
-retain uuidv7 for ordering. Use the `txn_id` returned by Acquire to join
-multiple keys into the same local transaction; namespaces that start with `.`
-are reserved for lockd internals (e.g. `.txns` stores transaction decisions)
-and are rejected.
+1. Acquire a lease for the workload key and get a `txn_id` for multi-key work.
+2. Read the current JSON state and any required attachments.
+3. Perform work; stage state updates/attachments, and optionally enqueue downstream tasks.
+4. Release to commit (or rollback on failure); queue acks/enlisted dequeues follow the same txn.
+5. On crash/TTL expiry, the lease rolls back and another worker resumes safely.
 
 <a href="https://github.com/sa6mwa/centaurarticles/blob/main/pub/10x.pdf" target="_blank">
 <img align="right" src="10x.png" width="170" height="240" alt="Article about human—AI software development">
@@ -62,6 +49,14 @@ and are rejected.
 - **Acquire-for-update helpers** wrap acquire → get → update, keeping leases alive while user code runs and releasing them automatically.
 - **Public reads** let dashboards or downstream systems fetch published state without holding leases (`/v1/get?public=1`, `Client.Get` default behavior).
 - **Reserved namespaces**: user namespaces must not start with `.`; `.txns` and other dot-prefixed namespaces are reserved for lockd internals.
+
+### Identifiers & namespaces
+
+Lease IDs and transaction IDs are compact `xid` strings (20 lowercase base32
+chars, e.g. `c5v9d0sl70b3m3q8ndg0`). Keys/manifests/segments retain uuidv7 for
+ordering. Use the `txn_id` returned by Acquire to join multiple keys into the
+same local transaction; namespaces that start with `.` are reserved for lockd
+internals (e.g. `.txns` stores transaction decisions) and are rejected.
 
 ### Document store + search
 

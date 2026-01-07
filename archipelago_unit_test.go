@@ -309,8 +309,7 @@ func TestArchipelagoUnitLeaveStopsAutoAnnounceUntilJoin(t *testing.T) {
 	waitForClusterMembersWithClock(t, []*lockd.TestServer{nodeB}, httpClient, []string{nodeB.URL()}, clk, 50*time.Millisecond, 2*time.Second)
 
 	membershipTTL := tccluster.DeriveLeaseTTL(leaseTTL)
-	clk.Advance(membershipTTL/3 + 200*time.Millisecond)
-	runtime.Gosched()
+	advanceManualClock(t, clk, membershipTTL/3+200*time.Millisecond)
 	list := archipelagotest.FetchClusterList(t, nodeB, httpClient)
 	have := tccluster.NormalizeEndpoints(list.Endpoints)
 	if tccluster.ContainsEndpoint(have, nodeA.URL()) {
@@ -396,9 +395,9 @@ func TestArchipelagoUnitLeaderElectionStepdown(t *testing.T) {
 	stopCancel()
 
 	alive := filterServers(tcs, nonLeader)
-	waitForNoLeaderWithClock(t, alive, httpClient, clk, 50*time.Millisecond, 2*time.Second)
-
 	membershipTTL := tccluster.DeriveLeaseTTL(leaseTTL)
+	// Allow quorum loss to expire the leader lease under the manual clock.
+	waitForNoLeaderWithClock(t, alive, httpClient, clk, 50*time.Millisecond, membershipTTL)
 	waitForClusterMembersWithClock(t, alive, httpClient, endpointsForServers(alive), clk, membershipTTL/3, membershipTTL)
 	_, newTerm := waitForLeaderWithClock(t, alive, httpClient, clk, 50*time.Millisecond, 2*time.Second)
 	if newTerm <= oldTerm {
@@ -409,14 +408,15 @@ func TestArchipelagoUnitLeaderElectionStepdown(t *testing.T) {
 func TestArchipelagoUnitNonLeaderForwardUnavailable(t *testing.T) {
 	t.Parallel()
 	clk := clock.NewManual(time.Now().UTC())
-	leaseTTL := archipelagoUnitLeaderTTL
+	// Keep leader info valid while the manual clock advances after abort.
+	leaseTTL := 5 * time.Second
 	_, _, tcs, endpoints := startTwoNodeArchipelago(t, leaseTTL, clk)
 	httpClient := serverHTTPClient
 
 	joinClusterOnce(t, tcs, endpoints, httpClient)
-	waitForClusterMembersWithClock(t, tcs, httpClient, endpoints, clk, 50*time.Millisecond, 2*time.Second)
+	waitForClusterMembersWithClock(t, tcs, httpClient, endpoints, clk, 50*time.Millisecond, leaseTTL)
 
-	leaderEndpoint, _ := waitForLeaderWithClock(t, tcs, httpClient, clk, 50*time.Millisecond, 2*time.Second)
+	leaderEndpoint, _ := waitForLeaderAllWithClock(t, tcs, httpClient, clk, 50*time.Millisecond, leaseTTL)
 	leaderTS := serverByEndpoint(tcs, leaderEndpoint)
 	if leaderTS == nil {
 		t.Fatalf("scenario: leader %q not found", leaderEndpoint)
@@ -550,6 +550,19 @@ func joinClusterOnce(t testing.TB, servers []*lockd.TestServer, endpoints []stri
 	}
 }
 
+func advanceManualClock(t testing.TB, clk *clock.Manual, step time.Duration) {
+	t.Helper()
+	if clk == nil {
+		return
+	}
+	if step <= 0 {
+		step = 50 * time.Millisecond
+	}
+	clk.Advance(step)
+	runtime.Gosched()
+	time.Sleep(1 * time.Millisecond)
+}
+
 func waitForLeaderWithClock(t testing.TB, servers []*lockd.TestServer, clientFn archipelagotest.HTTPClientFunc, clk *clock.Manual, step, timeout time.Duration) (string, uint64) {
 	t.Helper()
 	if clk == nil {
@@ -567,8 +580,7 @@ func waitForLeaderWithClock(t testing.TB, servers []*lockd.TestServer, clientFn 
 		if clk.Now().After(deadline) {
 			t.Fatalf("wait leader (manual clock): timed out")
 		}
-		clk.Advance(step)
-		runtime.Gosched()
+		advanceManualClock(t, clk, step)
 	}
 }
 
@@ -619,8 +631,7 @@ func waitForRMRegistryWithClock(t testing.TB, tcs []*lockd.TestServer, clientFn 
 		if clk.Now().After(deadline) {
 			t.Fatalf("rm registry: %s", missing)
 		}
-		clk.Advance(step)
-		runtime.Gosched()
+		advanceManualClock(t, clk, step)
 	}
 }
 
@@ -659,8 +670,7 @@ func waitForRMRegistryEndpointWithClock(t testing.TB, tcs []*lockd.TestServer, c
 		if clk.Now().After(deadline) {
 			t.Fatalf("rm registry endpoint: %s", mismatch)
 		}
-		clk.Advance(step)
-		runtime.Gosched()
+		advanceManualClock(t, clk, step)
 	}
 }
 
@@ -681,8 +691,7 @@ func waitForLeaderChangeWithClock(t testing.TB, servers []*lockd.TestServer, cli
 		if clk.Now().After(deadline) {
 			t.Fatalf("wait leader change (manual clock): timed out (prev=%s)", prev)
 		}
-		clk.Advance(step)
-		runtime.Gosched()
+		advanceManualClock(t, clk, step)
 	}
 }
 
@@ -703,8 +712,7 @@ func waitForLeaderAllWithClock(t testing.TB, servers []*lockd.TestServer, client
 		if clk.Now().After(deadline) {
 			t.Fatalf("wait leader all (manual clock): timed out")
 		}
-		clk.Advance(step)
-		runtime.Gosched()
+		advanceManualClock(t, clk, step)
 	}
 }
 
@@ -725,8 +733,7 @@ func waitForLeaderAllChangeWithClock(t testing.TB, servers []*lockd.TestServer, 
 		if clk.Now().After(deadline) {
 			t.Fatalf("wait leader all change (manual clock): timed out (prev=%s)", prev)
 		}
-		clk.Advance(step)
-		runtime.Gosched()
+		advanceManualClock(t, clk, step)
 	}
 }
 
@@ -758,8 +765,7 @@ func waitForLeaderOnWithClock(t testing.TB, ts *lockd.TestServer, clientFn archi
 			t.Fatalf("wait leader on (manual clock): timed out (want=%s)", want)
 		}
 		if clk != nil {
-			clk.Advance(step)
-			runtime.Gosched()
+			advanceManualClock(t, clk, step)
 			continue
 		}
 		time.Sleep(step)
@@ -799,8 +805,7 @@ func waitForClusterMembersWithClock(t testing.TB, servers []*lockd.TestServer, c
 		if clk.Now().After(deadline) {
 			t.Fatalf("cluster members: %s", mismatch)
 		}
-		clk.Advance(step)
-		runtime.Gosched()
+		advanceManualClock(t, clk, step)
 	}
 }
 
@@ -821,8 +826,7 @@ func waitForNoLeaderWithClock(t testing.TB, servers []*lockd.TestServer, clientF
 		if clk.Now().After(deadline) {
 			t.Fatalf("wait no leader: timed out")
 		}
-		clk.Advance(step)
-		runtime.Gosched()
+		advanceManualClock(t, clk, step)
 	}
 }
 

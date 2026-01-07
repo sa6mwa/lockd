@@ -22,6 +22,25 @@ This produces a `lockd-ycsb` binary with all upstream workloads plus the lockd d
 ./lockd-ycsb run lockd -P workloads/workloada.properties -p recordcount=10000 -p operationcount=100000
 ```
 
+## Makefile quickstart
+
+The `ycsb/Makefile` wraps the runner with sane defaults and comparable lockd vs etcd commands. It also prints a hint if the local compose stack is not running.
+
+```bash
+cd ycsb
+make build
+make lockd-load
+make lockd-run
+make etcd-load
+make etcd-run
+```
+
+Override the workload mix or scale as needed:
+
+```bash
+make lockd-run WORKLOAD=workloadb RECORDCOUNT=50000 OPERATIONCOUNT=500000 THREADS=16
+```
+
 > **Note**: The standard `go-ycsb` binary can also exercise the lockd driver; just `go build` it from this module so the `_ "github.com/sa6mwa/lockd/ycsb/db/lockd"` import is included.
 
 ## Driver properties
@@ -43,6 +62,10 @@ All properties use the `lockd.` prefix. Key settings:
 | `lockd.query.refresh` | _empty_ | Set to `wait_for` to block until the namespace index flushes. |
 | `lockd.query.limit` | `100` | Cap on the number of keys fetched per scan call. |
 | `lockd.query.return` | `documents` | `documents` streams NDJSON payloads; set to `keys` to fall back to key-only scans. |
+| `lockd.attach.enable` | `false` | When true, stage a single attachment on each insert/update. |
+| `lockd.attach.bytes` | `1024` | Attachment size in bytes when attachment staging is enabled. |
+| `lockd.attach.read` | `false` | When true, read one attachment per record during reads/scans. |
+| `lockd.txn.explicit` | `false` | When true, the driver supplies an explicit xid `txn_id` on acquire. |
 
 The driver stores each YCSB record as a JSON document with:
 
@@ -53,6 +76,29 @@ Scans are implemented via `/v1/query` and default to `return=documents`, so the 
 
 - Only documents for the requested table are returned.
 - The `_seq` field (derived from the numeric suffix of the YCSB key) is used as the range cursor so scans start at the requested key.
+
+### Attachments and explicit transactions
+
+When `lockd.attach.enable=true`, the driver stages a single attachment named `ycsb.bin` on every insert/update. Set `lockd.attach.bytes` to control the payload size. Enable `lockd.attach.read=true` to list attachments and stream one attachment per record during reads/scans (useful for exercising attachment read paths).
+
+When `lockd.txn.explicit=true`, the driver generates and supplies an explicit xid `txn_id` on each acquire. This remains a per-operation transaction (YCSB operations are single-record); it does **not** batch multiple keys into the same transaction.
+
+## Workloads and overlays
+
+`workloads/workload[a-f].properties` are the standard YCSB core mixes (A-F) copied from go-ycsb. To keep lockd vs etcd comparable, run the same workload file and scale via `RECORDCOUNT`/`OPERATIONCOUNT`/`THREADS` in the Makefile or via `-p` overrides.
+
+Driver overlays live under:
+
+- `workloads/lockd.properties` (lockd defaults)
+- `workloads/etcd.properties` (etcd defaults)
+- `workloads/lockd.attach.properties` (attachment overlay)
+- `workloads/lockd.txn.properties` (explicit txn overlay)
+
+You can supply multiple overlays via `LOCKD_EXTRA_PROPS`, for example:
+
+```bash
+make lockd-run LOCKD_EXTRA_PROPS="workloads/lockd.attach.properties workloads/lockd.txn.properties"
+```
 
 ## Example property file
 

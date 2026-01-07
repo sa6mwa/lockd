@@ -12,6 +12,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     go build -trimpath -ldflags="-s -w" -o /out/lockd ./cmd/lockd
 
 FROM scratch
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=build /out/lockd /lockd
 ENV LOCKD_CONFIG_DIR=/config \
     LOCKD_STORE=disk:///storage

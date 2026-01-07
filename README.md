@@ -433,8 +433,8 @@ its behaviour:
 ### Development Environment (Docker Compose + OTLP)
 
 `devenv/docker-compose.yaml` brings up a complete local stack—Jaeger, the OTLP
-collector, and a MinIO instance whose data lives under
-`devenv/volumes/miniostore/`. Start the environment with:
+collector, MinIO (for S3-compatible backends), a single-node etcd service for
+YCSB comparisons, and a disk-backed lockd container. Start the environment with:
 
 ```sh
 cd devenv
@@ -460,6 +460,11 @@ LOCKD_STORE=mem:// \
 LOCKD_OTLP_ENDPOINT=localhost \
 lockd
 ```
+
+The compose-managed lockd container persists its bootstrap bundles under
+`devenv/volumes/lockd-config/` (client bundle: `client.pem`) and its disk
+backend under `devenv/volumes/lockd-storage/`. The bundled etcd instance listens
+on `localhost:2379` for single-node YCSB comparisons.
 
 All HTTP endpoints are wrapped with `otelhttp`, storage backends emit child
 spans, and structured logs attach `trace_id`/`span_id` when a span is active.

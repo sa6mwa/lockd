@@ -1,6 +1,7 @@
 package lockd
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -8,6 +9,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"os"
@@ -18,6 +20,7 @@ import (
 
 	"github.com/magiconair/properties"
 	"github.com/pingcap/go-ycsb/pkg/ycsb"
+	"github.com/rs/xid"
 
 	"pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
@@ -37,7 +40,13 @@ const (
 	propQueryRefresh = "lockd.query.refresh"
 	propQueryLimit   = "lockd.query.limit"
 	propQueryReturn  = "lockd.query.return"
+	propAttachEnable = "lockd.attach.enable"
+	propAttachBytes  = "lockd.attach.bytes"
+	propAttachRead   = "lockd.attach.read"
+	propTxnExplicit  = "lockd.txn.explicit"
 )
+
+const attachmentDefaultName = "ycsb.bin"
 
 func init() {
 	ycsb.RegisterDBCreator("lockd", lockdCreator{})
@@ -46,19 +55,24 @@ func init() {
 type lockdCreator struct{}
 
 type driverConfig struct {
-	endpoints    []string
-	namespace    string
-	bundlePath   string
-	disableMTLS  bool
-	publicRead   bool
-	leaseTTL     time.Duration
-	blockSeconds int64
-	ownerPrefix  string
-	httpTimeout  time.Duration
-	queryEngine  string
-	queryRefresh string
-	queryLimit   int
-	queryReturn  lockdclient.QueryReturn
+	endpoints     []string
+	namespace     string
+	bundlePath    string
+	disableMTLS   bool
+	publicRead    bool
+	leaseTTL      time.Duration
+	blockSeconds  int64
+	ownerPrefix   string
+	httpTimeout   time.Duration
+	queryEngine   string
+	queryRefresh  string
+	queryLimit    int
+	queryReturn   lockdclient.QueryReturn
+	attachEnable  bool
+	attachBytes   int64
+	attachRead    bool
+	attachPayload []byte
+	txnExplicit   bool
 }
 
 type lockdDB struct {
@@ -148,6 +162,12 @@ func parseConfig(p *properties.Properties) (*driverConfig, error) {
 	if err != nil {
 		return nil, err
 	}
+	attachEnable := p.GetBool(propAttachEnable, false)
+	attachBytes := int64(p.GetInt(propAttachBytes, 1024))
+	if attachBytes <= 0 {
+		attachBytes = 1024
+	}
+	attachRead := p.GetBool(propAttachRead, false)
 	cfg := &driverConfig{
 		endpoints:    endpoints,
 		namespace:    namespace,
@@ -162,6 +182,13 @@ func parseConfig(p *properties.Properties) (*driverConfig, error) {
 		queryRefresh: strings.TrimSpace(strings.ToLower(p.GetString(propQueryRefresh, ""))),
 		queryLimit:   queryLimit,
 		queryReturn:  queryReturn,
+		attachEnable: attachEnable,
+		attachBytes:  attachBytes,
+		attachRead:   attachRead,
+		txnExplicit:  p.GetBool(propTxnExplicit, false),
+	}
+	if attachEnable {
+		cfg.attachPayload = bytes.Repeat([]byte("y"), int(attachBytes))
 	}
 	return cfg, nil
 }
@@ -276,6 +303,9 @@ func (db *lockdDB) Scan(ctx context.Context, table string, startKey string, coun
 				return err
 			}
 			doc.normalize()
+			if err := db.maybeReadAttachments(ctx, compositeKey(doc.Table, doc.Key), nil); err != nil {
+				return err
+			}
 			results = append(results, filterFields(doc.Data, fields))
 			return nil
 		})
@@ -331,12 +361,17 @@ func (db *lockdDB) acquire(ctx context.Context, table, key, owner string) (*lock
 		ttlSeconds = 1
 	}
 	composite := compositeKey(table, key)
+	txnID := ""
+	if db.cfg.txnExplicit {
+		txnID = xid.New().String()
+	}
 	req := api.AcquireRequest{
 		Namespace:  db.cfg.namespace,
 		Key:        composite,
 		Owner:      owner,
 		TTLSeconds: ttlSeconds,
 		BlockSecs:  db.cfg.blockSeconds,
+		TxnID:      txnID,
 	}
 	return db.client.Acquire(ctx, req)
 }
@@ -364,6 +399,10 @@ func (db *lockdDB) writeDocument(ctx context.Context, table, key string, values 
 		_ = lease.Release(ctx)
 		return err
 	}
+	if err := db.maybeAttachPayload(ctx, lease); err != nil {
+		_ = lease.Release(ctx)
+		return err
+	}
 	return lease.Release(ctx)
 }
 
@@ -382,6 +421,11 @@ func (db *lockdDB) loadDocument(ctx context.Context, table, key string) (*record
 			defer resp.Close()
 			data, err = resp.Bytes()
 		}
+		if err == nil && len(data) > 0 {
+			if errAttach := db.maybeReadAttachments(ctx, composite, nil); errAttach != nil {
+				return nil, errAttach
+			}
+		}
 	} else {
 		owner := db.ownerFromContext(ctx)
 		lease, acquireErr := db.acquire(ctx, table, key, owner)
@@ -393,13 +437,19 @@ func (db *lockdDB) loadDocument(ctx context.Context, table, key string) (*record
 			lockdclient.WithGetLeaseID(lease.LeaseID),
 			lockdclient.WithGetPublicDisabled(true),
 		)
+		if errGet == nil && resp != nil {
+			defer resp.Close()
+			data, err = resp.Bytes()
+		}
+		if err == nil && len(data) > 0 {
+			if errAttach := db.maybeReadAttachments(ctx, composite, lease); errAttach != nil {
+				_ = lease.Release(ctx)
+				return nil, errAttach
+			}
+		}
 		relErr := lease.Release(ctx)
 		if errGet != nil {
 			return nil, errGet
-		}
-		if resp != nil {
-			defer resp.Close()
-			data, err = resp.Bytes()
 		}
 		if err == nil && relErr != nil {
 			err = relErr
@@ -430,11 +480,11 @@ func (db *lockdDB) ownerFromContext(ctx context.Context) string {
 }
 
 func compositeKey(table, key string) string {
-	return table + ":" + key
+	return table + "/" + key
 }
 
 func splitKey(composite string) (string, string) {
-	parts := strings.SplitN(composite, ":", 2)
+	parts := strings.SplitN(composite, "/", 2)
 	if len(parts) != 2 {
 		return "", composite
 	}
@@ -481,6 +531,61 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func (db *lockdDB) maybeAttachPayload(ctx context.Context, lease *lockdclient.LeaseSession) error {
+	if !db.cfg.attachEnable || lease == nil {
+		return nil
+	}
+	body := bytes.NewReader(db.cfg.attachPayload)
+	_, err := lease.Attach(ctx, lockdclient.AttachRequest{
+		Name:        attachmentDefaultName,
+		Body:        body,
+		ContentType: "application/octet-stream",
+		MaxBytes:    &db.cfg.attachBytes,
+	})
+	return err
+}
+
+func (db *lockdDB) maybeReadAttachments(ctx context.Context, key string, lease *lockdclient.LeaseSession) error {
+	if !db.cfg.attachRead {
+		return nil
+	}
+	if lease != nil {
+		list, err := lease.ListAttachments(ctx)
+		if err != nil || list == nil || len(list.Attachments) == 0 {
+			return err
+		}
+		info := list.Attachments[0]
+		att, err := lease.RetrieveAttachment(ctx, lockdclient.AttachmentSelector{ID: info.ID, Name: info.Name})
+		if err != nil {
+			return err
+		}
+		defer att.Close()
+		_, err = io.Copy(io.Discard, att)
+		return err
+	}
+	list, err := db.client.ListAttachments(ctx, lockdclient.ListAttachmentsRequest{
+		Namespace: db.cfg.namespace,
+		Key:       key,
+		Public:    true,
+	})
+	if err != nil || list == nil || len(list.Attachments) == 0 {
+		return err
+	}
+	info := list.Attachments[0]
+	att, err := db.client.GetAttachment(ctx, lockdclient.GetAttachmentRequest{
+		Namespace: db.cfg.namespace,
+		Key:       key,
+		Public:    true,
+		Selector:  lockdclient.AttachmentSelector{ID: info.ID, Name: info.Name},
+	})
+	if err != nil {
+		return err
+	}
+	defer att.Close()
+	_, err = io.Copy(io.Discard, att)
+	return err
 }
 
 func loadClientMaterial(path string) (*tls.Certificate, *x509.CertPool, error) {

@@ -1,7 +1,7 @@
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 
-FROM golang:1.25.3 AS build
+FROM golang:1.25.5 AS build
 WORKDIR /src/lockd
 COPY go.mod go.sum ./
 RUN go mod download

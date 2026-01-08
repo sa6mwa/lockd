@@ -4243,8 +4243,8 @@ func (c *Client) getWithOptions(ctx context.Context, key string, opts GetOptions
 		return &GetResponse{Namespace: namespace, Key: key, ETag: strings.Trim(resp.Header.Get("ETag"), "\""), Version: resp.Header.Get("X-Key-Version"), client: c, public: public}, nil
 	}
 	if resp.StatusCode != http.StatusOK {
+		defer cancel()
 		defer resp.Body.Close()
-		cancel()
 		errorFields := []any{"key", key, "namespace", namespace, "endpoint", endpoint, "status", resp.StatusCode}
 		if public {
 			errorFields = append(errorFields, "public", true)

@@ -709,6 +709,33 @@ func TestCommitTxnRetainsRecordOnApplyFailure(t *testing.T) {
 	}
 }
 
+func TestTxnDecisionMarkerConflict(t *testing.T) {
+	ctx := context.Background()
+	svc := newTestService(t)
+
+	txnID := "c5v9d0sl70b3m3q8ndgb"
+	marker := txnDecisionMarker{
+		TxnID:         txnID,
+		State:         TxnStateCommit,
+		TCTerm:        4,
+		ExpiresAtUnix: time.Now().Add(time.Minute).Unix(),
+		UpdatedAtUnix: time.Now().Unix(),
+	}
+	if _, err := svc.putTxnDecisionMarker(ctx, &marker, ""); err != nil {
+		t.Fatalf("put marker: %v", err)
+	}
+
+	_, err := svc.RollbackTxn(ctx, TxnRecord{
+		TxnID:  txnID,
+		State:  TxnStateRollback,
+		TCTerm: 4,
+	})
+	if err == nil {
+		t.Fatalf("expected txn_conflict on rollback with marker")
+	}
+	assertFailureCode(t, err, "txn_conflict")
+}
+
 func TestTxnDecisionRejectsStaleTerm(t *testing.T) {
 	ctx := context.Background()
 	svc := newTestService(t)

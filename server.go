@@ -2014,10 +2014,15 @@ func (s *Server) startSweeper() {
 	s.sweeperDone.Add(1)
 	stopCh := s.sweeperStop
 	interval := s.cfg.SweeperInterval
-	sweeperCtx := context.Background()
+	sweeperCtx, cancel := context.WithCancel(context.Background())
 	s.mu.Unlock()
 	go func() {
 		defer s.sweeperDone.Done()
+		defer cancel()
+		go func() {
+			<-stopCh
+			cancel()
+		}()
 		for {
 			select {
 			case <-stopCh:

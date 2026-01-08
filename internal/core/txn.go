@@ -15,7 +15,49 @@ import (
 	"pkt.systems/lockd/internal/storage"
 )
 
-const txnNamespace = ".txns"
+const (
+	txnNamespace         = ".txns"
+	txnDecisionNamespace = ".txn-decisions"
+)
+
+type txnDecisionMarker struct {
+	TxnID         string   `json:"txn_id"`
+	State         TxnState `json:"state"`
+	TCTerm        uint64   `json:"tc_term,omitempty"`
+	ExpiresAtUnix int64    `json:"expires_at_unix,omitempty"`
+	UpdatedAtUnix int64    `json:"updated_at_unix,omitempty"`
+}
+
+func (s *Service) loadTxnDecisionMarker(ctx context.Context, txnID string) (*txnDecisionMarker, string, error) {
+	obj, err := s.store.GetObject(ctx, txnDecisionNamespace, txnID)
+	if err != nil {
+		return nil, "", err
+	}
+	defer obj.Reader.Close()
+	var marker txnDecisionMarker
+	if err := json.NewDecoder(obj.Reader).Decode(&marker); err != nil {
+		return nil, "", err
+	}
+	if marker.TxnID == "" {
+		marker.TxnID = txnID
+	}
+	return &marker, obj.Info.ETag, nil
+}
+
+func (s *Service) putTxnDecisionMarker(ctx context.Context, marker *txnDecisionMarker, expectedETag string) (string, error) {
+	buf := &bytes.Buffer{}
+	if err := json.NewEncoder(buf).Encode(marker); err != nil {
+		return "", err
+	}
+	info, err := s.store.PutObject(ctx, txnDecisionNamespace, marker.TxnID, bytes.NewReader(buf.Bytes()), storage.PutObjectOptions{
+		ExpectedETag: expectedETag,
+		ContentType:  storage.ContentTypeJSON,
+	})
+	if err != nil {
+		return "", err
+	}
+	return info.ETag, nil
+}
 
 // TxnState captures the decision state of a transaction record.
 type TxnState string
@@ -170,6 +212,98 @@ func markAppliedParticipants(rec *TxnRecord, applied []TxnParticipant) bool {
 	return changed
 }
 
+func (s *Service) resolveDecisionFromMarker(ctx context.Context, rec TxnRecord) (*TxnRecord, error) {
+	if rec.State == "" || rec.State == TxnStatePending {
+		return nil, nil
+	}
+	marker, _, err := s.loadTxnDecisionMarker(ctx, rec.TxnID)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) || errors.Is(err, storage.ErrNotImplemented) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if marker.State == "" {
+		return nil, nil
+	}
+	if marker.TCTerm != 0 && rec.TCTerm == 0 {
+		return nil, Failure{Code: "tc_term_required", Detail: "tc_term required for this transaction", HTTPStatus: http.StatusBadRequest}
+	}
+	if rec.TCTerm != 0 && marker.TCTerm != 0 && rec.TCTerm < marker.TCTerm {
+		return nil, Failure{Code: "tc_term_stale", Detail: "tc_term is lower than recorded term", HTTPStatus: http.StatusConflict}
+	}
+	if marker.State != rec.State {
+		if rec.TCTerm != 0 || marker.TCTerm != 0 {
+			return nil, Failure{Code: "txn_conflict", Detail: "transaction already decided", HTTPStatus: http.StatusConflict}
+		}
+	}
+	return &TxnRecord{
+		TxnID:         rec.TxnID,
+		State:         marker.State,
+		ExpiresAtUnix: marker.ExpiresAtUnix,
+		TCTerm:        marker.TCTerm,
+	}, nil
+}
+
+func (s *Service) writeDecisionMarker(ctx context.Context, rec *TxnRecord) error {
+	if s == nil || rec == nil {
+		return nil
+	}
+	if rec.State == "" || rec.State == TxnStatePending {
+		return nil
+	}
+	now := s.clock.Now().Unix()
+	marker := txnDecisionMarker{
+		TxnID:         rec.TxnID,
+		State:         rec.State,
+		TCTerm:        rec.TCTerm,
+		ExpiresAtUnix: rec.ExpiresAtUnix,
+		UpdatedAtUnix: now,
+	}
+	if s.txnDecisionRetention > 0 {
+		retentionExpiry := now + int64(s.txnDecisionRetention/time.Second)
+		if marker.ExpiresAtUnix < retentionExpiry {
+			marker.ExpiresAtUnix = retentionExpiry
+		}
+	}
+	for {
+		existing, etag, err := s.loadTxnDecisionMarker(ctx, rec.TxnID)
+		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				etag = ""
+			} else if errors.Is(err, storage.ErrNotImplemented) {
+				return nil
+			} else {
+				return err
+			}
+		}
+		if existing != nil {
+			if existing.State != "" && existing.State != marker.State {
+				if rec.TCTerm != 0 || existing.TCTerm != 0 {
+					return Failure{Code: "txn_conflict", Detail: "transaction already decided", HTTPStatus: http.StatusConflict}
+				}
+				return nil
+			}
+			if existing.TCTerm > marker.TCTerm {
+				marker.TCTerm = existing.TCTerm
+			}
+			if existing.ExpiresAtUnix > marker.ExpiresAtUnix {
+				marker.ExpiresAtUnix = existing.ExpiresAtUnix
+			}
+		}
+		if _, err := s.putTxnDecisionMarker(ctx, &marker, etag); err != nil {
+			if errors.Is(err, storage.ErrCASMismatch) {
+				continue
+			}
+			if errors.Is(err, storage.ErrNotImplemented) {
+				return nil
+			}
+			return err
+		}
+		return nil
+	}
+}
+
 func (s *Service) normalizeTxnRecord(rec TxnRecord) TxnRecord {
 	rec.Participants = s.normalizeParticipants(rec.Participants)
 	return rec
@@ -313,6 +447,12 @@ func (s *Service) decideTxnWithMerge(ctx context.Context, rec TxnRecord) (*TxnRe
 		}
 		now := s.clock.Now().Unix()
 		if existing == nil {
+			if resolved, err := s.resolveDecisionFromMarker(ctx, rec); err != nil {
+				return resolved, err
+			} else if resolved != nil {
+				recordDecision(resolved.State)
+				return resolved, nil
+			}
 			existing = &TxnRecord{
 				TxnID:         rec.TxnID,
 				CreatedAtUnix: now,
@@ -442,6 +582,15 @@ func (s *Service) RollbackTxn(ctx context.Context, rec TxnRecord) (TxnState, err
 func (s *Service) ApplyTxnDecision(ctx context.Context, txnID string) (TxnState, error) {
 	rec, _, err := s.loadTxnRecord(ctx, txnID)
 	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			marker, _, markerErr := s.loadTxnDecisionMarker(ctx, txnID)
+			if markerErr == nil && marker != nil && marker.State != "" && marker.State != TxnStatePending {
+				return marker.State, nil
+			}
+			if markerErr != nil && !errors.Is(markerErr, storage.ErrNotFound) && !errors.Is(markerErr, storage.ErrNotImplemented) {
+				return "", markerErr
+			}
+		}
 		return "", err
 	}
 	if rec.TxnID == "" {
@@ -538,6 +687,9 @@ func (s *Service) MarkTxnParticipantsApplied(ctx context.Context, txnID string, 
 		now := s.clock.Now().Unix()
 		rec.UpdatedAtUnix = now
 		if allApplied && rec.State != TxnStatePending {
+			if err := s.writeDecisionMarker(ctx, rec); err != nil {
+				return err
+			}
 			if err := s.store.DeleteObject(ctx, txnNamespace, rec.TxnID, storage.DeleteObjectOptions{}); err != nil {
 				if errors.Is(err, storage.ErrNotFound) || errors.Is(err, storage.ErrNotImplemented) {
 					return nil
@@ -684,7 +836,7 @@ func (s *Service) applyTxnDecisionWithOptions(ctx context.Context, rec *TxnRecor
 		case duration > txnApplySlowThreshold:
 			s.logger.Warn("txn.apply.slow", fields...)
 		default:
-			s.logger.Trace("txn.apply.complete", fields...)
+			s.logger.Debug("txn.apply.complete", fields...)
 		}
 	}
 	if s.txnMetrics != nil {
@@ -1167,6 +1319,17 @@ func (s *Service) ReplayTxn(ctx context.Context, txnID string) (TxnState, error)
 	for {
 		rec, etag, err := s.loadTxnRecord(ctx, txnID)
 		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				marker, _, markerErr := s.loadTxnDecisionMarker(ctx, txnID)
+				if markerErr == nil && marker != nil && marker.State != "" && marker.State != TxnStatePending {
+					logReplay(marker.State, nil)
+					return marker.State, nil
+				}
+				if markerErr != nil && !errors.Is(markerErr, storage.ErrNotFound) && !errors.Is(markerErr, storage.ErrNotImplemented) {
+					logReplay("", markerErr)
+					return "", markerErr
+				}
+			}
 			logReplay("", err)
 			return "", err
 		}
@@ -1218,6 +1381,8 @@ func (s *Service) SweepTxnRecords(ctx context.Context, now time.Time) error {
 		cleanupDeleted    int
 		cleanupFailed     int
 		rollbackCASFailed int
+		markerDeleted     int
+		markerFailed      int
 	)
 	startAfter := ""
 	for {
@@ -1280,6 +1445,13 @@ func (s *Service) SweepTxnRecords(ctx context.Context, now time.Time) error {
 				continue
 			}
 			if allParticipantsApplied(rec.Participants) {
+				if err := s.writeDecisionMarker(ctx, rec); err != nil {
+					if s.logger != nil {
+						s.logger.Warn("txn.decision.marker.write_failed", "txn_id", rec.TxnID, "state", rec.State, "error", err)
+					}
+					applyFailed++
+					continue
+				}
 				if err := s.store.DeleteObject(ctx, txnNamespace, rec.TxnID, storage.DeleteObjectOptions{}); err != nil {
 					if !errors.Is(err, storage.ErrNotFound) && !errors.Is(err, storage.ErrNotImplemented) {
 						if s.logger != nil {
@@ -1321,6 +1493,15 @@ func (s *Service) SweepTxnRecords(ctx context.Context, now time.Time) error {
 			}
 		}
 		if !list.Truncated {
+			if deleted, failed, err := s.sweepTxnDecisionMarkers(ctx, now); err != nil {
+				if s.logger != nil {
+					s.logger.Warn("txn.decision.marker.sweep_failed", "error", err)
+				}
+				markerFailed += failed
+			} else {
+				markerDeleted += deleted
+				markerFailed += failed
+			}
 			if s.logger != nil {
 				duration := s.clock.Now().Sub(start)
 				fields := []any{
@@ -1333,9 +1514,11 @@ func (s *Service) SweepTxnRecords(ctx context.Context, now time.Time) error {
 					"rollback_cas_failed", rollbackCASFailed,
 					"cleanup_deleted", cleanupDeleted,
 					"cleanup_failed", cleanupFailed,
+					"decision_marker_deleted", markerDeleted,
+					"decision_marker_failed", markerFailed,
 					"duration_ms", duration.Milliseconds(),
 				}
-				work := applySuccess + applyFailed + pendingExpired + cleanupDeleted + cleanupFailed + loadErrors + rollbackCASFailed
+				work := applySuccess + applyFailed + pendingExpired + cleanupDeleted + cleanupFailed + loadErrors + rollbackCASFailed + markerDeleted + markerFailed
 				switch {
 				case duration > txnSweepSlowThreshold:
 					s.logger.Warn("txn.sweeper.summary", fields...)
@@ -1350,6 +1533,52 @@ func (s *Service) SweepTxnRecords(ctx context.Context, now time.Time) error {
 				s.txnMetrics.recordSweep(ctx, duration, applySuccess, applyFailed, pendingExpired, cleanupDeleted, cleanupFailed, loadErrors, rollbackCASFailed)
 			}
 			return nil
+		}
+		startAfter = list.NextStartAfter
+	}
+}
+
+func (s *Service) sweepTxnDecisionMarkers(ctx context.Context, now time.Time) (int, int, error) {
+	if s == nil {
+		return 0, 0, nil
+	}
+	var deleted int
+	var failed int
+	startAfter := ""
+	for {
+		list, err := s.store.ListObjects(ctx, txnDecisionNamespace, storage.ListOptions{StartAfter: startAfter, Limit: 128})
+		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) || errors.Is(err, storage.ErrNotImplemented) {
+				return deleted, failed, nil
+			}
+			return deleted, failed, err
+		}
+		for _, obj := range list.Objects {
+			marker, _, err := s.loadTxnDecisionMarker(ctx, obj.Key)
+			if err != nil {
+				if errors.Is(err, storage.ErrNotFound) {
+					continue
+				}
+				if errors.Is(err, storage.ErrNotImplemented) {
+					return deleted, failed, nil
+				}
+				failed++
+				continue
+			}
+			if marker.ExpiresAtUnix <= 0 || marker.ExpiresAtUnix > now.Unix() {
+				continue
+			}
+			if err := s.store.DeleteObject(ctx, txnDecisionNamespace, marker.TxnID, storage.DeleteObjectOptions{}); err != nil {
+				if errors.Is(err, storage.ErrNotFound) || errors.Is(err, storage.ErrNotImplemented) {
+					continue
+				}
+				failed++
+				continue
+			}
+			deleted++
+		}
+		if !list.Truncated {
+			return deleted, failed, nil
 		}
 		startAfter = list.NextStartAfter
 	}

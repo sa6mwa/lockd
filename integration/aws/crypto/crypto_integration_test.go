@@ -117,7 +117,7 @@ func TestCryptoAWSQueues(t *testing.T) {
 		if err := msg.ClosePayload(); err != nil {
 			return err
 		}
-		ackCtx, ackCancel := context.WithTimeout(context.Background(), time.Second)
+		ackCtx, ackCancel := context.WithTimeout(context.Background(), 3*time.Second)
 		err := msg.Ack(ackCtx)
 		ackCancel()
 		if err != nil {

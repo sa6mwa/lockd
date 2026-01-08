@@ -17,7 +17,17 @@ import (
 const attachmentDefaultContentType = storage.ContentTypeOctetStream
 
 // Attach stages an attachment payload for a lease-bound key.
-func (s *Service) Attach(ctx context.Context, cmd AttachCommand) (*AttachResult, error) {
+func (s *Service) Attach(ctx context.Context, cmd AttachCommand) (res *AttachResult, err error) {
+	start := s.clock.Now()
+	namespaceLabel := "unknown"
+	var attachBytes int64
+	defer func() {
+		if s.attachmentMetrics == nil {
+			return
+		}
+		duration := s.clock.Now().Sub(start)
+		s.attachmentMetrics.recordAttach(ctx, namespaceLabel, attachBytes, duration, err)
+	}()
 	if err := s.maybeThrottleLock(); err != nil {
 		return nil, err
 	}
@@ -28,6 +38,7 @@ func (s *Service) Attach(ctx context.Context, cmd AttachCommand) (*AttachResult,
 	if err != nil {
 		return nil, Failure{Code: "invalid_namespace", Detail: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
+	namespaceLabel = namespace
 	if strings.TrimSpace(cmd.Key) == "" {
 		return nil, Failure{Code: "missing_key", Detail: "key required", HTTPStatus: http.StatusBadRequest}
 	}
@@ -144,6 +155,7 @@ func (s *Service) Attach(ctx context.Context, cmd AttachCommand) (*AttachResult,
 			if payload.counter != nil {
 				stagedSize = payload.counter.Count()
 			}
+			attachBytes = stagedSize
 			if maxBytes > 0 && stagedSize > maxBytes {
 				_ = s.deleteAttachmentObject(ctx, namespace, stagedKey)
 				return nil, Failure{Code: "attachment_too_large", Detail: "attachment exceeds max_bytes", HTTPStatus: http.StatusRequestEntityTooLarge}
@@ -200,7 +212,17 @@ func (s *Service) Attach(ctx context.Context, cmd AttachCommand) (*AttachResult,
 }
 
 // ListAttachments enumerates attachments for a key.
-func (s *Service) ListAttachments(ctx context.Context, cmd ListAttachmentsCommand) (*ListAttachmentsResult, error) {
+func (s *Service) ListAttachments(ctx context.Context, cmd ListAttachmentsCommand) (res *ListAttachmentsResult, err error) {
+	start := s.clock.Now()
+	namespaceLabel := "unknown"
+	var itemCount int
+	defer func() {
+		if s.attachmentMetrics == nil {
+			return
+		}
+		duration := s.clock.Now().Sub(start)
+		s.attachmentMetrics.recordList(ctx, namespaceLabel, itemCount, duration, err)
+	}()
 	if err := s.maybeThrottleLock(); err != nil {
 		return nil, err
 	}
@@ -211,6 +233,7 @@ func (s *Service) ListAttachments(ctx context.Context, cmd ListAttachmentsComman
 	if err != nil {
 		return nil, Failure{Code: "invalid_namespace", Detail: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
+	namespaceLabel = namespace
 	if strings.TrimSpace(cmd.Key) == "" {
 		return nil, Failure{Code: "missing_key", Detail: "key required", HTTPStatus: http.StatusBadRequest}
 	}
@@ -247,11 +270,23 @@ func (s *Service) ListAttachments(ctx context.Context, cmd ListAttachmentsComman
 		}
 	}
 	view := buildAttachmentView(meta, !publicRead, cmd.TxnID)
-	return &ListAttachmentsResult{Attachments: view.list()}, nil
+	attachments := view.list()
+	itemCount = len(attachments)
+	return &ListAttachmentsResult{Attachments: attachments}, nil
 }
 
 // RetrieveAttachment streams a single attachment payload.
-func (s *Service) RetrieveAttachment(ctx context.Context, cmd RetrieveAttachmentCommand) (*RetrieveAttachmentResult, error) {
+func (s *Service) RetrieveAttachment(ctx context.Context, cmd RetrieveAttachmentCommand) (res *RetrieveAttachmentResult, err error) {
+	start := s.clock.Now()
+	namespaceLabel := "unknown"
+	var retrieveBytes int64
+	defer func() {
+		if s.attachmentMetrics == nil {
+			return
+		}
+		duration := s.clock.Now().Sub(start)
+		s.attachmentMetrics.recordRetrieve(ctx, namespaceLabel, retrieveBytes, duration, err)
+	}()
 	if err := s.maybeThrottleLock(); err != nil {
 		return nil, err
 	}
@@ -262,6 +297,7 @@ func (s *Service) RetrieveAttachment(ctx context.Context, cmd RetrieveAttachment
 	if err != nil {
 		return nil, Failure{Code: "invalid_namespace", Detail: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
+	namespaceLabel = namespace
 	if strings.TrimSpace(cmd.Key) == "" {
 		return nil, Failure{Code: "missing_key", Detail: "key required", HTTPStatus: http.StatusBadRequest}
 	}
@@ -327,11 +363,21 @@ func (s *Service) RetrieveAttachment(ctx context.Context, cmd RetrieveAttachment
 		}
 		return nil, err
 	}
+	retrieveBytes = entry.info.Size
 	return &RetrieveAttachmentResult{Attachment: entry.info, Reader: reader}, nil
 }
 
 // DeleteAttachment stages removal of a single attachment.
-func (s *Service) DeleteAttachment(ctx context.Context, cmd DeleteAttachmentCommand) (*DeleteAttachmentResult, error) {
+func (s *Service) DeleteAttachment(ctx context.Context, cmd DeleteAttachmentCommand) (res *DeleteAttachmentResult, err error) {
+	start := s.clock.Now()
+	namespaceLabel := "unknown"
+	defer func() {
+		if s.attachmentMetrics == nil {
+			return
+		}
+		duration := s.clock.Now().Sub(start)
+		s.attachmentMetrics.recordDelete(ctx, namespaceLabel, duration, err)
+	}()
 	if err := s.maybeThrottleLock(); err != nil {
 		return nil, err
 	}
@@ -342,6 +388,7 @@ func (s *Service) DeleteAttachment(ctx context.Context, cmd DeleteAttachmentComm
 	if err != nil {
 		return nil, Failure{Code: "invalid_namespace", Detail: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
+	namespaceLabel = namespace
 	if strings.TrimSpace(cmd.Key) == "" {
 		return nil, Failure{Code: "missing_key", Detail: "key required", HTTPStatus: http.StatusBadRequest}
 	}
@@ -425,7 +472,17 @@ func (s *Service) DeleteAttachment(ctx context.Context, cmd DeleteAttachmentComm
 }
 
 // DeleteAllAttachments stages removal of all attachments for a key.
-func (s *Service) DeleteAllAttachments(ctx context.Context, cmd DeleteAllAttachmentsCommand) (*DeleteAllAttachmentsResult, error) {
+func (s *Service) DeleteAllAttachments(ctx context.Context, cmd DeleteAllAttachmentsCommand) (res *DeleteAllAttachmentsResult, err error) {
+	start := s.clock.Now()
+	namespaceLabel := "unknown"
+	deletedCount := 0
+	defer func() {
+		if s.attachmentMetrics == nil {
+			return
+		}
+		duration := s.clock.Now().Sub(start)
+		s.attachmentMetrics.recordDeleteAll(ctx, namespaceLabel, deletedCount, duration, err)
+	}()
 	if err := s.maybeThrottleLock(); err != nil {
 		return nil, err
 	}
@@ -436,6 +493,7 @@ func (s *Service) DeleteAllAttachments(ctx context.Context, cmd DeleteAllAttachm
 	if err != nil {
 		return nil, Failure{Code: "invalid_namespace", Detail: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
+	namespaceLabel = namespace
 	if strings.TrimSpace(cmd.Key) == "" {
 		return nil, Failure{Code: "missing_key", Detail: "key required", HTTPStatus: http.StatusBadRequest}
 	}
@@ -474,7 +532,7 @@ func (s *Service) DeleteAllAttachments(ctx context.Context, cmd DeleteAllAttachm
 			return &DeleteAllAttachmentsResult{Deleted: 0, Version: meta.StagedVersion}, nil
 		}
 		view := buildAttachmentView(meta, true, cmd.TxnID)
-		deletedCount := len(view.byName)
+		deletedCount = len(view.byName)
 		if len(meta.StagedAttachments) > 0 {
 			discardStagedAttachments(ctx, s.store, namespace, keyComponent, cmd.TxnID, meta.StagedAttachments)
 		}

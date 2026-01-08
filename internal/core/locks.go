@@ -21,7 +21,17 @@ import (
 )
 
 // Acquire obtains an exclusive lease using transport-neutral inputs/outputs.
-func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (*AcquireResult, error) {
+func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (res *AcquireResult, err error) {
+	start := s.clock.Now()
+	namespaceLabel := "unknown"
+	kindLabel := "lock"
+	defer func() {
+		if s.leaseMetrics == nil {
+			return
+		}
+		duration := s.clock.Now().Sub(start)
+		s.leaseMetrics.recordAcquire(ctx, namespaceLabel, kindLabel, duration, err)
+	}()
 	if err := s.maybeThrottleLock(); err != nil {
 		return nil, err
 	}
@@ -41,6 +51,7 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (*AcquireResu
 	if err != nil {
 		return nil, Failure{Code: "invalid_namespace", Detail: err.Error(), HTTPStatus: 400}
 	}
+	namespaceLabel = namespace
 	s.observeNamespace(namespace)
 
 	key := strings.TrimSpace(cmd.Key)
@@ -66,6 +77,7 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (*AcquireResu
 		return nil, Failure{Code: "invalid_key", Detail: err.Error(), HTTPStatus: 400}
 	}
 	keyComponent := relativeKey(namespace, storageKey)
+	kindLabel = leaseKindLabel(keyComponent)
 	block, waitForever := s.resolveBlock(cmd.BlockSeconds)
 
 	// Correlation setup
@@ -213,7 +225,7 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (*AcquireResu
 		}
 		metaETag = newMetaETag
 
-		res := &AcquireResult{
+		res = &AcquireResult{
 			Namespace:     namespace,
 			LeaseID:       leaseID,
 			TxnID:         txnID,
@@ -227,6 +239,9 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (*AcquireResu
 			GeneratedKey:  autoKey,
 			MetaETag:      metaETag,
 			Meta:          meta,
+		}
+		if s.leaseMetrics != nil {
+			s.leaseMetrics.addActive(kindLabel, 1)
 		}
 		logger.Info("lease.acquire.success",
 			"namespace", namespace,
@@ -242,7 +257,17 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (*AcquireResu
 }
 
 // KeepAlive refreshes a lease TTL.
-func (s *Service) KeepAlive(ctx context.Context, cmd KeepAliveCommand) (*KeepAliveResult, error) {
+func (s *Service) KeepAlive(ctx context.Context, cmd KeepAliveCommand) (res *KeepAliveResult, err error) {
+	start := s.clock.Now()
+	namespaceLabel := "unknown"
+	kindLabel := "lock"
+	defer func() {
+		if s.leaseMetrics == nil {
+			return
+		}
+		duration := s.clock.Now().Sub(start)
+		s.leaseMetrics.recordKeepAlive(ctx, namespaceLabel, kindLabel, duration, err)
+	}()
 	if err := s.maybeThrottleLock(); err != nil {
 		return nil, err
 	}
@@ -253,6 +278,7 @@ func (s *Service) KeepAlive(ctx context.Context, cmd KeepAliveCommand) (*KeepAli
 	if err != nil {
 		return nil, Failure{Code: "invalid_namespace", Detail: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
+	namespaceLabel = namespace
 	s.observeNamespace(namespace)
 	if strings.TrimSpace(cmd.Key) == "" {
 		return nil, Failure{Code: "missing_key", Detail: "key is required", HTTPStatus: http.StatusBadRequest}
@@ -270,6 +296,7 @@ func (s *Service) KeepAlive(ctx context.Context, cmd KeepAliveCommand) (*KeepAli
 		return nil, Failure{Code: "invalid_key", Detail: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
 	keyComponent := relativeKey(namespace, storageKey)
+	kindLabel = leaseKindLabel(keyComponent)
 
 	logger := pslog.LoggerFromContext(ctx)
 	if logger == nil {
@@ -308,17 +335,28 @@ func (s *Service) KeepAlive(ctx context.Context, cmd KeepAliveCommand) (*KeepAli
 			"expires_at", meta.Lease.ExpiresAtUnix,
 			"fencing", meta.Lease.FencingToken,
 		)
-		return &KeepAliveResult{
+		res = &KeepAliveResult{
 			ExpiresAt:    meta.Lease.ExpiresAtUnix,
 			FencingToken: meta.Lease.FencingToken,
 			MetaETag:     newMetaETag,
 			Meta:         meta,
-		}, nil
+		}
+		return res, nil
 	}
 }
 
 // Release relinquishes a lease.
-func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (*ReleaseResult, error) {
+func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (res *ReleaseResult, err error) {
+	start := s.clock.Now()
+	namespaceLabel := "unknown"
+	kindLabel := "lock"
+	defer func() {
+		if s.leaseMetrics == nil {
+			return
+		}
+		duration := s.clock.Now().Sub(start)
+		s.leaseMetrics.recordRelease(ctx, namespaceLabel, kindLabel, duration, err)
+	}()
 	if err := s.maybeThrottleLock(); err != nil {
 		return nil, err
 	}
@@ -329,6 +367,7 @@ func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (*ReleaseResu
 	if err != nil {
 		return nil, Failure{Code: "invalid_namespace", Detail: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
+	namespaceLabel = namespace
 	if strings.TrimSpace(cmd.Key) == "" {
 		return nil, Failure{Code: "missing_key", Detail: "key is required", HTTPStatus: http.StatusBadRequest}
 	}
@@ -343,6 +382,7 @@ func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (*ReleaseResu
 		return nil, Failure{Code: "invalid_key", Detail: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
 	keyComponent := relativeKey(namespace, storageKey)
+	kindLabel = leaseKindLabel(keyComponent)
 
 	for {
 		now := s.clock.Now()
@@ -400,6 +440,9 @@ func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (*ReleaseResu
 			if state == TxnStatePending {
 				return nil, Failure{Code: "txn_pending", Detail: "transaction decision not recorded", HTTPStatus: http.StatusConflict}
 			}
+			if s.leaseMetrics != nil {
+				s.leaseMetrics.addActive(kindLabel, -1)
+			}
 			return &ReleaseResult{
 				Released:    true,
 				MetaCleared: true,
@@ -444,6 +487,9 @@ func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (*ReleaseResu
 					"decision", rec.State,
 					"error", err)
 			}
+		}
+		if s.leaseMetrics != nil {
+			s.leaseMetrics.addActive(kindLabel, -1)
 		}
 		return &ReleaseResult{
 			Released:    true,

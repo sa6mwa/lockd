@@ -1,0 +1,932 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "datasource",
+          "uid": "grafana"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 90,
+      "panels": [],
+      "title": "Transactions",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 1
+      },
+      "id": 1,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (lockd_txn_state) (rate({__name__=~\"lockd_txn_decisions_recorded(_total)?\"}[5m]))",
+          "legendFormat": "{{lockd_txn_state}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Decisions recorded /s by state",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 1
+      },
+      "id": 2,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(lockd_txn_decide_duration_ms_bucket[5m])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(lockd_txn_decide_duration_ms_bucket[5m])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        }
+      ],
+      "title": "Decision duration (ms)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 9
+      },
+      "id": 3,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate({__name__=~\"lockd_txn_apply_applied(_total)?\"}[5m]))",
+          "legendFormat": "applied",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate({__name__=~\"lockd_txn_apply_failed(_total)?\"}[5m]))",
+          "legendFormat": "failed",
+          "refId": "B"
+        }
+      ],
+      "title": "Apply applied/failed /s",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 9
+      },
+      "id": 4,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate({__name__=~\"lockd_txn_apply_retries(_total)?\"}[5m]))",
+          "legendFormat": "retries",
+          "refId": "A"
+        }
+      ],
+      "title": "Apply retries /s",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 17
+      },
+      "id": 5,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(lockd_txn_apply_duration_ms_bucket[5m])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(lockd_txn_apply_duration_ms_bucket[5m])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        }
+      ],
+      "title": "Apply duration (ms)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 17
+      },
+      "id": 6,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, lockd_txn_state) (rate(lockd_txn_replay_duration_ms_bucket[5m])))",
+          "legendFormat": "{{lockd_txn_state}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Replay duration p95 (ms) by state",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 25
+      },
+      "id": 7,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(lockd_txn_sweep_duration_ms_bucket[5m])))",
+          "legendFormat": "p95",
+          "refId": "A"
+        }
+      ],
+      "title": "Sweep duration p95 (ms)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 25
+      },
+      "id": 8,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate({__name__=~\"lockd_txn_sweep_applied(_total)?\"}[5m]))",
+          "legendFormat": "applied",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate({__name__=~\"lockd_txn_sweep_failed(_total)?\"}[5m]))",
+          "legendFormat": "failed",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(rate({__name__=~\"lockd_txn_sweep_pending_expired(_total)?\"}[5m]))",
+          "legendFormat": "pending_expired",
+          "refId": "C"
+        },
+        {
+          "expr": "sum(rate({__name__=~\"lockd_txn_sweep_cleanup_deleted(_total)?\"}[5m]))",
+          "legendFormat": "cleanup_deleted",
+          "refId": "D"
+        },
+        {
+          "expr": "sum(rate({__name__=~\"lockd_txn_sweep_cleanup_failed(_total)?\"}[5m]))",
+          "legendFormat": "cleanup_failed",
+          "refId": "E"
+        },
+        {
+          "expr": "sum(rate({__name__=~\"lockd_txn_sweep_load_errors(_total)?\"}[5m]))",
+          "legendFormat": "load_errors",
+          "refId": "F"
+        },
+        {
+          "expr": "sum(rate({__name__=~\"lockd_txn_sweep_rollback_cas_failed(_total)?\"}[5m]))",
+          "legendFormat": "rollback_cas_failed",
+          "refId": "G"
+        }
+      ],
+      "title": "Sweep outcomes /s",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 33
+      },
+      "id": 9,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate({__name__=~\"lockd_txn_fanout_attempts(_total)?\"}[5m]))",
+          "legendFormat": "attempts",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate({__name__=~\"lockd_txn_fanout_failed(_total)?\"}[5m]))",
+          "legendFormat": "failed",
+          "refId": "B"
+        }
+      ],
+      "title": "TC fanout attempts/failed /s",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 33
+      },
+      "id": 10,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, lockd_txn_result) (rate(lockd_txn_fanout_duration_ms_bucket[5m])))",
+          "legendFormat": "{{lockd_txn_result}}",
+          "refId": "A"
+        }
+      ],
+      "title": "TC fanout duration p95 (ms)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 41
+      },
+      "id": 11,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, lockd_txn_state) (rate(lockd_txn_tc_decide_duration_ms_bucket[5m])))",
+          "legendFormat": "{{lockd_txn_state}}",
+          "refId": "A"
+        }
+      ],
+      "title": "TC decision duration p95 (ms)",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 49
+      },
+      "id": 91,
+      "panels": [],
+      "title": "Queues",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 50
+      },
+      "id": 12,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate({__name__=~\"lockd_queue_enqueue(_total)?\"}[5m]))",
+          "legendFormat": "enqueue",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate({__name__=~\"lockd_queue_dequeue(_total)?\"}[5m]))",
+          "legendFormat": "dequeue",
+          "refId": "B"
+        }
+      ],
+      "title": "Enqueue / Dequeue rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 50
+      },
+      "id": 13,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate({__name__=~\"lockd_queue_enqueue_bytes(_total)?\"}[5m]))",
+          "legendFormat": "enqueue",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate({__name__=~\"lockd_queue_dequeue_bytes(_total)?\"}[5m]))",
+          "legendFormat": "dequeue",
+          "refId": "B"
+        }
+      ],
+      "title": "Enqueue / Dequeue bytes per second",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 58
+      },
+      "id": 14,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(lockd_queue_waiters)",
+          "legendFormat": "waiters",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(lockd_queue_pending)",
+          "legendFormat": "pending",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(lockd_queue_consumers)",
+          "legendFormat": "consumers",
+          "refId": "C"
+        }
+      ],
+      "title": "Queue pressure",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 58
+      },
+      "id": 15,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(lockd_queue_enqueue_duration_ms_bucket[5m])))",
+          "legendFormat": "enqueue",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, lockd_queue_stateful) (rate(lockd_queue_dequeue_duration_ms_bucket[5m])))",
+          "legendFormat": "dequeue {{lockd_queue_stateful}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Queue duration p95 (ms)",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 66
+      },
+      "id": 92,
+      "panels": [],
+      "title": "Leases & Attachments",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 67
+      },
+      "id": 16,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (lockd_lease_kind) (lockd_lease_active)",
+          "legendFormat": "{{lockd_lease_kind}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Active leases by kind",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 67
+      },
+      "id": 17,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(lockd_lease_acquire_total[5m]))",
+          "legendFormat": "acquire",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(lockd_lease_keepalive_total[5m]))",
+          "legendFormat": "keepalive",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(rate(lockd_lease_release_total[5m]))",
+          "legendFormat": "release",
+          "refId": "C"
+        }
+      ],
+      "title": "Lease ops /s",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 75
+      },
+      "id": 18,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(lockd_lease_acquire_duration_ms_bucket[5m])))",
+          "legendFormat": "acquire",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(lockd_lease_keepalive_duration_ms_bucket[5m])))",
+          "legendFormat": "keepalive",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(lockd_lease_release_duration_ms_bucket[5m])))",
+          "legendFormat": "release",
+          "refId": "C"
+        }
+      ],
+      "title": "Lease duration p95 (ms)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 75
+      },
+      "id": 19,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(lockd_attachments_attach_total[5m]))",
+          "legendFormat": "attach",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(lockd_attachments_retrieve_total[5m]))",
+          "legendFormat": "retrieve",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(rate(lockd_attachments_list_total[5m]))",
+          "legendFormat": "list",
+          "refId": "C"
+        },
+        {
+          "expr": "sum(rate(lockd_attachments_delete_total[5m]))",
+          "legendFormat": "delete",
+          "refId": "D"
+        },
+        {
+          "expr": "sum(rate(lockd_attachments_delete_all_total[5m]))",
+          "legendFormat": "delete_all",
+          "refId": "E"
+        }
+      ],
+      "title": "Attachment ops /s",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 83
+      },
+      "id": 20,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(lockd_attachments_attach_bytes_total[5m]))",
+          "legendFormat": "attach",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(lockd_attachments_retrieve_bytes_total[5m]))",
+          "legendFormat": "retrieve",
+          "refId": "B"
+        }
+      ],
+      "title": "Attachment bytes per second",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 83
+      },
+      "id": 21,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(lockd_attachments_list_items_bucket[5m])))",
+          "legendFormat": "list",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(lockd_attachments_delete_all_items_bucket[5m])))",
+          "legendFormat": "delete_all",
+          "refId": "B"
+        }
+      ],
+      "title": "Attachment list/delete-all size p95",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 38,
+  "tags": [
+    "lockd",
+    "transactions",
+    "queues",
+    "leases",
+    "attachments"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "5s",
+      "10s",
+      "30s",
+      "1m",
+      "5m",
+      "15m"
+    ]
+  },
+  "timezone": "browser",
+  "title": "Lockd Overview",
+  "uid": "lockd-txn",
+  "version": 1
+}

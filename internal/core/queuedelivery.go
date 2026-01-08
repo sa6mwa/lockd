@@ -100,6 +100,10 @@ func (s *Service) consumeQueue(ctx context.Context, qsvc *queue.Service, disp *q
 			}
 			nextCursor = cand.NextCursor
 			delivery.NextCursor = nextCursor
+			if s.queueMetrics != nil {
+				duration := s.clock.Now().Sub(start)
+				s.queueMetrics.recordDequeue(ctx, namespace, queueName, delivery.PayloadBytes, duration, stateful)
+			}
 			return delivery, nextCursor, nil
 		}
 		return nil, "", errQueueEmpty
@@ -154,6 +158,10 @@ func (s *Service) consumeQueue(ctx context.Context, qsvc *queue.Service, disp *q
 		}
 		nextCursor = cand.NextCursor
 		delivery.NextCursor = nextCursor
+		if s.queueMetrics != nil {
+			duration := s.clock.Now().Sub(start)
+			s.queueMetrics.recordDequeue(ctx, namespace, queueName, delivery.PayloadBytes, duration, stateful)
+		}
 		return delivery, nextCursor, nil
 	}
 }

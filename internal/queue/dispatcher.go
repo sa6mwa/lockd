@@ -80,6 +80,7 @@ type Dispatcher struct {
 	watchFactory          WatchFactory
 	logger                pslog.Logger
 	resilientPollInterval time.Duration
+	metrics               *dispatcherMetrics
 }
 
 // DispatcherOption customises Dispatcher behaviour.
@@ -186,6 +187,7 @@ func NewDispatcher(svc candidateProvider, opts ...DispatcherOption) *Dispatcher 
 		d.resilientPollInterval = 5 * time.Minute
 	}
 	d.logger = svcfields.WithSubsystem(d.logger, "queue.dispatcher.core")
+	d.metrics = newDispatcherMetrics(d.logger, d)
 	return d
 }
 

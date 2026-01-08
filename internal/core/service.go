@@ -51,6 +51,9 @@ type Service struct {
 	txnDecisionApplied atomic.Int64
 	txnDecisionFailed  atomic.Int64
 	txnMetrics         *txnMetrics
+	queueMetrics       *queueMetrics
+	leaseMetrics       *leaseMetrics
+	attachmentMetrics  *attachmentMetrics
 	tcDecider          TCDecider
 }
 
@@ -112,6 +115,9 @@ func New(cfg Config) *Service {
 		createLocks:            &sync.Map{},
 		staging:                storage.EnsureStaging(cfg.Store),
 		txnMetrics:             newTxnMetrics(logger),
+		queueMetrics:           newQueueMetrics(logger),
+		leaseMetrics:           newLeaseMetrics(logger),
+		attachmentMetrics:      newAttachmentMetrics(logger),
 		tcDecider:              cfg.TCDecider,
 	}
 }

@@ -466,11 +466,18 @@ The compose-managed lockd container persists its bootstrap bundles under
 backend under `devenv/volumes/lockd-storage/`. The bundled etcd instance listens
 on `localhost:2379` for single-node YCSB comparisons.
 
+Prometheus is exposed on `localhost:9090`, and Grafana on `localhost:3000`
+(login `admin` / `admin`). Grafana auto-provisions a “Lockd Overview”
+dashboard that reads metrics from Prometheus. Prometheus scrapes the OTLP
+collector’s Prometheus exporter on the compose network, so no extra ports are
+opened on the lockd container.
+
 All HTTP endpoints are wrapped with `otelhttp`, storage backends emit child
 spans, and structured logs attach `trace_id`/`span_id` when a span is active.
 Transaction telemetry is exported as metrics such as `lockd.txn.decisions.recorded`,
 `lockd.txn.apply.applied/failed/retries`, `lockd.txn.decide|apply|replay|sweep.duration_ms`,
-and `lockd.txn.fanout.*`.
+and `lockd.txn.fanout.*`. Lease operations, queue operations, and attachments also
+emit telemetry (`lockd.lease.*`, `lockd.queue.*`, `lockd.attachments.*`).
 
 ### Dev Environment Assurance
 

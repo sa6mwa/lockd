@@ -38,6 +38,7 @@ type QueueEnqueueResult struct {
 
 // Enqueue inserts a message into the queue backend.
 func (s *Service) Enqueue(ctx context.Context, cmd QueueEnqueueCommand) (*QueueEnqueueResult, error) {
+	start := s.clock.Now()
 	if err := s.maybeThrottleQueue(qrf.KindQueueProducer); err != nil {
 		return nil, err
 	}
@@ -69,6 +70,10 @@ func (s *Service) Enqueue(ctx context.Context, cmd QueueEnqueueCommand) (*QueueE
 	}
 	if s.queueDispatcher != nil {
 		s.queueDispatcher.Notify(ns, cmd.Queue)
+	}
+	if s.queueMetrics != nil {
+		duration := s.clock.Now().Sub(start)
+		s.queueMetrics.recordEnqueue(ctx, msg.Namespace, msg.Queue, msg.PayloadBytes, duration)
 	}
 	return &QueueEnqueueResult{
 		Namespace:           msg.Namespace,

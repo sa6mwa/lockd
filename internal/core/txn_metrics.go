@@ -12,21 +12,23 @@ import (
 )
 
 type txnMetrics struct {
-	decisionsRecorded    metric.Int64Counter
-	decisionDuration     metric.Int64Histogram
-	applyApplied         metric.Int64Counter
-	applyFailed          metric.Int64Counter
-	applyRetries         metric.Int64Counter
-	applyDuration        metric.Int64Histogram
-	replayDuration       metric.Int64Histogram
-	sweepDuration        metric.Int64Histogram
-	sweepApplied         metric.Int64Counter
-	sweepFailed          metric.Int64Counter
-	sweepPendingExpired  metric.Int64Counter
-	sweepCleanupDeleted  metric.Int64Counter
-	sweepCleanupFailed   metric.Int64Counter
-	sweepLoadErrors      metric.Int64Counter
-	sweepRollbackCASFail metric.Int64Counter
+	decisionsRecorded     metric.Int64Counter
+	decisionDuration      metric.Int64Histogram
+	applyApplied          metric.Int64Counter
+	applyFailed           metric.Int64Counter
+	applyRetries          metric.Int64Counter
+	applyDuration         metric.Int64Histogram
+	replayDuration        metric.Int64Histogram
+	sweepDuration         metric.Int64Histogram
+	sweepApplied          metric.Int64Counter
+	sweepFailed           metric.Int64Counter
+	sweepPendingExpired   metric.Int64Counter
+	sweepCleanupDeleted   metric.Int64Counter
+	sweepCleanupFailed    metric.Int64Counter
+	sweepLoadErrors       metric.Int64Counter
+	sweepRollbackCASFail  metric.Int64Counter
+	decisionMarkerDeleted metric.Int64Counter
+	decisionMarkerFailed  metric.Int64Counter
 }
 
 func newTxnMetrics(logger pslog.Logger) *txnMetrics {
@@ -128,6 +130,18 @@ func newTxnMetrics(logger pslog.Logger) *txnMetrics {
 	)
 	logMetricInitError(logger, "lockd.txn.sweep.rollback_cas_failed", err)
 
+	m.decisionMarkerDeleted, err = meter.Int64Counter(
+		"lockd.txn.decision.marker.deleted",
+		metric.WithDescription("Transaction decision markers deleted"),
+	)
+	logMetricInitError(logger, "lockd.txn.decision.marker.deleted", err)
+
+	m.decisionMarkerFailed, err = meter.Int64Counter(
+		"lockd.txn.decision.marker.failed",
+		metric.WithDescription("Failed transaction decision marker deletions"),
+	)
+	logMetricInitError(logger, "lockd.txn.decision.marker.failed", err)
+
 	return m
 }
 
@@ -174,34 +188,52 @@ func (m *txnMetrics) recordReplay(ctx context.Context, state TxnState, duration 
 	m.replayDuration.Record(ctx, duration.Milliseconds(), metric.WithAttributes(attrs...))
 }
 
-func (m *txnMetrics) recordSweep(ctx context.Context, duration time.Duration, applied, failed, pendingExpired, cleanupDeleted, cleanupFailed, loadErrors, rollbackCASFailed int) {
+func (m *txnMetrics) recordSweep(ctx context.Context, mode sweepMode, duration time.Duration, applied, failed, pendingExpired, cleanupDeleted, cleanupFailed, loadErrors, rollbackCASFailed int) {
 	if m == nil {
 		return
 	}
 	ctx = metricContext(ctx)
+	attrs := []attribute.KeyValue{attribute.String("lockd.txn.sweep_mode", sweepModeLabel(mode))}
 	if applied > 0 && m.sweepApplied != nil {
-		m.sweepApplied.Add(ctx, int64(applied))
+		m.sweepApplied.Add(ctx, int64(applied), metric.WithAttributes(attrs...))
 	}
 	if failed > 0 && m.sweepFailed != nil {
-		m.sweepFailed.Add(ctx, int64(failed))
+		m.sweepFailed.Add(ctx, int64(failed), metric.WithAttributes(attrs...))
 	}
 	if pendingExpired > 0 && m.sweepPendingExpired != nil {
-		m.sweepPendingExpired.Add(ctx, int64(pendingExpired))
+		m.sweepPendingExpired.Add(ctx, int64(pendingExpired), metric.WithAttributes(attrs...))
 	}
 	if cleanupDeleted > 0 && m.sweepCleanupDeleted != nil {
-		m.sweepCleanupDeleted.Add(ctx, int64(cleanupDeleted))
+		m.sweepCleanupDeleted.Add(ctx, int64(cleanupDeleted), metric.WithAttributes(attrs...))
 	}
 	if cleanupFailed > 0 && m.sweepCleanupFailed != nil {
-		m.sweepCleanupFailed.Add(ctx, int64(cleanupFailed))
+		m.sweepCleanupFailed.Add(ctx, int64(cleanupFailed), metric.WithAttributes(attrs...))
 	}
 	if loadErrors > 0 && m.sweepLoadErrors != nil {
-		m.sweepLoadErrors.Add(ctx, int64(loadErrors))
+		m.sweepLoadErrors.Add(ctx, int64(loadErrors), metric.WithAttributes(attrs...))
 	}
 	if rollbackCASFailed > 0 && m.sweepRollbackCASFail != nil {
-		m.sweepRollbackCASFail.Add(ctx, int64(rollbackCASFailed))
+		m.sweepRollbackCASFail.Add(ctx, int64(rollbackCASFailed), metric.WithAttributes(attrs...))
 	}
 	if m.sweepDuration != nil {
-		m.sweepDuration.Record(ctx, duration.Milliseconds())
+		m.sweepDuration.Record(ctx, duration.Milliseconds(), metric.WithAttributes(attrs...))
+	}
+}
+
+func (m *txnMetrics) recordDecisionMarkerSweep(ctx context.Context, mode sweepMode, deleted, failed int) {
+	if m == nil {
+		return
+	}
+	if deleted <= 0 && failed <= 0 {
+		return
+	}
+	ctx = metricContext(ctx)
+	attrs := []attribute.KeyValue{attribute.String("lockd.txn.sweep_mode", sweepModeLabel(mode))}
+	if deleted > 0 && m.decisionMarkerDeleted != nil {
+		m.decisionMarkerDeleted.Add(ctx, int64(deleted), metric.WithAttributes(attrs...))
+	}
+	if failed > 0 && m.decisionMarkerFailed != nil {
+		m.decisionMarkerFailed.Add(ctx, int64(failed), metric.WithAttributes(attrs...))
 	}
 }
 
@@ -217,6 +249,13 @@ func txnStateLabel(state TxnState) string {
 		return "unknown"
 	}
 	return string(state)
+}
+
+func sweepModeLabel(mode sweepMode) string {
+	if mode == "" {
+		return "unknown"
+	}
+	return string(mode)
 }
 
 func logMetricInitError(logger pslog.Logger, name string, err error) {

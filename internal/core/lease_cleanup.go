@@ -8,7 +8,7 @@ import (
 	"pkt.systems/lockd/internal/storage"
 )
 
-func (s *Service) clearExpiredLease(ctx context.Context, namespace, key string, meta *storage.Meta, metaETag string, now time.Time, cleanupStaging bool) (bool, string, error) {
+func (s *Service) clearExpiredLease(ctx context.Context, namespace, key string, meta *storage.Meta, metaETag string, now time.Time, mode sweepMode, cleanupStaging bool) (bool, string, error) {
 	if s == nil || meta == nil || meta.Lease == nil {
 		return false, metaETag, nil
 	}
@@ -30,6 +30,9 @@ func (s *Service) clearExpiredLease(ctx context.Context, namespace, key string, 
 		if s.logger != nil && !errors.Is(err, storage.ErrNotImplemented) {
 			s.logger.Warn("lease.index.clear_failed", "namespace", namespace, "key", key, "error", err)
 		}
+	}
+	if s.sweeperMetrics != nil {
+		s.sweeperMetrics.recordLeaseCleared(ctx, mode, leaseKindLabel(key))
 	}
 	return true, newETag, nil
 }

@@ -124,7 +124,7 @@ func TestClearExpiredLeaseRemovesIndexEntry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load meta: %v", err)
 	}
-	if _, _, err := svc.clearExpiredLease(ctx, namespace, key, metaLoaded, metaETag, clk.Now(), false); err != nil {
+	if _, _, err := svc.clearExpiredLease(ctx, namespace, key, metaLoaded, metaETag, clk.Now(), sweepModeTransparent, false); err != nil {
 		t.Fatalf("clear expired lease: %v", err)
 	}
 

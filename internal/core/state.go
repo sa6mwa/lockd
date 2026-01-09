@@ -102,7 +102,7 @@ func (s *Service) Get(ctx context.Context, cmd GetCommand) (*GetResult, error) {
 		now := s.clock.Now()
 		if meta.Lease != nil && meta.Lease.ExpiresAtUnix <= now.Unix() {
 			leaseErr := validateLease(meta, cmd.LeaseID, cmd.FencingToken, txnID, now)
-			if _, _, err := s.clearExpiredLease(ctx, namespace, relKey, meta, metaETag, now, true); err != nil {
+			if _, _, err := s.clearExpiredLease(ctx, namespace, relKey, meta, metaETag, now, sweepModeTransparent, true); err != nil {
 				if errors.Is(err, storage.ErrCASMismatch) {
 					return nil, leaseErr
 				}

@@ -303,7 +303,7 @@ func (s *Service) KeepAlive(ctx context.Context, cmd KeepAliveCommand) (res *Kee
 		}
 		if meta.Lease != nil && meta.Lease.ExpiresAtUnix <= now.Unix() {
 			leaseErr := validateLease(meta, cmd.LeaseID, cmd.FencingToken, requestTxn, now)
-			if _, _, err := s.clearExpiredLease(ctx, namespace, keyComponent, meta, metaETag, now, true); err != nil {
+			if _, _, err := s.clearExpiredLease(ctx, namespace, keyComponent, meta, metaETag, now, sweepModeTransparent, true); err != nil {
 				if errors.Is(err, storage.ErrCASMismatch) {
 					continue
 				}
@@ -396,7 +396,7 @@ func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (res *Release
 			return nil, err
 		}
 		if meta.Lease != nil && meta.Lease.ExpiresAtUnix <= now.Unix() {
-			if _, _, err := s.clearExpiredLease(ctx, namespace, keyComponent, meta, metaETag, now, true); err != nil {
+			if _, _, err := s.clearExpiredLease(ctx, namespace, keyComponent, meta, metaETag, now, sweepModeTransparent, true); err != nil {
 				if errors.Is(err, storage.ErrCASMismatch) {
 					continue
 				}

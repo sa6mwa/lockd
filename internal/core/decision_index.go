@@ -55,20 +55,20 @@ func (s *Service) deleteTxnDecisionMarker(ctx context.Context, marker *txnDecisi
 	return nil
 }
 
-func (s *Service) sweepDecisionIndex(ctx context.Context, budget *sweepBudget) error {
+func (s *Service) sweepDecisionIndex(ctx context.Context, budget *sweepBudget, mode sweepMode) (int, int, error) {
 	if s == nil || budget == nil {
-		return nil
+		return 0, 0, nil
 	}
 	now := budget.clock.Now()
 	buckets, _, err := s.loadBucketIndex(ctx, txnDecisionNamespace, txnDecisionBucketsObjectKey())
 	if err != nil {
 		if errors.Is(err, storage.ErrNotImplemented) || errors.Is(err, storage.ErrNotFound) {
-			return nil
+			return 0, 0, nil
 		}
-		return err
+		return 0, 0, err
 	}
 	if len(buckets) == 0 {
-		return nil
+		return 0, 0, nil
 	}
 	cursor := &s.decisionSweepCursor
 	cursor.mu.Lock()
@@ -81,7 +81,7 @@ func (s *Service) sweepDecisionIndex(ctx context.Context, budget *sweepBudget) e
 		startAfter = ""
 	}
 	if bucket == "" || !sweepBucketExpired(bucket, now) {
-		return nil
+		return 0, 0, nil
 	}
 	prefix := txnDecisionIndexKey(bucket, "")
 	if !strings.HasSuffix(prefix, "/") {
@@ -89,7 +89,7 @@ func (s *Service) sweepDecisionIndex(ctx context.Context, budget *sweepBudget) e
 	}
 	limit := remainingOps(budget)
 	if limit <= 0 {
-		return nil
+		return 0, 0, nil
 	}
 	list, err := s.store.ListObjects(ctx, txnDecisionNamespace, storage.ListOptions{
 		Prefix:     prefix,
@@ -98,40 +98,53 @@ func (s *Service) sweepDecisionIndex(ctx context.Context, budget *sweepBudget) e
 	})
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) || errors.Is(err, storage.ErrNotImplemented) {
-			return nil
+			return 0, 0, nil
 		}
-		return err
+		return 0, 0, err
 	}
+	deleted := 0
+	failed := 0
 	for _, obj := range list.Objects {
 		if !budget.allowed() {
-			return nil
+			if s.txnMetrics != nil {
+				s.txnMetrics.recordDecisionMarkerSweep(ctx, mode, deleted, failed)
+			}
+			return deleted, failed, nil
 		}
 		txnID := strings.TrimPrefix(obj.Key, prefix)
 		if txnID == "" {
 			continue
 		}
-		marker, _, err := s.loadTxnDecisionMarker(ctx, txnID)
+		marker, _, err := s.loadTxnDecisionMarkerWithMode(ctx, txnID, mode)
 		switch {
 		case errors.Is(err, storage.ErrNotFound):
 			_ = s.store.DeleteObject(ctx, txnDecisionNamespace, obj.Key, storage.DeleteObjectOptions{IgnoreNotFound: true})
 			budget.consume()
 			continue
 		case errors.Is(err, storage.ErrNotImplemented):
-			return nil
+			return deleted, failed, nil
 		case err != nil:
-			return err
+			return deleted, failed, err
 		}
 		if marker.ExpiresAtUnix <= 0 || marker.ExpiresAtUnix > now.Unix() {
 			_ = s.store.DeleteObject(ctx, txnDecisionNamespace, obj.Key, storage.DeleteObjectOptions{IgnoreNotFound: true})
 			budget.consume()
 			continue
 		}
-		if err := s.deleteTxnDecisionMarker(ctx, marker); err != nil && !errors.Is(err, storage.ErrNotFound) {
-			return err
+		delErr := s.deleteTxnDecisionMarker(ctx, marker)
+		if delErr != nil && !errors.Is(delErr, storage.ErrNotFound) {
+			failed++
+			return deleted, failed, delErr
+		}
+		if delErr == nil || errors.Is(delErr, storage.ErrNotFound) {
+			deleted++
 		}
 		_ = s.store.DeleteObject(ctx, txnDecisionNamespace, obj.Key, storage.DeleteObjectOptions{IgnoreNotFound: true})
 		if !budget.consume() {
-			return nil
+			if s.txnMetrics != nil {
+				s.txnMetrics.recordDecisionMarkerSweep(ctx, mode, deleted, failed)
+			}
+			return deleted, failed, nil
 		}
 	}
 	if list.Truncated {
@@ -139,12 +152,18 @@ func (s *Service) sweepDecisionIndex(ctx context.Context, budget *sweepBudget) e
 		cursor.bucket = bucket
 		cursor.startAfter = list.NextStartAfter
 		cursor.mu.Unlock()
-		return nil
+		if s.txnMetrics != nil {
+			s.txnMetrics.recordDecisionMarkerSweep(ctx, mode, deleted, failed)
+		}
+		return deleted, failed, nil
 	}
 	cursor.mu.Lock()
 	cursor.bucket = ""
 	cursor.startAfter = ""
 	cursor.mu.Unlock()
 	_ = s.removeBucket(ctx, txnDecisionNamespace, txnDecisionBucketsObjectKey(), bucket)
-	return nil
+	if s.txnMetrics != nil {
+		s.txnMetrics.recordDecisionMarkerSweep(ctx, mode, deleted, failed)
+	}
+	return deleted, failed, nil
 }

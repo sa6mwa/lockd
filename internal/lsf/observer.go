@@ -34,6 +34,7 @@ type Observer struct {
 	qrf     *qrf.Controller
 	logger  pslog.Logger
 	running atomic.Bool
+	metrics *lsfMetrics
 
 	queueProducerInflight atomic.Int64
 	queueConsumerInflight atomic.Int64
@@ -64,9 +65,10 @@ func NewObserver(cfg Config, controller *qrf.Controller, logger pslog.Logger) *O
 		logger = pslog.NoopLogger()
 	}
 	return &Observer{
-		cfg:    cfg,
-		qrf:    controller,
-		logger: svcfields.WithSubsystem(logger, "control.lsf.observer"),
+		cfg:     cfg,
+		qrf:     controller,
+		logger:  svcfields.WithSubsystem(logger, "control.lsf.observer"),
+		metrics: newLSFMetrics(logger),
 	}
 }
 
@@ -226,6 +228,9 @@ func (o *Observer) sample(ts time.Time) {
 			"goroutines", snapshot.Goroutines,
 		)
 		o.lastLogTime = ts
+	}
+	if o.metrics != nil {
+		o.metrics.recordSample(nil, snapshot)
 	}
 	o.qrf.Observe(snapshot)
 }

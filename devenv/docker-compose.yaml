@@ -9,8 +9,11 @@ services:
       LOCKD_CONFIG_DIR: /config
       LOCKD_STORE: disk:///storage
       LOCKD_OTLP_ENDPOINT: otel-collector:4317
+      LOCKD_METRICS_LISTEN: 0.0.0.0:9464
     ports:
       - "9341:9341"
+    expose:
+      - "9464"                         # Prometheus scrape (internal only)
     volumes:
       - ./volumes/lockd-config:/config
       - ./volumes/lockd-storage:/storage
@@ -78,8 +81,6 @@ services:
     command: ["--config=/etc/otel-collector-config.yaml"]
     volumes:
       - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
-    expose:
-      - "9464"   # Prometheus scrape (internal only)
     ports:
       - "4317:4317"   # host -> collector (OTLP/gRPC)
       - "4318:4318"   # host -> collector (OTLP/HTTP)

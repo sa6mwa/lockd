@@ -1,0 +1,7 @@
+# ycsb performance log (append-only)
+## 2026-01-09T21:44:11Z
+backend=lockd phase=load workload=core recordcount=10000 operationcount=100000 threads=8 target=0 endpoints=https://127.0.0.1:9341
+Run finished, takes 3m36.994281863s
+INSERT - Takes(s): 216.4, Count: 10000, OPS: 46.2, Avg(us): 173256, Min(us): 41088, Max(us): 908287, 50th(us): 79487, 90th(us): 494335, 95th(us): 584191, 99th(us): 724991, 99.9th(us): 833023, 99.99th(us): 885247
+TOTAL  - Takes(s): 216.4, Count: 10000, OPS: 46.2, Avg(us): 173256, Min(us): 41088, Max(us): 908287, 50th(us): 79487, 90th(us): 494335, 95th(us): 584191, 99th(us): 724991, 99.9th(us): 833023, 99.99th(us): 885247
+

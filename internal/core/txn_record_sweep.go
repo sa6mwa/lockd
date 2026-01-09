@@ -15,7 +15,7 @@ const (
 	txnReplayMaxRuntime         = 2 * time.Second
 )
 
-func (s *Service) sweepTxnRecordsPartial(ctx context.Context, budget *sweepBudget) error {
+func (s *Service) sweepTxnRecordsPartial(ctx context.Context, budget *sweepBudget, mode sweepMode) error {
 	if s == nil || budget == nil {
 		return nil
 	}
@@ -141,7 +141,7 @@ func (s *Service) sweepTxnRecordsPartial(ctx context.Context, budget *sweepBudge
 	}
 	if s.txnMetrics != nil {
 		duration := budget.clock.Now().Sub(start)
-		s.txnMetrics.recordSweep(ctx, duration, applySuccess, applyFailed, pendingExpired, cleanupDeleted, cleanupFailed, loadErrors, rollbackCASFailed)
+		s.txnMetrics.recordSweep(ctx, mode, duration, applySuccess, applyFailed, pendingExpired, cleanupDeleted, cleanupFailed, loadErrors, rollbackCASFailed)
 	}
 	return nil
 }
@@ -177,7 +177,7 @@ func (s *Service) maybeReplayTxnRecords(ctx context.Context) {
 			MaxOps:     txnReplayMaxOps,
 			MaxRuntime: txnReplayMaxRuntime,
 		})
-		if err := s.sweepTxnRecordsPartial(sweepCtx, budget); err != nil && s.logger != nil {
+		if err := s.sweepTxnRecordsPartial(sweepCtx, budget, sweepModeReplay); err != nil && s.logger != nil {
 			if !errors.Is(err, storage.ErrNotImplemented) {
 				s.logger.Warn("txn.replay.sweep_failed", "error", err)
 			}

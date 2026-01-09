@@ -21,6 +21,7 @@ bin/
 *.swo
 *~
 *.log
+!ycsb/performance.log
 *.test
 *.pprof
 *.out

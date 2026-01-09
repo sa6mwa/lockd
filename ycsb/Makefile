@@ -9,6 +9,7 @@ RECORDCOUNT ?= 10000
 OPERATIONCOUNT ?= 100000
 THREADS ?= 8
 TARGET ?= 0
+PERF_LOG ?= performance.log
 
 LOCKD_ENDPOINTS ?=
 LOCKD_ENDPOINTS := $(if $(strip $(LOCKD_ENDPOINTS)),$(LOCKD_ENDPOINTS),https://127.0.0.1:9341)
@@ -21,6 +22,7 @@ LOCKD_PROPS := workloads/lockd.properties
 ETCD_PROPS := workloads/etcd.properties
 LOCKD_ATTACH_PROPS := workloads/lockd.attach.properties
 LOCKD_TXN_PROPS := workloads/lockd.txn.properties
+LOCKD_QUERYSYNC_PROPS := workloads/lockd.querysync.properties
 
 LOCKD_EXTRA_PROPS ?=
 
@@ -55,6 +57,7 @@ help:
 	@echo "  LOCKD_BUNDLE=../devenv/volumes/lockd-config/client.pem"
 	@echo "  ETCD_ENDPOINTS=127.0.0.1:2379"
 	@echo "  LOCKD_EXTRA_PROPS=\"workloads/lockd.attach.properties\""
+	@echo "  PERF_LOG=performance.log        # set empty to disable perf logging"
 
 build:
 	@go build -o $(RUNNER) ./cmd/lockd-ycsb
@@ -107,10 +110,10 @@ preflight-etcd:
 	'
 
 lockd-load: build preflight-lockd
-	@$(RUNNER) load lockd $(COMMON_ARGS) $(LOCKD_ARGS)
+	@$(RUNNER) load lockd $(COMMON_ARGS) $(LOCKD_ARGS) --perf-log=$(PERF_LOG)
 
 lockd-run: build preflight-lockd
-	@$(RUNNER) run lockd $(COMMON_ARGS) $(LOCKD_ARGS)
+	@$(RUNNER) run lockd $(COMMON_ARGS) $(LOCKD_ARGS) --perf-log=$(PERF_LOG)
 
 lockd-load-attach: LOCKD_EXTRA_PROPS := $(LOCKD_ATTACH_PROPS)
 lockd-load-attach: lockd-load
@@ -125,9 +128,9 @@ lockd-run-txn: LOCKD_EXTRA_PROPS := $(LOCKD_TXN_PROPS)
 lockd-run-txn: lockd-run
 
 etcd-load: build preflight-etcd
-	@$(RUNNER) load etcd $(COMMON_ARGS) $(ETCD_ARGS)
+	@$(RUNNER) load etcd $(COMMON_ARGS) $(ETCD_ARGS) --perf-log=$(PERF_LOG)
 
 etcd-run: build preflight-etcd
-	@$(RUNNER) run etcd $(COMMON_ARGS) $(ETCD_ARGS)
+	@$(RUNNER) run etcd $(COMMON_ARGS) $(ETCD_ARGS) --perf-log=$(PERF_LOG)
 
 compare: lockd-load lockd-run etcd-load etcd-run

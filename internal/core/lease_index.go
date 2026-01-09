@@ -134,7 +134,7 @@ func (s *Service) sweepLeaseIndex(ctx context.Context, budget *sweepBudget) erro
 				budget.consume()
 				continue
 			}
-			if _, _, err := s.clearExpiredLease(ctx, namespace, key, meta, metaETag, now, true); err != nil {
+			if _, _, err := s.clearExpiredLease(ctx, namespace, key, meta, metaETag, now, sweepModeIdle, true); err != nil {
 				if errors.Is(err, storage.ErrCASMismatch) {
 					continue
 				}

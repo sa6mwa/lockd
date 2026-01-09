@@ -45,8 +45,8 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
+        "h": 6,
+        "w": 8,
         "x": 0,
         "y": 1
       },
@@ -79,9 +79,9 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
+        "h": 6,
+        "w": 8,
+        "x": 8,
         "y": 1
       },
       "id": 2,
@@ -93,12 +93,12 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(lockd_txn_decide_duration_ms_bucket[5m])))",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(lockd_txn_decide_duration_ms_milliseconds_bucket[5m])))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(lockd_txn_decide_duration_ms_bucket[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(lockd_txn_decide_duration_ms_milliseconds_bucket[5m])))",
           "legendFormat": "p95",
           "refId": "B"
         }
@@ -118,10 +118,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 9
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 1
       },
       "id": 3,
       "options": {
@@ -157,10 +157,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 9
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 7
       },
       "id": 4,
       "options": {
@@ -191,10 +191,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 17
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 7
       },
       "id": 5,
       "options": {
@@ -205,12 +205,12 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(lockd_txn_apply_duration_ms_bucket[5m])))",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(lockd_txn_apply_duration_ms_milliseconds_bucket[5m])))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(lockd_txn_apply_duration_ms_bucket[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(lockd_txn_apply_duration_ms_milliseconds_bucket[5m])))",
           "legendFormat": "p95",
           "refId": "B"
         }
@@ -230,10 +230,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 17
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 7
       },
       "id": 6,
       "options": {
@@ -244,7 +244,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le, lockd_txn_state) (rate(lockd_txn_replay_duration_ms_bucket[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, lockd_txn_state) (rate(lockd_txn_replay_duration_ms_milliseconds_bucket[5m])))",
           "legendFormat": "{{lockd_txn_state}}",
           "refId": "A"
         }
@@ -264,10 +264,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
+        "h": 6,
+        "w": 8,
         "x": 0,
-        "y": 25
+        "y": 13
       },
       "id": 7,
       "options": {
@@ -278,8 +278,8 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(lockd_txn_sweep_duration_ms_bucket[5m])))",
-          "legendFormat": "p95",
+          "expr": "histogram_quantile(0.95, sum by (le, lockd_txn_sweep_mode) (rate(lockd_txn_sweep_duration_ms_milliseconds_bucket[5m])))",
+          "legendFormat": "{{lockd_txn_sweep_mode}}",
           "refId": "A"
         }
       ],
@@ -298,10 +298,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 25
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 13
       },
       "id": 8,
       "options": {
@@ -312,38 +312,38 @@
       },
       "targets": [
         {
-          "expr": "sum(rate({__name__=~\"lockd_txn_sweep_applied(_total)?\"}[5m]))",
-          "legendFormat": "applied",
+          "expr": "sum by (lockd_txn_sweep_mode) (rate(lockd_txn_sweep_applied_total[5m]))",
+          "legendFormat": "applied/{{lockd_txn_sweep_mode}}",
           "refId": "A"
         },
         {
-          "expr": "sum(rate({__name__=~\"lockd_txn_sweep_failed(_total)?\"}[5m]))",
-          "legendFormat": "failed",
+          "expr": "sum by (lockd_txn_sweep_mode) (rate(lockd_txn_sweep_failed_total[5m]))",
+          "legendFormat": "failed/{{lockd_txn_sweep_mode}}",
           "refId": "B"
         },
         {
-          "expr": "sum(rate({__name__=~\"lockd_txn_sweep_pending_expired(_total)?\"}[5m]))",
-          "legendFormat": "pending_expired",
+          "expr": "sum by (lockd_txn_sweep_mode) (rate(lockd_txn_sweep_pending_expired_total[5m]))",
+          "legendFormat": "pending_expired/{{lockd_txn_sweep_mode}}",
           "refId": "C"
         },
         {
-          "expr": "sum(rate({__name__=~\"lockd_txn_sweep_cleanup_deleted(_total)?\"}[5m]))",
-          "legendFormat": "cleanup_deleted",
+          "expr": "sum by (lockd_txn_sweep_mode) (rate(lockd_txn_sweep_cleanup_deleted_total[5m]))",
+          "legendFormat": "cleanup_deleted/{{lockd_txn_sweep_mode}}",
           "refId": "D"
         },
         {
-          "expr": "sum(rate({__name__=~\"lockd_txn_sweep_cleanup_failed(_total)?\"}[5m]))",
-          "legendFormat": "cleanup_failed",
+          "expr": "sum by (lockd_txn_sweep_mode) (rate(lockd_txn_sweep_cleanup_failed_total[5m]))",
+          "legendFormat": "cleanup_failed/{{lockd_txn_sweep_mode}}",
           "refId": "E"
         },
         {
-          "expr": "sum(rate({__name__=~\"lockd_txn_sweep_load_errors(_total)?\"}[5m]))",
-          "legendFormat": "load_errors",
+          "expr": "sum by (lockd_txn_sweep_mode) (rate(lockd_txn_sweep_load_errors_total[5m]))",
+          "legendFormat": "load_errors/{{lockd_txn_sweep_mode}}",
           "refId": "F"
         },
         {
-          "expr": "sum(rate({__name__=~\"lockd_txn_sweep_rollback_cas_failed(_total)?\"}[5m]))",
-          "legendFormat": "rollback_cas_failed",
+          "expr": "sum by (lockd_txn_sweep_mode) (rate(lockd_txn_sweep_rollback_cas_failed_total[5m]))",
+          "legendFormat": "rollback_cas_failed/{{lockd_txn_sweep_mode}}",
           "refId": "G"
         }
       ],
@@ -362,10 +362,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 33
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 13
       },
       "id": 9,
       "options": {
@@ -401,10 +401,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 33
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 19
       },
       "id": 10,
       "options": {
@@ -415,7 +415,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le, lockd_txn_result) (rate(lockd_txn_fanout_duration_ms_bucket[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, lockd_txn_result) (rate(lockd_txn_fanout_duration_ms_milliseconds_bucket[5m])))",
           "legendFormat": "{{lockd_txn_result}}",
           "refId": "A"
         }
@@ -435,10 +435,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 41
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 19
       },
       "id": 11,
       "options": {
@@ -449,7 +449,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le, lockd_txn_state) (rate(lockd_txn_tc_decide_duration_ms_bucket[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, lockd_txn_state) (rate(lockd_txn_tc_decide_duration_ms_milliseconds_bucket[5m])))",
           "legendFormat": "{{lockd_txn_state}}",
           "refId": "A"
         }
@@ -463,7 +463,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 49
+        "y": 25
       },
       "id": 91,
       "panels": [],
@@ -482,10 +482,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
+        "h": 6,
+        "w": 8,
         "x": 0,
-        "y": 50
+        "y": 26
       },
       "id": 12,
       "options": {
@@ -521,10 +521,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 50
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 26
       },
       "id": 13,
       "options": {
@@ -560,10 +560,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 58
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 26
       },
       "id": 14,
       "options": {
@@ -604,10 +604,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 58
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 32
       },
       "id": 15,
       "options": {
@@ -618,12 +618,12 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(lockd_queue_enqueue_duration_ms_bucket[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(lockd_queue_enqueue_duration_ms_milliseconds_bucket[5m])))",
           "legendFormat": "enqueue",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le, lockd_queue_stateful) (rate(lockd_queue_dequeue_duration_ms_bucket[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, lockd_queue_stateful) (rate(lockd_queue_dequeue_duration_ms_milliseconds_bucket[5m])))",
           "legendFormat": "dequeue {{lockd_queue_stateful}}",
           "refId": "B"
         }
@@ -637,7 +637,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 66
+        "y": 38
       },
       "id": 92,
       "panels": [],
@@ -656,10 +656,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
+        "h": 6,
+        "w": 8,
         "x": 0,
-        "y": 67
+        "y": 39
       },
       "id": 16,
       "options": {
@@ -690,10 +690,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 67
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 39
       },
       "id": 17,
       "options": {
@@ -734,10 +734,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 75
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 39
       },
       "id": 18,
       "options": {
@@ -748,17 +748,17 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(lockd_lease_acquire_duration_ms_bucket[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(lockd_lease_acquire_duration_ms_milliseconds_bucket[5m])))",
           "legendFormat": "acquire",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(lockd_lease_keepalive_duration_ms_bucket[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(lockd_lease_keepalive_duration_ms_milliseconds_bucket[5m])))",
           "legendFormat": "keepalive",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(lockd_lease_release_duration_ms_bucket[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(lockd_lease_release_duration_ms_milliseconds_bucket[5m])))",
           "legendFormat": "release",
           "refId": "C"
         }
@@ -778,10 +778,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 75
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 45
       },
       "id": 19,
       "options": {
@@ -832,10 +832,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 83
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 45
       },
       "id": 20,
       "options": {
@@ -871,10 +871,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 83
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 45
       },
       "id": 21,
       "options": {
@@ -896,6 +896,402 @@
         }
       ],
       "title": "Attachment list/delete-all size p95",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 51
+      },
+      "id": 93,
+      "panels": [],
+      "title": "Sweepers",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 52
+      },
+      "id": 94,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (lockd_sweeper_result) (rate(lockd_sweeper_idle_run_total[5m]))",
+          "legendFormat": "{{lockd_sweeper_result}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Idle sweeper runs /s",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 52
+      },
+      "id": 95,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, lockd_sweeper_result) (rate(lockd_sweeper_idle_duration_ms_milliseconds_bucket[5m])))",
+          "legendFormat": "{{lockd_sweeper_result}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Idle sweeper duration p95 (ms)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 52
+      },
+      "id": 96,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (lockd_sweep_mode, lockd_lease_kind) (rate(lockd_sweep_lease_cleared_total[5m]))",
+          "legendFormat": "{{lockd_lease_kind}}/{{lockd_sweep_mode}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Lease expirations cleared /s",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 58
+      },
+      "id": 97,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (lockd_txn_sweep_mode) (rate(lockd_txn_decision_marker_deleted_total[5m]))",
+          "legendFormat": "deleted/{{lockd_txn_sweep_mode}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (lockd_txn_sweep_mode) (rate(lockd_txn_decision_marker_failed_total[5m]))",
+          "legendFormat": "failed/{{lockd_txn_sweep_mode}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Decision markers deleted /s",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 64
+      },
+      "id": 98,
+      "panels": [],
+      "title": "QRF / LSF",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 65
+      },
+      "id": 99,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "lockd_qrf_state",
+          "legendFormat": "state",
+          "refId": "A"
+        }
+      ],
+      "title": "QRF state",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 65
+      },
+      "id": 100,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (lockd_qrf_kind, lockd_qrf_throttle) (rate(lockd_qrf_decision_total[5m]))",
+          "legendFormat": "{{lockd_qrf_kind}}/{{lockd_qrf_throttle}}",
+          "refId": "A"
+        }
+      ],
+      "title": "QRF decisions /s",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 65
+      },
+      "id": 101,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (lockd_qrf_to) (rate(lockd_qrf_transition_total[5m]))",
+          "legendFormat": "{{lockd_qrf_to}}",
+          "refId": "A"
+        }
+      ],
+      "title": "QRF transitions /s",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 71
+      },
+      "id": 102,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "lockd_lsf_queue_inflight",
+          "legendFormat": "queue/{{lockd_queue_kind}}",
+          "refId": "A"
+        },
+        {
+          "expr": "lockd_lsf_lock_inflight",
+          "legendFormat": "lock",
+          "refId": "B"
+        }
+      ],
+      "title": "LSF inflight",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 71
+      },
+      "id": 103,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "lockd_lsf_memory_percent",
+          "legendFormat": "memory",
+          "refId": "A"
+        },
+        {
+          "expr": "lockd_lsf_swap_percent",
+          "legendFormat": "swap",
+          "refId": "B"
+        },
+        {
+          "expr": "lockd_lsf_cpu_percent",
+          "legendFormat": "cpu",
+          "refId": "C"
+        }
+      ],
+      "title": "LSF memory/cpu/swap percent",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 71
+      },
+      "id": 104,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "lockd_lsf_load",
+          "legendFormat": "load/{{lockd_load_window}}",
+          "refId": "A"
+        },
+        {
+          "expr": "lockd_lsf_load_baseline",
+          "legendFormat": "baseline/{{lockd_load_window}}",
+          "refId": "B"
+        },
+        {
+          "expr": "lockd_lsf_load_multiplier",
+          "legendFormat": "multiplier/{{lockd_load_window}}",
+          "refId": "C"
+        }
+      ],
+      "title": "LSF load/baseline/multiplier",
       "type": "timeseries"
     }
   ],

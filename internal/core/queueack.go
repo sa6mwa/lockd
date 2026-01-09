@@ -85,7 +85,7 @@ func (s *Service) Ack(ctx context.Context, cmd QueueAckCommand) (*QueueAckResult
 	}
 	if meta.Lease != nil && meta.Lease.ExpiresAtUnix <= now.Unix() {
 		leaseErr := validateLease(meta, cmd.LeaseID, cmd.FencingToken, checkTxn, now)
-		if _, _, err := s.clearExpiredLease(ctx, namespace, messageRel, meta, metaETag, now, false); err != nil {
+		if _, _, err := s.clearExpiredLease(ctx, namespace, messageRel, meta, metaETag, now, sweepModeTransparent, false); err != nil {
 			if errors.Is(err, storage.ErrCASMismatch) {
 				return nil, leaseErr
 			}
@@ -177,7 +177,7 @@ func (s *Service) Ack(ctx context.Context, cmd QueueAckCommand) (*QueueAckResult
 				stateTxn := stateMeta.Lease.TxnID
 				now := s.clock.Now()
 				if stateMeta.Lease.ExpiresAtUnix <= now.Unix() {
-					_, _, _ = s.clearExpiredLease(ctx, namespace, stateRel, stateMeta, stateMetaETag, now, false)
+					_, _, _ = s.clearExpiredLease(ctx, namespace, stateRel, stateMeta, stateMetaETag, now, sweepModeTransparent, false)
 				} else if err := validateLease(stateMeta, cmd.StateLeaseID, cmd.StateFencingToken, stateTxn, now); err == nil {
 					_ = s.releaseLeaseWithMeta(ctx, namespace, stateRel, cmd.StateLeaseID, stateMeta, stateMetaETag)
 				}
@@ -241,7 +241,7 @@ func (s *Service) Nack(ctx context.Context, cmd QueueNackCommand) (*QueueNackRes
 	now := s.clock.Now()
 	if meta.Lease != nil && meta.Lease.ExpiresAtUnix <= now.Unix() {
 		leaseErr := validateLease(meta, cmd.LeaseID, cmd.FencingToken, checkTxn, now)
-		if _, _, err := s.clearExpiredLease(ctx, namespace, messageRel, meta, metaETag, now, false); err != nil {
+		if _, _, err := s.clearExpiredLease(ctx, namespace, messageRel, meta, metaETag, now, sweepModeTransparent, false); err != nil {
 			if errors.Is(err, storage.ErrCASMismatch) {
 				return nil, leaseErr
 			}
@@ -351,7 +351,7 @@ func (s *Service) Nack(ctx context.Context, cmd QueueNackCommand) (*QueueNackRes
 				stateTxn := stateMeta.Lease.TxnID
 				now := s.clock.Now()
 				if stateMeta.Lease.ExpiresAtUnix <= now.Unix() {
-					_, _, _ = s.clearExpiredLease(ctx, namespace, stateRel, stateMeta, stateMetaETag, now, false)
+					_, _, _ = s.clearExpiredLease(ctx, namespace, stateRel, stateMeta, stateMetaETag, now, sweepModeTransparent, false)
 				} else if err := validateLease(stateMeta, cmd.StateLeaseID, cmd.StateFencingToken, stateTxn, now); err == nil {
 					_ = s.releaseLeaseWithMeta(ctx, namespace, stateRel, cmd.StateLeaseID, stateMeta, stateMetaETag)
 				}
@@ -415,7 +415,7 @@ func (s *Service) Extend(ctx context.Context, cmd QueueExtendCommand) (*QueueExt
 	now := s.clock.Now()
 	if meta.Lease != nil && meta.Lease.ExpiresAtUnix <= now.Unix() {
 		leaseErr := validateLease(meta, cmd.LeaseID, cmd.FencingToken, checkTxn, now)
-		if _, _, err := s.clearExpiredLease(ctx, namespace, messageRel, meta, metaETag, now, false); err != nil {
+		if _, _, err := s.clearExpiredLease(ctx, namespace, messageRel, meta, metaETag, now, sweepModeTransparent, false); err != nil {
 			if errors.Is(err, storage.ErrCASMismatch) {
 				return nil, leaseErr
 			}
@@ -503,7 +503,7 @@ func (s *Service) Extend(ctx context.Context, cmd QueueExtendCommand) (*QueueExt
 		}
 		if stateMeta.Lease != nil && stateMeta.Lease.ExpiresAtUnix <= now.Unix() {
 			leaseErr := validateLease(stateMeta, cmd.StateLeaseID, cmd.StateFencingToken, stateTxn, now)
-			if _, _, err := s.clearExpiredLease(ctx, namespace, stateRel, stateMeta, stateMetaETag, now, false); err != nil {
+			if _, _, err := s.clearExpiredLease(ctx, namespace, stateRel, stateMeta, stateMetaETag, now, sweepModeTransparent, false); err != nil {
 				if errors.Is(err, storage.ErrCASMismatch) {
 					return nil, leaseErr
 				}

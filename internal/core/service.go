@@ -55,6 +55,7 @@ type Service struct {
 	queueMetrics       *queueMetrics
 	leaseMetrics       *leaseMetrics
 	attachmentMetrics  *attachmentMetrics
+	sweeperMetrics     *sweeperMetrics
 	tcDecider          TCDecider
 
 	leaseBucketCache    sync.Map
@@ -128,6 +129,7 @@ func New(cfg Config) *Service {
 		queueMetrics:           newQueueMetrics(logger),
 		leaseMetrics:           newLeaseMetrics(logger),
 		attachmentMetrics:      newAttachmentMetrics(logger),
+		sweeperMetrics:         newSweeperMetrics(logger),
 		tcDecider:              cfg.TCDecider,
 	}
 }

@@ -17,11 +17,11 @@ import (
 )
 
 const (
-	txnNamespace              = ".txns"
-	txnDecisionNamespace      = ".txn-decisions"
-	txnDecisionMarkerPrefix   = "m"
-	txnDecisionIndexPrefix    = "e"
-	txnDecisionBucketsKey     = "buckets.json"
+	txnNamespace            = ".txns"
+	txnDecisionNamespace    = ".txn-decisions"
+	txnDecisionMarkerPrefix = "m"
+	txnDecisionIndexPrefix  = "e"
+	txnDecisionBucketsKey   = "buckets.json"
 )
 
 type txnDecisionMarker struct {
@@ -41,6 +41,10 @@ func txnDecisionIndexKey(bucket, txnID string) string {
 }
 
 func (s *Service) loadTxnDecisionMarker(ctx context.Context, txnID string) (*txnDecisionMarker, string, error) {
+	return s.loadTxnDecisionMarkerWithMode(ctx, txnID, sweepModeTransparent)
+}
+
+func (s *Service) loadTxnDecisionMarkerWithMode(ctx context.Context, txnID string, mode sweepMode) (*txnDecisionMarker, string, error) {
 	obj, err := s.store.GetObject(ctx, txnDecisionNamespace, txnDecisionMarkerKey(txnID))
 	if err != nil {
 		return nil, "", err
@@ -54,7 +58,14 @@ func (s *Service) loadTxnDecisionMarker(ctx context.Context, txnID string) (*txn
 		marker.TxnID = txnID
 	}
 	if marker.ExpiresAtUnix > 0 && marker.ExpiresAtUnix <= s.clock.Now().Unix() {
-		_ = s.deleteTxnDecisionMarker(ctx, &marker)
+		err := s.deleteTxnDecisionMarker(ctx, &marker)
+		if s.txnMetrics != nil {
+			if err != nil && !errors.Is(err, storage.ErrNotFound) {
+				s.txnMetrics.recordDecisionMarkerSweep(ctx, mode, 0, 1)
+			} else {
+				s.txnMetrics.recordDecisionMarkerSweep(ctx, mode, 1, 0)
+			}
+		}
 		return nil, "", storage.ErrNotFound
 	}
 	return &marker, obj.Info.ETag, nil
@@ -1577,7 +1588,7 @@ func (s *Service) SweepTxnRecords(ctx context.Context, now time.Time) error {
 			}
 			if s.txnMetrics != nil {
 				duration := s.clock.Now().Sub(start)
-				s.txnMetrics.recordSweep(ctx, duration, applySuccess, applyFailed, pendingExpired, cleanupDeleted, cleanupFailed, loadErrors, rollbackCASFailed)
+				s.txnMetrics.recordSweep(ctx, sweepModeManual, duration, applySuccess, applyFailed, pendingExpired, cleanupDeleted, cleanupFailed, loadErrors, rollbackCASFailed)
 			}
 			return nil
 		}
@@ -1594,8 +1605,9 @@ func (s *Service) sweepTxnDecisionMarkers(ctx context.Context, now time.Time) (i
 		MaxOps:     128,
 		MaxRuntime: 2 * time.Second,
 	})
-	if err := s.sweepDecisionIndex(ctx, budget); err != nil {
-		return 0, 0, err
+	deleted, failed, err := s.sweepDecisionIndex(ctx, budget, sweepModeManual)
+	if err != nil {
+		return deleted, failed, err
 	}
-	return 0, 0, nil
+	return deleted, failed, nil
 }

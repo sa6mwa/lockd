@@ -15,6 +15,15 @@ import (
 
 const sweepBucketLayout = "2006010215"
 
+type sweepMode string
+
+const (
+	sweepModeTransparent sweepMode = "transparent"
+	sweepModeIdle        sweepMode = "idle"
+	sweepModeReplay      sweepMode = "replay"
+	sweepModeManual      sweepMode = "manual"
+)
+
 type IdleSweepOptions struct {
 	Now        time.Time
 	MaxOps     int
@@ -31,6 +40,7 @@ type sweepBudget struct {
 	opDelay     time.Duration
 	ops         int
 	shouldStop  func() bool
+	stopReason string
 }
 
 type clockSource interface {
@@ -64,12 +74,15 @@ func (b *sweepBudget) allowed() bool {
 		return false
 	}
 	if b.maxOps > 0 && b.ops >= b.maxOps {
+		b.setStopReason("budget_ops")
 		return false
 	}
 	if b.maxRuntime > 0 && b.clock.Now().Sub(b.start) >= b.maxRuntime {
+		b.setStopReason("budget_runtime")
 		return false
 	}
 	if b.shouldStop != nil && b.shouldStop() {
+		b.setStopReason("activity")
 		return false
 	}
 	return true
@@ -84,6 +97,30 @@ func (b *sweepBudget) consume() bool {
 		b.clock.Sleep(b.opDelay)
 	}
 	return b.allowed()
+}
+
+func (b *sweepBudget) opsCount() int {
+	if b == nil {
+		return 0
+	}
+	return b.ops
+}
+
+func (b *sweepBudget) stopResult() string {
+	if b == nil {
+		return "complete"
+	}
+	if b.stopReason == "" {
+		return "complete"
+	}
+	return b.stopReason
+}
+
+func (b *sweepBudget) setStopReason(reason string) {
+	if b == nil || reason == "" || b.stopReason != "" {
+		return
+	}
+	b.stopReason = reason
 }
 
 func sweepBucketFromUnix(expiresAtUnix int64) string {

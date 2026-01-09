@@ -35,6 +35,9 @@ make etcd-load
 make etcd-run
 ```
 
+Each `make *-load` / `make *-run` appends a summary to `performance.log` with the final YCSB stats.
+Disable logging by setting `PERF_LOG=` (empty) or run the binary with `--perf-log=`.
+
 Override the workload mix or scale as needed:
 
 ```bash
@@ -93,11 +96,18 @@ Driver overlays live under:
 - `workloads/etcd.properties` (etcd defaults)
 - `workloads/lockd.attach.properties` (attachment overlay)
 - `workloads/lockd.txn.properties` (explicit txn overlay)
+- `workloads/lockd.querysync.properties` (sync query visibility; opt-in)
 
 You can supply multiple overlays via `LOCKD_EXTRA_PROPS`, for example:
 
 ```bash
 make lockd-run LOCKD_EXTRA_PROPS="workloads/lockd.attach.properties workloads/lockd.txn.properties"
+```
+
+To force synchronous query visibility (wait for index refresh), add the query-sync overlay:
+
+```bash
+make lockd-run LOCKD_EXTRA_PROPS="workloads/lockd.querysync.properties"
 ```
 
 ## Example property file

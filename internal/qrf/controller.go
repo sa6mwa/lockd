@@ -130,8 +130,9 @@ type Decision struct {
 
 // Controller manages the QRF state machine.
 type Controller struct {
-	cfg    Config
-	logger pslog.Logger
+	cfg     Config
+	logger  pslog.Logger
+	metrics *qrfMetrics
 
 	mu                 sync.RWMutex
 	state              State
@@ -146,11 +147,13 @@ func NewController(cfg Config) *Controller {
 	if logger == nil {
 		logger = pslog.NoopLogger()
 	}
-	return &Controller{
+	controller := &Controller{
 		cfg:    cfg,
 		logger: svcfields.WithSubsystem(logger, "control.qrf.controller"),
 		state:  StateDisengaged,
 	}
+	controller.metrics = newQRFMetrics(logger, controller)
+	return controller
 }
 
 // Observe ingests a new snapshot from the LSF and updates the QRF posture.
@@ -228,6 +231,9 @@ func (c *Controller) Observe(snapshot Snapshot) {
 	if next != prev {
 		c.state = next
 		c.logTransition(prev, next, c.lastReason, snapshot)
+		if c.metrics != nil {
+			c.metrics.recordTransition(nil, prev, next, c.lastReason)
+		}
 		if next == StateEngaged || next == StateSoftArm {
 			c.consecutiveHealthy = 0
 		}
@@ -237,7 +243,7 @@ func (c *Controller) Observe(snapshot Snapshot) {
 // Decide reports whether an operation of the given kind should be throttled.
 func (c *Controller) Decide(kind Kind) Decision {
 	if !c.cfg.Enabled {
-		return Decision{Throttle: false, State: StateDisengaged}
+		return c.recordDecision(kind, Decision{Throttle: false, State: StateDisengaged})
 	}
 
 	c.mu.RLock()
@@ -255,95 +261,95 @@ func (c *Controller) Decide(kind Kind) Decision {
 
 	switch state {
 	case StateDisengaged:
-		return Decision{Throttle: false, State: StateDisengaged}
+		return c.recordDecision(kind, Decision{Throttle: false, State: StateDisengaged})
 	case StateSoftArm:
 		switch kind {
 		case KindQueueProducer:
 			if healthy {
-				return Decision{Throttle: false, State: StateSoftArm}
+				return c.recordDecision(kind, Decision{Throttle: false, State: StateSoftArm})
 			}
-			return Decision{
+			return c.recordDecision(kind, Decision{
 				Throttle:   true,
 				State:      StateSoftArm,
 				RetryAfter: nonZero(c.cfg.SoftRetryAfter, 50*time.Millisecond),
 				Reason:     reason,
-			}
+			})
 		case KindQueueConsumer, KindQueueAck:
 			if consumerHardExceeded || (consumerLimitExceeded && !needsMoreConsumers) {
 				limitReason := "queue_consumer_soft"
 				if consumerHardExceeded {
 					limitReason = "queue_consumer_hard"
 				}
-				return Decision{
+				return c.recordDecision(kind, Decision{
 					Throttle:   true,
 					State:      StateSoftArm,
 					RetryAfter: nonZero(c.cfg.SoftRetryAfter, 50*time.Millisecond),
 					Reason:     limitReason,
-				}
+				})
 			}
-			return Decision{Throttle: false, State: state}
+			return c.recordDecision(kind, Decision{Throttle: false, State: state})
 		default:
-			return Decision{
+			return c.recordDecision(kind, Decision{
 				Throttle:   true,
 				State:      StateSoftArm,
 				RetryAfter: nonZero(c.cfg.SoftRetryAfter, 50*time.Millisecond),
 				Reason:     reason,
-			}
+			})
 		}
 	case StateEngaged:
 		switch kind {
 		case KindQueueProducer:
-			return Decision{
+			return c.recordDecision(kind, Decision{
 				Throttle:   true,
 				State:      StateEngaged,
 				RetryAfter: nonZero(c.cfg.EngagedRetryAfter, 500*time.Millisecond),
 				Reason:     reason,
-			}
+			})
 		case KindQueueConsumer, KindQueueAck:
 			if consumerHardExceeded || (consumerLimitExceeded && !needsMoreConsumers) {
 				limitReason := "queue_consumer_soft"
 				if consumerHardExceeded {
 					limitReason = "queue_consumer_hard"
 				}
-				return Decision{
+				return c.recordDecision(kind, Decision{
 					Throttle:   true,
 					State:      StateEngaged,
 					RetryAfter: nonZero(c.cfg.RecoveryRetryAfter, 200*time.Millisecond),
 					Reason:     limitReason,
-				}
+				})
 			}
 			if c.cfg.QueueSoftLimit == 0 || totalQueue <= c.cfg.QueueSoftLimit {
-				return Decision{Throttle: false, State: state}
+				return c.recordDecision(kind, Decision{Throttle: false, State: state})
 			}
 			if snapshot.QueueProducerInflight == 0 {
-				return Decision{Throttle: false, State: state}
+				return c.recordDecision(kind, Decision{Throttle: false, State: state})
 			}
 			if snapshot.QueueConsumerInflight <= snapshot.QueueProducerInflight {
-				return Decision{Throttle: false, State: state}
+				return c.recordDecision(kind, Decision{Throttle: false, State: state})
 			}
-			return Decision{
+			return c.recordDecision(kind, Decision{
 				Throttle:   true,
 				State:      StateEngaged,
 				RetryAfter: nonZero(c.cfg.RecoveryRetryAfter, 200*time.Millisecond),
 				Reason:     reason,
-			}
+			})
 		default:
-			return Decision{
+			return c.recordDecision(kind, Decision{
 				Throttle:   true,
 				State:      StateEngaged,
 				RetryAfter: nonZero(c.cfg.EngagedRetryAfter, 500*time.Millisecond),
 				Reason:     reason,
-			}
+			})
 		}
 	case StateRecovery:
 		switch kind {
 		case KindQueueProducer:
-			return Decision{
+			return c.recordDecision(kind, Decision{
 				Throttle:   true,
 				State:      StateRecovery,
 				RetryAfter: nonZero(c.cfg.RecoveryRetryAfter, 200*time.Millisecond),
 				Reason:     reason,
-			}
+			})
 		case KindQueueConsumer, KindQueueAck:
 			if consumerHardExceeded || (consumerLimitExceeded && !needsMoreConsumers) {
 				limitReason := reason
@@ -352,38 +358,38 @@ func (c *Controller) Decide(kind Kind) Decision {
 				} else {
 					limitReason = "queue_consumer_soft"
 				}
-				return Decision{
+				return c.recordDecision(kind, Decision{
 					Throttle:   true,
 					State:      StateRecovery,
 					RetryAfter: nonZero(c.cfg.RecoveryRetryAfter, 200*time.Millisecond),
 					Reason:     limitReason,
-				}
+				})
 			}
 			if c.cfg.QueueSoftLimit == 0 || totalQueue <= c.cfg.QueueSoftLimit {
-				return Decision{Throttle: false, State: state}
+				return c.recordDecision(kind, Decision{Throttle: false, State: state})
 			}
 			if snapshot.QueueProducerInflight == 0 {
-				return Decision{Throttle: false, State: state}
+				return c.recordDecision(kind, Decision{Throttle: false, State: state})
 			}
 			if snapshot.QueueConsumerInflight <= snapshot.QueueProducerInflight {
-				return Decision{Throttle: false, State: state}
+				return c.recordDecision(kind, Decision{Throttle: false, State: state})
 			}
-			return Decision{
+			return c.recordDecision(kind, Decision{
 				Throttle:   true,
 				State:      StateRecovery,
 				RetryAfter: nonZero(c.cfg.RecoveryRetryAfter, 200*time.Millisecond),
 				Reason:     reason,
-			}
+			})
 		default:
-			return Decision{
+			return c.recordDecision(kind, Decision{
 				Throttle:   true,
 				State:      StateRecovery,
 				RetryAfter: nonZero(c.cfg.RecoveryRetryAfter, 200*time.Millisecond),
 				Reason:     reason,
-			}
+			})
 		}
 	default:
-		return Decision{Throttle: false, State: state}
+		return c.recordDecision(kind, Decision{Throttle: false, State: state})
 	}
 }
 
@@ -406,6 +412,14 @@ func (c *Controller) Status() Status {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return Status{State: c.state, Reason: c.lastReason, Snapshot: c.lastSnapshot}
+}
+
+func (c *Controller) recordDecision(kind Kind, decision Decision) Decision {
+	if c == nil || c.metrics == nil {
+		return decision
+	}
+	c.metrics.recordDecision(nil, kind, decision)
+	return decision
 }
 
 func (c *Controller) hardBreach(totalQueue int64, s Snapshot) (bool, string) {

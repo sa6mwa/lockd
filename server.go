@@ -134,6 +134,8 @@ type options struct {
 	Backend       storage.Backend
 	Clock         clock.Clock
 	OTLPEndpoint  string
+	MetricsListen string
+	MetricsSet    bool
 	configHooks   []func(*Config)
 	closeDefaults []CloseOption
 	tcLeaseTTL    time.Duration
@@ -179,6 +181,14 @@ func WithTCFanoutGate(gate txncoord.FanoutGate) Option {
 func WithOTLPEndpoint(endpoint string) Option {
 	return func(o *options) {
 		o.OTLPEndpoint = endpoint
+	}
+}
+
+// WithMetricsListen overrides the metrics listener address (empty disables metrics).
+func WithMetricsListen(addr string) Option {
+	return func(o *options) {
+		o.MetricsListen = addr
+		o.MetricsSet = true
 	}
 }
 
@@ -487,8 +497,12 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 	if o.OTLPEndpoint != "" {
 		otlpEndpoint = o.OTLPEndpoint
 	}
-	if otlpEndpoint != "" {
-		telemetry, err = setupTelemetry(context.Background(), otlpEndpoint, svcfields.WithSubsystem(logger, "observability.telemetry.exporter"))
+	metricsListen := cfg.MetricsListen
+	if o.MetricsSet {
+		metricsListen = o.MetricsListen
+	}
+	if otlpEndpoint != "" || metricsListen != "" {
+		telemetry, err = setupTelemetry(context.Background(), otlpEndpoint, metricsListen, svcfields.WithSubsystem(logger, "observability.telemetry.exporter"))
 		if err != nil {
 			return nil, err
 		}

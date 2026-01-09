@@ -228,6 +228,7 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 	flags.StringP("config", "c", "", "path to YAML config file (defaults to $HOME/.lockd/"+lockd.DefaultConfigFileName+")")
 	flags.String("listen", ":9341", "listen address")
 	flags.String("listen-proto", "tcp", "listen network (tcp, tcp4, tcp6)")
+	flags.String("metrics-listen", lockd.DefaultMetricsListen, "metrics listen address (Prometheus scrape endpoint; empty disables; default off)")
 	flags.String("store", "", "storage backend URL (mem://, s3://host[:port]/bucket, aws://bucket, disk:///path)")
 	flags.StringP("default-namespace", "n", lockd.DefaultNamespace, "default namespace applied when callers omit one")
 	jsonMaxDefault := humanizeBytes(lockd.DefaultJSONMaxBytes)
@@ -333,7 +334,7 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 
 	names := []string{
 		"config",
-		"listen", "listen-proto", "store", "default-namespace", "json-max", "json-util", "payload-spool-mem", "default-ttl", "max-ttl", "acquire-block",
+		"listen", "listen-proto", "metrics-listen", "store", "default-namespace", "json-max", "json-util", "payload-spool-mem", "default-ttl", "max-ttl", "acquire-block",
 		"sweeper-interval", "txn-replay-interval", "idle-sweep-grace", "idle-sweep-op-delay", "idle-sweep-max-ops", "idle-sweep-max-runtime", "drain-grace", "shutdown-timeout", "disk-retention", "disk-janitor-interval",
 		"disable-mtls", "http2-max-concurrent-streams", "bundle", "denylist-path", "tc-trust-dir", "tc-disable-auth", "tc-allow-default-ca",
 		"self", "join", "tc-fanout-timeout", "tc-fanout-attempts", "tc-fanout-base-delay", "tc-fanout-max-delay", "tc-fanout-multiplier", "tc-decision-retention", "tc-client-bundle",
@@ -375,6 +376,8 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 func bindConfig(cfg *lockd.Config) error {
 	cfg.Listen = viper.GetString("listen")
 	cfg.ListenProto = viper.GetString("listen-proto")
+	cfg.MetricsListen = viper.GetString("metrics-listen")
+	cfg.MetricsListenSet = viper.IsSet("metrics-listen")
 	cfg.Store = viper.GetString("store")
 	cfg.DefaultNamespace = viper.GetString("default-namespace")
 	maxBytes := viper.GetString("json-max")

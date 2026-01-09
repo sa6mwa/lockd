@@ -242,6 +242,26 @@
 // baseline (4×/8×) while queue/lock inflight guards remain disabled unless
 // configured explicitly.
 //
+// # Telemetry
+//
+// Traces are exported over OTLP when `Config.OTLPEndpoint` is set (gRPC by
+// default; use `grpc://`, `grpcs://`, `http://`, or `https://` to force a
+// transport). Metrics are exposed via a Prometheus scrape endpoint when
+// `Config.MetricsListen` is non-empty (for example `:9464`). Both can be
+// enabled together or independently:
+//
+//	cfg := lockd.Config{
+//	    Store:         "disk:///var/lib/lockd",
+//	    OTLPEndpoint:  "localhost:4317",
+//	    MetricsListen: ":9464",
+//	}
+//	srv, err := lockd.NewServer(cfg)
+//	if err != nil { log.Fatal(err) }
+//	defer srv.Close(context.Background())
+//
+// Embedded servers can override metrics via `lockd.WithMetricsListen` when
+// using helpers such as `StartServer` or `client/inprocess`.
+//
 // # Embedding and helpers
 //
 // `StartServer` launches a server in a goroutine, waits for readiness, and

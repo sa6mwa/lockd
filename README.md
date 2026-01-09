@@ -88,7 +88,7 @@ internals (e.g. `.txns` stores transaction decisions) and are rejected.
 ### Operations & observability
 
 - **Structured logging** (`pslog`) with subsystem tagging (`server.lifecycle.core`, `search.index`, `queue.dispatcher`, etc.).
-- **Transaction telemetry**: decision/apply/replay/sweep logs (`txn.*`, `txn.tc.*`, `txn.rm.*`), watchdog warnings for long-running operations, and OTLP metrics (`lockd.txn.*`, `lockd.txn.fanout.*`).
+- **Transaction telemetry**: decision/apply/replay/sweep logs (`txn.*`, `txn.tc.*`, `txn.rm.*`), watchdog warnings for long-running operations, and Prometheus metrics (`lockd.txn.*`, `lockd.txn.fanout.*`).
 - **Watchdogs** baked into unit/integration tests to catch hangs instantly.
 - **`lockd verify store`** diagnostics ensure backend credentials + permissions + encryption descriptors are valid before deploying.
 - **Integration suites** (`run-integration-suites.sh`) cover every backend/feature combination; use them before landing cross-cutting changes.
@@ -134,7 +134,7 @@ code paths. The primary production subsystems are:
   before encryption whenever storage compression is enabled.
 - `storage.crypto.envelope` – Kryptograf envelope encryption for metadata/state/queue payloads.
 - `storage.backend.core` – Storage adapters (S3/MinIO, disk, Azure, mem).
-- `observability.telemetry.exporter` – OTLP exporter for traces and metrics.
+- `observability.telemetry.exporter` – OTLP trace exporter + Prometheus metrics endpoint bootstrap.
 
 Additional prefixes show up in specialised contexts:
 
@@ -430,11 +430,12 @@ its behaviour:
 | `--disk-queue-watch` (`LOCKD_DISK_QUEUE_WATCH`) | Enables Linux/inotify queue watchers on the disk backend (default `true`; automatically ignored on unsupported filesystems such as NFS). |
 | `--disable-mem-queue-watch` (`LOCKD_DISABLE_MEM_QUEUE_WATCH`) | Disables in-process queue notifications for the in-memory backend (default `false`). |
 
-### Development Environment (Docker Compose + OTLP)
+### Development Environment (Docker Compose + Prometheus)
 
 `devenv/docker-compose.yaml` brings up a complete local stack—Jaeger, the OTLP
-collector, MinIO (for S3-compatible backends), a single-node etcd service for
-YCSB comparisons, and a disk-backed lockd container. Start the environment with:
+collector (traces), MinIO (for S3-compatible backends), a single-node etcd
+service for YCSB comparisons, and a disk-backed lockd container. Start the
+environment with:
 
 ```sh
 cd devenv
@@ -450,14 +451,22 @@ export LOCKD_S3_ACCESS_KEY_ID="lockddev"
 export LOCKD_S3_SECRET_ACCESS_KEY="lockddevpass"
 ```
 
-Set `--otlp-endpoint` (or `LOCKD_OTLP_ENDPOINT`) to export traces and metrics to
-the same compose collector. Omit the scheme to default to OTLP/gRPC on
+Set `--otlp-endpoint` (or `LOCKD_OTLP_ENDPOINT`) to export traces to
+the compose collector. Omit the scheme to default to OTLP/gRPC on
 port `4317`; use `grpc://`/`grpcs://` to force gRPC, or `http://`/`https://`
 (default port `4318`) for the HTTP transport. With the compose stack running:
 
 ```sh
 LOCKD_STORE=mem:// \
 LOCKD_OTLP_ENDPOINT=localhost \
+lockd
+```
+
+Metrics are served via a Prometheus scrape endpoint on a separate listener. Set
+`--metrics-listen` (or `LOCKD_METRICS_LISTEN`) to enable it, for example:
+
+```sh
+LOCKD_METRICS_LISTEN=:9464 \
 lockd
 ```
 
@@ -468,9 +477,8 @@ on `localhost:2379` for single-node YCSB comparisons.
 
 Prometheus is exposed on `localhost:9090`, and Grafana on `localhost:3000`
 (login `admin` / `admin`). Grafana auto-provisions a “Lockd Overview”
-dashboard that reads metrics from Prometheus. Prometheus scrapes the OTLP
-collector’s Prometheus exporter on the compose network, so no extra ports are
-opened on the lockd container.
+dashboard that reads metrics from Prometheus. Prometheus scrapes the lockd
+metrics listener on the compose network.
 
 All HTTP endpoints are wrapped with `otelhttp`, storage backends emit child
 spans, and structured logs attach `trace_id`/`span_id` when a span is active.
@@ -907,7 +915,7 @@ To keep observability output, docs, and dashboards aligned, every structured log
 
 High-volume events (per-message queue delivery/enqueue logs, subscription delivery traces) are emitted at Debug/Trace so Info remains a summary signal.
 
-OpenTelemetry exports follow the same convention: every server-managed span records `lockd.sys=<value>` alongside `lockd.operation`, so traces and metrics can be filtered with the same identifiers as logs.
+OpenTelemetry traces and Prometheus metrics follow the same convention: every server-managed span records `lockd.sys=<value>` alongside `lockd.operation`, so traces and metrics can be filtered with the same identifiers as logs.
 
 ## TLS (mTLS)
 

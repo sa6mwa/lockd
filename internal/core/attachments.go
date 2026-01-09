@@ -93,7 +93,7 @@ func (s *Service) Attach(ctx context.Context, cmd AttachCommand) (res *AttachRes
 		}
 		if meta.Lease != nil && meta.Lease.ExpiresAtUnix <= now.Unix() {
 			leaseErr := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now)
-			if _, _, err := s.clearExpiredLease(ctx, namespace, keyComponent, meta, metaETag, now, true); err != nil {
+			if _, _, err := s.clearExpiredLease(ctx, namespace, keyComponent, meta, metaETag, now, sweepModeTransparent, true); err != nil {
 				if errors.Is(err, storage.ErrCASMismatch) {
 					continue
 				}
@@ -279,7 +279,7 @@ func (s *Service) ListAttachments(ctx context.Context, cmd ListAttachmentsComman
 		now := s.clock.Now()
 		if meta.Lease != nil && meta.Lease.ExpiresAtUnix <= now.Unix() {
 			leaseErr := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now)
-			if _, _, err := s.clearExpiredLease(ctx, namespace, keyComponent, meta, metaETag, now, true); err != nil {
+			if _, _, err := s.clearExpiredLease(ctx, namespace, keyComponent, meta, metaETag, now, sweepModeTransparent, true); err != nil {
 				if errors.Is(err, storage.ErrCASMismatch) {
 					return nil, leaseErr
 				}
@@ -359,7 +359,7 @@ func (s *Service) RetrieveAttachment(ctx context.Context, cmd RetrieveAttachment
 		now := s.clock.Now()
 		if meta.Lease != nil && meta.Lease.ExpiresAtUnix <= now.Unix() {
 			leaseErr := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now)
-			if _, _, err := s.clearExpiredLease(ctx, namespace, keyComponent, meta, metaETag, now, true); err != nil {
+			if _, _, err := s.clearExpiredLease(ctx, namespace, keyComponent, meta, metaETag, now, sweepModeTransparent, true); err != nil {
 				if errors.Is(err, storage.ErrCASMismatch) {
 					return nil, leaseErr
 				}
@@ -453,7 +453,7 @@ func (s *Service) DeleteAttachment(ctx context.Context, cmd DeleteAttachmentComm
 		}
 		if meta.Lease != nil && meta.Lease.ExpiresAtUnix <= now.Unix() {
 			leaseErr := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now)
-			if _, _, err := s.clearExpiredLease(ctx, namespace, keyComponent, meta, metaETag, now, true); err != nil {
+			if _, _, err := s.clearExpiredLease(ctx, namespace, keyComponent, meta, metaETag, now, sweepModeTransparent, true); err != nil {
 				if errors.Is(err, storage.ErrCASMismatch) {
 					continue
 				}
@@ -564,7 +564,7 @@ func (s *Service) DeleteAllAttachments(ctx context.Context, cmd DeleteAllAttachm
 		}
 		if meta.Lease != nil && meta.Lease.ExpiresAtUnix <= now.Unix() {
 			leaseErr := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now)
-			if _, _, err := s.clearExpiredLease(ctx, namespace, keyComponent, meta, metaETag, now, true); err != nil {
+			if _, _, err := s.clearExpiredLease(ctx, namespace, keyComponent, meta, metaETag, now, sweepModeTransparent, true); err != nil {
 				if errors.Is(err, storage.ErrCASMismatch) {
 					continue
 				}

@@ -45,6 +45,9 @@ const (
 	DefaultListen = ":9341"
 	// DefaultListenProto controls the scheme used when no protocol is configured.
 	DefaultListenProto = "tcp"
+	// DefaultMetricsListen is the default metrics endpoint (Prometheus scrape).
+	// Empty disables metrics unless explicitly configured.
+	DefaultMetricsListen = ""
 	// DefaultStore points the server at the in-memory backend when no store is provided.
 	DefaultStore = "mem://"
 	// DefaultJSONMaxBytes bounds incoming JSON payloads.
@@ -178,6 +181,8 @@ func isValidJSONUtil(name string) bool {
 type Config struct {
 	Listen                string
 	ListenProto           string
+	MetricsListen         string
+	MetricsListenSet      bool
 	Store                 string
 	DefaultNamespace      string
 	JSONMaxBytes          int64
@@ -322,6 +327,9 @@ func (c *Config) Validate() error {
 	}
 	if c.ListenProto == "" {
 		c.ListenProto = DefaultListenProto
+	}
+	if !c.MetricsListenSet && c.MetricsListen == "" {
+		c.MetricsListen = DefaultMetricsListen
 	}
 	if c.Store == "" {
 		return fmt.Errorf("config: store is required")

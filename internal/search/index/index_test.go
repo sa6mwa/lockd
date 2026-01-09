@@ -65,7 +65,7 @@ func TestStoreSegmentLifecycle(t *testing.T) {
 	ctx := context.Background()
 	seg := NewSegment("seg-seed", time.Now())
 	seg.Fields["status"] = FieldBlock{Postings: map[string][]string{"open": {"doc-1"}}}
-	if _, err := idxStore.WriteSegment(ctx, "default", seg); err != nil {
+	if _, _, err := idxStore.WriteSegment(ctx, "default", seg); err != nil {
 		t.Fatalf("write segment: %v", err)
 	}
 	loaded, err := idxStore.LoadSegment(ctx, "default", seg.ID)
@@ -93,7 +93,7 @@ func TestIndexAdapterQuery(t *testing.T) {
 		"4200": {"device-gw-42"},
 		"3300": {"device-gw-7"},
 	}}
-	if _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
 		t.Fatalf("write segment: %v", err)
 	}
 	manifest := NewManifest()

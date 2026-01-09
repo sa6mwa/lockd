@@ -23,17 +23,19 @@ type WriterConfig struct {
 
 // Writer ingests documents and flushes them into immutable segments.
 type Writer struct {
-	cfg        WriterConfig
-	store      *Store
-	memtable   *MemTable
-	mu         sync.Mutex
-	ctx        context.Context
-	cancel     context.CancelFunc
-	clock      clock.Clock
-	logger     pslog.Logger
-	pending    atomic.Bool
-	lastFlush  atomic.Int64
-	readableCh chan struct{}
+	cfg           WriterConfig
+	store         *Store
+	memtable      *MemTable
+	mu            sync.Mutex
+	ctx           context.Context
+	cancel        context.CancelFunc
+	clock         clock.Clock
+	logger        pslog.Logger
+	pending       atomic.Bool
+	lastFlush     atomic.Int64
+	oldestPending atomic.Int64
+	readableCh    chan struct{}
+	metrics       *indexMetrics
 }
 
 // NewWriter constructs a namespace writer.
@@ -57,6 +59,10 @@ func NewWriter(cfg WriterConfig) *Writer {
 		clock:    cfg.Clock,
 		logger:   cfg.Logger,
 	}
+	w.metrics = newIndexMetrics(cfg.Logger)
+	if w.metrics != nil {
+		w.metrics.registerWriter(w)
+	}
 	w.lastFlush.Store(w.clock.Now().UnixNano())
 	go w.flushLoop()
 	return w
@@ -75,10 +81,15 @@ func (w *Writer) Insert(doc Document) error {
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	before := w.memtable.DocCount()
 	for field, terms := range doc.Fields {
 		for _, term := range terms {
 			w.memtable.Add(field, term, doc.Key)
 		}
+	}
+	after := w.memtable.DocCount()
+	if before == 0 && after > 0 {
+		w.oldestPending.Store(w.clock.Now().UnixNano())
 	}
 	w.pending.Store(true)
 	if int(w.memtable.DocCount()) >= w.cfg.FlushDocs {
@@ -108,20 +119,28 @@ func (w *Writer) flushLoop() {
 func (w *Writer) flushLocked(ctx context.Context) error {
 	if w.memtable.DocCount() == 0 {
 		w.pending.Store(false)
+		w.oldestPending.Store(0)
 		return nil
 	}
 	segment := w.memtable.Flush(w.clock.Now())
 	if segment.DocCount() == 0 {
 		w.pending.Store(false)
+		w.oldestPending.Store(0)
 		return nil
 	}
-	if err := w.persistSegment(ctx, segment); err != nil {
+	start := w.clock.Now()
+	segmentBytes, err := w.persistSegment(ctx, segment)
+	if w.metrics != nil {
+		w.metrics.recordFlush(ctx, w.cfg.Namespace, w.clock.Now().Sub(start), err, int64(segment.DocCount()), segmentBytes)
+	}
+	if err != nil {
 		if w.logger != nil {
 			w.logger.Warn("index.flush.error", "namespace", w.cfg.Namespace, "error", err)
 		}
 		return err
 	}
 	w.pending.Store(false)
+	w.oldestPending.Store(0)
 	w.lastFlush.Store(w.clock.Now().UnixNano())
 	w.signalReadableLocked()
 	if w.logger != nil {
@@ -130,16 +149,17 @@ func (w *Writer) flushLocked(ctx context.Context) error {
 	return nil
 }
 
-func (w *Writer) persistSegment(ctx context.Context, segment *Segment) error {
+func (w *Writer) persistSegment(ctx context.Context, segment *Segment) (int64, error) {
 	if w.store == nil {
-		return storage.ErrNotImplemented
+		return 0, storage.ErrNotImplemented
 	}
-	if _, err := w.store.WriteSegment(ctx, w.cfg.Namespace, segment); err != nil {
-		return err
+	_, segmentBytes, err := w.store.WriteSegment(ctx, w.cfg.Namespace, segment)
+	if err != nil {
+		return 0, err
 	}
 	manifestRes, err := w.store.LoadManifest(ctx, w.cfg.Namespace)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	manifest := manifestRes.Manifest
 	etag := manifestRes.ETag
@@ -156,7 +176,10 @@ func (w *Writer) persistSegment(ctx context.Context, segment *Segment) error {
 	manifest.Seq++
 	manifest.UpdatedAt = segment.CreatedAt
 	_, err = w.store.SaveManifest(ctx, w.cfg.Namespace, manifest, etag)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return segmentBytes, nil
 }
 
 // WaitForReadable waits (best-effort) until pending documents are flushed or
@@ -201,6 +224,7 @@ func (w *Writer) readableChan() <-chan struct{} {
 	defer w.mu.Unlock()
 	if w.memtable.DocCount() == 0 {
 		w.pending.Store(false)
+		w.oldestPending.Store(0)
 		return nil
 	}
 	if w.readableCh == nil {
@@ -214,4 +238,25 @@ func (w *Writer) signalReadableLocked() {
 		close(w.readableCh)
 		w.readableCh = nil
 	}
+}
+
+func (w *Writer) metricsSnapshot(now time.Time) (depth int64, lagMs int64) {
+	if w == nil {
+		return 0, 0
+	}
+	w.mu.Lock()
+	depth = int64(w.memtable.DocCount())
+	w.mu.Unlock()
+	if depth == 0 {
+		return 0, 0
+	}
+	oldest := w.oldestPending.Load()
+	if oldest == 0 {
+		return depth, 0
+	}
+	lag := now.Sub(time.Unix(0, oldest)).Milliseconds()
+	if lag < 0 {
+		lag = 0
+	}
+	return depth, lag
 }

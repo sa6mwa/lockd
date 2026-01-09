@@ -103,34 +103,34 @@ func (s *Store) SaveManifest(ctx context.Context, namespace string, manifest *Ma
 	return info.ETag, nil
 }
 
-// WriteSegment persists a segment and returns its ETag.
-func (s *Store) WriteSegment(ctx context.Context, namespace string, segment *Segment) (string, error) {
+// WriteSegment persists a segment and returns its ETag and payload size.
+func (s *Store) WriteSegment(ctx context.Context, namespace string, segment *Segment) (string, int64, error) {
 	if s == nil || s.backend == nil {
-		return "", fmt.Errorf("index store unavailable")
+		return "", 0, fmt.Errorf("index store unavailable")
 	}
 	if err := segment.Validate(); err != nil {
-		return "", err
+		return "", 0, err
 	}
 	msg := segment.ToProto()
 	payload, err := proto.Marshal(msg)
 	if err != nil {
-		return "", fmt.Errorf("encode segment: %w", err)
+		return "", 0, fmt.Errorf("encode segment: %w", err)
 	}
 	contentType := contentTypePlain
 	if s.crypto != nil && s.crypto.Enabled() {
 		contentType = contentTypeEncrypted
 		payload, err = s.crypto.EncryptMetadata(payload)
 		if err != nil {
-			return "", fmt.Errorf("encrypt segment: %w", err)
+			return "", 0, fmt.Errorf("encrypt segment: %w", err)
 		}
 	}
 	object := segmentObject(segment.ID)
 	if _, err := s.backend.PutObject(ctx, namespace, object, bytes.NewReader(payload), storage.PutObjectOptions{
 		ContentType: contentType,
 	}); err != nil {
-		return "", err
+		return "", 0, err
 	}
-	return object, nil
+	return object, int64(len(payload)), nil
 }
 
 // LoadSegment retrieves and decrypts a segment by ID.

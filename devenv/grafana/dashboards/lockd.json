@@ -1293,6 +1293,223 @@
       ],
       "title": "LSF load/baseline/multiplier",
       "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 77
+      },
+      "id": 105,
+      "panels": [],
+      "title": "Indexer",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 78
+      },
+      "id": 106,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "max by (lockd_namespace) (lockd_index_queue_depth)",
+          "legendFormat": "{{lockd_namespace}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Index queue depth",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 78
+      },
+      "id": 107,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "max by (lockd_namespace) (lockd_index_queue_lag_ms_milliseconds)",
+          "legendFormat": "{{lockd_namespace}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Index queue lag p95 (ms)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 78
+      },
+      "id": 108,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, lockd_namespace) (rate(lockd_index_flush_duration_ms_milliseconds_bucket[5m])))",
+          "legendFormat": "{{lockd_namespace}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Flush duration p95 (ms)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 84
+      },
+      "id": 109,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (lockd_namespace) (rate(lockd_index_flush_errors_total[5m]))",
+          "legendFormat": "{{lockd_namespace}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Flush errors /s",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 84
+      },
+      "id": 110,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (lockd_namespace) (rate(lockd_index_segment_written_total[5m]))",
+          "legendFormat": "{{lockd_namespace}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Segments written /s",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 84
+      },
+      "id": 111,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, lockd_namespace) (rate(lockd_index_segment_size_bytes_bucket[5m])))",
+          "legendFormat": "{{lockd_namespace}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Segment size p95 (bytes)",
+      "type": "timeseries"
     }
   ],
   "refresh": "10s",

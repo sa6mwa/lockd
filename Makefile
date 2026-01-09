@@ -1,7 +1,8 @@
+GO ?= go
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-integration bench diagrams
+.PHONY: help test test-integration bench diagrams swagger
 
 help:
 	@echo "Available targets:"
@@ -55,7 +56,6 @@ bench:
 PLANTUML_SOURCES := $(wildcard docs/diagrams/*.puml)
 PLANTUML_OUT_SVG := $(PLANTUML_SOURCES:.puml=.svg)
 
-.PHONY: diagrams
 diagrams: $(PLANTUML_SOURCES)
 	@echo "Rendering PlantUML diagrams to PNG (high resolution)"
 	@plantuml -tsvg $(PLANTUML_SOURCES)
@@ -64,7 +64,11 @@ diagrams: $(PLANTUML_SOURCES)
 		sed -i '0,/<svg[^>]*>/s//&\n  <rect width="100%" height="100%" fill="#ffffff"\/>/' "$$svg"; \
 	done
 
-.PHONY: swagger
 swagger:
 	@echo "Generating Swagger/OpenAPI documentation"
-	@go generate ./swagger
+	$(GO) generate ./swagger
+
+tidy:
+	$(GO) mod tidy
+	cd devenv/assure && $(GO) mod tidy
+	cd ycsb && $(GO) mod tidy

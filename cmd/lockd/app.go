@@ -229,6 +229,8 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 	flags.String("listen", ":9341", "listen address")
 	flags.String("listen-proto", "tcp", "listen network (tcp, tcp4, tcp6)")
 	flags.String("metrics-listen", lockd.DefaultMetricsListen, "metrics listen address (Prometheus scrape endpoint; empty disables; default off)")
+	flags.String("pprof-listen", lockd.DefaultPprofListen, "pprof listen address (debug/pprof endpoints; empty disables)")
+	flags.Bool("enable-profiling-metrics", false, "enable Go runtime profiling metrics on the Prometheus endpoint")
 	flags.String("store", "", "storage backend URL (mem://, s3://host[:port]/bucket, aws://bucket, disk:///path)")
 	flags.StringP("default-namespace", "n", lockd.DefaultNamespace, "default namespace applied when callers omit one")
 	jsonMaxDefault := humanizeBytes(lockd.DefaultJSONMaxBytes)
@@ -334,7 +336,7 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 
 	names := []string{
 		"config",
-		"listen", "listen-proto", "metrics-listen", "store", "default-namespace", "json-max", "json-util", "payload-spool-mem", "default-ttl", "max-ttl", "acquire-block",
+		"listen", "listen-proto", "metrics-listen", "pprof-listen", "enable-profiling-metrics", "store", "default-namespace", "json-max", "json-util", "payload-spool-mem", "default-ttl", "max-ttl", "acquire-block",
 		"sweeper-interval", "txn-replay-interval", "idle-sweep-grace", "idle-sweep-op-delay", "idle-sweep-max-ops", "idle-sweep-max-runtime", "drain-grace", "shutdown-timeout", "disk-retention", "disk-janitor-interval",
 		"disable-mtls", "http2-max-concurrent-streams", "bundle", "denylist-path", "tc-trust-dir", "tc-disable-auth", "tc-allow-default-ca",
 		"self", "join", "tc-fanout-timeout", "tc-fanout-attempts", "tc-fanout-base-delay", "tc-fanout-max-delay", "tc-fanout-multiplier", "tc-decision-retention", "tc-client-bundle",
@@ -378,6 +380,10 @@ func bindConfig(cfg *lockd.Config) error {
 	cfg.ListenProto = viper.GetString("listen-proto")
 	cfg.MetricsListen = viper.GetString("metrics-listen")
 	cfg.MetricsListenSet = viper.IsSet("metrics-listen")
+	cfg.PprofListen = viper.GetString("pprof-listen")
+	cfg.PprofListenSet = viper.IsSet("pprof-listen")
+	cfg.EnableProfilingMetrics = viper.GetBool("enable-profiling-metrics")
+	cfg.EnableProfilingMetricsSet = viper.IsSet("enable-profiling-metrics")
 	cfg.Store = viper.GetString("store")
 	cfg.DefaultNamespace = viper.GetString("default-namespace")
 	maxBytes := viper.GetString("json-max")

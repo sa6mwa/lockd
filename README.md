@@ -470,6 +470,17 @@ LOCKD_METRICS_LISTEN=:9464 \
 lockd
 ```
 
+Profiling tools can be enabled independently. Use `--pprof-listen` to expose
+`/debug/pprof` endpoints and `--enable-profiling-metrics` to export Go runtime
+metrics via Prometheus:
+
+```sh
+LOCKD_METRICS_LISTEN=:9464 \
+LOCKD_ENABLE_PROFILING_METRICS=1 \
+LOCKD_PPROF_LISTEN=:6060 \
+lockd
+```
+
 The compose-managed lockd container persists its bootstrap bundles under
 `devenv/volumes/lockd-config/` (client bundle: `client.pem`) and its disk
 backend under `devenv/volumes/lockd-storage/`. The bundled etcd instance listens

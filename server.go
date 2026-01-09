@@ -95,7 +95,7 @@ type Server struct {
 	lsfObserver   *lsf.Observer
 	lsfCancel     context.CancelFunc
 
-	lastActivity   atomic.Int64
+	lastActivity     atomic.Int64
 	idleSweepRunning atomic.Bool
 
 	draining      atomic.Bool
@@ -130,16 +130,20 @@ type drainSummary struct {
 type Option func(*options)
 
 type options struct {
-	Logger        pslog.Logger
-	Backend       storage.Backend
-	Clock         clock.Clock
-	OTLPEndpoint  string
-	MetricsListen string
-	MetricsSet    bool
-	configHooks   []func(*Config)
-	closeDefaults []CloseOption
-	tcLeaseTTL    time.Duration
-	tcFanoutGate  txncoord.FanoutGate
+	Logger              pslog.Logger
+	Backend             storage.Backend
+	Clock               clock.Clock
+	OTLPEndpoint        string
+	MetricsListen       string
+	MetricsSet          bool
+	PprofListen         string
+	PprofSet            bool
+	ProfilingMetrics    bool
+	ProfilingMetricsSet bool
+	configHooks         []func(*Config)
+	closeDefaults       []CloseOption
+	tcLeaseTTL          time.Duration
+	tcFanoutGate        txncoord.FanoutGate
 }
 
 // WithLogger supplies a custom logger.
@@ -189,6 +193,22 @@ func WithMetricsListen(addr string) Option {
 	return func(o *options) {
 		o.MetricsListen = addr
 		o.MetricsSet = true
+	}
+}
+
+// WithPprofListen overrides the pprof listener address (empty disables).
+func WithPprofListen(addr string) Option {
+	return func(o *options) {
+		o.PprofListen = addr
+		o.PprofSet = true
+	}
+}
+
+// WithProfilingMetrics toggles Go runtime profiling metrics on the metrics endpoint.
+func WithProfilingMetrics(enabled bool) Option {
+	return func(o *options) {
+		o.ProfilingMetrics = enabled
+		o.ProfilingMetricsSet = true
 	}
 }
 
@@ -501,8 +521,19 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 	if o.MetricsSet {
 		metricsListen = o.MetricsListen
 	}
-	if otlpEndpoint != "" || metricsListen != "" {
-		telemetry, err = setupTelemetry(context.Background(), otlpEndpoint, metricsListen, svcfields.WithSubsystem(logger, "observability.telemetry.exporter"))
+	pprofListen := cfg.PprofListen
+	if o.PprofSet {
+		pprofListen = o.PprofListen
+	}
+	profilingMetrics := cfg.EnableProfilingMetrics
+	if o.ProfilingMetricsSet {
+		profilingMetrics = o.ProfilingMetrics
+	}
+	if profilingMetrics && strings.TrimSpace(metricsListen) == "" {
+		return nil, fmt.Errorf("profiling metrics require metrics listen address")
+	}
+	if otlpEndpoint != "" || metricsListen != "" || pprofListen != "" || profilingMetrics {
+		telemetry, err = setupTelemetry(context.Background(), otlpEndpoint, metricsListen, pprofListen, profilingMetrics, svcfields.WithSubsystem(logger, "observability.telemetry.exporter"))
 		if err != nil {
 			return nil, err
 		}

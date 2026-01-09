@@ -48,6 +48,8 @@ const (
 	// DefaultMetricsListen is the default metrics endpoint (Prometheus scrape).
 	// Empty disables metrics unless explicitly configured.
 	DefaultMetricsListen = ""
+	// DefaultPprofListen is the default pprof debug listener (empty disables).
+	DefaultPprofListen = ""
 	// DefaultStore points the server at the in-memory backend when no store is provided.
 	DefaultStore = "mem://"
 	// DefaultJSONMaxBytes bounds incoming JSON payloads.
@@ -179,36 +181,40 @@ func isValidJSONUtil(name string) bool {
 
 // Config captures the tunables for a lockd.Server instance.
 type Config struct {
-	Listen                string
-	ListenProto           string
-	MetricsListen         string
-	MetricsListenSet      bool
-	Store                 string
-	DefaultNamespace      string
-	JSONMaxBytes          int64
-	AttachmentMaxBytes    int64
-	JSONUtil              string
-	SpoolMemoryThreshold  int64
-	DiskRetention         time.Duration
-	DiskJanitorInterval   time.Duration
-	DiskQueueWatch        bool
-	DisableMemQueueWatch  bool
-	DefaultTTL            time.Duration
-	MaxTTL                time.Duration
-	AcquireBlock          time.Duration
-	SweeperInterval       time.Duration
-	TxnReplayInterval     time.Duration
-	IdleSweepGrace        time.Duration
-	IdleSweepOpDelay       time.Duration
-	IdleSweepMaxOps        int
-	IdleSweepMaxRuntime    time.Duration
-	DrainGrace            time.Duration
-	DrainGraceSet         bool
-	ShutdownTimeout       time.Duration
-	ShutdownTimeoutSet    bool
-	OTLPEndpoint          string
-	DisableHTTPTracing    bool
-	DisableStorageTracing bool
+	Listen                    string
+	ListenProto               string
+	MetricsListen             string
+	MetricsListenSet          bool
+	PprofListen               string
+	PprofListenSet            bool
+	EnableProfilingMetrics    bool
+	EnableProfilingMetricsSet bool
+	Store                     string
+	DefaultNamespace          string
+	JSONMaxBytes              int64
+	AttachmentMaxBytes        int64
+	JSONUtil                  string
+	SpoolMemoryThreshold      int64
+	DiskRetention             time.Duration
+	DiskJanitorInterval       time.Duration
+	DiskQueueWatch            bool
+	DisableMemQueueWatch      bool
+	DefaultTTL                time.Duration
+	MaxTTL                    time.Duration
+	AcquireBlock              time.Duration
+	SweeperInterval           time.Duration
+	TxnReplayInterval         time.Duration
+	IdleSweepGrace            time.Duration
+	IdleSweepOpDelay          time.Duration
+	IdleSweepMaxOps           int
+	IdleSweepMaxRuntime       time.Duration
+	DrainGrace                time.Duration
+	DrainGraceSet             bool
+	ShutdownTimeout           time.Duration
+	ShutdownTimeoutSet        bool
+	OTLPEndpoint              string
+	DisableHTTPTracing        bool
+	DisableStorageTracing     bool
 
 	// mTLS
 	DisableMTLS  bool
@@ -330,6 +336,12 @@ func (c *Config) Validate() error {
 	}
 	if !c.MetricsListenSet && c.MetricsListen == "" {
 		c.MetricsListen = DefaultMetricsListen
+	}
+	if !c.PprofListenSet && c.PprofListen == "" {
+		c.PprofListen = DefaultPprofListen
+	}
+	if c.EnableProfilingMetrics && strings.TrimSpace(c.MetricsListen) == "" {
+		return fmt.Errorf("config: profiling metrics require metrics-listen")
 	}
 	if c.Store == "" {
 		return fmt.Errorf("config: store is required")

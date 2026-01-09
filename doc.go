@@ -247,13 +247,17 @@
 // Traces are exported over OTLP when `Config.OTLPEndpoint` is set (gRPC by
 // default; use `grpc://`, `grpcs://`, `http://`, or `https://` to force a
 // transport). Metrics are exposed via a Prometheus scrape endpoint when
-// `Config.MetricsListen` is non-empty (for example `:9464`). Both can be
-// enabled together or independently:
+// `Config.MetricsListen` is non-empty (for example `:9464`). Runtime profiling
+// metrics (goroutines, heap, scheduler latency) are opt-in via
+// `Config.EnableProfilingMetrics`. A pprof debug listener can be exposed with
+// `Config.PprofListen`. All three can be enabled together or independently:
 //
 //	cfg := lockd.Config{
 //	    Store:         "disk:///var/lib/lockd",
 //	    OTLPEndpoint:  "localhost:4317",
 //	    MetricsListen: ":9464",
+//	    EnableProfilingMetrics: true,
+//	    PprofListen:            ":6060",
 //	}
 //	srv, err := lockd.NewServer(cfg)
 //	if err != nil { log.Fatal(err) }

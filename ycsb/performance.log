@@ -5,3 +5,9 @@ Run finished, takes 3m36.994281863s
 INSERT - Takes(s): 216.4, Count: 10000, OPS: 46.2, Avg(us): 173256, Min(us): 41088, Max(us): 908287, 50th(us): 79487, 90th(us): 494335, 95th(us): 584191, 99th(us): 724991, 99.9th(us): 833023, 99.99th(us): 885247
 TOTAL  - Takes(s): 216.4, Count: 10000, OPS: 46.2, Avg(us): 173256, Min(us): 41088, Max(us): 908287, 50th(us): 79487, 90th(us): 494335, 95th(us): 584191, 99th(us): 724991, 99.9th(us): 833023, 99.99th(us): 885247
 
+## 2026-01-09T22:52:42Z
+backend=lockd phase=load workload=core recordcount=10000 operationcount=100000 threads=8 target=0 endpoints=https://127.0.0.1:9341
+Run finished, takes 3m40.163782578s
+INSERT - Takes(s): 220.1, Count: 10000, OPS: 45.4, Avg(us): 175961, Min(us): 33440, Max(us): 895999, 50th(us): 80511, 90th(us): 519679, 95th(us): 603135, 99th(us): 713215, 99.9th(us): 807423, 99.99th(us): 895999
+TOTAL  - Takes(s): 220.1, Count: 10000, OPS: 45.4, Avg(us): 175961, Min(us): 33440, Max(us): 895999, 50th(us): 80511, 90th(us): 519679, 95th(us): 603135, 99th(us): 713215, 99.9th(us): 807423, 99.99th(us): 895999
+

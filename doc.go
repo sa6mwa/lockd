@@ -112,6 +112,27 @@
 // be disabled by setting them to `0`. Each server splits the budget 80/20 so a
 // 10 s timeout reserves ~8 s for draining and ~2 s for `http.Server.Shutdown`.
 //
+// Sweeping is split into two paths: (1) transparent cleanup on relevant ops
+// (e.g., if an acquire encounters an expired lease) and (2) an idle maintenance
+// sweeper that runs only after a period of inactivity. The idle sweeper is
+// rate-limited (max ops and max runtime) and can be configured to pause between
+// operations to reduce backend pressure. Transaction replay has its own
+// throttle so active traffic can kick replay without inheriting the idle
+// sweeper cadence. Configure these in the server SDK with:
+//
+//	cfg := lockd.Config{
+//	    Store:            "aws://lockd-prod",
+//	    SweeperInterval:  5 * time.Minute,   // idle sweep tick
+//	    IdleSweepGrace:   5 * time.Minute,   // idle time before a sweep can start
+//	    IdleSweepOpDelay: 100 * time.Millisecond,
+//	    IdleSweepMaxOps:  1000,
+//	    IdleSweepMaxRuntime: 30 * time.Second,
+//	    TxnReplayInterval:   5 * time.Second, // throttle for replay on active ops
+//	}
+//
+// To disable the idle sweeper entirely, set `SweeperInterval <= 0` (replay
+// throttling is independent and controlled by `TxnReplayInterval`).
+//
 // The Go client and CLI are drain-aware by default: when the server emits the
 // `Shutdown-Imminent` header, the SDK auto-releases leases once in-flight work
 // is done. Opt out by using `client.WithDrainAwareShutdown(false)` or passing

@@ -240,6 +240,11 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 	flags.Duration("max-ttl", lockd.DefaultMaxTTL, "maximum lease TTL")
 	flags.Duration("acquire-block", lockd.DefaultAcquireBlock, "maximum time to wait on acquire conflicts")
 	flags.Duration("sweeper-interval", lockd.DefaultSweeperInterval, "sweeper interval for background tasks")
+	flags.Duration("txn-replay-interval", lockd.DefaultTxnReplayInterval, "minimum interval between transaction replay sweeps on active operations")
+	flags.Duration("idle-sweep-grace", lockd.DefaultIdleSweepGrace, "idle time before maintenance sweeper runs")
+	flags.Duration("idle-sweep-op-delay", lockd.DefaultIdleSweepOpDelay, "pause between maintenance sweep operations")
+	flags.Int("idle-sweep-max-ops", lockd.DefaultIdleSweepMaxOps, "maximum maintenance sweep operations per run")
+	flags.Duration("idle-sweep-max-runtime", lockd.DefaultIdleSweepMaxRuntime, "maximum maintenance sweep runtime")
 	flags.Duration("drain-grace", lockd.DefaultDrainGrace, "grace period to drain leases before HTTP shutdown (set 0 to disable)")
 	flags.Duration("shutdown-timeout", lockd.DefaultShutdownTimeout, "overall shutdown timeout (set 0 to rely on signal deadlines)")
 	flags.Duration("disk-retention", 0, "optional retention window for disk backend (0 keeps state indefinitely)")
@@ -329,7 +334,7 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 	names := []string{
 		"config",
 		"listen", "listen-proto", "store", "default-namespace", "json-max", "json-util", "payload-spool-mem", "default-ttl", "max-ttl", "acquire-block",
-		"sweeper-interval", "drain-grace", "shutdown-timeout", "disk-retention", "disk-janitor-interval",
+		"sweeper-interval", "txn-replay-interval", "idle-sweep-grace", "idle-sweep-op-delay", "idle-sweep-max-ops", "idle-sweep-max-runtime", "drain-grace", "shutdown-timeout", "disk-retention", "disk-janitor-interval",
 		"disable-mtls", "http2-max-concurrent-streams", "bundle", "denylist-path", "tc-trust-dir", "tc-disable-auth", "tc-allow-default-ca",
 		"self", "join", "tc-fanout-timeout", "tc-fanout-attempts", "tc-fanout-base-delay", "tc-fanout-max-delay", "tc-fanout-multiplier", "tc-decision-retention", "tc-client-bundle",
 		"s3-sse",
@@ -392,6 +397,11 @@ func bindConfig(cfg *lockd.Config) error {
 	cfg.MaxTTL = viper.GetDuration("max-ttl")
 	cfg.AcquireBlock = viper.GetDuration("acquire-block")
 	cfg.SweeperInterval = viper.GetDuration("sweeper-interval")
+	cfg.TxnReplayInterval = viper.GetDuration("txn-replay-interval")
+	cfg.IdleSweepGrace = viper.GetDuration("idle-sweep-grace")
+	cfg.IdleSweepOpDelay = viper.GetDuration("idle-sweep-op-delay")
+	cfg.IdleSweepMaxOps = viper.GetInt("idle-sweep-max-ops")
+	cfg.IdleSweepMaxRuntime = viper.GetDuration("idle-sweep-max-runtime")
 	cfg.DrainGrace = viper.GetDuration("drain-grace")
 	cfg.DrainGraceSet = true
 	cfg.ShutdownTimeout = viper.GetDuration("shutdown-timeout")

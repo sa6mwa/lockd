@@ -91,6 +91,19 @@ func (s *Service) Attach(ctx context.Context, cmd AttachCommand) (res *AttachRes
 		if err != nil {
 			return nil, err
 		}
+		if meta.Lease != nil && meta.Lease.ExpiresAtUnix <= now.Unix() {
+			leaseErr := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now)
+			if _, _, err := s.clearExpiredLease(ctx, namespace, keyComponent, meta, metaETag, now, true); err != nil {
+				if errors.Is(err, storage.ErrCASMismatch) {
+					continue
+				}
+				return nil, err
+			}
+			if stagedPrepared {
+				_ = s.deleteAttachmentObject(ctx, namespace, stagedKey)
+			}
+			return nil, leaseErr
+		}
 		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now); err != nil {
 			if stagedPrepared {
 				_ = s.deleteAttachmentObject(ctx, namespace, stagedKey)
@@ -241,8 +254,9 @@ func (s *Service) ListAttachments(ctx context.Context, cmd ListAttachmentsComman
 	if err != nil {
 		return nil, Failure{Code: "invalid_key", Detail: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
+	keyComponent := relativeKey(namespace, storageKey)
 
-	meta, _, err := s.ensureMeta(ctx, namespace, storageKey)
+	meta, metaETag, err := s.ensureMeta(ctx, namespace, storageKey)
 	if err != nil {
 		return nil, err
 	}
@@ -262,7 +276,18 @@ func (s *Service) ListAttachments(ctx context.Context, cmd ListAttachmentsComman
 		if strings.TrimSpace(cmd.TxnID) == "" {
 			return nil, Failure{Code: "missing_txn", Detail: "txn_id required", HTTPStatus: http.StatusBadRequest}
 		}
-		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, s.clock.Now()); err != nil {
+		now := s.clock.Now()
+		if meta.Lease != nil && meta.Lease.ExpiresAtUnix <= now.Unix() {
+			leaseErr := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now)
+			if _, _, err := s.clearExpiredLease(ctx, namespace, keyComponent, meta, metaETag, now, true); err != nil {
+				if errors.Is(err, storage.ErrCASMismatch) {
+					return nil, leaseErr
+				}
+				return nil, err
+			}
+			return nil, leaseErr
+		}
+		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now); err != nil {
 			return nil, err
 		}
 		if meta.StagedRemove && meta.StagedTxnID == cmd.TxnID {
@@ -305,12 +330,13 @@ func (s *Service) RetrieveAttachment(ctx context.Context, cmd RetrieveAttachment
 	if err != nil {
 		return nil, Failure{Code: "invalid_key", Detail: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
+	keyComponent := relativeKey(namespace, storageKey)
 	selector, err := normalizeAttachmentSelector(cmd.Selector)
 	if err != nil {
 		return nil, err
 	}
 
-	meta, _, err := s.ensureMeta(ctx, namespace, storageKey)
+	meta, metaETag, err := s.ensureMeta(ctx, namespace, storageKey)
 	if err != nil {
 		return nil, err
 	}
@@ -330,7 +356,18 @@ func (s *Service) RetrieveAttachment(ctx context.Context, cmd RetrieveAttachment
 		if strings.TrimSpace(cmd.TxnID) == "" {
 			return nil, Failure{Code: "missing_txn", Detail: "txn_id required", HTTPStatus: http.StatusBadRequest}
 		}
-		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, s.clock.Now()); err != nil {
+		now := s.clock.Now()
+		if meta.Lease != nil && meta.Lease.ExpiresAtUnix <= now.Unix() {
+			leaseErr := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now)
+			if _, _, err := s.clearExpiredLease(ctx, namespace, keyComponent, meta, metaETag, now, true); err != nil {
+				if errors.Is(err, storage.ErrCASMismatch) {
+					return nil, leaseErr
+				}
+				return nil, err
+			}
+			return nil, leaseErr
+		}
+		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now); err != nil {
 			return nil, err
 		}
 		if meta.StagedRemove && meta.StagedTxnID == cmd.TxnID {
@@ -343,7 +380,6 @@ func (s *Service) RetrieveAttachment(ctx context.Context, cmd RetrieveAttachment
 	if !ok {
 		return nil, Failure{Code: "attachment_not_found", Detail: "attachment not found", HTTPStatus: http.StatusNotFound}
 	}
-	keyComponent := relativeKey(namespace, storageKey)
 	objectKey := ""
 	descriptor := []byte(nil)
 	if entry.staged {
@@ -414,6 +450,16 @@ func (s *Service) DeleteAttachment(ctx context.Context, cmd DeleteAttachmentComm
 		meta, metaETag, err := s.ensureMeta(ctx, namespace, storageKey)
 		if err != nil {
 			return nil, err
+		}
+		if meta.Lease != nil && meta.Lease.ExpiresAtUnix <= now.Unix() {
+			leaseErr := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now)
+			if _, _, err := s.clearExpiredLease(ctx, namespace, keyComponent, meta, metaETag, now, true); err != nil {
+				if errors.Is(err, storage.ErrCASMismatch) {
+					continue
+				}
+				return nil, err
+			}
+			return nil, leaseErr
 		}
 		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now); err != nil {
 			return nil, err
@@ -515,6 +561,16 @@ func (s *Service) DeleteAllAttachments(ctx context.Context, cmd DeleteAllAttachm
 		meta, metaETag, err := s.ensureMeta(ctx, namespace, storageKey)
 		if err != nil {
 			return nil, err
+		}
+		if meta.Lease != nil && meta.Lease.ExpiresAtUnix <= now.Unix() {
+			leaseErr := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now)
+			if _, _, err := s.clearExpiredLease(ctx, namespace, keyComponent, meta, metaETag, now, true); err != nil {
+				if errors.Is(err, storage.ErrCASMismatch) {
+					continue
+				}
+				return nil, err
+			}
+			return nil, leaseErr
 		}
 		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now); err != nil {
 			return nil, err

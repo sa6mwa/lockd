@@ -1042,8 +1042,25 @@ func (s *Store) ListObjects(ctx context.Context, namespace string, opts storage.
 		return nil, fmt.Errorf("disk: list objects: %w", err)
 	}
 
+	walkRoot := objectsDir
+	if strings.HasSuffix(opts.Prefix, "/") && opts.Prefix != "" {
+		trimmed := strings.TrimSuffix(opts.Prefix, "/")
+		if trimmed != "" {
+			if prefixRoot, err := s.objectDataPath(namespace, trimmed); err == nil {
+				if _, err := os.Stat(prefixRoot); err != nil {
+					if errors.Is(err, os.ErrNotExist) {
+						return &storage.ListResult{}, nil
+					}
+					logger.Debug("disk.list_objects.prefix_stat_error", "namespace", namespace, "prefix", opts.Prefix, "error", err)
+					return nil, fmt.Errorf("disk: list objects: %w", err)
+				}
+				walkRoot = prefixRoot
+			}
+		}
+	}
+
 	keys := make([]string, 0, 64)
-	err := filepath.WalkDir(objectsDir, func(p string, d os.DirEntry, walkErr error) error {
+	err := filepath.WalkDir(walkRoot, func(p string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			if errors.Is(walkErr, os.ErrNotExist) {
 				return nil

@@ -93,6 +93,11 @@ type configDefaults struct {
 	MaxTTL                    string   `yaml:"max-ttl"`
 	AcquireBlock              string   `yaml:"acquire-block"`
 	SweeperInterval           string   `yaml:"sweeper-interval"`
+	TxnReplayInterval         string   `yaml:"txn-replay-interval"`
+	IdleSweepGrace            string   `yaml:"idle-sweep-grace"`
+	IdleSweepOpDelay           string   `yaml:"idle-sweep-op-delay"`
+	IdleSweepMaxOps            int      `yaml:"idle-sweep-max-ops"`
+	IdleSweepMaxRuntime        string   `yaml:"idle-sweep-max-runtime"`
 	DrainGrace                string   `yaml:"drain-grace"`
 	ShutdownTimeout           string   `yaml:"shutdown-timeout"`
 	DisableMTLS               bool     `yaml:"disable-mtls"`
@@ -147,6 +152,11 @@ func defaultConfigYAML(overrides ...func(*configDefaults)) ([]byte, error) {
 		MaxTTL:                    lockd.DefaultMaxTTL.String(),
 		AcquireBlock:              lockd.DefaultAcquireBlock.String(),
 		SweeperInterval:           lockd.DefaultSweeperInterval.String(),
+		TxnReplayInterval:         lockd.DefaultTxnReplayInterval.String(),
+		IdleSweepGrace:            lockd.DefaultIdleSweepGrace.String(),
+		IdleSweepOpDelay:           lockd.DefaultIdleSweepOpDelay.String(),
+		IdleSweepMaxOps:            lockd.DefaultIdleSweepMaxOps,
+		IdleSweepMaxRuntime:        lockd.DefaultIdleSweepMaxRuntime.String(),
 		DrainGrace:                lockd.DefaultDrainGrace.String(),
 		ShutdownTimeout:           lockd.DefaultShutdownTimeout.String(),
 		DisableMTLS:               false,

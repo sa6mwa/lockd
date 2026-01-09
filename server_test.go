@@ -1,9 +1,12 @@
 package lockd
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"path"
 	"sync"
 	"testing"
 	"time"
@@ -144,7 +147,7 @@ func TestSweeperClearsExpiredLeases(t *testing.T) {
 	store := memory.New()
 	ctx := context.Background()
 	start := time.Unix(1_700_000_000, 0)
-	expired := start.Add(-time.Minute)
+	expired := start.Add(-2 * time.Hour)
 	namespace := namespaces.Default
 	key := "alpha"
 	meta := &storage.Meta{
@@ -158,9 +161,28 @@ func TestSweeperClearsExpiredLeases(t *testing.T) {
 	if _, err := store.StoreMeta(ctx, namespace, key, meta, ""); err != nil {
 		t.Fatalf("store meta: %v", err)
 	}
+	bucket := expired.UTC().Format("2006010215")
+	bucketList, err := json.Marshal([]string{bucket})
+	if err != nil {
+		t.Fatalf("marshal bucket list: %v", err)
+	}
+	if _, err := store.PutObject(ctx, namespace, path.Join(".lease-index", "buckets.json"), bytes.NewReader(bucketList), storage.PutObjectOptions{
+		ContentType: storage.ContentTypeJSON,
+	}); err != nil {
+		t.Fatalf("store lease index buckets: %v", err)
+	}
+	if _, err := store.PutObject(ctx, namespace, path.Join(".lease-index", bucket, key), bytes.NewReader([]byte("{}")), storage.PutObjectOptions{
+		ContentType: storage.ContentTypeJSON,
+	}); err != nil {
+		t.Fatalf("store lease index entry: %v", err)
+	}
 	cfg := Config{
-		Store:           "mem://",
-		SweeperInterval: time.Second,
+		Store:              "mem://",
+		SweeperInterval:    time.Second,
+		IdleSweepGrace:     time.Nanosecond,
+		IdleSweepOpDelay:   time.Nanosecond,
+		IdleSweepMaxOps:    10,
+		IdleSweepMaxRuntime: time.Second,
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("validate config: %v", err)

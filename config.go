@@ -57,8 +57,18 @@ const (
 	DefaultMaxTTL = 30 * time.Minute
 	// DefaultAcquireBlock controls how long acquire requests block before timing out.
 	DefaultAcquireBlock = 60 * time.Second
-	// DefaultSweeperInterval sets the frequency for background lease reaping.
-	DefaultSweeperInterval = 5 * time.Second
+	// DefaultSweeperInterval sets the tick frequency for idle maintenance sweeps.
+	DefaultSweeperInterval = 5 * time.Minute
+	// DefaultTxnReplayInterval throttles transaction replay sweeps on active operations.
+	DefaultTxnReplayInterval = 5 * time.Second
+	// DefaultIdleSweepGrace controls how long the server must be idle before running maintenance sweeps.
+	DefaultIdleSweepGrace = 5 * time.Minute
+	// DefaultIdleSweepOpDelay pauses between maintenance sweep operations to reduce backend pressure.
+	DefaultIdleSweepOpDelay = 100 * time.Millisecond
+	// DefaultIdleSweepMaxOps caps how many sweep operations execute per run.
+	DefaultIdleSweepMaxOps = 1000
+	// DefaultIdleSweepMaxRuntime caps how long a maintenance sweep run may execute.
+	DefaultIdleSweepMaxRuntime = 30 * time.Second
 	// DefaultDrainGrace is the grace period granted before HTTP shutdown begins.
 	DefaultDrainGrace = 10 * time.Second
 	// DefaultShutdownTimeout caps the total shutdown time (drain + HTTP server).
@@ -182,6 +192,11 @@ type Config struct {
 	MaxTTL                time.Duration
 	AcquireBlock          time.Duration
 	SweeperInterval       time.Duration
+	TxnReplayInterval     time.Duration
+	IdleSweepGrace        time.Duration
+	IdleSweepOpDelay       time.Duration
+	IdleSweepMaxOps        int
+	IdleSweepMaxRuntime    time.Duration
 	DrainGrace            time.Duration
 	DrainGraceSet         bool
 	ShutdownTimeout       time.Duration
@@ -345,6 +360,27 @@ func (c *Config) Validate() error {
 	}
 	if c.SweeperInterval <= 0 {
 		c.SweeperInterval = DefaultSweeperInterval
+	}
+	if c.TxnReplayInterval < 0 {
+		return fmt.Errorf("config: txn replay interval must be >= 0")
+	}
+	if c.TxnReplayInterval <= 0 {
+		c.TxnReplayInterval = DefaultTxnReplayInterval
+		if c.SweeperInterval > 0 && c.SweeperInterval < c.TxnReplayInterval {
+			c.TxnReplayInterval = c.SweeperInterval
+		}
+	}
+	if c.IdleSweepGrace <= 0 {
+		c.IdleSweepGrace = DefaultIdleSweepGrace
+	}
+	if c.IdleSweepOpDelay <= 0 {
+		c.IdleSweepOpDelay = DefaultIdleSweepOpDelay
+	}
+	if c.IdleSweepMaxOps <= 0 {
+		c.IdleSweepMaxOps = DefaultIdleSweepMaxOps
+	}
+	if c.IdleSweepMaxRuntime <= 0 {
+		c.IdleSweepMaxRuntime = DefaultIdleSweepMaxRuntime
 	}
 	if c.DrainGrace < 0 {
 		return fmt.Errorf("config: drain grace must be >= 0")

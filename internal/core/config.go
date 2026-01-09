@@ -38,6 +38,7 @@ type Config struct {
 	AttachmentMaxBytes   int64
 	SpoolThreshold       int64
 	TxnDecisionRetention time.Duration
+	TxnReplayInterval    time.Duration
 	EnforceIdentity      bool
 	MetaWarmup           WarmupConfig
 	StateWarmup          WarmupConfig

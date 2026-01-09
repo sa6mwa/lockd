@@ -87,10 +87,14 @@ func (s *Service) applyTxnDecisionQueueMessage(ctx context.Context, namespace, q
 
 	// Clear the lease metadata to avoid stranding.
 	if meta != nil && meta.Lease != nil {
+		oldExpires := meta.Lease.ExpiresAtUnix
 		meta.Lease = nil
 		meta.UpdatedAtUnix = s.clock.Now().Unix()
 		if _, err := s.store.StoreMeta(ctx, namespace, relKey, meta, metaETag); err != nil && !errors.Is(err, storage.ErrNotFound) {
 			return fmt.Errorf("clear queue lease meta: %w", err)
+		}
+		if err := s.updateLeaseIndex(ctx, namespace, relKey, oldExpires, 0); err != nil && s.logger != nil {
+			s.logger.Warn("lease.index.update_failed", "namespace", namespace, "key", relKey, "error", err)
 		}
 	}
 	return nil
@@ -130,10 +134,14 @@ func (s *Service) applyTxnDecisionQueueState(ctx context.Context, namespace, que
 	}
 
 	if meta != nil && meta.Lease != nil {
+		oldExpires := meta.Lease.ExpiresAtUnix
 		meta.Lease = nil
 		meta.UpdatedAtUnix = s.clock.Now().Unix()
 		if _, err := s.store.StoreMeta(ctx, namespace, relKey, meta, metaETag); err != nil && !errors.Is(err, storage.ErrNotFound) {
 			return fmt.Errorf("clear queue state lease meta: %w", err)
+		}
+		if err := s.updateLeaseIndex(ctx, namespace, relKey, oldExpires, 0); err != nil && s.logger != nil {
+			s.logger.Warn("lease.index.update_failed", "namespace", namespace, "key", relKey, "error", err)
 		}
 	}
 	return nil

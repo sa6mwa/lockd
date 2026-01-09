@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,6 +24,7 @@ import (
 
 	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/internal/clock"
+	"pkt.systems/lockd/internal/core"
 	"pkt.systems/lockd/internal/cryptoutil"
 	"pkt.systems/lockd/internal/httpapi"
 	"pkt.systems/lockd/internal/lsf"
@@ -94,6 +94,9 @@ type Server struct {
 	qrfController *qrf.Controller
 	lsfObserver   *lsf.Observer
 	lsfCancel     context.CancelFunc
+
+	lastActivity   atomic.Int64
+	idleSweepRunning atomic.Bool
 
 	draining      atomic.Bool
 	drainDeadline atomic.Int64
@@ -669,6 +672,7 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 		AcquireBlock:               cfg.AcquireBlock,
 		SpoolMemoryThreshold:       cfg.SpoolMemoryThreshold,
 		TxnDecisionRetention:       cfg.TCDecisionRetention,
+		TxnReplayInterval:          cfg.TxnReplayInterval,
 		EnforceClientIdentity:      cfg.MTLSEnabled(),
 		MetaWarmupAttempts:         -1,
 		StateWarmupAttempts:        -1,
@@ -722,6 +726,12 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 			return httpapi.ShutdownState{Draining: draining, Remaining: remaining, Notify: notify}
 		},
 		DisableHTTPTracing: cfg.DisableHTTPTracing,
+		ActivityHook: func() {
+			if srvRef == nil {
+				return
+			}
+			srvRef.markActivity()
+		},
 	})
 	logger.Info("json compaction configured", "impl", jsonUtil.name)
 	mux := http.NewServeMux()
@@ -790,6 +800,7 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 		srv.defaultCloseOpts = resolveCloseOptions(srv.defaultCloseOpts, o.closeDefaults)
 	}
 	srvRef = srv
+	srv.markActivity()
 	return srv, nil
 }
 
@@ -2050,63 +2061,46 @@ func (s *Server) stopSweeper() {
 }
 
 func (s *Server) sweepExpired(ctx context.Context) error {
-	observed := []string{}
-	if s.handler != nil {
-		observed = s.handler.ObservedNamespaces()
+	if s == nil || s.handler == nil {
+		return nil
 	}
-	if len(observed) == 0 {
-		observed = []string{s.cfg.DefaultNamespace}
-	}
-	now := s.clock.Now().Unix()
-	for _, ns := range observed {
-		relKeys, err := s.backend.ListMetaKeys(ctx, ns)
-		switch {
-		case errors.Is(err, storage.ErrNotImplemented):
-			// Backend cannot list meta keys (object stores that don't expose
-			// directory listings). Skip lease sweeping but still run txn replay.
-			continue
-		case errors.Is(err, storage.ErrNotFound):
-			// Namespace absent/empty – nothing to sweep, keep going so txn
-			// replay can still run.
-			continue
-		case err != nil:
-			return err
-		}
-		sort.Strings(relKeys)
-		for _, rel := range relKeys {
-			namespacedKey := ns + "/" + rel
-			res, err := s.backend.LoadMeta(ctx, ns, rel)
-			if err != nil {
-				if errors.Is(err, storage.ErrNotFound) {
-					continue
-				}
-				s.logger.Warn("sweeper load meta failed", "namespace", ns, "key", namespacedKey, "error", err)
-				continue
-			}
-			meta := res.Meta
-			etag := res.ETag
-			if meta.Lease == nil {
-				continue
-			}
-			if meta.Lease.ExpiresAtUnix > now {
-				continue
-			}
-			meta.Lease = nil
-			meta.UpdatedAtUnix = now
-			if _, err := s.backend.StoreMeta(ctx, ns, rel, meta, etag); err != nil {
-				if errors.Is(err, storage.ErrCASMismatch) {
-					continue
-				}
-				s.logger.Warn("sweeper store meta failed", "namespace", ns, "key", namespacedKey, "error", err)
-			}
+	now := s.clock.Now()
+	last := s.lastActivity.Load()
+	if last > 0 {
+		lastAt := time.Unix(0, last)
+		if now.Sub(lastAt) < s.cfg.IdleSweepGrace {
+			return nil
 		}
 	}
-	if s.handler != nil {
-		if err := s.handler.SweepTransactions(ctx, s.clock.Now()); err != nil && !errors.Is(err, storage.ErrNotImplemented) {
-			s.logger.Warn("sweeper txn replay failed", "error", err)
-		}
+	if !s.idleSweepRunning.CompareAndSwap(false, true) {
+		return nil
+	}
+	defer s.idleSweepRunning.Store(false)
+
+	start := now
+	opts := core.IdleSweepOptions{
+		Now:        start,
+		MaxOps:     s.cfg.IdleSweepMaxOps,
+		MaxRuntime: s.cfg.IdleSweepMaxRuntime,
+		OpDelay:    s.cfg.IdleSweepOpDelay,
+		ShouldStop: func() bool {
+			latest := s.lastActivity.Load()
+			return latest > 0 && latest > start.UnixNano()
+		},
+	}
+	if err := s.handler.SweepIdleMaintenance(ctx, opts); err != nil && !errors.Is(err, storage.ErrNotImplemented) {
+		s.logger.Warn("sweeper idle maintenance failed", "error", err)
+		return err
 	}
 	return nil
+}
+
+func (s *Server) markActivity() {
+	if s == nil {
+		return
+	}
+	now := s.clock.Now().UnixNano()
+	s.lastActivity.Store(now)
 }
 
 func (s *Server) recordServeErr(err error) {

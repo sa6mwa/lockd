@@ -143,28 +143,16 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (res *Acquire
 			creationMu = s.creationMutex(storageKey)
 			creationMu.Lock()
 		}
+		oldExpires := int64(0)
 		if meta.Lease != nil && meta.Lease.ExpiresAtUnix <= now.Unix() {
+			oldExpires = meta.Lease.ExpiresAtUnix
 			meta.Lease = nil
 		}
 		// If the lease is gone but staging remains, roll it back before granting
 		// a new lease to avoid resurfacing stale staged payloads after restarts.
 		if meta.Lease == nil && meta.StagedTxnID != "" {
-			if meta.StagedStateETag != "" {
-				_ = s.staging.DiscardStagedState(ctx, namespace, keyComponent, meta.StagedTxnID, storage.DiscardStagedOptions{IgnoreNotFound: true})
-			}
-			if len(meta.StagedAttachments) > 0 {
-				discardStagedAttachments(ctx, s.store, namespace, keyComponent, meta.StagedTxnID, meta.StagedAttachments)
-			}
-			meta.StagedTxnID = ""
-			meta.StagedVersion = 0
-			meta.StagedStateETag = ""
-			meta.StagedStateDescriptor = nil
-			meta.StagedStatePlaintextBytes = 0
-			meta.StagedAttributes = nil
-			meta.StagedRemove = false
-			meta.StagedAttachments = nil
-			meta.StagedAttachmentDeletes = nil
-			meta.StagedAttachmentsClear = false
+			s.discardStagedArtifacts(ctx, namespace, keyComponent, meta)
+			clearStagingFields(meta)
 		}
 		if meta.Lease != nil && meta.Lease.ExpiresAtUnix > now.Unix() {
 			if creationMu != nil {
@@ -219,6 +207,9 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (res *Acquire
 				continue
 			}
 			return nil, fmt.Errorf("store meta: %w", err)
+		}
+		if err := s.updateLeaseIndex(ctx, namespace, keyComponent, oldExpires, meta.Lease.ExpiresAtUnix); err != nil && s.logger != nil {
+			s.logger.Warn("lease.index.update_failed", "namespace", namespace, "key", keyComponent, "error", err)
 		}
 		if creationMu != nil {
 			creationMu.Unlock()
@@ -310,6 +301,16 @@ func (s *Service) KeepAlive(ctx context.Context, cmd KeepAliveCommand) (res *Kee
 		if err != nil {
 			return nil, err
 		}
+		if meta.Lease != nil && meta.Lease.ExpiresAtUnix <= now.Unix() {
+			leaseErr := validateLease(meta, cmd.LeaseID, cmd.FencingToken, requestTxn, now)
+			if _, _, err := s.clearExpiredLease(ctx, namespace, keyComponent, meta, metaETag, now, true); err != nil {
+				if errors.Is(err, storage.ErrCASMismatch) {
+					continue
+				}
+				return nil, err
+			}
+			return nil, leaseErr
+		}
 		metaTxn := ""
 		if meta.Lease != nil {
 			metaTxn = meta.Lease.TxnID
@@ -317,6 +318,7 @@ func (s *Service) KeepAlive(ctx context.Context, cmd KeepAliveCommand) (res *Kee
 		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, requestTxn, now); err != nil {
 			return nil, err
 		}
+		oldExpires := meta.Lease.ExpiresAtUnix
 		meta.Lease.ExpiresAtUnix = now.Add(ttl).Unix()
 		meta.UpdatedAtUnix = now.Unix()
 
@@ -335,6 +337,9 @@ func (s *Service) KeepAlive(ctx context.Context, cmd KeepAliveCommand) (res *Kee
 			"expires_at", meta.Lease.ExpiresAtUnix,
 			"fencing", meta.Lease.FencingToken,
 		)
+		if err := s.updateLeaseIndex(ctx, namespace, keyComponent, oldExpires, meta.Lease.ExpiresAtUnix); err != nil && s.logger != nil {
+			s.logger.Warn("lease.index.update_failed", "namespace", namespace, "key", keyComponent, "error", err)
+		}
 		res = &KeepAliveResult{
 			ExpiresAt:    meta.Lease.ExpiresAtUnix,
 			FencingToken: meta.Lease.FencingToken,
@@ -389,6 +394,15 @@ func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (res *Release
 		meta, metaETag, err := s.loadMetaMaybeCached(ctx, namespace, storageKey, cmd.KnownMeta, cmd.KnownMetaETag)
 		if err != nil {
 			return nil, err
+		}
+		if meta.Lease != nil && meta.Lease.ExpiresAtUnix <= now.Unix() {
+			if _, _, err := s.clearExpiredLease(ctx, namespace, keyComponent, meta, metaETag, now, true); err != nil {
+				if errors.Is(err, storage.ErrCASMismatch) {
+					continue
+				}
+				return nil, err
+			}
+			return &ReleaseResult{Released: true, MetaCleared: true}, nil
 		}
 		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now); err != nil {
 			// Idempotent: mismatched/expired/fencing issues are treated as already released.

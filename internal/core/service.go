@@ -32,6 +32,7 @@ type Service struct {
 	attachmentMaxBytes     int64
 	spoolThreshold         int64
 	txnDecisionRetention   time.Duration
+	txnReplayInterval      time.Duration
 	defaultNamespaceConfig namespaces.Config
 	logger                 pslog.Logger
 	clock                  clock.Clock
@@ -55,6 +56,14 @@ type Service struct {
 	leaseMetrics       *leaseMetrics
 	attachmentMetrics  *attachmentMetrics
 	tcDecider          TCDecider
+
+	leaseBucketCache    sync.Map
+	decisionBucketCache sync.Map
+	leaseSweepCursors   sync.Map
+	decisionSweepCursor sweepCursor
+	txnSweepCursor      sweepCursor
+	txnReplayRunning    atomic.Bool
+	txnReplayLast       atomic.Int64
 }
 
 // New constructs the core Service with sane defaults.
@@ -101,6 +110,7 @@ func New(cfg Config) *Service {
 		attachmentMaxBytes:     cfg.AttachmentMaxBytes,
 		spoolThreshold:         cfg.SpoolThreshold,
 		txnDecisionRetention:   cfg.TxnDecisionRetention,
+		txnReplayInterval:      cfg.TxnReplayInterval,
 		defaultNamespaceConfig: defaultCfg,
 		logger:                 logger,
 		clock:                  clk,

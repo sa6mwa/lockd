@@ -54,6 +54,8 @@ func (s *Service) Get(ctx context.Context, cmd GetCommand) (*GetResult, error) {
 	finish := s.beginLockOp()
 	defer finish()
 
+	s.maybeReplayTxnRecords(ctx)
+
 	namespace, err := s.resolveNamespace(cmd.Namespace)
 	if err != nil {
 		return nil, Failure{Code: "invalid_namespace", Detail: err.Error(), HTTPStatus: http.StatusBadRequest}
@@ -67,10 +69,11 @@ func (s *Service) Get(ctx context.Context, cmd GetCommand) (*GetResult, error) {
 		return nil, Failure{Code: "invalid_key", Detail: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
 
-	meta, _, err := s.ensureMeta(ctx, namespace, storageKey)
+	meta, metaETag, err := s.ensureMeta(ctx, namespace, storageKey)
 	if err != nil {
 		return nil, err
 	}
+	relKey := relativeKey(namespace, storageKey)
 	publishedVersion := meta.PublishedVersion
 	if publishedVersion == 0 {
 		publishedVersion = meta.Version
@@ -96,12 +99,21 @@ func (s *Service) Get(ctx context.Context, cmd GetCommand) (*GetResult, error) {
 		if cmd.LeaseID == "" {
 			return nil, Failure{Code: "missing_params", Detail: "lease_id required (or use public=1)", HTTPStatus: http.StatusBadRequest}
 		}
-		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, txnID, s.clock.Now()); err != nil {
+		now := s.clock.Now()
+		if meta.Lease != nil && meta.Lease.ExpiresAtUnix <= now.Unix() {
+			leaseErr := validateLease(meta, cmd.LeaseID, cmd.FencingToken, txnID, now)
+			if _, _, err := s.clearExpiredLease(ctx, namespace, relKey, meta, metaETag, now, true); err != nil {
+				if errors.Is(err, storage.ErrCASMismatch) {
+					return nil, leaseErr
+				}
+				return nil, err
+			}
+			return nil, leaseErr
+		}
+		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, txnID, now); err != nil {
 			return nil, err
 		}
 	}
-
-	relKey := relativeKey(namespace, storageKey)
 	if meta.StagedTxnID != "" && meta.StagedTxnID == txnID {
 		if meta.StagedRemove {
 			return &GetResult{NoContent: true, Public: publicRead, Meta: meta, PublishedVersion: publishedVersion}, nil

@@ -124,6 +124,7 @@ type Handler struct {
 	stateWarmupMax         time.Duration
 	pendingDeliveries      *core.PendingDeliveries
 	shutdownState          func() ShutdownState
+	activityHook           func()
 	httpTracingEnabled     bool
 	tcAuthEnabled          bool
 	tcTrustPool            *x509.CertPool
@@ -428,6 +429,7 @@ type Config struct {
 	AcquireBlock               time.Duration
 	SpoolMemoryThreshold       int64
 	TxnDecisionRetention       time.Duration
+	TxnReplayInterval          time.Duration
 	EnforceClientIdentity      bool
 	MetaWarmupAttempts         int
 	MetaWarmupInitialDelay     time.Duration
@@ -442,6 +444,7 @@ type Config struct {
 	LSFObserver                *lsf.Observer
 	QRFController              *qrf.Controller
 	ShutdownState              func() ShutdownState
+	ActivityHook               func()
 	NamespaceTracker           *NamespaceTracker
 	DisableHTTPTracing         bool
 	TCAuthEnabled              bool
@@ -616,6 +619,7 @@ func New(cfg Config) *Handler {
 		AttachmentMaxBytes:     cfg.AttachmentMaxBytes,
 		SpoolThreshold:         threshold,
 		TxnDecisionRetention:   cfg.TxnDecisionRetention,
+		TxnReplayInterval:      cfg.TxnReplayInterval,
 		EnforceIdentity:        cfg.EnforceClientIdentity,
 		MetaWarmup: core.WarmupConfig{
 			Attempts: metaWarmupAttempts,
@@ -742,6 +746,7 @@ func New(cfg Config) *Handler {
 		stateWarmupInitial:     stateWarmupInitial,
 		stateWarmupMax:         stateWarmupMax,
 		shutdownState:          cfg.ShutdownState,
+		activityHook:           cfg.ActivityHook,
 		namespaceTracker:       tracker,
 		pendingDeliveries:      core.NewPendingDeliveries(),
 		httpTracingEnabled:     !cfg.DisableHTTPTracing,
@@ -830,6 +835,9 @@ func (h *Handler) wrap(operation string, fn handlerFunc) http.Handler {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		ctx := r.Context()
+		if h.activityHook != nil {
+			h.activityHook()
+		}
 		reqID := uuidv7.NewString()
 		instrument := h.httpTracingEnabled
 		var span trace.Span
@@ -1283,6 +1291,14 @@ func (h *Handler) SweepTransactions(ctx context.Context, now time.Time) error {
 		return nil
 	}
 	return h.core.SweepTxnRecords(ctx, now)
+}
+
+// SweepIdleMaintenance runs low-impact maintenance sweeping when the server is idle.
+func (h *Handler) SweepIdleMaintenance(ctx context.Context, opts core.IdleSweepOptions) error {
+	if h == nil || h.core == nil {
+		return nil
+	}
+	return h.core.SweepIdle(ctx, opts)
 }
 
 type httpError struct {

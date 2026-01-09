@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path"
 	"sort"
 	"strings"
 	"time"
@@ -16,8 +17,11 @@ import (
 )
 
 const (
-	txnNamespace         = ".txns"
-	txnDecisionNamespace = ".txn-decisions"
+	txnNamespace              = ".txns"
+	txnDecisionNamespace      = ".txn-decisions"
+	txnDecisionMarkerPrefix   = "m"
+	txnDecisionIndexPrefix    = "e"
+	txnDecisionBucketsKey     = "buckets.json"
 )
 
 type txnDecisionMarker struct {
@@ -28,8 +32,16 @@ type txnDecisionMarker struct {
 	UpdatedAtUnix int64    `json:"updated_at_unix,omitempty"`
 }
 
+func txnDecisionMarkerKey(txnID string) string {
+	return path.Join(txnDecisionMarkerPrefix, txnID)
+}
+
+func txnDecisionIndexKey(bucket, txnID string) string {
+	return path.Join(txnDecisionIndexPrefix, bucket, txnID)
+}
+
 func (s *Service) loadTxnDecisionMarker(ctx context.Context, txnID string) (*txnDecisionMarker, string, error) {
-	obj, err := s.store.GetObject(ctx, txnDecisionNamespace, txnID)
+	obj, err := s.store.GetObject(ctx, txnDecisionNamespace, txnDecisionMarkerKey(txnID))
 	if err != nil {
 		return nil, "", err
 	}
@@ -41,6 +53,10 @@ func (s *Service) loadTxnDecisionMarker(ctx context.Context, txnID string) (*txn
 	if marker.TxnID == "" {
 		marker.TxnID = txnID
 	}
+	if marker.ExpiresAtUnix > 0 && marker.ExpiresAtUnix <= s.clock.Now().Unix() {
+		_ = s.deleteTxnDecisionMarker(ctx, &marker)
+		return nil, "", storage.ErrNotFound
+	}
 	return &marker, obj.Info.ETag, nil
 }
 
@@ -49,7 +65,7 @@ func (s *Service) putTxnDecisionMarker(ctx context.Context, marker *txnDecisionM
 	if err := json.NewEncoder(buf).Encode(marker); err != nil {
 		return "", err
 	}
-	info, err := s.store.PutObject(ctx, txnDecisionNamespace, marker.TxnID, bytes.NewReader(buf.Bytes()), storage.PutObjectOptions{
+	info, err := s.store.PutObject(ctx, txnDecisionNamespace, txnDecisionMarkerKey(marker.TxnID), bytes.NewReader(buf.Bytes()), storage.PutObjectOptions{
 		ExpectedETag: expectedETag,
 		ContentType:  storage.ContentTypeJSON,
 	})
@@ -278,6 +294,7 @@ func (s *Service) writeDecisionMarker(ctx context.Context, rec *TxnRecord) error
 			}
 		}
 		if existing != nil {
+			oldExpires := existing.ExpiresAtUnix
 			if existing.State != "" && existing.State != marker.State {
 				if rec.TCTerm != 0 || existing.TCTerm != 0 {
 					return Failure{Code: "txn_conflict", Detail: "transaction already decided", HTTPStatus: http.StatusConflict}
@@ -290,6 +307,19 @@ func (s *Service) writeDecisionMarker(ctx context.Context, rec *TxnRecord) error
 			if existing.ExpiresAtUnix > marker.ExpiresAtUnix {
 				marker.ExpiresAtUnix = existing.ExpiresAtUnix
 			}
+			if _, err := s.putTxnDecisionMarker(ctx, &marker, etag); err != nil {
+				if errors.Is(err, storage.ErrCASMismatch) {
+					continue
+				}
+				if errors.Is(err, storage.ErrNotImplemented) {
+					return nil
+				}
+				return err
+			}
+			if err := s.updateDecisionIndex(ctx, marker.TxnID, oldExpires, marker.ExpiresAtUnix); err != nil && s.logger != nil {
+				s.logger.Warn("txn.decision.index.update_failed", "txn_id", marker.TxnID, "error", err)
+			}
+			return nil
 		}
 		if _, err := s.putTxnDecisionMarker(ctx, &marker, etag); err != nil {
 			if errors.Is(err, storage.ErrCASMismatch) {
@@ -299,6 +329,9 @@ func (s *Service) writeDecisionMarker(ctx context.Context, rec *TxnRecord) error
 				return nil
 			}
 			return err
+		}
+		if err := s.updateDecisionIndex(ctx, marker.TxnID, 0, marker.ExpiresAtUnix); err != nil && s.logger != nil {
+			s.logger.Warn("txn.decision.index.update_failed", "txn_id", marker.TxnID, "error", err)
 		}
 		return nil
 	}
@@ -973,6 +1006,10 @@ func (s *Service) applyTxnDecisionForMeta(ctx context.Context, namespace, key, t
 		}
 		now := s.clock.Now()
 		if !commit {
+			oldExpires := int64(0)
+			if meta.Lease != nil {
+				oldExpires = meta.Lease.ExpiresAtUnix
+			}
 			if meta.StagedStateETag != "" {
 				_ = s.staging.DiscardStagedState(ctx, namespace, key, meta.StagedTxnID, storage.DiscardStagedOptions{IgnoreNotFound: true})
 			}
@@ -997,6 +1034,9 @@ func (s *Service) applyTxnDecisionForMeta(ctx context.Context, namespace, key, t
 					continue
 				}
 				return err
+			}
+			if err := s.updateLeaseIndex(ctx, namespace, key, oldExpires, 0); err != nil && s.logger != nil {
+				s.logger.Warn("lease.index.update_failed", "namespace", namespace, "key", key, "error", err)
 			}
 			return nil
 		}
@@ -1251,6 +1291,10 @@ func (s *Service) applyTxnDecisionForMeta(ctx context.Context, namespace, key, t
 			}
 		}
 
+		oldExpires := int64(0)
+		if meta.Lease != nil {
+			oldExpires = meta.Lease.ExpiresAtUnix
+		}
 		meta.StagedTxnID = ""
 		meta.StagedVersion = 0
 		meta.StagedStateETag = ""
@@ -1270,6 +1314,9 @@ func (s *Service) applyTxnDecisionForMeta(ctx context.Context, namespace, key, t
 				continue
 			}
 			return err
+		}
+		if err := s.updateLeaseIndex(ctx, namespace, key, oldExpires, 0); err != nil && s.logger != nil {
+			s.logger.Warn("lease.index.update_failed", "namespace", namespace, "key", key, "error", err)
 		}
 		return nil
 	}
@@ -1542,44 +1589,13 @@ func (s *Service) sweepTxnDecisionMarkers(ctx context.Context, now time.Time) (i
 	if s == nil {
 		return 0, 0, nil
 	}
-	var deleted int
-	var failed int
-	startAfter := ""
-	for {
-		list, err := s.store.ListObjects(ctx, txnDecisionNamespace, storage.ListOptions{StartAfter: startAfter, Limit: 128})
-		if err != nil {
-			if errors.Is(err, storage.ErrNotFound) || errors.Is(err, storage.ErrNotImplemented) {
-				return deleted, failed, nil
-			}
-			return deleted, failed, err
-		}
-		for _, obj := range list.Objects {
-			marker, _, err := s.loadTxnDecisionMarker(ctx, obj.Key)
-			if err != nil {
-				if errors.Is(err, storage.ErrNotFound) {
-					continue
-				}
-				if errors.Is(err, storage.ErrNotImplemented) {
-					return deleted, failed, nil
-				}
-				failed++
-				continue
-			}
-			if marker.ExpiresAtUnix <= 0 || marker.ExpiresAtUnix > now.Unix() {
-				continue
-			}
-			if err := s.store.DeleteObject(ctx, txnDecisionNamespace, marker.TxnID, storage.DeleteObjectOptions{}); err != nil {
-				if errors.Is(err, storage.ErrNotFound) || errors.Is(err, storage.ErrNotImplemented) {
-					continue
-				}
-				failed++
-				continue
-			}
-			deleted++
-		}
-		if !list.Truncated {
-			return deleted, failed, nil
-		}
-		startAfter = list.NextStartAfter
+	budget := newSweepBudget(s.clock, IdleSweepOptions{
+		Now:        now,
+		MaxOps:     128,
+		MaxRuntime: 2 * time.Second,
+	})
+	if err := s.sweepDecisionIndex(ctx, budget); err != nil {
+		return 0, 0, err
 	}
+	return 0, 0, nil
 }

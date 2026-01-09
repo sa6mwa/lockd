@@ -82,6 +82,13 @@ On any operation that needs a decision:
 
 This ensures the decision set stays correct and bounded for active IDs.
 
+### Txn records (queue replay)
+
+Queue dequeue operations perform a **small, throttled replay sweep** of txn
+records to ensure recovery completes even under active traffic. The sweep is
+bounded (max ops/runtime) and rate-limited (minimum interval) so it does not
+devolve into a full scan or overwhelm the backend.
+
 ## Idle sweeper (maintenance only)
 
 ### Trigger

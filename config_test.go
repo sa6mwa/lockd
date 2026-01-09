@@ -31,6 +31,12 @@ func TestConfigValidateDefaults(t *testing.T) {
 	if cfg.AcquireBlock <= 0 {
 		t.Fatal("expected acquire block default")
 	}
+	if cfg.SweeperInterval != DefaultSweeperInterval {
+		t.Fatalf("expected sweeper interval default %s, got %s", DefaultSweeperInterval, cfg.SweeperInterval)
+	}
+	if cfg.TxnReplayInterval != DefaultTxnReplayInterval {
+		t.Fatalf("expected txn replay interval default %s, got %s", DefaultTxnReplayInterval, cfg.TxnReplayInterval)
+	}
 	if cfg.HTTP2MaxConcurrentStreams != DefaultMaxConcurrentStreams {
 		t.Fatalf("expected http2 max concurrent streams default %d, got %d", DefaultMaxConcurrentStreams, cfg.HTTP2MaxConcurrentStreams)
 	}
@@ -82,6 +88,23 @@ func TestConfigValidateErrors(t *testing.T) {
 	cfg = Config{Store: "mem://", DefaultNamespace: "Invalid Space"}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected error for invalid default namespace")
+	}
+	cfg = Config{Store: "mem://", TxnReplayInterval: -1}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for negative txn replay interval")
+	}
+}
+
+func TestConfigTxnReplayIntervalDefaultsToSweeper(t *testing.T) {
+	cfg := Config{
+		Store:           "mem://",
+		SweeperInterval: 2 * time.Second,
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if cfg.TxnReplayInterval != cfg.SweeperInterval {
+		t.Fatalf("expected txn replay interval %s, got %s", cfg.SweeperInterval, cfg.TxnReplayInterval)
 	}
 }
 

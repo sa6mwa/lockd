@@ -105,6 +105,16 @@ func (s *Service) Update(ctx context.Context, cmd UpdateCommand) (*UpdateResult,
 		if err != nil {
 			return nil, err
 		}
+		if meta.Lease != nil && meta.Lease.ExpiresAtUnix <= now.Unix() {
+			leaseErr := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now)
+			if _, _, err := s.clearExpiredLease(ctx, namespace, keyComponent, meta, metaETag, now, true); err != nil {
+				if errors.Is(err, storage.ErrCASMismatch) {
+					continue
+				}
+				return nil, err
+			}
+			return nil, leaseErr
+		}
 		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now); err != nil {
 			return nil, err
 		}
@@ -225,6 +235,16 @@ func (s *Service) Remove(ctx context.Context, cmd RemoveCommand) (*RemoveResult,
 		if err != nil {
 			return nil, err
 		}
+		if meta.Lease != nil && meta.Lease.ExpiresAtUnix <= now.Unix() {
+			leaseErr := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now)
+			if _, _, err := s.clearExpiredLease(ctx, namespace, keyComponent, meta, metaETag, now, true); err != nil {
+				if errors.Is(err, storage.ErrCASMismatch) {
+					continue
+				}
+				return nil, err
+			}
+			return nil, leaseErr
+		}
 		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now); err != nil {
 			return nil, err
 		}
@@ -339,6 +359,16 @@ func (s *Service) Metadata(ctx context.Context, cmd MetadataCommand) (*MetadataR
 		meta, metaETag, err := s.loadMetaMaybeCached(ctx, namespace, storageKey, cmd.KnownMeta, cmd.KnownMetaETag)
 		if err != nil {
 			return nil, err
+		}
+		if meta.Lease != nil && meta.Lease.ExpiresAtUnix <= now.Unix() {
+			leaseErr := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now)
+			if _, _, err := s.clearExpiredLease(ctx, namespace, keyComponent, meta, metaETag, now, true); err != nil {
+				if errors.Is(err, storage.ErrCASMismatch) {
+					continue
+				}
+				return nil, err
+			}
+			return nil, leaseErr
 		}
 		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now); err != nil {
 			return nil, err

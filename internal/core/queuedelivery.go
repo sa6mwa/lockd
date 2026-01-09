@@ -690,10 +690,17 @@ func (s *Service) releaseLeaseWithMeta(ctx context.Context, namespace, key strin
 	}
 	relKey := relativeKey(namespace, key)
 	metaCopy := *meta
+	oldExpires := int64(0)
+	if metaCopy.Lease != nil {
+		oldExpires = metaCopy.Lease.ExpiresAtUnix
+	}
 	metaCopy.Lease = nil
 	metaCopy.UpdatedAtUnix = s.clock.Now().Unix()
 	if _, err := s.store.StoreMeta(ctx, namespace, relKey, &metaCopy, metaETag); err != nil && !errors.Is(err, storage.ErrNotFound) {
 		return err
+	}
+	if err := s.updateLeaseIndex(ctx, namespace, relKey, oldExpires, 0); err != nil && s.logger != nil {
+		s.logger.Warn("lease.index.update_failed", "namespace", namespace, "key", relKey, "error", err)
 	}
 	return nil
 }

@@ -865,14 +865,14 @@ func (s *Store) WriteState(ctx context.Context, namespace, key string, body io.R
 				logger.Debug("disk.write_state.sync_error", "key", key, "error", err)
 				return nil, err
 			}
-			if err := tempFile.Close(); err != nil {
+			if err := tempFile.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
 				logger.Debug("disk.write_state.close_error", "key", key, "error", err)
 				return nil, err
 			}
 		}
 	}
 	if walEnabled {
-		if err := tempFile.Close(); err != nil {
+		if err := tempFile.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
 			logger.Debug("disk.write_state.close_error", "key", key, "error", err)
 			return nil, err
 		}
@@ -1364,7 +1364,7 @@ func (s *Store) PutObject(ctx context.Context, namespace, key string, body io.Re
 			return nil, fmt.Errorf("disk: sync object %q: %w", key, err)
 		}
 	}
-	if err := tmp.Close(); err != nil {
+	if err := tmp.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
 		return nil, fmt.Errorf("disk: close object %q: %w", key, err)
 	}
 	dataSize := written

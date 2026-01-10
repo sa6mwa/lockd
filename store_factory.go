@@ -400,6 +400,7 @@ func BuildDiskConfig(cfg Config) (DiskConfigResult, error) {
 		Retention:       cfg.DiskRetention,
 		JanitorInterval: cfg.DiskJanitorInterval,
 		QueueWatch:      cfg.DiskQueueWatch,
+		DisableWAL:      cfg.DisableWAL,
 	}
 	return DiskConfigResult{Config: cfgDisk, Root: root}, nil
 }

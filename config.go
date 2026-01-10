@@ -198,6 +198,7 @@ type Config struct {
 	DiskRetention             time.Duration
 	DiskJanitorInterval       time.Duration
 	DiskQueueWatch            bool
+	DisableWAL                bool
 	DisableMemQueueWatch      bool
 	DefaultTTL                time.Duration
 	MaxTTL                    time.Duration

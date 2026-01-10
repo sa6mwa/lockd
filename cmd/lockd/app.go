@@ -253,6 +253,7 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 	flags.Duration("disk-retention", 0, "optional retention window for disk backend (0 keeps state indefinitely)")
 	flags.Duration("disk-janitor-interval", 0, "override janitor sweep interval for disk backend (default derived from retention)")
 	flags.Bool("disk-queue-watch", true, "enable inotify-based queue events for disk backend (Linux only; falls back to polling on unsupported filesystems)")
+	flags.Bool("disable-wal", false, "disable WAL for disk/NFS backends (ignored by non-disk backends)")
 	flags.Bool("disable-mem-queue-watch", false, "disable in-memory queue change notifications")
 	flags.Bool("disable-storage-encryption", false, "disable kryptograf envelope encryption (plaintext at rest)")
 	flags.Bool("storage-encryption-snappy", false, "enable Snappy compression before encrypting objects")
@@ -338,6 +339,7 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 		"config",
 		"listen", "listen-proto", "metrics-listen", "pprof-listen", "enable-profiling-metrics", "store", "default-namespace", "json-max", "json-util", "payload-spool-mem", "default-ttl", "max-ttl", "acquire-block",
 		"sweeper-interval", "txn-replay-interval", "idle-sweep-grace", "idle-sweep-op-delay", "idle-sweep-max-ops", "idle-sweep-max-runtime", "drain-grace", "shutdown-timeout", "disk-retention", "disk-janitor-interval",
+		"disable-wal",
 		"disable-mtls", "http2-max-concurrent-streams", "bundle", "denylist-path", "tc-trust-dir", "tc-disable-auth", "tc-allow-default-ca",
 		"self", "join", "tc-fanout-timeout", "tc-fanout-attempts", "tc-fanout-base-delay", "tc-fanout-max-delay", "tc-fanout-multiplier", "tc-decision-retention", "tc-client-bundle",
 		"s3-sse",
@@ -417,6 +419,7 @@ func bindConfig(cfg *lockd.Config) error {
 	cfg.ShutdownTimeoutSet = true
 	cfg.DiskRetention = viper.GetDuration("disk-retention")
 	cfg.DiskJanitorInterval = viper.GetDuration("disk-janitor-interval")
+	cfg.DisableWAL = viper.GetBool("disable-wal")
 	cfg.DisableMTLS = viper.GetBool("disable-mtls")
 	if viper.IsSet("mtls") {
 		cfg.DisableMTLS = !viper.GetBool("mtls")

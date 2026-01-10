@@ -32,6 +32,16 @@
 //	    }
 //	}()
 //
+// Disk/NFS backends enable a write-ahead log (WAL) by default to reduce fsync
+// overhead. Disable it only if you need legacy behavior:
+//
+//	cfg := lockd.Config{
+//	    Store:      "disk:///var/lib/lockd-data",
+//	    DisableWAL: true, // disk/NFS only; ignored by other backends
+//	}
+//
+// The CLI mirrors this with `--disable-wal` (disk/NFS only).
+//
 // Namespaces partition keys and metadata. When callers omit the namespace, the
 // server falls back to `Config.DefaultNamespace` (default "default"). Setting
 // the field on `Config`, providing `Namespace` in `api.AcquireRequest`, or

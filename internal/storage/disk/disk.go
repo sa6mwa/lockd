@@ -34,6 +34,7 @@ type Config struct {
 	Now             func() time.Time
 	QueueWatch      bool
 	Crypto          *storage.Crypto
+	DisableWAL      bool
 }
 
 // Store implements storage.Backend backed by the local filesystem.
@@ -43,6 +44,9 @@ type Store struct {
 	janitorInterval time.Duration
 	now             func() time.Time
 	crypto          *storage.Crypto
+	walEnabled      bool
+	walMu           sync.Mutex
+	walByNamespace  map[string]*walStore
 
 	locks sync.Map
 
@@ -115,6 +119,8 @@ func New(cfg Config) (*Store, error) {
 		janitorInterval: cfg.JanitorInterval,
 		now:             cfg.Now,
 		crypto:          cfg.Crypto,
+		walEnabled:      !cfg.DisableWAL,
+		walByNamespace:  make(map[string]*walStore),
 	}
 	s.queueWatchMode = "polling"
 	s.queueWatchReason = "config_disabled"
@@ -176,6 +182,13 @@ func (s *Store) Close() error {
 		close(s.stopJanitor)
 		<-s.doneJanitor
 	}
+	s.walMu.Lock()
+	for _, wal := range s.walByNamespace {
+		if wal != nil {
+			_ = wal.close()
+		}
+	}
+	s.walMu.Unlock()
 	return nil
 }
 
@@ -219,6 +232,10 @@ func (s *Store) namespaceLocksDir(namespace string) string {
 
 func (s *Store) namespaceTmpDir(namespace string) string {
 	return s.namespacePath(namespace, "tmp")
+}
+
+func (s *Store) namespaceWalDir(namespace string) string {
+	return s.namespacePath(namespace, "wal")
 }
 
 func (s *Store) encodeKey(namespace, key string) (string, string, error) {
@@ -506,7 +523,24 @@ func (s *Store) StoreMeta(ctx context.Context, namespace, key string, meta *stor
 		logger.Debug("disk.store_meta.mkdir_error", "key", key, "dir", filepath.Dir(metaFile), "error", err)
 		return "", err
 	}
-	if err := s.writeBytesAtomic(namespace, metaFile, payload, "meta"); err != nil {
+	apply := func() error {
+		if s.walEnabled {
+			return s.writeBytesAtomicNoSync(ns, metaFile, payload, "meta")
+		}
+		return s.writeBytesAtomic(ns, metaFile, payload, "meta")
+	}
+	if s.walEnabled {
+		rel, err := s.walRelPath(ns, metaFile)
+		if err != nil {
+			logger.Debug("disk.store_meta.wal_path_error", "key", key, "error", err)
+			return "", err
+		}
+		entry := walEntry{op: walOpWrite, path: rel, data: payload}
+		if err := s.withWAL(ns, []walEntry{entry}, apply); err != nil {
+			logger.Debug("disk.store_meta.wal_error", "key", key, "error", err)
+			return "", err
+		}
+	} else if err := apply(); err != nil {
 		logger.Debug("disk.store_meta.write_error", "key", key, "error", err)
 		return "", err
 	}
@@ -560,8 +594,32 @@ func (s *Store) DeleteMeta(ctx context.Context, namespace, key string, expectedE
 		}
 	}
 	metaFile := s.metaPath(ns, encoded)
-	if err := os.Remove(metaFile); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+	apply := func() error {
+		if err := os.Remove(metaFile); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return storage.ErrNotFound
+			}
+			return err
+		}
+		return nil
+	}
+	if s.walEnabled {
+		rel, err := s.walRelPath(ns, metaFile)
+		if err != nil {
+			logger.Debug("disk.delete_meta.wal_path_error", "key", key, "error", err)
+			return err
+		}
+		entry := walEntry{op: walOpDelete, path: rel}
+		if err := s.withWAL(ns, []walEntry{entry}, apply); err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				logger.Debug("disk.delete_meta.not_found", "key", key)
+				return storage.ErrNotFound
+			}
+			logger.Debug("disk.delete_meta.wal_error", "key", key, "error", err)
+			return err
+		}
+	} else if err := apply(); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
 			logger.Debug("disk.delete_meta.not_found", "key", key)
 			return storage.ErrNotFound
 		}
@@ -696,6 +754,7 @@ func (s *Store) WriteState(ctx context.Context, namespace, key string, body io.R
 	logger, verbose := s.loggers(ctx)
 	start := time.Now()
 	verbose.Trace("disk.write_state.begin", "key", key, "expected_etag", opts.ExpectedETag)
+	walEnabled := s.walEnabled
 
 	ns, encoded, err := s.encodeKey(namespace, key)
 	if err != nil {
@@ -794,15 +853,25 @@ func (s *Store) WriteState(ctx context.Context, namespace, key string, body io.R
 		if fileInfo, statErr := os.Stat(tempFile.Name()); statErr == nil {
 			cipherSize = fileInfo.Size()
 		}
-		if f, openErr := os.OpenFile(tempFile.Name(), os.O_RDONLY, 0); openErr == nil {
-			_ = f.Sync()
-			_ = f.Close()
+		if !walEnabled {
+			if f, openErr := os.OpenFile(tempFile.Name(), os.O_RDONLY, 0); openErr == nil {
+				_ = f.Sync()
+				_ = f.Close()
+			}
 		}
 	} else {
-		if err := tempFile.Sync(); err != nil {
-			logger.Debug("disk.write_state.sync_error", "key", key, "error", err)
-			return nil, err
+		if !walEnabled {
+			if err := tempFile.Sync(); err != nil {
+				logger.Debug("disk.write_state.sync_error", "key", key, "error", err)
+				return nil, err
+			}
+			if err := tempFile.Close(); err != nil {
+				logger.Debug("disk.write_state.close_error", "key", key, "error", err)
+				return nil, err
+			}
 		}
+	}
+	if walEnabled {
 		if err := tempFile.Close(); err != nil {
 			logger.Debug("disk.write_state.close_error", "key", key, "error", err)
 			return nil, err
@@ -832,19 +901,6 @@ func (s *Store) WriteState(ctx context.Context, namespace, key string, body io.R
 	}
 
 	dataPath := s.stateDataPath(ns, encoded)
-	if err := os.Rename(tempFile.Name(), dataPath); err != nil {
-		if removeErr := os.Remove(dataPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-			logger.Debug("disk.write_state.rename_remove_error", "key", key, "error", removeErr)
-			return nil, err
-		}
-		if err2 := os.Rename(tempFile.Name(), dataPath); err2 != nil {
-			logger.Debug("disk.write_state.rename_error", "key", key, "error", err2)
-			return nil, err2
-		}
-	}
-	moved = true
-	_ = syncDir(filepath.Dir(dataPath))
-
 	info := stateRecord{
 		ETag:           newETag,
 		Size:           written,
@@ -852,9 +908,53 @@ func (s *Store) WriteState(ctx context.Context, namespace, key string, body io.R
 		ModifiedAtUnix: s.now().Unix(),
 		Descriptor:     append([]byte(nil), descriptor...),
 	}
-	if err := s.writeJSONAtomic(ns, s.stateInfoPath(ns, encoded), info, "state-info"); err != nil {
+	infoPath := s.stateInfoPath(ns, encoded)
+	infoPayload, err := json.Marshal(info)
+	if err != nil {
 		logger.Debug("disk.write_state.write_info_error", "key", key, "error", err)
 		return nil, err
+	}
+	infoPayload = append(infoPayload, '\n')
+	if walEnabled {
+		relData, err := s.walRelPath(ns, dataPath)
+		if err != nil {
+			logger.Debug("disk.write_state.wal_path_error", "key", key, "error", err)
+			return nil, err
+		}
+		relInfo, err := s.walRelPath(ns, infoPath)
+		if err != nil {
+			logger.Debug("disk.write_state.wal_path_error", "key", key, "error", err)
+			return nil, err
+		}
+		entries := []walEntry{
+			{op: walOpWrite, path: relData, dataPath: tempFile.Name(), dataSize: cipherSize},
+			{op: walOpWrite, path: relInfo, data: infoPayload},
+		}
+		apply := func() error {
+			if err := renameReplace(tempFile.Name(), dataPath); err != nil {
+				return err
+			}
+			moved = true
+			if err := s.writeBytesAtomicNoSync(ns, infoPath, infoPayload, "state-info"); err != nil {
+				return err
+			}
+			return nil
+		}
+		if err := s.withWAL(ns, entries, apply); err != nil {
+			logger.Debug("disk.write_state.wal_error", "key", key, "error", err)
+			return nil, err
+		}
+	} else {
+		if err := renameReplace(tempFile.Name(), dataPath); err != nil {
+			logger.Debug("disk.write_state.rename_error", "key", key, "error", err)
+			return nil, err
+		}
+		moved = true
+		_ = syncDir(filepath.Dir(dataPath))
+		if err := s.writeJSONAtomic(ns, infoPath, info, "state-info"); err != nil {
+			logger.Debug("disk.write_state.write_info_error", "key", key, "error", err)
+			return nil, err
+		}
 	}
 
 	result = &storage.PutStateResult{
@@ -917,20 +1017,51 @@ func (s *Store) Remove(ctx context.Context, namespace, key string, expectedETag 
 
 	dataPath := s.stateDataPath(ns, encoded)
 	infoPath := s.stateInfoPath(ns, encoded)
-	errData := os.Remove(dataPath)
-	errInfo := os.Remove(infoPath)
-	if errData != nil && !errors.Is(errData, os.ErrNotExist) {
-		logger.Debug("disk.remove_state.remove_data_error", "key", key, "error", errData)
-		return errData
+	apply := func() error {
+		errData := os.Remove(dataPath)
+		errInfo := os.Remove(infoPath)
+		if errData != nil && !errors.Is(errData, os.ErrNotExist) {
+			return errData
+		}
+		if errInfo != nil && !errors.Is(errInfo, os.ErrNotExist) {
+			return errInfo
+		}
+		_ = os.Remove(s.stateDirPath(ns, encoded))
+		if errors.Is(errData, os.ErrNotExist) && errors.Is(errInfo, os.ErrNotExist) {
+			return storage.ErrNotFound
+		}
+		return nil
 	}
-	if errInfo != nil && !errors.Is(errInfo, os.ErrNotExist) {
-		logger.Debug("disk.remove_state.remove_info_error", "key", key, "error", errInfo)
-		return errInfo
-	}
-	_ = os.Remove(s.stateDirPath(ns, encoded))
-	if errors.Is(errData, os.ErrNotExist) && errors.Is(errInfo, os.ErrNotExist) {
-		verbose.Debug("disk.remove_state.not_found", "key", key, "elapsed", time.Since(start))
-		return storage.ErrNotFound
+	if s.walEnabled {
+		relData, err := s.walRelPath(ns, dataPath)
+		if err != nil {
+			logger.Debug("disk.remove_state.wal_path_error", "key", key, "error", err)
+			return err
+		}
+		relInfo, err := s.walRelPath(ns, infoPath)
+		if err != nil {
+			logger.Debug("disk.remove_state.wal_path_error", "key", key, "error", err)
+			return err
+		}
+		entries := []walEntry{
+			{op: walOpDelete, path: relData},
+			{op: walOpDelete, path: relInfo},
+		}
+		if err := s.withWAL(ns, entries, apply); err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				verbose.Debug("disk.remove_state.not_found", "key", key, "elapsed", time.Since(start))
+				return storage.ErrNotFound
+			}
+			logger.Debug("disk.remove_state.wal_error", "key", key, "error", err)
+			return err
+		}
+	} else if err := apply(); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			verbose.Debug("disk.remove_state.not_found", "key", key, "elapsed", time.Since(start))
+			return storage.ErrNotFound
+		}
+		logger.Debug("disk.remove_state.remove_error", "key", key, "error", err)
+		return err
 	}
 	verbose.Debug("disk.remove_state.success", "key", key, "elapsed", time.Since(start))
 	return nil
@@ -1174,6 +1305,7 @@ func (s *Store) PutObject(ctx context.Context, namespace, key string, body io.Re
 		return nil, fmt.Errorf("disk: namespace required")
 	}
 	verbose.Trace("disk.put_object.begin", "namespace", namespace, "key", key, "expected_etag", opts.ExpectedETag, "if_not_exists", opts.IfNotExists)
+	walEnabled := s.walEnabled
 	dataPath, err := s.objectDataPath(namespace, key)
 	if err != nil {
 		return nil, err
@@ -1214,35 +1346,81 @@ func (s *Store) PutObject(ctx context.Context, namespace, key string, body io.Re
 	if err != nil {
 		return nil, fmt.Errorf("disk: create temp object for %q: %w", key, err)
 	}
+	moved := false
+	defer func() {
+		if !moved {
+			_ = os.Remove(tmp.Name())
+		}
+	}()
 	hasher := sha256.New()
 	written, err := io.Copy(io.MultiWriter(tmp, hasher), body)
 	if err != nil {
 		tmp.Close()
-		os.Remove(tmp.Name())
 		return nil, fmt.Errorf("disk: write object %q: %w", key, err)
 	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
-		return nil, fmt.Errorf("disk: sync object %q: %w", key, err)
+	if !walEnabled {
+		if err := tmp.Sync(); err != nil {
+			tmp.Close()
+			return nil, fmt.Errorf("disk: sync object %q: %w", key, err)
+		}
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmp.Name())
 		return nil, fmt.Errorf("disk: close object %q: %w", key, err)
 	}
-	newETag := hex.EncodeToString(hasher.Sum(nil))
-	if err := os.Rename(tmp.Name(), dataPath); err != nil {
-		os.Remove(tmp.Name())
-		return nil, fmt.Errorf("disk: rename object %q: %w", key, err)
+	dataSize := written
+	if fi, statErr := os.Stat(tmp.Name()); statErr == nil {
+		dataSize = fi.Size()
 	}
+	newETag := hex.EncodeToString(hasher.Sum(nil))
 	now := s.now()
-	if err := s.storeObjectInfo(namespace, key, objectInfoRecord{
+	infoRecord := objectInfoRecord{
 		ETag:          newETag,
 		ContentType:   opts.ContentType,
 		UpdatedAtUnix: now.Unix(),
 		Descriptor:    append([]byte(nil), opts.Descriptor...),
-	}); err != nil {
+	}
+	infoPath, err := s.objectInfoPath(namespace, key)
+	if err != nil {
 		return nil, err
+	}
+	infoPayload, err := json.Marshal(infoRecord)
+	if err != nil {
+		return nil, fmt.Errorf("disk: encode object metadata for %q: %w", key, err)
+	}
+	infoPayload = append(infoPayload, '\n')
+	if walEnabled {
+		relData, err := s.walRelPath(namespace, dataPath)
+		if err != nil {
+			return nil, err
+		}
+		relInfo, err := s.walRelPath(namespace, infoPath)
+		if err != nil {
+			return nil, err
+		}
+		entries := []walEntry{
+			{op: walOpWrite, path: relData, dataPath: tmp.Name(), dataSize: dataSize},
+			{op: walOpWrite, path: relInfo, data: infoPayload},
+		}
+		if err := s.withWAL(namespace, entries, func() error {
+			if err := renameReplace(tmp.Name(), dataPath); err != nil {
+				return err
+			}
+			moved = true
+			if err := s.writeBytesAtomicNoSync(namespace, infoPath, infoPayload, "objectinfo"); err != nil {
+				return err
+			}
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := renameReplace(tmp.Name(), dataPath); err != nil {
+			return nil, fmt.Errorf("disk: rename object %q: %w", key, err)
+		}
+		moved = true
+		if err := s.storeObjectInfo(namespace, key, infoRecord); err != nil {
+			return nil, err
+		}
 	}
 	info := &storage.ObjectInfo{
 		Key:          key,
@@ -1288,17 +1466,39 @@ func (s *Store) DeleteObject(ctx context.Context, namespace, key string, opts st
 		verbose.Debug("disk.delete_object.cas_mismatch", "key", key, "expected_etag", opts.ExpectedETag, "current_etag", info.ETag)
 		return storage.ErrCASMismatch
 	}
-	if err := os.Remove(dataPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		logger.Debug("disk.delete_object.remove_error", "namespace", namespace, "key", key, "error", err)
-		return fmt.Errorf("disk: remove object %q: %w", key, err)
-	}
 	infoPath, err := s.objectInfoPath(namespace, key)
 	if err != nil {
 		return err
 	}
-	if err := os.Remove(infoPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		logger.Debug("disk.delete_object.remove_info_error", "namespace", namespace, "key", key, "error", err)
-		return fmt.Errorf("disk: remove object metadata %q: %w", key, err)
+	apply := func() error {
+		if err := os.Remove(dataPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("disk: remove object %q: %w", key, err)
+		}
+		if err := os.Remove(infoPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("disk: remove object metadata %q: %w", key, err)
+		}
+		return nil
+	}
+	if s.walEnabled {
+		relData, err := s.walRelPath(namespace, dataPath)
+		if err != nil {
+			return err
+		}
+		relInfo, err := s.walRelPath(namespace, infoPath)
+		if err != nil {
+			return err
+		}
+		entries := []walEntry{
+			{op: walOpDelete, path: relData},
+			{op: walOpDelete, path: relInfo},
+		}
+		if err := s.withWAL(namespace, entries, apply); err != nil {
+			logger.Debug("disk.delete_object.wal_error", "namespace", namespace, "key", key, "error", err)
+			return err
+		}
+	} else if err := apply(); err != nil {
+		logger.Debug("disk.delete_object.remove_error", "namespace", namespace, "key", key, "error", err)
+		return err
 	}
 	verbose.Debug("disk.delete_object.success", "namespace", namespace, "key", key)
 
@@ -1392,6 +1592,34 @@ func (s *Store) writeBytesAtomic(namespace, dest string, payload []byte, prefix 
 	return nil
 }
 
+func (s *Store) writeBytesAtomicNoSync(namespace, dest string, payload []byte, prefix string) error {
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return err
+	}
+	tmpDir := s.namespaceTmpDir(namespace)
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(tmpDir, "lockd-"+prefix+"-*")
+	if err != nil {
+		return err
+	}
+	if _, err := tmp.Write(payload); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmp.Name())
+		return err
+	}
+	if err := os.Rename(tmp.Name(), dest); err != nil {
+		os.Remove(tmp.Name())
+		return err
+	}
+	return nil
+}
+
 func (s *Store) writeJSONAtomic(namespace, dest string, v any, prefix string) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
@@ -1425,6 +1653,36 @@ func (s *Store) writeJSONAtomic(namespace, dest string, v any, prefix string) er
 		return err
 	}
 	_ = syncDir(filepath.Dir(dest))
+	return nil
+}
+
+func (s *Store) writeJSONAtomicNoSync(namespace, dest string, v any, prefix string) error {
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return err
+	}
+	tmpDir := s.namespaceTmpDir(namespace)
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(tmpDir, "lockd-"+prefix+"-*")
+	if err != nil {
+		return err
+	}
+	enc := json.NewEncoder(tmp)
+	enc.SetIndent("", "")
+	if err := enc.Encode(v); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmp.Name())
+		return err
+	}
+	if err := os.Rename(tmp.Name(), dest); err != nil {
+		os.Remove(tmp.Name())
+		return err
+	}
 	return nil
 }
 

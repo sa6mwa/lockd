@@ -22,10 +22,10 @@ cost. WAL is **enabled by default** for disk/NFS, with a `--disable-wal` knob.
 - No performance tuning beyond disk/NFS writes in this phase.
 
 ## On-Disk Layout
-WAL lives per namespace under a hidden directory:
+WAL lives per namespace under a `wal/` directory:
 
 ```
-<root>/<namespace>/.wal/
+<root>/<namespace>/wal/
   lock                 # file lock for WAL writer/replay
   checkpoint           # last applied LSN (uint64)
   segment-00000001.wal # append-only segments
@@ -33,7 +33,7 @@ WAL lives per namespace under a hidden directory:
 ```
 
 Rationale: per-namespace WAL avoids a global bottleneck while keeping recovery
-scoped and predictable. Hidden `.wal/` keeps it out of user-facing listings.
+scoped and predictable. `wal/` is intentionally non-hidden to simplify ops.
 
 ## Record Model
 Each WAL entry represents a *fully validated* storage mutation. CAS checks are
@@ -51,11 +51,11 @@ apply, not the original API request.
 
 ### Payload (binary)
 Payload encodes one logical mutation. To keep replay idempotent, the payload
-contains *exact target paths and bytes* to write (or delete). Suggested layout
-for version 1:
+contains *exact target paths and bytes* to write (or delete). Because WAL is
+per-namespace, payload paths are **relative to the namespace root**. Suggested
+layout for version 1:
 
 Common fields:
-- Namespace (u16 len + bytes)
 - EntryCount (u16)
 
 Each entry:

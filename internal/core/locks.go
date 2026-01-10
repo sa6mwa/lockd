@@ -507,7 +507,7 @@ func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (res *Release
 			if p.Namespace == namespace && p.Key == keyComponent && (p.BackendHash == "" || p.BackendHash == s.backendHash) {
 				continue
 			}
-			if err := s.applyTxnDecisionToKey(ctx, p.Namespace, p.Key, rec.TxnID, decisionCommit); err != nil && s.logger != nil {
+			if err := s.applyTxnDecisionToKey(ctx, p.Namespace, p.Key, rec.TxnID, decisionCommit, false); err != nil && s.logger != nil {
 				s.logger.Warn("txn.apply.failed",
 					"namespace", p.Namespace,
 					"key", p.Key,

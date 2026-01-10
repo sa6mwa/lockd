@@ -143,6 +143,25 @@
 // To disable the idle sweeper entirely, set `SweeperInterval <= 0` (replay
 // throttling is independent and controlled by `TxnReplayInterval`).
 //
+// Queue transactions use a dedicated worklist to avoid list scans when a
+// queue message is enlisted in a transaction decision. When a commit/rollback
+// includes a queue message participant, the TC records a small per-queue
+// decision list under `.txn-queue-decisions`. Dequeue checks that worklist at
+// most once per cache window (no background sweeps) and applies up to a capped
+// number of items, making rollback-visible messages reappear after restarts
+// without scanning the queue. Non-transactional queues do not write these
+// markers, so they incur no extra IO beyond the cached check.
+//
+// Configure the worklist behavior with:
+//
+//	cfg := lockd.Config{
+//	    QueueDecisionCacheTTL: 60 * time.Second, // cache empty worklist checks
+//	    QueueDecisionMaxApply: 50,               // max items applied per dequeue
+//	}
+//
+// The CLI mirrors these as `--queue-decision-cache-ttl` and
+// `--queue-decision-max-apply`.
+//
 // The Go client and CLI are drain-aware by default: when the server emits the
 // `Shutdown-Imminent` header, the SDK auto-releases leases once in-flight work
 // is done. Opt out by using `client.WithDrainAwareShutdown(false)` or passing

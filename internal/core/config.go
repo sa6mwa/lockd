@@ -39,6 +39,8 @@ type Config struct {
 	SpoolThreshold       int64
 	TxnDecisionRetention time.Duration
 	TxnReplayInterval    time.Duration
+	QueueDecisionCacheTTL time.Duration
+	QueueDecisionMaxApply int
 	EnforceIdentity      bool
 	MetaWarmup           WarmupConfig
 	StateWarmup          WarmupConfig

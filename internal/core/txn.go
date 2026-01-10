@@ -24,6 +24,8 @@ const (
 	txnDecisionBucketsKey   = "buckets.json"
 )
 
+var errTxnApplySkipped = errors.New("txn apply skipped")
+
 type txnDecisionMarker struct {
 	TxnID         string   `json:"txn_id"`
 	State         TxnState `json:"state"`
@@ -484,6 +486,12 @@ func (s *Service) decideTxnWithMerge(ctx context.Context, rec TxnRecord) (*TxnRe
 		}
 		s.txnMetrics.recordDecision(ctx, state, s.clock.Now().Sub(start))
 	}
+	recordQueueDecision := func(rec *TxnRecord) {
+		if rec == nil || rec.State == "" || rec.State == TxnStatePending {
+			return
+		}
+		s.recordQueueDecisionWorklist(ctx, rec)
+	}
 	for {
 		existing, etag, err := s.loadTxnRecord(ctx, rec.TxnID)
 		if err != nil && !errors.Is(err, storage.ErrNotFound) {
@@ -499,6 +507,7 @@ func (s *Service) decideTxnWithMerge(ctx context.Context, rec TxnRecord) (*TxnRe
 				return resolved, err
 			} else if resolved != nil {
 				recordDecision(resolved.State)
+				recordQueueDecision(resolved)
 				return resolved, nil
 			}
 			existing = &TxnRecord{
@@ -527,6 +536,7 @@ func (s *Service) decideTxnWithMerge(ctx context.Context, rec TxnRecord) (*TxnRe
 				return existing, Failure{Code: "txn_conflict", Detail: "transaction already decided", HTTPStatus: http.StatusConflict}
 			}
 			recordDecision(existing.State)
+			recordQueueDecision(existing)
 			return existing, nil
 		}
 		if rec.TCTerm != 0 {
@@ -537,6 +547,7 @@ func (s *Service) decideTxnWithMerge(ctx context.Context, rec TxnRecord) (*TxnRe
 		if _, err := s.putTxnRecord(ctx, existing, etag); err != nil {
 			if errors.Is(err, storage.ErrNotImplemented) {
 				recordDecision(existing.State)
+				recordQueueDecision(existing)
 				return existing, nil
 			}
 			if errors.Is(err, storage.ErrCASMismatch) {
@@ -545,6 +556,7 @@ func (s *Service) decideTxnWithMerge(ctx context.Context, rec TxnRecord) (*TxnRe
 			return nil, err
 		}
 		recordDecision(existing.State)
+		recordQueueDecision(existing)
 		return existing, nil
 	}
 }
@@ -846,6 +858,9 @@ func (s *Service) applyTxnDecisionWithOptions(ctx context.Context, rec *TxnRecor
 		}
 		retries, err := s.applyTxnDecisionWithRetry(ctx, p, rec.TxnID, commit, opts)
 		retryCount += retries
+		if errors.Is(err, errTxnApplySkipped) {
+			continue
+		}
 		if err != nil {
 			s.txnDecisionFailed.Add(1)
 			failedCount++
@@ -926,7 +941,7 @@ func (s *Service) applyTxnDecisionWithRetry(ctx context.Context, p TxnParticipan
 			}
 			return retries, ctx.Err()
 		}
-		err := s.applyTxnDecisionToKey(ctx, p.Namespace, p.Key, txnID, commit)
+		err := s.applyTxnDecisionToKey(ctx, p.Namespace, p.Key, txnID, commit, opts.tolerateQueueLeaseMismatch)
 		if err == nil {
 			return retries, nil
 		}
@@ -938,7 +953,7 @@ func (s *Service) applyTxnDecisionWithRetry(ctx context.Context, p TxnParticipan
 					"txn_id", txnID,
 					"commit", commit)
 			}
-			return retries, nil
+			return retries, errTxnApplySkipped
 		}
 		lastErr = err
 		if attempt == txnApplyRetryAttempts-1 {
@@ -1337,7 +1352,7 @@ func (s *Service) applyTxnDecisionForMeta(ctx context.Context, namespace, key, t
 	}
 }
 
-func (s *Service) applyTxnDecisionToKey(ctx context.Context, namespace, key, txnID string, commit bool) error {
+func (s *Service) applyTxnDecisionToKey(ctx context.Context, namespace, key, txnID string, commit bool, tolerateQueueLeaseMismatch bool) error {
 	if parts, ok := queue.ParseStateLeaseKey(key); ok {
 		return s.applyTxnDecisionQueueState(ctx, namespace, parts.Queue, parts.ID, txnID, commit)
 	}

@@ -33,6 +33,8 @@ type Service struct {
 	spoolThreshold         int64
 	txnDecisionRetention   time.Duration
 	txnReplayInterval      time.Duration
+	queueDecisionCacheTTL  time.Duration
+	queueDecisionMaxApply  int
 	defaultNamespaceConfig namespaces.Config
 	logger                 pslog.Logger
 	clock                  clock.Clock
@@ -65,6 +67,7 @@ type Service struct {
 	txnSweepCursor      sweepCursor
 	txnReplayRunning    atomic.Bool
 	txnReplayLast       atomic.Int64
+	queueDecisionCache   sync.Map
 }
 
 // New constructs the core Service with sane defaults.
@@ -92,6 +95,17 @@ func New(cfg Config) *Service {
 	if err := defaultCfg.Validate(); err != nil {
 		defaultCfg = namespaces.DefaultConfig()
 	}
+	queueDecisionCacheTTL := cfg.QueueDecisionCacheTTL
+	if queueDecisionCacheTTL < 0 {
+		queueDecisionCacheTTL = 0
+	}
+	if queueDecisionCacheTTL == 0 {
+		queueDecisionCacheTTL = time.Minute
+	}
+	queueDecisionMaxApply := cfg.QueueDecisionMaxApply
+	if queueDecisionMaxApply <= 0 {
+		queueDecisionMaxApply = 50
+	}
 
 	return &Service{
 		store:            cfg.Store,
@@ -112,6 +126,8 @@ func New(cfg Config) *Service {
 		spoolThreshold:         cfg.SpoolThreshold,
 		txnDecisionRetention:   cfg.TxnDecisionRetention,
 		txnReplayInterval:      cfg.TxnReplayInterval,
+		queueDecisionCacheTTL:  queueDecisionCacheTTL,
+		queueDecisionMaxApply:  queueDecisionMaxApply,
 		defaultNamespaceConfig: defaultCfg,
 		logger:                 logger,
 		clock:                  clk,

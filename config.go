@@ -66,6 +66,10 @@ const (
 	DefaultSweeperInterval = 5 * time.Minute
 	// DefaultTxnReplayInterval throttles transaction replay sweeps on active operations.
 	DefaultTxnReplayInterval = 5 * time.Second
+	// DefaultQueueDecisionCacheTTL bounds how long empty queue decision checks are cached.
+	DefaultQueueDecisionCacheTTL = 60 * time.Second
+	// DefaultQueueDecisionMaxApply caps how many queue decision items are applied per dequeue attempt.
+	DefaultQueueDecisionMaxApply = 50
 	// DefaultIdleSweepGrace controls how long the server must be idle before running maintenance sweeps.
 	DefaultIdleSweepGrace = 5 * time.Minute
 	// DefaultIdleSweepOpDelay pauses between maintenance sweep operations to reduce backend pressure.
@@ -205,6 +209,8 @@ type Config struct {
 	AcquireBlock              time.Duration
 	SweeperInterval           time.Duration
 	TxnReplayInterval         time.Duration
+	QueueDecisionCacheTTL     time.Duration
+	QueueDecisionMaxApply     int
 	IdleSweepGrace            time.Duration
 	IdleSweepOpDelay          time.Duration
 	IdleSweepMaxOps           int
@@ -390,6 +396,15 @@ func (c *Config) Validate() error {
 		if c.SweeperInterval > 0 && c.SweeperInterval < c.TxnReplayInterval {
 			c.TxnReplayInterval = c.SweeperInterval
 		}
+	}
+	if c.QueueDecisionCacheTTL < 0 {
+		return fmt.Errorf("config: queue decision cache ttl must be >= 0")
+	}
+	if c.QueueDecisionCacheTTL == 0 {
+		c.QueueDecisionCacheTTL = DefaultQueueDecisionCacheTTL
+	}
+	if c.QueueDecisionMaxApply <= 0 {
+		c.QueueDecisionMaxApply = DefaultQueueDecisionMaxApply
 	}
 	if c.IdleSweepGrace <= 0 {
 		c.IdleSweepGrace = DefaultIdleSweepGrace

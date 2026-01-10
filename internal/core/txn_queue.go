@@ -42,19 +42,29 @@ func (s *Service) applyTxnDecisionQueueMessage(ctx context.Context, namespace, q
 
 	leaseMissing := doc.LeaseID == "" && doc.LeaseTxnID == "" && doc.LeaseFencingToken == 0
 	if leaseMissing {
-		if !commit && (meta == nil || meta.Lease == nil) {
-			return nil
+		if commit {
+			return queueMessageLeaseFailure("queue message lease missing")
 		}
-		return queueMessageLeaseFailure("queue message lease missing")
-	}
-	if meta == nil || meta.Lease == nil {
-		return queueMessageLeaseFailure("queue message lease missing")
-	}
-	if meta.Lease.TxnID != txnID {
-		return queueMessageLeaseFailure("queue message lease mismatch")
-	}
-	if err := validateQueueMessageLease(doc, meta.Lease.ID, meta.Lease.FencingToken, txnID); err != nil {
-		return err
+		if meta != nil && meta.Lease != nil && meta.Lease.TxnID != txnID {
+			return queueMessageLeaseFailure("queue message lease mismatch")
+		}
+	} else if meta == nil || meta.Lease == nil {
+		if doc.LeaseTxnID == "" {
+			if !commit {
+				return nil
+			}
+			return queueMessageLeaseFailure("queue message lease missing")
+		}
+		if doc.LeaseTxnID != txnID {
+			return queueMessageLeaseFailure("queue message lease mismatch")
+		}
+	} else {
+		if meta.Lease.TxnID != txnID {
+			return queueMessageLeaseFailure("queue message lease mismatch")
+		}
+		if err := validateQueueMessageLease(doc, meta.Lease.ID, meta.Lease.FencingToken, txnID); err != nil {
+			return err
+		}
 	}
 
 	if commit {
@@ -83,6 +93,23 @@ func (s *Service) applyTxnDecisionQueueMessage(ctx context.Context, namespace, q
 		if s.queueDispatcher != nil {
 			s.queueDispatcher.Notify(namespace, queueName)
 		}
+	}
+	if !commit {
+		if meta != nil && meta.Lease != nil {
+			if meta.Lease.TxnID != txnID {
+				return queueMessageLeaseFailure("queue message lease mismatch")
+			}
+			oldExpires := meta.Lease.ExpiresAtUnix
+			meta.Lease = nil
+			meta.UpdatedAtUnix = s.clock.Now().Unix()
+			if _, err := s.store.StoreMeta(ctx, namespace, relKey, meta, metaETag); err != nil && !errors.Is(err, storage.ErrNotFound) {
+				return fmt.Errorf("clear queue lease meta: %w", err)
+			}
+			if err := s.updateLeaseIndex(ctx, namespace, relKey, oldExpires, 0); err != nil && s.logger != nil {
+				s.logger.Warn("lease.index.update_failed", "namespace", namespace, "key", relKey, "error", err)
+			}
+		}
+		return nil
 	}
 
 	// Clear the lease metadata to avoid stranding.
@@ -122,7 +149,7 @@ func (s *Service) applyTxnDecisionQueueState(ctx context.Context, namespace, que
 	metaETag := metaRes.ETag
 	// Skip if the lease belongs to another transaction (including non-XA leases).
 	if meta != nil && meta.Lease != nil && meta.Lease.TxnID != txnID {
-		return nil
+		return queueMessageLeaseFailure("queue state lease mismatch")
 	}
 
 	if commit {

@@ -822,7 +822,14 @@ func RunQueueTxnDecisionReplayWakeScenario(t testing.TB, tc, rm *lockd.TestServe
 		})
 		cancelProbe()
 		if err == nil && probe != nil {
-			t.Fatalf("message visible before replay")
+			t.Logf("message visible before replay (transparent decision apply)")
+			if probe.MessageID() != msg.MessageID() {
+				t.Fatalf("expected same message before replay; want %s got %s", msg.MessageID(), probe.MessageID())
+			}
+			if err := probe.Ack(context.Background()); err != nil {
+				t.Fatalf("ack pre-replay message: %v", err)
+			}
+			return
 		}
 		var apiErr *lockdclient.APIError
 		if err != nil && (!errors.As(err, &apiErr) || apiErr.Response.ErrorCode != "waiting") {

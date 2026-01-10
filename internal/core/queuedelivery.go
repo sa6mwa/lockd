@@ -33,6 +33,13 @@ func (s *Service) consumeQueue(ctx context.Context, qsvc *queue.Service, disp *q
 	if err := s.applyShutdownGuard("queue"); err != nil {
 		return nil, "", err
 	}
+	if applied, err := s.maybeApplyQueueDecisionWorklist(ctx, namespace, queueName); err != nil {
+		if s.logger != nil {
+			s.logger.Warn("queue.decision.apply_failed", "namespace", namespace, "queue", queueName, "error", err)
+		}
+	} else if applied > 0 && disp != nil {
+		disp.Notify(namespace, queueName)
+	}
 	type consumeTiming struct {
 		wait    time.Duration
 		try     time.Duration
@@ -654,7 +661,21 @@ func (s *Service) acquireLeaseForKey(ctx context.Context, params acquireParams) 
 
 	res, err := s.Acquire(ctx, cmd)
 	if err != nil {
-		return nil, err
+		var failure Failure
+		if errors.As(err, &failure) && failure.Code == "waiting" {
+			if queue.IsQueueMessageKey(relKey) || queue.IsQueueStateKey(relKey) {
+				applied, applyErr := s.maybeApplyDecisionMarkerForLease(ctx, namespace, relKey)
+				if applyErr != nil {
+					return nil, applyErr
+				}
+				if applied {
+					res, err = s.Acquire(ctx, cmd)
+				}
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	resp := api.AcquireResponse{

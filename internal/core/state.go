@@ -54,7 +54,9 @@ func (s *Service) Get(ctx context.Context, cmd GetCommand) (*GetResult, error) {
 	finish := s.beginLockOp()
 	defer finish()
 
-	s.maybeReplayTxnRecords(ctx)
+	if !s.maybeReplayTxnRecordsInline(ctx) {
+		s.maybeReplayTxnRecords(ctx)
+	}
 
 	namespace, err := s.resolveNamespace(cmd.Namespace)
 	if err != nil {

@@ -94,6 +94,8 @@ type configDefaults struct {
 	AcquireBlock              string   `yaml:"acquire-block"`
 	SweeperInterval           string   `yaml:"sweeper-interval"`
 	TxnReplayInterval         string   `yaml:"txn-replay-interval"`
+	QueueDecisionCacheTTL     string   `yaml:"queue-decision-cache-ttl"`
+	QueueDecisionMaxApply     int      `yaml:"queue-decision-max-apply"`
 	IdleSweepGrace            string   `yaml:"idle-sweep-grace"`
 	IdleSweepOpDelay           string   `yaml:"idle-sweep-op-delay"`
 	IdleSweepMaxOps            int      `yaml:"idle-sweep-max-ops"`
@@ -153,6 +155,8 @@ func defaultConfigYAML(overrides ...func(*configDefaults)) ([]byte, error) {
 		AcquireBlock:              lockd.DefaultAcquireBlock.String(),
 		SweeperInterval:           lockd.DefaultSweeperInterval.String(),
 		TxnReplayInterval:         lockd.DefaultTxnReplayInterval.String(),
+		QueueDecisionCacheTTL:     lockd.DefaultQueueDecisionCacheTTL.String(),
+		QueueDecisionMaxApply:     lockd.DefaultQueueDecisionMaxApply,
 		IdleSweepGrace:            lockd.DefaultIdleSweepGrace.String(),
 		IdleSweepOpDelay:           lockd.DefaultIdleSweepOpDelay.String(),
 		IdleSweepMaxOps:            lockd.DefaultIdleSweepMaxOps,

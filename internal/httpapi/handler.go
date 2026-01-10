@@ -430,6 +430,8 @@ type Config struct {
 	SpoolMemoryThreshold       int64
 	TxnDecisionRetention       time.Duration
 	TxnReplayInterval          time.Duration
+	QueueDecisionCacheTTL      time.Duration
+	QueueDecisionMaxApply      int
 	EnforceClientIdentity      bool
 	MetaWarmupAttempts         int
 	MetaWarmupInitialDelay     time.Duration
@@ -620,6 +622,8 @@ func New(cfg Config) *Handler {
 		SpoolThreshold:         threshold,
 		TxnDecisionRetention:   cfg.TxnDecisionRetention,
 		TxnReplayInterval:      cfg.TxnReplayInterval,
+		QueueDecisionCacheTTL:  cfg.QueueDecisionCacheTTL,
+		QueueDecisionMaxApply:  cfg.QueueDecisionMaxApply,
 		EnforceIdentity:        cfg.EnforceClientIdentity,
 		MetaWarmup: core.WarmupConfig{
 			Attempts: metaWarmupAttempts,

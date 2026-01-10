@@ -718,6 +718,8 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 		SpoolMemoryThreshold:       cfg.SpoolMemoryThreshold,
 		TxnDecisionRetention:       cfg.TCDecisionRetention,
 		TxnReplayInterval:          cfg.TxnReplayInterval,
+		QueueDecisionCacheTTL:      cfg.QueueDecisionCacheTTL,
+		QueueDecisionMaxApply:      cfg.QueueDecisionMaxApply,
 		EnforceClientIdentity:      cfg.MTLSEnabled(),
 		MetaWarmupAttempts:         -1,
 		StateWarmupAttempts:        -1,

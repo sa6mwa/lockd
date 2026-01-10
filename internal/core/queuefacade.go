@@ -50,7 +50,9 @@ func (s *Service) Dequeue(ctx context.Context, cmd QueueDequeueCommand) (*QueueD
 		visibility = s.resolveTTL(0)
 	}
 
-	s.maybeReplayTxnRecords(ctx)
+	if !s.maybeReplayTxnRecordsInline(ctx) {
+		s.maybeReplayTxnRecords(ctx)
+	}
 
 	deliveries, nextCursor, err := s.consumeQueueBatch(
 		ctx,

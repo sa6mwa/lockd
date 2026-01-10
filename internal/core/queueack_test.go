@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rs/xid"
 	"pkt.systems/lockd/internal/clock"
 	"pkt.systems/lockd/internal/queue"
 	"pkt.systems/lockd/internal/storage/memory"
@@ -285,12 +286,14 @@ func TestQueueAckUsesTCDecider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
+	txnID := xid.New().String()
 	acq, err := coreSvc.Acquire(ctx, AcquireCommand{
 		Namespace:    "default",
 		Key:          relativeKey("default", msgLeaseKey(t, "default", "q7", msg.ID)),
 		Owner:        "worker",
 		TTLSeconds:   30,
 		BlockSeconds: apiBlockNoWait,
+		TxnID:        txnID,
 	})
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
@@ -320,7 +323,7 @@ func TestQueueAckUsesTCDecider(t *testing.T) {
 		MessageID:    msg.ID,
 		MetaETag:     metaETag,
 		LeaseID:      acq.LeaseID,
-		TxnID:        acq.TxnID,
+		TxnID:        txnID,
 		FencingToken: acq.FencingToken,
 		Stateful:     false,
 	})
@@ -357,12 +360,14 @@ func TestQueueNackUsesTCDecider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
+	txnID := xid.New().String()
 	acq, err := coreSvc.Acquire(ctx, AcquireCommand{
 		Namespace:    "default",
 		Key:          relativeKey("default", msgLeaseKey(t, "default", "q8", msg.ID)),
 		Owner:        "worker",
 		TTLSeconds:   30,
 		BlockSeconds: apiBlockNoWait,
+		TxnID:        txnID,
 	})
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
@@ -392,7 +397,7 @@ func TestQueueNackUsesTCDecider(t *testing.T) {
 		MessageID:    msg.ID,
 		MetaETag:     metaETag,
 		LeaseID:      acq.LeaseID,
-		TxnID:        acq.TxnID,
+		TxnID:        txnID,
 		FencingToken: acq.FencingToken,
 		Delay:        0,
 	})

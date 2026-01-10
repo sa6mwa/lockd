@@ -29,6 +29,7 @@ type Lease struct {
 	ExpiresAtUnix int64                  `protobuf:"varint,3,opt,name=expires_at_unix,json=expiresAtUnix,proto3" json:"expires_at_unix,omitempty"`
 	FencingToken  int64                  `protobuf:"varint,4,opt,name=fencing_token,json=fencingToken,proto3" json:"fencing_token,omitempty"`
 	TxnId         string                 `protobuf:"bytes,5,opt,name=txn_id,json=txnId,proto3" json:"txn_id,omitempty"`
+	TxnExplicit   bool                   `protobuf:"varint,6,opt,name=txn_explicit,json=txnExplicit,proto3" json:"txn_explicit,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -96,6 +97,13 @@ func (x *Lease) GetTxnId() string {
 		return x.TxnId
 	}
 	return ""
+}
+
+func (x *Lease) GetTxnExplicit() bool {
+	if x != nil {
+		return x.TxnExplicit
+	}
+	return false
 }
 
 type LockMeta struct {
@@ -842,13 +850,14 @@ var File_storage_proto protoreflect.FileDescriptor
 
 const file_storage_proto_rawDesc = "" +
 	"\n" +
-	"\rstorage.proto\x12\x0elockd.internal\x1a\x1cgoogle/protobuf/struct.proto\"\x9c\x01\n" +
+	"\rstorage.proto\x12\x0elockd.internal\x1a\x1cgoogle/protobuf/struct.proto\"\xbf\x01\n" +
 	"\x05Lease\x12\x19\n" +
 	"\blease_id\x18\x01 \x01(\tR\aleaseId\x12\x14\n" +
 	"\x05owner\x18\x02 \x01(\tR\x05owner\x12&\n" +
 	"\x0fexpires_at_unix\x18\x03 \x01(\x03R\rexpiresAtUnix\x12#\n" +
 	"\rfencing_token\x18\x04 \x01(\x03R\ffencingToken\x12\x15\n" +
-	"\x06txn_id\x18\x05 \x01(\tR\x05txnId\"\xbe\b\n" +
+	"\x06txn_id\x18\x05 \x01(\tR\x05txnId\x12!\n" +
+	"\ftxn_explicit\x18\x06 \x01(\bR\vtxnExplicit\"\xbe\b\n" +
 	"\bLockMeta\x12+\n" +
 	"\x05lease\x18\x01 \x01(\v2\x15.lockd.internal.LeaseR\x05lease\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\x03R\aversion\x12\x1d\n" +

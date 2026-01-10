@@ -63,6 +63,7 @@ type Lease struct {
 	ExpiresAtUnix int64  `json:"expires_at_unix"`
 	FencingToken  int64  `json:"fencing_token,omitempty"`
 	TxnID         string `json:"txn_id,omitempty"`
+	TxnExplicit   bool   `json:"txn_explicit,omitempty"`
 }
 
 // StateInfo provides metadata about a stored state blob.

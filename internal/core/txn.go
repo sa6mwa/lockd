@@ -132,6 +132,10 @@ func (s *Service) loadTxnRecord(ctx context.Context, txnID string) (*TxnRecord, 
 	return &rec, obj.Info.ETag, nil
 }
 
+func txnExplicit(meta *storage.Meta) bool {
+	return meta != nil && meta.Lease != nil && meta.Lease.TxnExplicit
+}
+
 func (s *Service) putTxnRecord(ctx context.Context, rec *TxnRecord, expectedETag string) (string, error) {
 	buf := &bytes.Buffer{}
 	if err := json.NewEncoder(buf).Encode(rec); err != nil {
@@ -1368,7 +1372,7 @@ func (s *Service) ReplayTxn(ctx context.Context, txnID string) (TxnState, error)
 		case duration > txnReplaySlowThreshold:
 			s.logger.Warn("txn.replay.slow", fields...)
 		default:
-			s.logger.Info("txn.replay.complete", fields...)
+			s.logger.Debug("txn.replay.complete", fields...)
 		}
 		if s.txnMetrics != nil {
 			s.txnMetrics.recordReplay(ctx, state, duration)

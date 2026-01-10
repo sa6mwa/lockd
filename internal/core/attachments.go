@@ -208,7 +208,7 @@ func (s *Service) Attach(ctx context.Context, cmd AttachCommand) (res *AttachRes
 			_ = s.deleteAttachmentObject(ctx, namespace, stagedKey)
 			return nil, fmt.Errorf("store meta: %w", err)
 		}
-		if meta.Lease != nil {
+		if txnExplicit(meta) {
 			if _, _, err := s.enlistTxnParticipant(ctx, cmd.TxnID, namespace, keyComponent, meta.Lease.ExpiresAtUnix); err != nil {
 				_ = s.deleteAttachmentObject(ctx, namespace, stagedKey)
 				return nil, fmt.Errorf("register txn participant: %w", err)
@@ -508,7 +508,7 @@ func (s *Service) DeleteAttachment(ctx context.Context, cmd DeleteAttachmentComm
 			}
 			return nil, fmt.Errorf("store meta: %w", err)
 		}
-		if meta.Lease != nil {
+		if txnExplicit(meta) {
 			if _, _, err := s.enlistTxnParticipant(ctx, cmd.TxnID, namespace, keyComponent, meta.Lease.ExpiresAtUnix); err != nil {
 				return nil, fmt.Errorf("register txn participant: %w", err)
 			}
@@ -611,7 +611,7 @@ func (s *Service) DeleteAllAttachments(ctx context.Context, cmd DeleteAllAttachm
 			}
 			return nil, fmt.Errorf("store meta: %w", err)
 		}
-		if meta.Lease != nil {
+		if txnExplicit(meta) {
 			if _, _, err := s.enlistTxnParticipant(ctx, cmd.TxnID, namespace, keyComponent, meta.Lease.ExpiresAtUnix); err != nil {
 				return nil, fmt.Errorf("register txn participant: %w", err)
 			}

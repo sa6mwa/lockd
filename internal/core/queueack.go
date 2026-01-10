@@ -119,7 +119,7 @@ func (s *Service) Ack(ctx context.Context, cmd QueueAckCommand) (*QueueAckResult
 	}
 	ctx = correlation.Set(ctx, corr)
 
-	if checkTxn != "" && s.tcDecider != nil {
+	if checkTxn != "" && s.tcDecider != nil && txnExplicit(meta) {
 		rec := TxnRecord{
 			TxnID:         checkTxn,
 			State:         TxnStateCommit,
@@ -277,7 +277,7 @@ func (s *Service) Nack(ctx context.Context, cmd QueueNackCommand) (*QueueNackRes
 	}
 	ctx = correlation.Set(ctx, corr)
 
-	if checkTxn != "" && s.tcDecider != nil {
+	if checkTxn != "" && s.tcDecider != nil && txnExplicit(meta) {
 		rec := TxnRecord{
 			TxnID:         checkTxn,
 			State:         TxnStateRollback,
@@ -477,7 +477,7 @@ func (s *Service) Extend(ctx context.Context, cmd QueueExtendCommand) (*QueueExt
 	if err := s.updateLeaseIndex(ctx, namespace, messageRel, oldExpires, meta.Lease.ExpiresAtUnix); err != nil && s.logger != nil {
 		s.logger.Warn("lease.index.update_failed", "namespace", namespace, "key", messageRel, "error", err)
 	}
-	if checkTxn != "" {
+	if checkTxn != "" && txnExplicit(meta) {
 		if _, _, err := s.registerTxnParticipant(ctx, checkTxn, namespace, messageRel, meta.Lease.ExpiresAtUnix); err != nil {
 			return nil, fmt.Errorf("register txn participant: %w", err)
 		}
@@ -531,7 +531,7 @@ func (s *Service) Extend(ctx context.Context, cmd QueueExtendCommand) (*QueueExt
 			s.logger.Warn("lease.index.update_failed", "namespace", namespace, "key", stateRel, "error", err)
 		}
 		stateLeaseExpires = stateMeta.Lease.ExpiresAtUnix
-		if checkTxn != "" {
+		if checkTxn != "" && txnExplicit(stateMeta) {
 			if _, _, err := s.registerTxnParticipant(ctx, checkTxn, namespace, stateRel, stateMeta.Lease.ExpiresAtUnix); err != nil {
 				return nil, fmt.Errorf("register txn participant: %w", err)
 			}

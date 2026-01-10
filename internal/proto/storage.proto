@@ -12,6 +12,7 @@ message Lease {
   int64 expires_at_unix = 3;
   int64 fencing_token = 4;
   string txn_id = 5;
+  bool txn_explicit = 6;
 }
 
 message LockMeta {

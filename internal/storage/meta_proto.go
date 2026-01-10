@@ -105,6 +105,7 @@ func metaToProto(meta *Meta) *lockdproto.LockMeta {
 			ExpiresAtUnix: meta.Lease.ExpiresAtUnix,
 			FencingToken:  meta.Lease.FencingToken,
 			TxnId:         meta.Lease.TxnID,
+			TxnExplicit:   meta.Lease.TxnExplicit,
 		}
 	}
 	if len(meta.StateDescriptor) > 0 {
@@ -188,6 +189,7 @@ func metaFromProto(pm *lockdproto.LockMeta) *Meta {
 			ExpiresAtUnix: lease.GetExpiresAtUnix(),
 			FencingToken:  lease.GetFencingToken(),
 			TxnID:         lease.GetTxnId(),
+			TxnExplicit:   lease.GetTxnExplicit(),
 		}
 	}
 	if desc := pm.GetStateDescriptor(); len(desc) > 0 {

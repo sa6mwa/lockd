@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rs/xid"
 	"pkt.systems/lockd/internal/clock"
 	"pkt.systems/lockd/internal/queue"
 	"pkt.systems/lockd/internal/storage/memory"
@@ -38,11 +39,12 @@ func TestQueueAckStatefulFlow(t *testing.T) {
 	// Acquire message and state leases via core Acquire (mimic delivery).
 	msgKey, _ := queue.MessageLeaseKey("default", "jobs", msg.ID)
 	stateKey, _ := queue.StateLeaseKey("default", "jobs", msg.ID)
-	acqMsg, err := svc.Acquire(ctx, AcquireCommand{Namespace: "default", Key: relativeKey("default", msgKey), Owner: "worker", TTLSeconds: 5})
+	txnID := xid.New().String()
+	acqMsg, err := svc.Acquire(ctx, AcquireCommand{Namespace: "default", Key: relativeKey("default", msgKey), Owner: "worker", TTLSeconds: 5, TxnID: txnID})
 	if err != nil {
 		t.Fatalf("acquire msg: %v", err)
 	}
-	acqState, err := svc.Acquire(ctx, AcquireCommand{Namespace: "default", Key: relativeKey("default", stateKey), Owner: "worker", TTLSeconds: 5})
+	acqState, err := svc.Acquire(ctx, AcquireCommand{Namespace: "default", Key: relativeKey("default", stateKey), Owner: "worker", TTLSeconds: 5, TxnID: txnID})
 	if err != nil {
 		t.Fatalf("acquire state: %v", err)
 	}
@@ -84,11 +86,12 @@ func TestQueueAckStatefulFlow(t *testing.T) {
 	}
 
 	// Reacquire and extend stateful delivery.
-	acqMsg2, err := svc.Acquire(ctx, AcquireCommand{Namespace: "default", Key: relativeKey("default", msgKey), Owner: "worker", TTLSeconds: 5})
+	txnID2 := xid.New().String()
+	acqMsg2, err := svc.Acquire(ctx, AcquireCommand{Namespace: "default", Key: relativeKey("default", msgKey), Owner: "worker", TTLSeconds: 5, TxnID: txnID2})
 	if err != nil {
 		t.Fatalf("re-acquire msg: %v", err)
 	}
-	acqState2, err := svc.Acquire(ctx, AcquireCommand{Namespace: "default", Key: relativeKey("default", stateKey), Owner: "worker", TTLSeconds: 5})
+	acqState2, err := svc.Acquire(ctx, AcquireCommand{Namespace: "default", Key: relativeKey("default", stateKey), Owner: "worker", TTLSeconds: 5, TxnID: txnID2})
 	if err != nil {
 		t.Fatalf("re-acquire state: %v", err)
 	}

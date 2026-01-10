@@ -220,7 +220,7 @@ func (c *Coordinator) Decide(ctx context.Context, rec core.TxnRecord) (core.TxnS
 		return state, fanoutErr
 	}
 	if c.logger != nil {
-		c.logger.Info("txn.tc.fanout.complete",
+		c.logger.Debug("txn.tc.fanout.complete",
 			"txn_id", decided.TxnID,
 			"state", state,
 			"backend_groups", len(groups),

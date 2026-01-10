@@ -119,6 +119,7 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (res *Acquire
 	}
 
 	txnID := strings.TrimSpace(cmd.TxnID)
+	txnExplicit := txnID != ""
 	if txnID != "" {
 		if _, err := xid.FromString(txnID); err != nil {
 			return nil, Failure{Code: "invalid_txn", Detail: "txn_id must be a valid xid", HTTPStatus: http.StatusBadRequest}
@@ -195,6 +196,7 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (res *Acquire
 			ExpiresAtUnix: expiresAt,
 			FencingToken:  newFencing,
 			TxnID:         txnID,
+			TxnExplicit:   txnExplicit,
 		}
 		meta.UpdatedAtUnix = now.Unix()
 
@@ -434,6 +436,18 @@ func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (res *Release
 		decision := TxnStateCommit
 		if !commit {
 			decision = TxnStateRollback
+		}
+		if !txnExplicit(meta) {
+			if err := s.applyTxnDecisionForMeta(ctx, namespace, keyComponent, cmd.TxnID, decision == TxnStateCommit, meta, metaETag); err != nil {
+				return nil, err
+			}
+			if s.leaseMetrics != nil {
+				s.leaseMetrics.addActive(kindLabel, -1)
+			}
+			return &ReleaseResult{
+				Released:    true,
+				MetaCleared: true,
+			}, nil
 		}
 		if s.tcDecider != nil {
 			rec := TxnRecord{

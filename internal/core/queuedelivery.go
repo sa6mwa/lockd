@@ -417,7 +417,7 @@ func (s *Service) prepareQueueDelivery(ctx context.Context, qsvc *queue.Service,
 		releaseLease(messageKey, acq)
 	}
 
-	if txnID != "" {
+	if txnID != "" && txnExplicit(&acq.Meta) {
 		relParticipant := relativeKey(namespace, messageKey)
 		if _, _, err := s.enlistTxnParticipant(ctx, txnID, namespace, relParticipant, acq.Response.ExpiresAt); err != nil {
 			releaseMessage()
@@ -536,7 +536,7 @@ func (s *Service) prepareQueueDelivery(ctx context.Context, qsvc *queue.Service,
 		releaseState = func() {
 			releaseLease(stateKey, stateOutcome)
 		}
-		if txnID != "" {
+		if txnID != "" && stateOutcome != nil && txnExplicit(&stateOutcome.Meta) {
 			relParticipant := relativeKey(namespace, stateKey)
 			if _, _, err := s.enlistTxnParticipant(ctx, txnID, namespace, relParticipant, stateOutcome.Response.ExpiresAt); err != nil {
 				releaseState()

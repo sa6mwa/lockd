@@ -184,7 +184,7 @@ func (s *Service) Update(ctx context.Context, cmd UpdateCommand) (*UpdateResult,
 			}
 			return nil, fmt.Errorf("store meta: %w", err)
 		}
-		if meta.Lease != nil {
+		if txnExplicit(meta) {
 			if _, _, err := s.enlistTxnParticipant(ctx, cmd.TxnID, namespace, keyComponent, meta.Lease.ExpiresAtUnix); err != nil {
 				return nil, fmt.Errorf("register txn participant: %w", err)
 			}
@@ -309,7 +309,7 @@ func (s *Service) Remove(ctx context.Context, cmd RemoveCommand) (*RemoveResult,
 			}
 			return nil, fmt.Errorf("store meta: %w", err)
 		}
-		if meta.Lease != nil {
+		if txnExplicit(meta) {
 			if _, _, err := s.enlistTxnParticipant(ctx, cmd.TxnID, namespace, keyComponent, meta.Lease.ExpiresAtUnix); err != nil {
 				return nil, fmt.Errorf("register txn participant: %w", err)
 			}
@@ -424,7 +424,7 @@ func (s *Service) Metadata(ctx context.Context, cmd MetadataCommand) (*MetadataR
 			}
 			return nil, fmt.Errorf("store meta: %w", err)
 		}
-		if meta.Lease != nil {
+		if txnExplicit(meta) {
 			if _, _, err := s.enlistTxnParticipant(ctx, cmd.TxnID, namespace, keyComponent, meta.Lease.ExpiresAtUnix); err != nil {
 				return nil, fmt.Errorf("register txn participant: %w", err)
 			}

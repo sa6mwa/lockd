@@ -1,0 +1,131 @@
+File: lockd
+Build ID: e4d61a645a1f2bc729cb1865a9a8fa7f759a8ceb
+Type: inuse_space
+Time: 2026-01-28 11:41:33 CET
+Showing nodes accounting for 42078.88kB, 100% of 42078.88kB total
+      flat  flat%   sum%        cum   cum%
+ 8705.05kB 20.69% 20.69% 15406.26kB 36.61%  pkt.systems/lockd/internal/storage/disk.(*logNamespace).readSegmentLocked
+ 6278.95kB 14.92% 35.61%  6278.95kB 14.92%  pkt.systems/lockd/internal/storage/disk.(*logNamespace).allocRef (inline)
+    4617kB 10.97% 46.58%     4617kB 10.97%  runtime.allocm
+ 4097.12kB  9.74% 56.32% 20015.41kB 47.57%  pkt.systems/lockd/internal/storage/disk.(*Store).StoreMeta
+ 2560.12kB  6.08% 62.40%  2560.12kB  6.08%  github.com/google/uuid.UUID.String (inline)
+ 2048.16kB  4.87% 67.27%  4608.28kB 10.95%  pkt.systems/lockd/internal/storage/disk.decodeMeta
+ 1762.94kB  4.19% 71.46%  1762.94kB  4.19%  runtime/pprof.StartCPUProfile
+ 1576.28kB  3.75% 75.21%  2092.92kB  4.97%  pkt.systems/lockd/internal/storage/disk.(*logNamespace).applyRecordLocked
+ 1536.09kB  3.65% 78.86%  1536.09kB  3.65%  encoding/hex.EncodeToString (inline)
+ 1184.27kB  2.81% 81.67%  1184.27kB  2.81%  bytes.growSlice
+  520.04kB  1.24% 82.91%   520.04kB  1.24%  pkt.systems/lockd/internal/search/index.dedupeAndSort
+  516.64kB  1.23% 84.13%   516.64kB  1.23%  pkt.systems/kryptograf/stream.newBufferSet (inline)
+  516.64kB  1.23% 85.36%   516.64kB  1.23%  pkt.systems/lockd/internal/search/index.(*MemTable).Add (inline)
+  516.64kB  1.23% 86.59%   516.64kB  1.23%  pkt.systems/lockd/internal/storage/disk.(*logNamespace).insertObjectKeyLocked
+  516.01kB  1.23% 87.82%   516.01kB  1.23%  golang.org/x/net/trace.init
+  516.01kB  1.23% 89.04%   516.01kB  1.23%  os.init.func1
+     514kB  1.22% 90.26%      514kB  1.22%  github.com/minio/md5-simd.init.func2 (inline)
+  512.25kB  1.22% 91.48%   512.25kB  1.22%  runtime.gcBgMarkWorker
+  512.23kB  1.22% 92.70%   512.23kB  1.22%  google.golang.org/protobuf/internal/filedesc.newRawFile
+  512.16kB  1.22% 93.92%   512.16kB  1.22%  pkt.systems/pslog.(*jsonPlainLogger).With
+  512.08kB  1.22% 95.13%   512.08kB  1.22%  github.com/spf13/pflag.(*FlagSet).VarPF
+  512.08kB  1.22% 96.35%   512.08kB  1.22%  internal/sync.newIndirectNode[go.shape.interface {},go.shape.interface {}] (inline)
+  512.04kB  1.22% 97.57%   512.04kB  1.22%  pkt.systems/lockd/internal/core.(*Service).namespacedKey
+  512.04kB  1.22% 98.78%  3080.79kB  7.32%  pkt.systems/lockd/internal/storage/disk.(*Store).WriteState
+  512.04kB  1.22%   100%  3237.01kB  7.69%  pkt.systems/lockd/internal/storage/disk.(*logNamespace).appendRecord
+         0     0%   100%  1184.27kB  2.81%  bytes.(*Buffer).ReadFrom
+         0     0%   100%  1184.27kB  2.81%  bytes.(*Buffer).grow
+         0     0%   100%      514kB  1.22%  github.com/minio/md5-simd.init
+         0     0%   100% 10272.33kB 24.41%  github.com/spf13/cobra.(*Command).Execute (inline)
+         0     0%   100% 10272.33kB 24.41%  github.com/spf13/cobra.(*Command).ExecuteC
+         0     0%   100% 10272.33kB 24.41%  github.com/spf13/cobra.(*Command).ExecuteContext (inline)
+         0     0%   100% 10272.33kB 24.41%  github.com/spf13/cobra.(*Command).execute
+         0     0%   100%   512.08kB  1.22%  github.com/spf13/pflag.(*FlagSet).Bool (inline)
+         0     0%   100%   512.08kB  1.22%  github.com/spf13/pflag.(*FlagSet).BoolP (inline)
+         0     0%   100%   512.08kB  1.22%  github.com/spf13/pflag.(*FlagSet).BoolVarP
+         0     0%   100% 11447.16kB 27.20%  golang.org/x/net/http2.(*serverConn).runHandler
+         0     0%   100%   512.23kB  1.22%  google.golang.org/genproto/googleapis/rpc/errdetails.file_google_rpc_error_details_proto_init
+         0     0%   100%   512.23kB  1.22%  google.golang.org/genproto/googleapis/rpc/errdetails.init.0
+         0     0%   100%   512.23kB  1.22%  google.golang.org/protobuf/internal/filedesc.Builder.Build
+         0     0%   100%   512.23kB  1.22%  google.golang.org/protobuf/internal/filetype.Builder.Build
+         0     0%   100%   512.08kB  1.22%  internal/sync.(*HashTrieMap[go.shape.interface {},go.shape.interface {}]).Store (inline)
+         0     0%   100%   512.08kB  1.22%  internal/sync.(*HashTrieMap[go.shape.interface {},go.shape.interface {}]).Swap
+         0     0%   100%   512.08kB  1.22%  internal/sync.(*HashTrieMap[go.shape.interface {},go.shape.interface {}]).expand
+         0     0%   100% 10784.41kB 25.63%  main.main
+         0     0%   100% 10784.41kB 25.63%  main.main.func1
+         0     0%   100%   512.08kB  1.22%  main.newRootCommand
+         0     0%   100% 10272.33kB 24.41%  main.newRootCommand.func1
+         0     0%   100% 10784.41kB 25.63%  main.submain
+         0     0%   100% 13210.10kB 31.39%  net/http.(*ServeMux).ServeHTTP
+         0     0%   100%  1762.94kB  4.19%  net/http.(*conn).serve
+         0     0%   100% 13210.10kB 31.39%  net/http.HandlerFunc.ServeHTTP
+         0     0%   100% 11447.16kB 27.20%  net/http.initALPNRequest.ServeHTTP
+         0     0%   100% 13210.10kB 31.39%  net/http.serverHandler.ServeHTTP
+         0     0%   100%  1762.94kB  4.19%  net/http/pprof.Profile
+         0     0%   100%   516.01kB  1.23%  os.(*File).ReadDir
+         0     0%   100%   516.01kB  1.23%  os.(*File).readdir
+         0     0%   100%   516.01kB  1.23%  os.ReadDir
+         0     0%   100%   516.64kB  1.23%  pkt.systems/kryptograf.(*service).EncryptWriter
+         0     0%   100%   516.64kB  1.23%  pkt.systems/kryptograf/stream.NewEncryptWriter
+         0     0%   100%   516.64kB  1.23%  pkt.systems/kryptograf/stream.borrowBuffers
+         0     0%   100% 10272.33kB 24.41%  pkt.systems/lockd.NewServer
+         0     0%   100% 10272.33kB 24.41%  pkt.systems/lockd.openBackend
+         0     0%   100%  1024.20kB  2.43%  pkt.systems/lockd/internal/core.(*Service).Acquire
+         0     0%   100%  7350.19kB 17.47%  pkt.systems/lockd/internal/core.(*Service).Release
+         0     0%   100%  2560.70kB  6.09%  pkt.systems/lockd/internal/core.(*Service).Update
+         0     0%   100%  5129.23kB 12.19%  pkt.systems/lockd/internal/core.(*Service).applyTxnDecisionForMeta
+         0     0%   100%  2220.95kB  5.28%  pkt.systems/lockd/internal/core.(*Service).applyTxnDecisionForMeta.func1.1
+         0     0%   100%   512.16kB  1.22%  pkt.systems/lockd/internal/core.(*Service).updateLeaseIndex
+         0     0%   100%  2220.95kB  5.28%  pkt.systems/lockd/internal/core.(*writePlan).Wait
+         0     0%   100%   512.08kB  1.22%  pkt.systems/lockd/internal/httpapi.(*Handler).cacheLease
+         0     0%   100%  1536.27kB  3.65%  pkt.systems/lockd/internal/httpapi.(*Handler).handleAcquire
+         0     0%   100%  7350.19kB 17.47%  pkt.systems/lockd/internal/httpapi.(*Handler).handleRelease
+         0     0%   100%  2560.70kB  6.09%  pkt.systems/lockd/internal/httpapi.(*Handler).handleUpdate
+         0     0%   100%   512.08kB  1.22%  pkt.systems/lockd/internal/httpapi.(*Handler).markKeyObserved
+         0     0%   100% 11447.16kB 27.20%  pkt.systems/lockd/internal/httpapi.(*Handler).wrap.func1
+         0     0%   100%  2220.95kB  5.28%  pkt.systems/lockd/internal/search/index.(*Manager).Insert
+         0     0%   100%   520.04kB  1.24%  pkt.systems/lockd/internal/search/index.(*MemTable).Flush
+         0     0%   100%  1184.27kB  2.81%  pkt.systems/lockd/internal/search/index.(*Store).WriteSegment
+         0     0%   100%  2220.95kB  5.28%  pkt.systems/lockd/internal/search/index.(*Writer).Insert
+         0     0%   100%  1704.31kB  4.05%  pkt.systems/lockd/internal/search/index.(*Writer).flushLocked
+         0     0%   100%  1184.27kB  2.81%  pkt.systems/lockd/internal/search/index.(*Writer).persistSegment
+         0     0%   100%  2220.95kB  5.28%  pkt.systems/lockd/internal/storage.(*CommitGroup).Wait
+         0     0%   100%   516.64kB  1.23%  pkt.systems/lockd/internal/storage.(*Crypto).EncryptWriterForMaterial
+         0     0%   100%  3080.79kB  7.32%  pkt.systems/lockd/internal/storage.(*defaultStagingBackend).PromoteStagedState
+         0     0%   100%  1696.43kB  4.03%  pkt.systems/lockd/internal/storage/disk.(*Store).PutObject
+         0     0%   100%   512.16kB  1.22%  pkt.systems/lockd/internal/storage/disk.(*Store).loggers
+         0     0%   100%  6278.95kB 14.92%  pkt.systems/lockd/internal/storage/disk.(*logNamespace).appendLoop
+         0     0%   100%  6278.95kB 14.92%  pkt.systems/lockd/internal/storage/disk.(*logNamespace).flushAppends
+         0     0%   100% 15406.26kB 36.61%  pkt.systems/lockd/internal/storage/disk.(*logNamespace).refresh (inline)
+         0     0%   100%   516.01kB  1.23%  pkt.systems/lockd/internal/storage/disk.(*logNamespace).refreshForce (inline)
+         0     0%   100% 15922.27kB 37.84%  pkt.systems/lockd/internal/storage/disk.(*logNamespace).refreshWithMode
+         0     0%   100%   516.01kB  1.23%  pkt.systems/lockd/internal/storage/disk.(*logNamespace).scanSegmentsLocked
+         0     0%   100% 10272.33kB 24.41%  pkt.systems/lockd/internal/storage/disk.Verify
+         0     0%   100% 10272.33kB 24.41%  pkt.systems/lockd/internal/storage/disk.Verify.func1
+         0     0%   100%  5133.93kB 12.20%  pkt.systems/lockd/internal/storage/disk.Verify.func2.2
+         0     0%   100%  1184.27kB  2.81%  pkt.systems/lockd/internal/storage/disk.readPayloadInline
+         0     0%   100%  1696.43kB  4.03%  pkt.systems/lockd/internal/storage/retry.(*backend).PutObject
+         0     0%   100%  1696.43kB  4.03%  pkt.systems/lockd/internal/storage/retry.(*backend).PutObject.func1
+         0     0%   100%  4609.15kB 10.95%  pkt.systems/lockd/internal/storage/retry.(*backend).StoreMeta
+         0     0%   100%  4609.15kB 10.95%  pkt.systems/lockd/internal/storage/retry.(*backend).StoreMeta.func1
+         0     0%   100%  3080.79kB  7.32%  pkt.systems/lockd/internal/storage/retry.(*backend).WriteState
+         0     0%   100%  3080.79kB  7.32%  pkt.systems/lockd/internal/storage/retry.(*backend).WriteState.func1
+         0     0%   100%  9386.37kB 22.31%  pkt.systems/lockd/internal/storage/retry.(*backend).withRetry
+         0     0%   100%   512.02kB  1.22%  pkt.systems/lockd/internal/uuidv7.NewString
+         0     0%   100% 10784.41kB 25.63%  pkt.systems/psi.Run
+         0     0%   100% 10784.41kB 25.63%  pkt.systems/psi.runChild
+         0     0%   100%  1542.25kB  3.67%  runtime.doInit (inline)
+         0     0%   100%  1542.25kB  3.67%  runtime.doInit1
+         0     0%   100%      513kB  1.22%  runtime.gopreempt_m (inline)
+         0     0%   100%      513kB  1.22%  runtime.goschedImpl
+         0     0%   100% 12326.65kB 29.29%  runtime.main
+         0     0%   100%     1539kB  3.66%  runtime.mcall
+         0     0%   100%      513kB  1.22%  runtime.morestack
+         0     0%   100%     2565kB  6.10%  runtime.mstart
+         0     0%   100%     2565kB  6.10%  runtime.mstart0
+         0     0%   100%     2565kB  6.10%  runtime.mstart1
+         0     0%   100%     4617kB 10.97%  runtime.newm
+         0     0%   100%      513kB  1.22%  runtime.newstack
+         0     0%   100%     1539kB  3.66%  runtime.park_m
+         0     0%   100%     4617kB 10.97%  runtime.resetspinning
+         0     0%   100%     4617kB 10.97%  runtime.schedule
+         0     0%   100%     4617kB 10.97%  runtime.startm
+         0     0%   100%     4617kB 10.97%  runtime.wakep
+         0     0%   100%   512.08kB  1.22%  sync.(*Map).Store (inline)
+         0     0%   100%   516.01kB  1.23%  sync.(*Pool).Get

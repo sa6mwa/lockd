@@ -85,6 +85,8 @@ type configDefaults struct {
 	Listen                    string   `yaml:"listen"`
 	ListenProto               string   `yaml:"listen-proto"`
 	Store                     string   `yaml:"store"`
+	HAMode                    string   `yaml:"ha"`
+	HALeaseTTL                string   `yaml:"ha-lease-ttl"`
 	DefaultNamespace          string   `yaml:"default-namespace"`
 	JSONMax                   string   `yaml:"json-max"`
 	JSONUtil                  string   `yaml:"json-util"`
@@ -94,10 +96,13 @@ type configDefaults struct {
 	AcquireBlock              string   `yaml:"acquire-block"`
 	SweeperInterval           string   `yaml:"sweeper-interval"`
 	TxnReplayInterval         string   `yaml:"txn-replay-interval"`
+	QueueDecisionCacheTTL     string   `yaml:"queue-decision-cache-ttl"`
+	QueueDecisionMaxApply     int      `yaml:"queue-decision-max-apply"`
+	QueueDecisionApplyTimeout string   `yaml:"queue-decision-apply-timeout"`
 	IdleSweepGrace            string   `yaml:"idle-sweep-grace"`
-	IdleSweepOpDelay           string   `yaml:"idle-sweep-op-delay"`
-	IdleSweepMaxOps            int      `yaml:"idle-sweep-max-ops"`
-	IdleSweepMaxRuntime        string   `yaml:"idle-sweep-max-runtime"`
+	IdleSweepOpDelay          string   `yaml:"idle-sweep-op-delay"`
+	IdleSweepMaxOps           int      `yaml:"idle-sweep-max-ops"`
+	IdleSweepMaxRuntime       string   `yaml:"idle-sweep-max-runtime"`
 	DrainGrace                string   `yaml:"drain-grace"`
 	ShutdownTimeout           string   `yaml:"shutdown-timeout"`
 	DisableMTLS               bool     `yaml:"disable-mtls"`
@@ -106,6 +111,9 @@ type configDefaults struct {
 	StorageEncryptionSnappy   bool     `yaml:"storage-encryption-snappy"`
 	Bundle                    string   `yaml:"bundle"`
 	DenylistPath              string   `yaml:"denylist-path"`
+	LogstoreCommitMaxOps      int      `yaml:"logstore-commit-max-ops"`
+	LogstoreSegmentSize       string   `yaml:"logstore-segment-size"`
+	DiskLockFileCacheSize     int      `yaml:"disk-lock-file-cache-size"`
 	DisableMemQueueWatch      bool     `yaml:"disable-mem-queue-watch"`
 	TCTrustDir                string   `yaml:"tc-trust-dir"`
 	TCDisableAuth             bool     `yaml:"tc-disable-auth"`
@@ -122,6 +130,7 @@ type configDefaults struct {
 	StoreSSE                  string   `yaml:"s3-sse"`
 	StoreKMSKeyID             string   `yaml:"s3-kms-key-id"`
 	StoreMaxPartSize          string   `yaml:"s3-max-part-size"`
+	StoreEncryptBufferBudget  string   `yaml:"s3-encrypt-buffer-budget"`
 	AWSRegion                 string   `yaml:"aws-region"`
 	AWSKMSKeyID               string   `yaml:"aws-kms-key-id"`
 	StorageRetryMaxAttempts   int      `yaml:"storage-retry-attempts"`
@@ -144,6 +153,8 @@ func defaultConfigYAML(overrides ...func(*configDefaults)) ([]byte, error) {
 		Listen:                    lockd.DefaultListen,
 		ListenProto:               lockd.DefaultListenProto,
 		Store:                     lockd.DefaultStore,
+		HAMode:                    lockd.DefaultHAMode,
+		HALeaseTTL:                lockd.DefaultHALeaseTTL.String(),
 		DefaultNamespace:          lockd.DefaultNamespace,
 		JSONMax:                   configHumanizeBytes(lockd.DefaultJSONMaxBytes),
 		JSONUtil:                  lockd.JSONUtilLockd,
@@ -153,10 +164,13 @@ func defaultConfigYAML(overrides ...func(*configDefaults)) ([]byte, error) {
 		AcquireBlock:              lockd.DefaultAcquireBlock.String(),
 		SweeperInterval:           lockd.DefaultSweeperInterval.String(),
 		TxnReplayInterval:         lockd.DefaultTxnReplayInterval.String(),
+		QueueDecisionCacheTTL:     lockd.DefaultQueueDecisionCacheTTL.String(),
+		QueueDecisionMaxApply:     lockd.DefaultQueueDecisionMaxApply,
+		QueueDecisionApplyTimeout: lockd.DefaultQueueDecisionApplyTimeout.String(),
 		IdleSweepGrace:            lockd.DefaultIdleSweepGrace.String(),
-		IdleSweepOpDelay:           lockd.DefaultIdleSweepOpDelay.String(),
-		IdleSweepMaxOps:            lockd.DefaultIdleSweepMaxOps,
-		IdleSweepMaxRuntime:        lockd.DefaultIdleSweepMaxRuntime.String(),
+		IdleSweepOpDelay:          lockd.DefaultIdleSweepOpDelay.String(),
+		IdleSweepMaxOps:           lockd.DefaultIdleSweepMaxOps,
+		IdleSweepMaxRuntime:       lockd.DefaultIdleSweepMaxRuntime.String(),
 		DrainGrace:                lockd.DefaultDrainGrace.String(),
 		ShutdownTimeout:           lockd.DefaultShutdownTimeout.String(),
 		DisableMTLS:               false,
@@ -165,6 +179,9 @@ func defaultConfigYAML(overrides ...func(*configDefaults)) ([]byte, error) {
 		StorageEncryptionSnappy:   false,
 		Bundle:                    "",
 		DenylistPath:              "",
+		LogstoreCommitMaxOps:      lockd.DefaultLogstoreCommitMaxOps,
+		LogstoreSegmentSize:       configHumanizeBytes(lockd.DefaultLogstoreSegmentSize),
+		DiskLockFileCacheSize:     lockd.DefaultDiskLockFileCacheSize,
 		DisableMemQueueWatch:      false,
 		TCTrustDir:                tcTrustDir,
 		TCDisableAuth:             false,
@@ -181,6 +198,7 @@ func defaultConfigYAML(overrides ...func(*configDefaults)) ([]byte, error) {
 		StoreSSE:                  "",
 		StoreKMSKeyID:             "",
 		StoreMaxPartSize:          configHumanizeBytes(lockd.DefaultS3MaxPartSize),
+		StoreEncryptBufferBudget:  configHumanizeBytes(lockd.DefaultS3SmallEncryptBufferBudget),
 		AWSRegion:                 "",
 		AWSKMSKeyID:               "",
 		StorageRetryMaxAttempts:   lockd.DefaultStorageRetryMaxAttempts,

@@ -1,12 +1,15 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
+	"github.com/rs/xid"
 	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/internal/correlation"
 	"pkt.systems/lockd/internal/qrf"
@@ -22,16 +25,32 @@ var (
 	ErrQueueEmpty = errQueueEmpty
 )
 
+type payloadOutcome struct {
+	res queue.PayloadResult
+	err error
+}
+
 // consumeQueue obtains a single delivery respecting block/wait semantics.
 func (s *Service) consumeQueue(ctx context.Context, qsvc *queue.Service, disp *queue.Dispatcher, namespace, queueName, owner string, txnID string, visibility time.Duration, stateful bool, blockSeconds int64) (delivery *QueueDelivery, nextCursor string, err error) {
 	if disp == nil {
 		return nil, "", Failure{Code: "queue_disabled", Detail: "queue dispatcher not configured", HTTPStatus: 501}
 	}
-	if err := s.maybeThrottleQueue(qrf.KindQueueConsumer); err != nil {
+	if err := s.maybeThrottleQueue(ctx, qrf.KindQueueConsumer); err != nil {
 		return nil, "", err
 	}
 	if err := s.applyShutdownGuard("queue"); err != nil {
 		return nil, "", err
+	}
+	decisionCtx, decisionCancel := s.queueDecisionContext(ctx)
+	if decisionCancel != nil {
+		defer decisionCancel()
+	}
+	if applied, err := s.maybeApplyQueueDecisionWorklist(decisionCtx, namespace, queueName); err != nil {
+		if s.logger != nil {
+			s.logger.Warn("queue.decision.apply_failed", "namespace", namespace, "queue", queueName, "error", err)
+		}
+	} else if applied > 0 && disp != nil {
+		disp.Notify(namespace, queueName)
 	}
 	type consumeTiming struct {
 		wait    time.Duration
@@ -164,6 +183,17 @@ func (s *Service) consumeQueue(ctx context.Context, qsvc *queue.Service, disp *q
 		}
 		return delivery, nextCursor, nil
 	}
+}
+
+func (s *Service) queueDecisionContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if s == nil || s.queueDecisionApplyTimeout <= 0 {
+		return parent, nil
+	}
+	base := context.Background()
+	if parent != nil {
+		base = context.WithoutCancel(parent)
+	}
+	return context.WithTimeout(base, s.queueDecisionApplyTimeout)
 }
 
 // consumeQueueBatch aggregates deliveries up to pageSize with the same fill heuristics used by the HTTP handler.
@@ -359,6 +389,48 @@ func (s *Service) prepareQueueDelivery(ctx context.Context, qsvc *queue.Service,
 	if err != nil {
 		return nil, false, Failure{Code: "invalid_queue_key", Detail: err.Error(), HTTPStatus: 400}
 	}
+	freshRes, err := qsvc.GetMessage(ctx, namespace, queueName, doc.ID)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			if s.queueDispatcher != nil {
+				s.queueDispatcher.Notify(namespace, queueName)
+			}
+			return nil, true, errDeliveryRetry
+		}
+		return nil, false, err
+	}
+	if freshRes.Document == nil {
+		if s.queueDispatcher != nil {
+			s.queueDispatcher.Notify(namespace, queueName)
+		}
+		return nil, true, errDeliveryRetry
+	}
+	if freshRes.Document.Queue != queueName || freshRes.Document.ID != doc.ID {
+		if s.queueDispatcher != nil {
+			s.queueDispatcher.Notify(namespace, queueName)
+		}
+		return nil, true, errDeliveryRetry
+	}
+	doc = *freshRes.Document
+	desc.Document = doc
+	if freshRes.ETag != "" {
+		desc.MetadataETag = freshRes.ETag
+	}
+	now := s.clock.Now().UTC()
+	if doc.NotVisibleUntil.After(now) {
+		qsvc.UpdateReadyCache(namespace, queueName, &doc, desc.MetadataETag)
+		traceQueueLease(s.logger, "queue.delivery.not_visible_retry",
+			"namespace", namespace,
+			"queue", queueName,
+			"message_id", doc.ID,
+			"not_visible_until", doc.NotVisibleUntil.Unix(),
+			"now_unix", now.Unix(),
+		)
+		if s.queueDispatcher != nil {
+			s.queueDispatcher.Notify(namespace, queueName)
+		}
+		return nil, true, errDeliveryRetry
+	}
 
 	ttl := visibility
 	if ttl <= 0 {
@@ -389,6 +461,10 @@ func (s *Service) prepareQueueDelivery(ctx context.Context, qsvc *queue.Service,
 	}
 	ctx = correlation.Set(ctx, corr)
 
+	var acquireStart time.Time
+	if queueDeliveryStatsEnabled() {
+		acquireStart = time.Now()
+	}
 	acq, err := s.acquireLeaseForKey(ctx, acquireParams{
 		Namespace:     namespace,
 		Key:           messageKey,
@@ -399,6 +475,9 @@ func (s *Service) prepareQueueDelivery(ctx context.Context, qsvc *queue.Service,
 		WaitForever:   false,
 		CorrelationID: corr,
 	})
+	if !acquireStart.IsZero() {
+		recordQueueDeliveryAcquire(time.Since(acquireStart))
+	}
 	if err != nil {
 		if failure, ok := err.(Failure); ok && failure.Code == "waiting" {
 			return nil, true, errDeliveryRetry
@@ -417,7 +496,7 @@ func (s *Service) prepareQueueDelivery(ctx context.Context, qsvc *queue.Service,
 		releaseLease(messageKey, acq)
 	}
 
-	if txnID != "" {
+	if txnID != "" && txnExplicit(&acq.Meta) {
 		relParticipant := relativeKey(namespace, messageKey)
 		if _, _, err := s.enlistTxnParticipant(ctx, txnID, namespace, relParticipant, acq.Response.ExpiresAt); err != nil {
 			releaseMessage()
@@ -428,8 +507,31 @@ func (s *Service) prepareQueueDelivery(ctx context.Context, qsvc *queue.Service,
 	doc.LeaseID = acq.Response.LeaseID
 	doc.LeaseFencingToken = acq.Response.FencingToken
 	doc.LeaseTxnID = acq.Response.TxnID
+	var incrementStart time.Time
+	if queueDeliveryStatsEnabled() {
+		incrementStart = time.Now()
+	}
+	payloadSize := doc.PayloadBytes
+	contentType := doc.PayloadContentType
+	var (
+		payloadCh     chan payloadOutcome
+		payloadCancel context.CancelFunc
+	)
+	if payloadSize > 0 {
+		payloadCtx, cancel := context.WithCancel(ctx)
+		payloadCancel = cancel
+		payloadCh = make(chan payloadOutcome, 1)
+		go s.fetchQueuePayload(payloadCtx, payloadCh, qsvc, namespace, queueName, doc.ID, payloadSize, doc.PayloadDescriptor)
+	}
+
 	newMetaETag, err := qsvc.IncrementAttempts(ctx, namespace, queueName, &doc, desc.MetadataETag, ttl)
+	if !incrementStart.IsZero() {
+		recordQueueDeliveryIncrement(time.Since(incrementStart))
+	}
 	if err != nil {
+		if payloadCancel != nil {
+			payloadCancel()
+		}
 		releaseMessage()
 		if errors.Is(err, storage.ErrCASMismatch) || errors.Is(err, storage.ErrNotFound) {
 			return nil, true, errDeliveryRetry
@@ -439,36 +541,59 @@ func (s *Service) prepareQueueDelivery(ctx context.Context, qsvc *queue.Service,
 		}
 		return nil, true, errDeliveryRetry
 	}
-
-	payloadCtx := storage.ContextWithObjectPlaintextSize(ctx, doc.PayloadBytes)
-	if len(doc.PayloadDescriptor) > 0 {
-		payloadCtx = storage.ContextWithObjectDescriptor(payloadCtx, doc.PayloadDescriptor)
+	now = s.clock.Now()
+	redelivered, previous := recordQueueLeaseDelivery(namespace, queueName, doc.ID, acq.Response.LeaseID, acq.Response.FencingToken, acq.Response.TxnID, newMetaETag, doc.NotVisibleUntil, now, &acq.Meta, acq.MetaETag)
+	if redelivered {
+		traceQueueLease(s.logger, "queue.lease.redelivered_inflight",
+			"namespace", namespace,
+			"queue", queueName,
+			"message_id", doc.ID,
+			"prev_lease_id", previous.leaseID,
+			"prev_fencing_token", previous.fencingToken,
+			"prev_txn_id", previous.txnID,
+			"prev_meta_etag", previous.metaETag,
+			"prev_not_visible_until", previous.notVisibleUntil.Unix(),
+			"prev_updated_at", previous.updatedAt.Unix(),
+			"lease_id", acq.Response.LeaseID,
+			"fencing_token", acq.Response.FencingToken,
+			"txn_id", acq.Response.TxnID,
+			"meta_etag", newMetaETag,
+			"not_visible_until", doc.NotVisibleUntil.Unix(),
+			"now_unix", now.Unix(),
+		)
 	}
-	payloadRes, err := qsvc.GetPayload(payloadCtx, namespace, queueName, doc.ID)
-	if err != nil {
-		releaseMessage()
-		if errors.Is(err, storage.ErrNotFound) {
-			s.rescheduleAfterPrepareRetry(qsvc, namespace, queueName, &desc, newMetaETag)
+
+	var (
+		reader io.ReadCloser
+		info   *storage.ObjectInfo
+	)
+	if payloadSize <= 0 {
+		reader = io.NopCloser(bytes.NewReader(nil))
+		payloadSize = 0
+	} else if payloadCh != nil {
+		outcome := <-payloadCh
+		if outcome.err != nil {
+			releaseMessage()
+			if errors.Is(outcome.err, storage.ErrNotFound) {
+				s.rescheduleAfterPrepareRetry(qsvc, namespace, queueName, &desc, newMetaETag)
+				return nil, true, errDeliveryRetry
+			}
+			if s.logger != nil {
+				s.logger.Warn("queue.delivery.payload.retry", "namespace", namespace, "queue", queueName, "message_id", doc.ID, "err", outcome.err)
+			}
 			return nil, true, errDeliveryRetry
 		}
-		if s.logger != nil {
-			s.logger.Warn("queue.delivery.payload.retry", "namespace", namespace, "queue", queueName, "message_id", doc.ID, "err", err)
+		reader = outcome.res.Reader
+		info = outcome.res.Info
+		if info != nil && info.Size >= 0 {
+			payloadSize = info.Size
 		}
-		return nil, true, errDeliveryRetry
-	}
-	reader := payloadRes.Reader
-	info := payloadRes.Info
-
-	var payloadSize int64 = doc.PayloadBytes
-	if info != nil && info.Size >= 0 {
-		payloadSize = info.Size
-	}
-	if payloadSize < 0 {
-		payloadSize = 0
-	}
-	contentType := doc.PayloadContentType
-	if info != nil && info.ContentType != "" {
-		contentType = info.ContentType
+		if payloadSize < 0 {
+			payloadSize = 0
+		}
+		if info != nil && info.ContentType != "" {
+			contentType = info.ContentType
+		}
 	}
 
 	message := &QueueMessage{
@@ -536,7 +661,7 @@ func (s *Service) prepareQueueDelivery(ctx context.Context, qsvc *queue.Service,
 		releaseState = func() {
 			releaseLease(stateKey, stateOutcome)
 		}
-		if txnID != "" {
+		if txnID != "" && stateOutcome != nil && txnExplicit(&stateOutcome.Meta) {
 			relParticipant := relativeKey(namespace, stateKey)
 			if _, _, err := s.enlistTxnParticipant(ctx, txnID, namespace, relParticipant, stateOutcome.Response.ExpiresAt); err != nil {
 				releaseState()
@@ -578,13 +703,13 @@ func (s *Service) prepareQueueDelivery(ctx context.Context, qsvc *queue.Service,
 			return
 		}
 		if newMetaETag != "" {
-			if _, err := qsvc.Reschedule(context.Background(), namespace, queueName, &docForReschedule, newMetaETag, 0); err == nil && s.queueDispatcher != nil {
-				s.queueDispatcher.Notify(namespace, queueName)
-			}
-		}
-		releaseMessage()
-		if releaseState != nil {
-			releaseState()
+			traceQueueLease(s.logger, "queue.delivery.finalize_keep_lease",
+				"namespace", namespace,
+				"queue", queueName,
+				"message_id", docForReschedule.ID,
+				"meta_etag", newMetaETag,
+				"not_visible_until", docForReschedule.NotVisibleUntil.Unix(),
+			)
 		}
 	}
 
@@ -652,9 +777,84 @@ func (s *Service) acquireLeaseForKey(ctx context.Context, params acquireParams) 
 		ForceQueryHidden: isQueueStateKey,
 	}
 
+	if queue.IsQueueMessageKey(relKey) || queue.IsQueueStateKey(relKey) {
+		if parts, ok := queue.ParseMessageLeaseKey(relKey); ok {
+			if rec, ok := queueLeaseRecordSnapshot(namespace, parts.Queue, parts.ID); ok && rec.leaseMetaSet && rec.leaseMetaETag != "" {
+				now := s.clock.Now()
+				meta := cloneMeta(rec.leaseMeta)
+				if meta.Lease == nil || meta.Lease.ExpiresAtUnix <= now.Unix() {
+					if cmd.ForceQueryHidden && !meta.HasQueryHiddenPreference() {
+						meta.SetQueryHidden(true)
+					}
+					if meta.Lease == nil && meta.StagedTxnID != "" {
+						s.discardStagedArtifacts(ctx, namespace, relKey, &meta)
+						clearStagingFields(&meta)
+					}
+					oldExpires := int64(0)
+					if meta.Lease != nil {
+						oldExpires = meta.Lease.ExpiresAtUnix
+					}
+					leaseID := xid.New().String()
+					txnID := strings.TrimSpace(params.TxnID)
+					txnExplicit := txnID != ""
+					if txnID == "" {
+						txnID = xid.New().String()
+					}
+					newFencing := meta.FencingToken + 1
+					meta.FencingToken = newFencing
+					meta.Lease = &storage.Lease{
+						ID:            leaseID,
+						Owner:         params.Owner,
+						ExpiresAtUnix: now.Add(params.TTL).Unix(),
+						FencingToken:  newFencing,
+						TxnID:         txnID,
+						TxnExplicit:   txnExplicit,
+					}
+					meta.UpdatedAtUnix = now.Unix()
+					newMetaETag, err := s.store.StoreMeta(ctx, namespace, relKey, &meta, rec.leaseMetaETag)
+					if err == nil {
+						if err := s.updateLeaseIndex(ctx, namespace, relKey, oldExpires, meta.Lease.ExpiresAtUnix); err != nil && s.logger != nil {
+							s.logger.Warn("lease.index.update_failed", "namespace", namespace, "key", relKey, "error", err)
+						}
+						return &acquireOutcome{
+							Response: api.AcquireResponse{
+								Namespace:     namespace,
+								LeaseID:       leaseID,
+								TxnID:         txnID,
+								Key:           relKey,
+								Owner:         params.Owner,
+								ExpiresAt:     meta.Lease.ExpiresAtUnix,
+								Version:       meta.Version,
+								StateETag:     meta.StateETag,
+								FencingToken:  newFencing,
+								CorrelationID: params.CorrelationID,
+							},
+							Meta:     meta,
+							MetaETag: newMetaETag,
+						}, nil
+					}
+				}
+			}
+		}
+	}
+
 	res, err := s.Acquire(ctx, cmd)
 	if err != nil {
-		return nil, err
+		var failure Failure
+		if errors.As(err, &failure) && failure.Code == "waiting" {
+			if queue.IsQueueMessageKey(relKey) || queue.IsQueueStateKey(relKey) {
+				applied, applyErr := s.maybeApplyDecisionMarkerForLease(ctx, namespace, relKey)
+				if applyErr != nil {
+					return nil, applyErr
+				}
+				if applied {
+					res, err = s.Acquire(ctx, cmd)
+				}
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	resp := api.AcquireResponse{
@@ -703,4 +903,24 @@ func (s *Service) releaseLeaseWithMeta(ctx context.Context, namespace, key strin
 		s.logger.Warn("lease.index.update_failed", "namespace", namespace, "key", relKey, "error", err)
 	}
 	return nil
+}
+
+func (s *Service) fetchQueuePayload(ctx context.Context, ch chan<- payloadOutcome, qsvc *queue.Service, namespace, queueName, id string, payloadSize int64, descriptor []byte) {
+	payloadCtx := storage.ContextWithObjectPlaintextSize(ctx, payloadSize)
+	if len(descriptor) > 0 {
+		payloadCtx = storage.ContextWithObjectDescriptor(payloadCtx, descriptor)
+	}
+	var payloadStart time.Time
+	if queueDeliveryStatsEnabled() {
+		payloadStart = time.Now()
+	}
+	res, err := qsvc.GetPayload(payloadCtx, namespace, queueName, id)
+	if !payloadStart.IsZero() {
+		recordQueueDeliveryPayload(time.Since(payloadStart))
+	}
+	outcome := payloadOutcome{res: res, err: err}
+	select {
+	case ch <- outcome:
+	default:
+	}
 }

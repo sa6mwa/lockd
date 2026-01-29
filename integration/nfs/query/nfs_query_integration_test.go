@@ -20,6 +20,7 @@ import (
 	"pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/integration/internal/cryptotest"
+	"pkt.systems/lockd/integration/internal/hatest"
 	queriesuite "pkt.systems/lockd/integration/query/suite"
 	"pkt.systems/lockd/internal/core"
 	"pkt.systems/lockd/internal/storage"
@@ -198,10 +199,10 @@ func TestNFSQueryTxnRecoveryRollbackPending(t *testing.T) {
 	if err != nil {
 		t.Fatalf("acquire B: %v", err)
 	}
-	if err := leaseA.Save(ctx, map[string]any{"value": "rollback-a"}); err != nil {
+	if err := leaseA.Save(ctx, map[string]any{"value": "a"}); err != nil {
 		t.Fatalf("save A: %v", err)
 	}
-	if err := leaseB.Save(ctx, map[string]any{"value": "rollback-b"}); err != nil {
+	if err := leaseB.Save(ctx, map[string]any{"value": "b"}); err != nil {
 		t.Fatalf("save B: %v", err)
 	}
 
@@ -509,34 +510,62 @@ func TestNFSQueryTxnDecisionEndpoints(t *testing.T) {
 func TestNFSQueryTxnFanoutAcrossNodes(t *testing.T) {
 	root := prepareNFSQueryRoot(t)
 	cfg := nfsQueryConfigWithSweeper(root, 2*time.Second)
-
 	cfg.DisableMTLS = true
 	tsA := startNFSQueryServerWithRootAndConfig(t, cfg, lockd.WithoutTestMTLS())
 	cfgB := cfg
 	tsB := startNFSQueryServerWithRootAndConfig(t, cfgB, lockd.WithoutTestMTLS())
 
-	cryptotest.RegisterRM(t, tsB, tsA)
+	t.Run("Commit", func(t *testing.T) {
+		runNFSQueryTxnFanoutAcrossNodes(t, tsA, tsB, true)
+	})
+	t.Run("Rollback", func(t *testing.T) {
+		runNFSQueryTxnFanoutAcrossNodes(t, tsA, tsB, false)
+	})
+}
 
+func runNFSQueryTxnFanoutAcrossNodes(t *testing.T, tsA, tsB *lockd.TestServer, commit bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
+	activeServer, activeClient, err := hatest.FindActiveServer(ctx, tsA, tsB)
+	if err != nil {
+		t.Fatalf("find active server: %v", err)
+	}
+	passiveServer := tsB
+	if activeServer == tsB {
+		passiveServer = tsA
+	}
+	passiveClient := passiveServer.Client
+	if passiveClient == nil {
+		t.Fatalf("passive server missing client")
+	}
 
-	keyA := fmt.Sprintf("nfs-multinode-commit-a-%d", time.Now().UnixNano())
-	keyB := fmt.Sprintf("nfs-multinode-commit-b-%d", time.Now().UnixNano())
+	keyA := fmt.Sprintf("nfs-multinode-%t-a-%d", commit, time.Now().UnixNano())
+	keyB := fmt.Sprintf("nfs-multinode-%t-b-%d", commit, time.Now().UnixNano())
 
-	leaseA, err := tsA.Client.Acquire(ctx, api.AcquireRequest{
+	if _, err := passiveClient.Acquire(ctx, api.AcquireRequest{
+		Namespace:  namespaces.Default,
+		Key:        "nfs-passive-probe-" + fmt.Sprint(time.Now().UnixNano()),
+		Owner:      "passive-probe",
+		TTLSeconds: 5,
+		BlockSecs:  lockdclient.BlockNoWait,
+	}); err == nil || !hatest.IsNodePassive(err) {
+		t.Fatalf("expected ha passive on acquire, got %v", err)
+	}
+
+	leaseA, err := activeClient.Acquire(ctx, api.AcquireRequest{
 		Namespace:  namespaces.Default,
 		Key:        keyA,
-		Owner:      "multinode-commit",
+		Owner:      "multinode",
 		TTLSeconds: 30,
 		BlockSecs:  lockdclient.BlockWaitForever,
 	})
 	if err != nil {
 		t.Fatalf("acquire A: %v", err)
 	}
-	leaseB, err := tsB.Client.Acquire(ctx, api.AcquireRequest{
+	leaseB, err := activeClient.Acquire(ctx, api.AcquireRequest{
 		Namespace:  namespaces.Default,
 		Key:        keyB,
-		Owner:      "multinode-commit",
+		Owner:      "multinode",
 		TTLSeconds: 30,
 		TxnID:      leaseA.TxnID,
 		BlockSecs:  lockdclient.BlockWaitForever,
@@ -552,7 +581,6 @@ func TestNFSQueryTxnFanoutAcrossNodes(t *testing.T) {
 		t.Fatalf("save B: %v", err)
 	}
 
-	httpClient := newHTTPClient(t, tsB)
 	decReq := api.TxnDecisionRequest{
 		TxnID: leaseA.TxnID,
 		State: "commit",
@@ -560,24 +588,27 @@ func TestNFSQueryTxnFanoutAcrossNodes(t *testing.T) {
 			{Namespace: namespaces.Default, Key: keyA},
 			{Namespace: namespaces.Default, Key: keyB},
 		},
-		ExpiresAtUnix: time.Now().Add(45 * time.Second).Unix(),
 	}
-	body, err := json.Marshal(decReq)
-	if err != nil {
-		t.Fatalf("marshal decision: %v", err)
+	if !commit {
+		decReq.State = "rollback"
 	}
-	req, err := http.NewRequest(http.MethodPost, tsB.URL()+"/v1/txn/decide", bytes.NewReader(body))
-	if err != nil {
-		t.Fatalf("new decision request: %v", err)
+	if commit {
+		if _, err := passiveClient.TxnCommit(ctx, decReq); err == nil || !hatest.IsNodePassive(err) {
+			t.Fatalf("expected ha passive on commit, got %v", err)
+		}
+	} else {
+		if _, err := passiveClient.TxnRollback(ctx, decReq); err == nil || !hatest.IsNodePassive(err) {
+			t.Fatalf("expected ha passive on rollback, got %v", err)
+		}
 	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		t.Fatalf("decision request failed: %v", err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("decision status=%d", resp.StatusCode)
+	if commit {
+		if _, err := activeClient.TxnCommit(ctx, decReq); err != nil {
+			t.Fatalf("decision commit failed: %v", err)
+		}
+	} else {
+		if _, err := activeClient.TxnRollback(ctx, decReq); err != nil {
+			t.Fatalf("decision rollback failed: %v", err)
+		}
 	}
 
 	waitCtx, waitCancel := context.WithTimeout(ctx, 15*time.Second)
@@ -600,91 +631,6 @@ func TestNFSQueryTxnFanoutAcrossNodes(t *testing.T) {
 			time.Sleep(75 * time.Millisecond)
 		}
 	}
-	assertCommitted(tsA.Client, keyA, "a")
-	assertCommitted(tsB.Client, keyB, "b")
-
-	recordCtx, recordCancel := context.WithTimeout(ctx, 8*time.Second)
-	defer recordCancel()
-	if err := waitForTxnRecordDecided(recordCtx, tsA.Backend(), leaseA.TxnID); err != nil {
-		t.Fatalf("waiting for txn record cleanup: %v", err)
-	}
-}
-
-func TestNFSQueryTxnFanoutRollbackAcrossNodes(t *testing.T) {
-	root := prepareNFSQueryRoot(t)
-	cfg := nfsQueryConfigWithSweeper(root, 2*time.Second)
-
-	cfg.DisableMTLS = true
-	tsB := startNFSQueryServerWithRootAndConfig(t, cfg, lockd.WithoutTestMTLS())
-	cfgA := cfg
-	tsA := startNFSQueryServerWithRootAndConfig(t, cfgA, lockd.WithoutTestMTLS())
-
-	cryptotest.RegisterRM(t, tsA, tsB)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
-
-	keyA := fmt.Sprintf("nfs-multinode-rollback-a-%d", time.Now().UnixNano())
-	keyB := fmt.Sprintf("nfs-multinode-rollback-b-%d", time.Now().UnixNano())
-
-	leaseA, err := tsA.Client.Acquire(ctx, api.AcquireRequest{
-		Namespace:  namespaces.Default,
-		Key:        keyA,
-		Owner:      "multinode-rollback",
-		TTLSeconds: 30,
-		BlockSecs:  lockdclient.BlockWaitForever,
-	})
-	if err != nil {
-		t.Fatalf("acquire A: %v", err)
-	}
-	leaseB, err := tsB.Client.Acquire(ctx, api.AcquireRequest{
-		Namespace:  namespaces.Default,
-		Key:        keyB,
-		Owner:      "multinode-rollback",
-		TTLSeconds: 30,
-		TxnID:      leaseA.TxnID,
-		BlockSecs:  lockdclient.BlockWaitForever,
-	})
-	if err != nil {
-		t.Fatalf("acquire B: %v", err)
-	}
-
-	if err := leaseA.Save(ctx, map[string]any{"value": "rollback-a"}); err != nil {
-		t.Fatalf("save A: %v", err)
-	}
-	if err := leaseB.Save(ctx, map[string]any{"value": "rollback-b"}); err != nil {
-		t.Fatalf("save B: %v", err)
-	}
-
-	httpClient := newHTTPClient(t, tsA)
-	rbReq := api.TxnDecisionRequest{
-		TxnID: leaseA.TxnID,
-		State: "rollback",
-		Participants: []api.TxnParticipant{
-			{Namespace: namespaces.Default, Key: keyA},
-			{Namespace: namespaces.Default, Key: keyB},
-		},
-	}
-	rbBody, err := json.Marshal(rbReq)
-	if err != nil {
-		t.Fatalf("marshal rollback: %v", err)
-	}
-	rbHTTP, err := http.NewRequest(http.MethodPost, tsA.URL()+"/v1/txn/decide", bytes.NewReader(rbBody))
-	if err != nil {
-		t.Fatalf("new rollback request: %v", err)
-	}
-	rbHTTP.Header.Set("Content-Type", "application/json")
-	rbResp, err := httpClient.Do(rbHTTP)
-	if err != nil {
-		t.Fatalf("rollback request failed: %v", err)
-	}
-	rbResp.Body.Close()
-	if rbResp.StatusCode != http.StatusOK {
-		t.Fatalf("rollback status=%d", rbResp.StatusCode)
-	}
-
-	waitCtx, waitCancel := context.WithTimeout(ctx, 15*time.Second)
-	defer waitCancel()
 	assertRolledBack := func(cli *lockdclient.Client, key string) {
 		for {
 			state, err := cli.Get(waitCtx, key, lockdclient.WithGetNamespace(namespaces.Default))
@@ -697,12 +643,17 @@ func TestNFSQueryTxnFanoutRollbackAcrossNodes(t *testing.T) {
 			time.Sleep(75 * time.Millisecond)
 		}
 	}
-	assertRolledBack(tsA.Client, keyA)
-	assertRolledBack(tsB.Client, keyB)
+	if commit {
+		assertCommitted(activeClient, keyA, "a")
+		assertCommitted(activeClient, keyB, "b")
+	} else {
+		assertRolledBack(activeClient, keyA)
+		assertRolledBack(activeClient, keyB)
+	}
 
 	recordCtx, recordCancel := context.WithTimeout(ctx, 8*time.Second)
 	defer recordCancel()
-	if err := waitForTxnRecordDecided(recordCtx, tsA.Backend(), leaseA.TxnID); err != nil {
+	if err := waitForTxnRecordDecided(recordCtx, activeServer.Backend(), leaseA.TxnID); err != nil {
 		t.Fatalf("waiting for txn record cleanup: %v", err)
 	}
 }

@@ -219,6 +219,29 @@ func (b *backend) ListMetaKeys(ctx context.Context, namespace string) ([]string,
 	return keys, nil
 }
 
+func (b *backend) ListNamespaces(ctx context.Context) ([]string, error) {
+	ctx, span, _, verbose, begin, finish := b.start(ctx, "list_namespaces")
+	defer span.End()
+
+	lister, ok := b.inner.(storage.NamespaceLister)
+	if !ok {
+		finish("error", storage.ErrNotImplemented)
+		verbose.Debug("storage.list_namespaces.unsupported", "elapsed", time.Since(begin))
+		return nil, storage.ErrNotImplemented
+	}
+	verbose.Trace("storage.list_namespaces.begin")
+	names, err := lister.ListNamespaces(ctx)
+	if err != nil {
+		finish("error", err)
+		verbose.Debug("storage.list_namespaces.error", "error", err, "elapsed", time.Since(begin))
+		return nil, err
+	}
+	span.SetAttributes(attribute.Int("lockd.storage.namespace_count", len(names)))
+	finish("ok", nil)
+	verbose.Debug("storage.list_namespaces.success", "count", len(names), "elapsed", time.Since(begin))
+	return names, nil
+}
+
 func (b *backend) ReadState(ctx context.Context, namespace, key string) (storage.ReadStateResult, error) {
 	ctx, span, _, verbose, begin, finish := b.start(ctx, "read_state")
 	defer span.End()
@@ -471,6 +494,19 @@ func (b *backend) BackendHash(ctx context.Context) (string, error) {
 	finish("ok", nil)
 	verbose.Debug("storage.backend_hash.success", "elapsed", time.Since(begin))
 	return hash, nil
+}
+
+func (b *backend) SetSingleWriter(enabled bool) {
+	if inner, ok := b.inner.(storage.SingleWriterControl); ok {
+		inner.SetSingleWriter(enabled)
+	}
+}
+
+func (b *backend) SupportsConcurrentWrites() bool {
+	if inner, ok := b.inner.(storage.ConcurrentWriteSupport); ok {
+		return inner.SupportsConcurrentWrites()
+	}
+	return true
 }
 
 func (b *backend) Close() error {

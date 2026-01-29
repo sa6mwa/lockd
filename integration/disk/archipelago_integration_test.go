@@ -12,76 +12,99 @@ import (
 	"pkt.systems/lockd"
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/integration/internal/cryptotest"
+	"pkt.systems/lockd/integration/internal/hatest"
 	"pkt.systems/lockd/internal/archipelagotest"
 	"pkt.systems/pslog"
 )
 
 func TestDiskArchipelagoLeaderFailover(t *testing.T) {
 	leaseTTL := 10 * time.Second
-	roots := []string{
-		prepareDiskRoot(t, ""),
-		prepareDiskRoot(t, ""),
-		prepareDiskRoot(t, ""),
-	}
 	bundlePath := cryptotest.SharedTCClientBundlePath(t)
-	configs := make([]lockd.Config, 0, len(roots))
-	for _, root := range roots {
-		cfg := buildDiskConfig(t, root, 0)
-		cryptotest.ConfigureTCAuth(t, &cfg)
-		cfg.TCClientBundlePath = bundlePath
-		configs = append(configs, cfg)
-	}
+	rootA := prepareDiskRoot(t, "")
+	rootB := prepareDiskRoot(t, "")
+	cfgA := buildDiskConfig(t, rootA, 0)
+	cfgB := buildDiskConfig(t, rootB, 0)
+	cfgA.HAMode = "concurrent"
+	cfgB.HAMode = "concurrent"
+	cryptotest.ConfigureTCAuth(t, &cfgA)
+	cryptotest.ConfigureTCAuth(t, &cfgB)
+	cfgA.TCClientBundlePath = bundlePath
+	cfgB.TCClientBundlePath = bundlePath
 
 	scheme := "http"
 	if cryptotest.TestMTLSEnabled() {
 		scheme = "https"
 	}
 
-	addrsByConfig := make([][]string, 0, len(configs))
-	endpoints := make([]string, 0, 6)
-	for range configs {
-		addrs := []string{
-			archipelagotest.ReserveTCPAddr(t),
-			archipelagotest.ReserveTCPAddr(t),
-		}
-		addrsByConfig = append(addrsByConfig, addrs)
-		for _, addr := range addrs {
-			endpoints = append(endpoints, fmt.Sprintf("%s://%s", scheme, addr))
-		}
+	addrA1 := archipelagotest.ReserveTCPAddr(t)
+	addrA2 := archipelagotest.ReserveTCPAddr(t)
+	addrB1 := archipelagotest.ReserveTCPAddr(t)
+	addrB2 := archipelagotest.ReserveTCPAddr(t)
+	endpoints := []string{
+		fmt.Sprintf("%s://%s", scheme, addrA1),
+		fmt.Sprintf("%s://%s", scheme, addrA2),
+		fmt.Sprintf("%s://%s", scheme, addrB1),
+		fmt.Sprintf("%s://%s", scheme, addrB2),
 	}
-	for i := range configs {
-		configs[i].TCJoinEndpoints = append([]string{}, endpoints...)
-	}
+	cfgA.TCJoinEndpoints = append([]string{}, endpoints...)
+	cfgB.TCJoinEndpoints = append([]string{}, endpoints...)
 
-	tcs := make([]*lockd.TestServer, 0, 6)
-	islands := make([]*lockd.TestServer, 0, len(configs))
 	fanoutGate := archipelagotest.NewFanoutGate()
-	restartSpecs := make([]archipelagotest.RestartSpec, 0, 3)
-	restartMap := make(map[int]archipelagotest.RestartSpec, 6)
-	for cfgIdx, cfg := range configs {
-		addrs := addrsByConfig[cfgIdx]
-		for i := 0; i < len(addrs); i++ {
-			addr := addrs[i]
-			ts := startDiskArchipelagoNode(t, cfg, addr, scheme, leaseTTL, fanoutGate)
-			idx := len(tcs)
-			cfgRef := cfg
-			addrRef := addr
-			credsRef := ts.TestMTLSCredentials()
-			spec := archipelagotest.RestartSpec{
-				Index: idx,
-				Start: func(tb testing.TB) *lockd.TestServer {
-					tb.Helper()
-					return startDiskArchipelagoNode(tb, cfgRef, addrRef, scheme, leaseTTL, fanoutGate, credsRef)
-				},
-			}
-			restartMap[idx] = spec
-			tcs = append(tcs, ts)
-			if i == 0 {
-				islands = append(islands, ts)
-			} else {
-				restartSpecs = append(restartSpecs, spec)
-			}
-		}
+	tcA1 := startDiskArchipelagoNode(t, cfgA, addrA1, scheme, leaseTTL, fanoutGate)
+	tcA2 := startDiskArchipelagoNode(t, cfgA, addrA2, scheme, leaseTTL, fanoutGate)
+	tcB1 := startDiskArchipelagoNode(t, cfgB, addrB1, scheme, leaseTTL, fanoutGate)
+	tcB2 := startDiskArchipelagoNode(t, cfgB, addrB2, scheme, leaseTTL, fanoutGate)
+	credsA1 := tcA1.TestMTLSCredentials()
+	credsA2 := tcA2.TestMTLSCredentials()
+	credsB1 := tcB1.TestMTLSCredentials()
+	credsB2 := tcB2.TestMTLSCredentials()
+
+	tcs := []*lockd.TestServer{tcA1, tcA2, tcB1, tcB2}
+	restartSpecs := []archipelagotest.RestartSpec{
+		{
+			Index: 1,
+			Start: func(tb testing.TB) *lockd.TestServer {
+				tb.Helper()
+				return startDiskArchipelagoNode(tb, cfgA, addrA2, scheme, leaseTTL, fanoutGate, credsA2)
+			},
+		},
+		{
+			Index: 3,
+			Start: func(tb testing.TB) *lockd.TestServer {
+				tb.Helper()
+				return startDiskArchipelagoNode(tb, cfgB, addrB2, scheme, leaseTTL, fanoutGate, credsB2)
+			},
+		},
+	}
+	restartMap := map[int]archipelagotest.RestartSpec{
+		0: {
+			Index: 0,
+			Start: func(tb testing.TB) *lockd.TestServer {
+				tb.Helper()
+				return startDiskArchipelagoNode(tb, cfgA, addrA1, scheme, leaseTTL, fanoutGate, credsA1)
+			},
+		},
+		1: {
+			Index: 1,
+			Start: func(tb testing.TB) *lockd.TestServer {
+				tb.Helper()
+				return startDiskArchipelagoNode(tb, cfgA, addrA2, scheme, leaseTTL, fanoutGate, credsA2)
+			},
+		},
+		2: {
+			Index: 2,
+			Start: func(tb testing.TB) *lockd.TestServer {
+				tb.Helper()
+				return startDiskArchipelagoNode(tb, cfgB, addrB1, scheme, leaseTTL, fanoutGate, credsB1)
+			},
+		},
+		3: {
+			Index: 3,
+			Start: func(tb testing.TB) *lockd.TestServer {
+				tb.Helper()
+				return startDiskArchipelagoNode(tb, cfgB, addrB2, scheme, leaseTTL, fanoutGate, credsB2)
+			},
+		},
 	}
 
 	tcHTTP := func(t testing.TB, ts *lockd.TestServer) *http.Client {
@@ -94,21 +117,48 @@ func TestDiskArchipelagoLeaderFailover(t *testing.T) {
 	}
 	archipelagotest.JoinCluster(t, tcs, endpoints, tcHTTP, 25*time.Second)
 
-	for _, rm := range tcs {
-		cryptotest.RegisterRM(t, tcs[0], rm)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	hashes := make([]string, 0, len(islands))
-	for idx, island := range islands {
-		hash, err := island.Backend().BackendHash(ctx)
-		if err != nil {
-			t.Fatalf("hash %d: %v", idx, err)
+	var islands []*lockd.TestServer
+	refreshIslands := func() {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		activeA, probeA, err := hatest.FindActiveServer(ctx, tcA1, tcA2)
+		if probeA != nil {
+			_ = probeA.Close()
 		}
-		hashes = append(hashes, hash)
+		if err != nil {
+			t.Fatalf("find active A: %v", err)
+		}
+		activeB, probeB, err := hatest.FindActiveServer(ctx, tcB1, tcB2)
+		if probeB != nil {
+			_ = probeB.Close()
+		}
+		if err != nil {
+			t.Fatalf("find active B: %v", err)
+		}
+		attachHAClient(t, activeA, tcA1, tcA2)
+		attachHAClient(t, activeB, tcB1, tcB2)
+		islands = []*lockd.TestServer{activeA, activeB}
 	}
-	archipelagotest.RequireRMRegistry(t, tcs, tcHTTP, hashes)
+	refreshIslands()
+
+	for _, rm := range tcs {
+		cryptotest.RegisterRM(t, tcA1, rm)
+	}
+	if len(islands) != 2 {
+		t.Fatalf("expected 2 active islands, got %d", len(islands))
+	}
+	hashCtx, hashCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer hashCancel()
+	hashA, err := islands[0].Backend().BackendHash(hashCtx)
+	if err != nil {
+		t.Fatalf("hash A: %v", err)
+	}
+	hashB, err := islands[1].Backend().BackendHash(hashCtx)
+	if err != nil {
+		t.Fatalf("hash B: %v", err)
+	}
+	archipelagotest.RequireRMRegistry(t, tcs, tcHTTP, []string{hashA, hashB})
 	expectedRMs := archipelagotest.ExpectedRMEndpoints(t, tcs)
 	archipelagotest.WaitForRMRegistry(t, tcs, tcHTTP, expectedRMs, 20*time.Second)
 
@@ -117,13 +167,21 @@ func TestDiskArchipelagoLeaderFailover(t *testing.T) {
 		return cryptotest.RequireTCClient(t, ts, lockdclient.WithEndpointShuffle(false))
 	}
 
+	refreshIslands()
 	archipelagotest.RunLeaderDecisionFanoutInterruptedScenario(t, tcs, islands, tcHTTP, tcClient, fanoutGate, restartMap)
+	refreshIslands()
 	archipelagotest.RunQuorumLossDuringRenewScenario(t, tcs, islands, restartSpecs, tcHTTP, tcClient)
+	refreshIslands()
 	archipelagotest.RunLeaderFailoverScenarioMulti(t, tcs, islands, tcHTTP, rmHTTP, tcClient, restartMap)
+	refreshIslands()
 	archipelagotest.RunRMRegistryReplicationScenario(t, tcs, tcHTTP, rmHTTP, restartMap)
+	refreshIslands()
 	archipelagotest.RunRMApplyTermFencingScenario(t, tcs, islands, tcHTTP, restartMap)
+	refreshIslands()
 	archipelagotest.RunQueueStateFailoverScenario(t, tcs, islands, tcHTTP, tcClient, restartMap)
+	refreshIslands()
 	archipelagotest.RunTCMembershipChurnScenario(t, tcs, tcHTTP)
+	refreshIslands()
 	archipelagotest.RunNonLeaderForwardUnavailableScenario(t, tcs, islands, tcHTTP, tcClient)
 }
 
@@ -158,4 +216,36 @@ func startDiskArchipelagoNode(tb testing.TB, base lockd.Config, addr, scheme str
 		options = append(options, cryptotest.SharedMTLSOptions(tb)...)
 	}
 	return lockd.StartTestServer(tb, options...)
+}
+
+func attachHAClient(t testing.TB, active *lockd.TestServer, servers ...*lockd.TestServer) *lockdclient.Client {
+	t.Helper()
+	if len(servers) == 0 {
+		t.Fatalf("ha client: servers required")
+	}
+	primary := active
+	if primary == nil {
+		primary = servers[0]
+	}
+	if primary == nil {
+		t.Fatalf("ha client: primary server missing")
+	}
+	endpoints := make([]string, 0, len(servers))
+	endpoints = append(endpoints, primary.URL())
+	for _, ts := range servers {
+		if ts == nil || ts == primary {
+			continue
+		}
+		endpoints = append(endpoints, ts.URL())
+	}
+	cli, err := primary.NewEndpointsClient(endpoints, lockdclient.WithEndpointShuffle(false))
+	if err != nil {
+		t.Fatalf("ha client: %v", err)
+	}
+	for _, ts := range servers {
+		if ts != nil {
+			ts.Client = cli
+		}
+	}
+	return cli
 }

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/magiconair/properties"
+	"github.com/pingcap/go-ycsb/pkg/measurement"
 	"github.com/pingcap/go-ycsb/pkg/ycsb"
 	"github.com/rs/xid"
 
@@ -44,6 +45,7 @@ const (
 	propAttachBytes  = "lockd.attach.bytes"
 	propAttachRead   = "lockd.attach.read"
 	propTxnExplicit  = "lockd.txn.explicit"
+	propPhaseMetrics = "lockd.phase_metrics"
 )
 
 const attachmentDefaultName = "ycsb.bin"
@@ -73,6 +75,8 @@ type driverConfig struct {
 	attachRead    bool
 	attachPayload []byte
 	txnExplicit   bool
+	phaseMetrics  bool
+	phaseRecorder func(op string, start time.Time, dur time.Duration)
 }
 
 type lockdDB struct {
@@ -116,6 +120,9 @@ func (lockdCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 	)
 	if err != nil {
 		return nil, err
+	}
+	if cfg.phaseMetrics {
+		cfg.phaseRecorder = measurement.Measure
 	}
 	return &lockdDB{client: cli, cfg: cfg}, nil
 }
@@ -168,6 +175,7 @@ func parseConfig(p *properties.Properties) (*driverConfig, error) {
 		attachBytes = 1024
 	}
 	attachRead := p.GetBool(propAttachRead, false)
+	phaseMetrics := p.GetBool(propPhaseMetrics, false)
 	cfg := &driverConfig{
 		endpoints:    endpoints,
 		namespace:    namespace,
@@ -186,11 +194,19 @@ func parseConfig(p *properties.Properties) (*driverConfig, error) {
 		attachBytes:  attachBytes,
 		attachRead:   attachRead,
 		txnExplicit:  p.GetBool(propTxnExplicit, false),
+		phaseMetrics: phaseMetrics,
 	}
 	if attachEnable {
 		cfg.attachPayload = bytes.Repeat([]byte("y"), int(attachBytes))
 	}
 	return cfg, nil
+}
+
+func (db *lockdDB) recordPhase(op string, start time.Time) {
+	if db == nil || db.cfg == nil || db.cfg.phaseRecorder == nil {
+		return
+	}
+	db.cfg.phaseRecorder(op, start, time.Since(start))
 }
 
 func parseQueryReturn(raw string) (lockdclient.QueryReturn, error) {
@@ -348,11 +364,17 @@ func (db *lockdDB) Delete(ctx context.Context, table string, key string) error {
 	if err != nil {
 		return err
 	}
+	removeStart := time.Now()
 	if _, err := lease.Remove(ctx); err != nil {
+		db.recordPhase("LOCKD_REMOVE", removeStart)
 		_ = lease.Release(ctx)
 		return err
 	}
-	return lease.Release(ctx)
+	db.recordPhase("LOCKD_REMOVE", removeStart)
+	releaseStart := time.Now()
+	err = lease.Release(ctx)
+	db.recordPhase("LOCKD_RELEASE", releaseStart)
+	return err
 }
 
 func (db *lockdDB) acquire(ctx context.Context, table, key, owner string) (*lockdclient.LeaseSession, error) {
@@ -373,7 +395,10 @@ func (db *lockdDB) acquire(ctx context.Context, table, key, owner string) (*lock
 		BlockSecs:  db.cfg.blockSeconds,
 		TxnID:      txnID,
 	}
-	return db.client.Acquire(ctx, req)
+	start := time.Now()
+	lease, err := db.client.Acquire(ctx, req)
+	db.recordPhase("LOCKD_ACQUIRE", start)
+	return lease, err
 }
 
 func (db *lockdDB) writeDocument(ctx context.Context, table, key string, values map[string][]byte) error {
@@ -395,15 +420,25 @@ func (db *lockdDB) writeDocument(ctx context.Context, table, key string, values 
 	for f, v := range values {
 		doc.Data[f] = string(v)
 	}
-	if err := lease.Save(ctx, doc, lockdclient.WithQueryVisible()); err != nil {
+	saveOpts := make([]lockdclient.UpdateOption, 0, 1)
+	if db.cfg.queryRefresh == "wait_for" {
+		saveOpts = append(saveOpts, lockdclient.WithQueryVisible())
+	}
+	updateStart := time.Now()
+	if err := lease.Save(ctx, doc, saveOpts...); err != nil {
+		db.recordPhase("LOCKD_UPDATE", updateStart)
 		_ = lease.Release(ctx)
 		return err
 	}
+	db.recordPhase("LOCKD_UPDATE", updateStart)
 	if err := db.maybeAttachPayload(ctx, lease); err != nil {
 		_ = lease.Release(ctx)
 		return err
 	}
-	return lease.Release(ctx)
+	releaseStart := time.Now()
+	err = lease.Release(ctx)
+	db.recordPhase("LOCKD_RELEASE", releaseStart)
+	return err
 }
 
 func (db *lockdDB) loadDocument(ctx context.Context, table, key string) (*recordDocument, error) {

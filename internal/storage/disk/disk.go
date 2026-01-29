@@ -1,11 +1,8 @@
 package disk
 
 import (
+	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -15,10 +12,9 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
+	"sync/atomic"
 	"time"
 
-	"pkt.systems/kryptograf"
 	"pkt.systems/lockd/internal/search"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/uuidv7"
@@ -28,12 +24,15 @@ import (
 
 // Config captures the tunables for the disk backend.
 type Config struct {
-	Root            string
-	Retention       time.Duration
-	JanitorInterval time.Duration
-	Now             func() time.Time
-	QueueWatch      bool
-	Crypto          *storage.Crypto
+	Root                 string
+	Retention            time.Duration
+	JanitorInterval      time.Duration
+	Now                  func() time.Time
+	QueueWatch           bool
+	LockFileCacheSize    int
+	Crypto               *storage.Crypto
+	LogstoreCommitMaxOps int
+	LogstoreSegmentSize  int64
 }
 
 // Store implements storage.Backend backed by the local filesystem.
@@ -43,8 +42,12 @@ type Store struct {
 	janitorInterval time.Duration
 	now             func() time.Time
 	crypto          *storage.Crypto
+	logstore        *logStore
+	lockCache       *lockFileCache
+	singleWriter    atomic.Bool
 
-	locks sync.Map
+	locks    lockStripes
+	lockDirs sync.Map
 
 	stopJanitor chan struct{}
 	doneJanitor chan struct{}
@@ -52,6 +55,35 @@ type Store struct {
 	queueWatchEnabled bool
 	queueWatchMode    string
 	queueWatchReason  string
+}
+
+// FsyncStats returns aggregated fsync batch stats for diagnostics.
+func (s *Store) FsyncStats() FsyncBatchStats {
+	if s == nil || s.logstore == nil {
+		return FsyncBatchStats{}
+	}
+	return s.logstore.FsyncStats()
+}
+
+// SupportsConcurrentWrites reports whether the disk backend can safely handle
+// multiple concurrent writers. The logstore is single-writer only.
+func (s *Store) SupportsConcurrentWrites() bool {
+	return false
+}
+
+// SetSingleWriter enables single-writer optimizations when the backend is
+// exclusively owned by this process.
+func (s *Store) SetSingleWriter(enabled bool) {
+	if s == nil {
+		return
+	}
+	if s.singleWriter.Load() == enabled {
+		return
+	}
+	s.singleWriter.Store(enabled)
+	if s.logstore != nil {
+		s.logstore.setSingleWriter(enabled)
+	}
 }
 
 // DefaultNamespaceConfig returns the preferred namespace settings for disk storage.
@@ -67,15 +99,50 @@ func (s *Store) IndexerFlushDefaults() (int, time.Duration) {
 	return 1000, 10 * time.Second
 }
 
-var globalLocks sync.Map
+const (
+	defaultLockFileCacheSize = 2048
+	lockStripeCount          = 4096
+	lockStripeMask           = lockStripeCount - 1
+)
 
-func globalKeyMutex(encoded string) *sync.Mutex {
-	mu, _ := globalLocks.LoadOrStore(encoded, &sync.Mutex{})
-	return mu.(*sync.Mutex)
+type lockStripes struct {
+	stripes [lockStripeCount]sync.Mutex
+}
+
+func (l *lockStripes) lock(namespace, key string) *sync.Mutex {
+	idx := lockStripeIndex(namespace, key) & lockStripeMask
+	return &l.stripes[int(idx)]
+}
+
+func lockStripeIndex(namespace, key string) uint64 {
+	const (
+		fnvOffset64 = 14695981039346656037
+		fnvPrime64  = 1099511628211
+	)
+	hash := uint64(fnvOffset64)
+	for i := 0; i < len(namespace); i++ {
+		hash ^= uint64(namespace[i])
+		hash *= fnvPrime64
+	}
+	hash ^= 0xff
+	hash *= fnvPrime64
+	for i := 0; i < len(key); i++ {
+		hash ^= uint64(key[i])
+		hash *= fnvPrime64
+	}
+	return hash
+}
+
+var globalLocks lockStripes
+
+func globalKeyMutex(namespace, key string) *sync.Mutex {
+	return globalLocks.lock(namespace, key)
 }
 
 type fileLock struct {
-	file *os.File
+	file  *os.File
+	cache *lockFileCache
+	entry *lockFileEntry
 }
 
 func (f *fileLock) Unlock() error {
@@ -83,8 +150,16 @@ func (f *fileLock) Unlock() error {
 		return nil
 	}
 	if err := unlockFile(f.file); err != nil {
-		f.file.Close()
+		if f.cache != nil && f.entry != nil {
+			f.cache.discard(f.entry)
+		} else {
+			_ = f.file.Close()
+		}
 		return err
+	}
+	if f.cache != nil && f.entry != nil {
+		f.cache.release(f.entry)
+		return nil
 	}
 	return f.file.Close()
 }
@@ -116,6 +191,14 @@ func New(cfg Config) (*Store, error) {
 		now:             cfg.Now,
 		crypto:          cfg.Crypto,
 	}
+	cacheSize := cfg.LockFileCacheSize
+	if cacheSize == 0 {
+		cacheSize = defaultLockFileCacheSize
+	} else if cacheSize < 0 {
+		cacheSize = 0
+	}
+	s.lockCache = newLockFileCache(cacheSize)
+	s.logstore = newLogStore(root, s.now, s.crypto, cfg.LogstoreCommitMaxOps, cfg.LogstoreSegmentSize, isNFS(root))
 	s.queueWatchMode = "polling"
 	s.queueWatchReason = "config_disabled"
 	if cfg.QueueWatch {
@@ -149,15 +232,78 @@ func (s *Store) QueueWatchStatus() storage.QueueWatchStatus {
 	}
 }
 
-func (s *Store) keyLock(key string) *sync.Mutex {
-	mu, _ := s.locks.LoadOrStore(key, &sync.Mutex{})
-	return mu.(*sync.Mutex)
+func (s *Store) queueNotifyPath(namespace, queue string) (string, error) {
+	namespace = strings.TrimSpace(namespace)
+	queue = strings.TrimSpace(queue)
+	if namespace == "" {
+		return "", fmt.Errorf("disk: queue namespace required")
+	}
+	if queue == "" {
+		return "", fmt.Errorf("disk: queue name required")
+	}
+	dir := filepath.Join(s.root, namespace, "logstore", "queue-notify")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("disk: prepare queue notify dir: %w", err)
+	}
+	return filepath.Join(dir, queue+".notify"), nil
 }
 
-func (s *Store) acquireFileLock(key string) (*fileLock, error) {
-	lockPath, err := s.lockFilePath(key)
+func (s *Store) touchQueueNotify(namespace, queue string) {
+	if !s.queueWatchEnabled {
+		return
+	}
+	path, err := s.queueNotifyPath(namespace, queue)
+	if err != nil {
+		return
+	}
+	now := time.Now()
+	if err := os.Chtimes(path, now, now); err == nil {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	_ = f.Close()
+}
+
+func queueNameFromObjectKey(key string) (string, bool) {
+	key = strings.TrimPrefix(strings.TrimSpace(key), "/")
+	parts := strings.Split(key, "/")
+	if len(parts) < 2 {
+		return "", false
+	}
+	if parts[0] != "q" {
+		return "", false
+	}
+	if parts[1] == "" {
+		return "", false
+	}
+	return parts[1], true
+}
+
+func (s *Store) keyLock(namespace, key string) *sync.Mutex {
+	return s.locks.lock(namespace, key)
+}
+
+func (s *Store) acquireFileLock(namespace, key string) (*fileLock, error) {
+	if s.singleWriter.Load() {
+		return &fileLock{}, nil
+	}
+	lockPath, err := s.lockFilePath(namespace, key)
 	if err != nil {
 		return nil, err
+	}
+	if s.lockCache != nil {
+		entry, err := s.lockCache.acquire(lockPath)
+		if err != nil {
+			return nil, fmt.Errorf("disk: open lock: %w", err)
+		}
+		if err := lockFile(entry.file); err != nil {
+			s.lockCache.discard(entry)
+			return nil, fmt.Errorf("disk: lock key: %w", err)
+		}
+		return &fileLock{file: entry.file, cache: s.lockCache, entry: entry}, nil
 	}
 	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
@@ -176,6 +322,9 @@ func (s *Store) Close() error {
 		close(s.stopJanitor)
 		<-s.doneJanitor
 	}
+	if s.lockCache != nil {
+		s.lockCache.close()
+	}
 	return nil
 }
 
@@ -186,7 +335,7 @@ func (s *Store) BackendHash(ctx context.Context) (string, error) {
 		root = abs
 	}
 	desc := fmt.Sprintf("disk|%s", root)
-	result, err := storage.ResolveBackendHash(ctx, s, desc)
+	result, err := storage.ResolveBackendHash(ctx, s, desc, s.crypto)
 	return result.Hash, err
 }
 
@@ -201,27 +350,11 @@ func (s *Store) namespacePath(namespace string, elems ...string) string {
 	return filepath.Join(parts...)
 }
 
-func (s *Store) namespaceMetaDir(namespace string) string {
-	return s.namespacePath(namespace, "meta")
-}
-
-func (s *Store) namespaceStateDir(namespace string) string {
-	return s.namespacePath(namespace, "state")
-}
-
-func (s *Store) namespaceObjectsDir(namespace string) string {
-	return s.namespacePath(namespace, "objects")
-}
-
 func (s *Store) namespaceLocksDir(namespace string) string {
 	return s.namespacePath(namespace, "locks")
 }
 
-func (s *Store) namespaceTmpDir(namespace string) string {
-	return s.namespacePath(namespace, "tmp")
-}
-
-func (s *Store) encodeKey(namespace, key string) (string, string, error) {
+func (s *Store) normalizeKey(namespace, key string) (string, string, error) {
 	namespace = strings.TrimSpace(namespace)
 	if namespace == "" {
 		return "", "", fmt.Errorf("disk: namespace required")
@@ -230,51 +363,54 @@ func (s *Store) encodeKey(namespace, key string) (string, string, error) {
 	if key == "" {
 		return "", "", fmt.Errorf("disk: key required")
 	}
-	clean := path.Clean("/" + key)
-	if clean == "/" {
-		return "", "", fmt.Errorf("disk: invalid key %q", key)
+	clean := key
+	if strings.HasPrefix(key, "/") || strings.HasSuffix(key, "/") || strings.Contains(key, "//") || strings.Contains(key, "..") {
+		clean = path.Clean("/" + key)
+		if clean == "/" {
+			return "", "", fmt.Errorf("disk: invalid key %q", key)
+		}
+		clean = strings.TrimPrefix(clean, "/")
+		if clean == "" || strings.HasPrefix(clean, "../") {
+			return "", "", fmt.Errorf("disk: invalid key %q", key)
+		}
 	}
-	clean = strings.TrimPrefix(clean, "/")
-	if clean == "" || strings.HasPrefix(clean, "../") {
-		return "", "", fmt.Errorf("disk: invalid key %q", key)
-	}
-	encoded := url.PathEscape(clean)
-	return namespace, encoded, nil
+	return namespace, clean, nil
 }
 
-func (s *Store) metaPath(namespace, encoded string) string {
-	return filepath.Join(s.namespaceMetaDir(namespace), encoded+".pb")
+func joinNamespaceKey(namespace, key string) string {
+	if namespace == "" {
+		return key
+	}
+	if key == "" {
+		return namespace
+	}
+	if namespace[len(namespace)-1] == '/' {
+		return namespace + key
+	}
+	return namespace + "/" + key
 }
 
-func (s *Store) lockFilePath(key string) (string, error) {
-	parts, err := storage.SplitNamespacedKey(key)
-	if err != nil {
-		return "", err
+func (s *Store) lockFilePath(namespace, key string) (string, error) {
+	if namespace == "" {
+		return "", fmt.Errorf("disk: namespace required")
 	}
-	ns := parts.Namespace
-	segments := parts.Segments
+	if key == "" {
+		return "", fmt.Errorf("disk: key required")
+	}
+	segments := strings.Split(key, "/")
 	if len(segments) == 0 {
-		return "", fmt.Errorf("disk: invalid lock key %q", key)
+		return "", fmt.Errorf("disk: invalid lock key %q/%q", namespace, key)
 	}
 	encoded := encodePathSegments(segments)
-	lockDir := filepath.Join(append([]string{s.namespaceLocksDir(ns)}, encoded[:len(encoded)-1]...)...)
-	if err := os.MkdirAll(lockDir, 0o755); err != nil {
-		return "", fmt.Errorf("disk: prepare lock directory %q: %w", lockDir, err)
+	lockDir := filepath.Join(append([]string{s.namespaceLocksDir(namespace)}, encoded[:len(encoded)-1]...)...)
+	if _, ok := s.lockDirs.Load(lockDir); !ok {
+		if err := os.MkdirAll(lockDir, 0o755); err != nil {
+			return "", fmt.Errorf("disk: prepare lock directory %q: %w", lockDir, err)
+		}
+		s.lockDirs.Store(lockDir, struct{}{})
 	}
 	filename := encoded[len(encoded)-1] + ".lock"
 	return filepath.Join(lockDir, filename), nil
-}
-
-func (s *Store) stateDirPath(namespace, encoded string) string {
-	return filepath.Join(s.namespaceStateDir(namespace), encoded)
-}
-
-func (s *Store) stateDataPath(namespace, encoded string) string {
-	return filepath.Join(s.stateDirPath(namespace, encoded), "data")
-}
-
-func (s *Store) stateInfoPath(namespace, encoded string) string {
-	return filepath.Join(s.stateDirPath(namespace, encoded), "info.json")
 }
 
 func encodePathSegments(segments []string) []string {
@@ -285,123 +421,119 @@ func encodePathSegments(segments []string) []string {
 	return encoded
 }
 
-func decodePathSegments(segments []string) ([]string, error) {
-	decoded := make([]string, len(segments))
-	for i, segment := range segments {
-		val, err := url.PathUnescape(segment)
-		if err != nil {
-			return nil, err
-		}
-		decoded[i] = val
-	}
-	return decoded, nil
-}
-
-func (s *Store) objectDataPath(namespace, key string) (string, error) {
-	namespace = strings.TrimSpace(namespace)
-	if namespace == "" {
-		return "", fmt.Errorf("disk: namespace required")
-	}
-	key = strings.TrimSpace(key)
-	if key == "" {
-		return "", fmt.Errorf("disk: object key required")
-	}
-	clean := path.Clean("/" + key)
-	if clean == "/" {
-		return "", fmt.Errorf("disk: invalid object key %q", key)
-	}
-	clean = strings.TrimPrefix(clean, "/")
-	if strings.HasPrefix(clean, "../") {
-		return "", fmt.Errorf("disk: invalid object key %q", key)
-	}
-	segments := strings.Split(clean, "/")
-	encoded := encodePathSegments(segments)
-	dataPath := filepath.Join(append([]string{s.namespaceObjectsDir(namespace)}, encoded...)...)
-	return dataPath, nil
-}
-
-func (s *Store) objectInfoPath(namespace, key string) (string, error) {
-	dataPath, err := s.objectDataPath(namespace, key)
-	if err != nil {
-		return "", err
-	}
-	return dataPath + ".info.json", nil
-}
-
-func (s *Store) keyFromObjectPath(namespace string, objectPath string) (string, error) {
-	namespace = strings.TrimSpace(namespace)
-	if namespace == "" {
-		return "", fmt.Errorf("disk: namespace required")
-	}
-	clean := filepath.Clean(objectPath)
-	expectedRoot := s.namespaceObjectsDir(namespace)
-	if !strings.HasPrefix(clean, expectedRoot) {
-		return "", fmt.Errorf("disk: object path outside namespace %q: %s", namespace, objectPath)
-	}
-	rel, err := filepath.Rel(expectedRoot, clean)
-	if err != nil {
-		return "", fmt.Errorf("disk: relative path: %w", err)
-	}
-	rel = filepath.ToSlash(rel)
-	if rel == "" || rel == "." {
-		return "", fmt.Errorf("disk: unexpected object directory %q", objectPath)
-	}
-	parts := strings.Split(rel, "/")
-	decoded, err := decodePathSegments(parts)
-	if err != nil {
-		return "", err
-	}
-	return path.Join(decoded...), nil
-}
-
-type metaRecord struct {
-	ETag string
-	Meta *storage.Meta
-}
-
-type stateRecord struct {
-	ETag            string `json:"etag"`
-	Size            int64  `json:"size"`
-	CipherSize      int64  `json:"cipher_size,omitempty"`
-	ModifiedAtUnix  int64  `json:"modified_at_unix"`
-	LastAccessUnix  int64  `json:"last_access_unix,omitempty"`
-	RetainedUntil   int64  `json:"retained_until_unix,omitempty"`
-	CompressionHint string `json:"compression,omitempty"`
-	Descriptor      []byte `json:"descriptor,omitempty"`
-}
-
-type objectInfoRecord struct {
-	ETag          string `json:"etag"`
-	ContentType   string `json:"content_type,omitempty"`
-	UpdatedAtUnix int64  `json:"updated_at_unix,omitempty"`
-	Descriptor    []byte `json:"descriptor,omitempty"`
-}
-
 // LoadMeta reads the per-key metadata protobuf and returns it with the stored ETag.
 func (s *Store) LoadMeta(ctx context.Context, namespace, key string) (storage.LoadMetaResult, error) {
 	logger, verbose := s.loggers(ctx)
 	start := time.Now()
 	verbose.Trace("disk.load_meta.begin", "key", key)
 
-	ns, encoded, err := s.encodeKey(namespace, key)
+	ns, clean, err := s.normalizeKey(namespace, key)
 	if err != nil {
 		logger.Debug("disk.load_meta.encode_error", "key", key, "error", err)
 		return storage.LoadMetaResult{}, err
 	}
-	rec, err := s.readMetaRecord(ns, encoded)
+	ln, err := s.logstore.namespace(ns)
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			verbose.Debug("disk.load_meta.not_found", "key", key, "elapsed", time.Since(start))
-		} else {
-			logger.Debug("disk.load_meta.error", "key", key, "error", err, "elapsed", time.Since(start))
-		}
+		logger.Debug("disk.load_meta.namespace_error", "key", key, "error", err)
 		return storage.LoadMetaResult{}, err
 	}
-	meta := *rec.Meta
-	if rec.Meta.Lease != nil {
-		leaseCopy := *rec.Meta.Lease
+	if err := ln.refresh(); err != nil {
+		logger.Debug("disk.load_meta.refresh_error", "key", key, "error", err)
+		return storage.LoadMetaResult{}, err
+	}
+	ln.mu.Lock()
+	ref := ln.metaIndex[clean]
+	pending := ln.pendingMeta[clean]
+	var cached *storage.Meta
+	var cachedETag string
+	if pending == nil && ref != nil && ref.cachedMeta != nil {
+		metaCopy := *ref.cachedMeta
+		if metaCopy.Lease != nil {
+			leaseCopy := *metaCopy.Lease
+			metaCopy.Lease = &leaseCopy
+		}
+		cached = &metaCopy
+		cachedETag = ref.meta.etag
+	}
+	ln.mu.Unlock()
+	if cached != nil {
+		verbose.Debug("disk.load_meta.cache_hit", "key", key, "elapsed", time.Since(start))
+		return storage.LoadMetaResult{Meta: cached, ETag: cachedETag}, nil
+	}
+	if pending != nil && !pendingGroupMatch(ctx, pending) {
+		if err := waitForPendingCommit(ctx, ln, pending); err != nil {
+			logger.Debug("disk.load_meta.pending_wait_error", "key", key, "error", err)
+			return storage.LoadMetaResult{}, err
+		}
+		ln.mu.Lock()
+		ref = ln.metaIndex[clean]
+		pending = ln.pendingMeta[clean]
+		cached = nil
+		cachedETag = ""
+		if pending == nil && ref != nil && ref.cachedMeta != nil {
+			metaCopy := *ref.cachedMeta
+			if metaCopy.Lease != nil {
+				leaseCopy := *metaCopy.Lease
+				metaCopy.Lease = &leaseCopy
+			}
+			cached = &metaCopy
+			cachedETag = ref.meta.etag
+		}
+		ln.mu.Unlock()
+		if cached != nil {
+			verbose.Debug("disk.load_meta.cache_hit", "key", key, "elapsed", time.Since(start))
+			return storage.LoadMetaResult{Meta: cached, ETag: cachedETag}, nil
+		}
+		if pending != nil && !pendingGroupMatch(ctx, pending) {
+			logger.Debug("disk.load_meta.pending_mismatch", "key", key)
+			return storage.LoadMetaResult{}, storage.ErrCASMismatch
+		}
+	}
+	if ref == nil {
+		verbose.Debug("disk.load_meta.not_found", "key", key, "elapsed", time.Since(start))
+		return storage.LoadMetaResult{}, storage.ErrNotFound
+	}
+	payload, err := ln.readPayload(ref)
+	if err != nil {
+		logger.Debug("disk.load_meta.payload_error", "key", key, "error", err)
+		return storage.LoadMetaResult{}, err
+	}
+	record, err := storage.UnmarshalMetaRecord(payload, s.crypto)
+	if err != nil {
+		logger.Debug("disk.load_meta.decode_error", "key", key, "error", err)
+		if refreshErr := ln.refreshForce(); refreshErr != nil {
+			logger.Debug("disk.load_meta.refresh_force_error", "key", key, "error", refreshErr)
+			return storage.LoadMetaResult{}, err
+		}
+		ln.mu.Lock()
+		ref = ln.metaIndex[clean]
+		ln.mu.Unlock()
+		if ref == nil {
+			verbose.Debug("disk.load_meta.not_found", "key", key, "elapsed", time.Since(start))
+			return storage.LoadMetaResult{}, storage.ErrNotFound
+		}
+		payload, payloadErr := ln.readPayload(ref)
+		if payloadErr != nil {
+			logger.Debug("disk.load_meta.payload_error", "key", key, "error", payloadErr)
+			return storage.LoadMetaResult{}, payloadErr
+		}
+		record, err = storage.UnmarshalMetaRecord(payload, s.crypto)
+		if err != nil {
+			logger.Debug("disk.load_meta.decode_error", "key", key, "error", err)
+			return storage.LoadMetaResult{}, err
+		}
+	}
+	meta := *record.Meta
+	if record.Meta.Lease != nil {
+		leaseCopy := *record.Meta.Lease
 		meta.Lease = &leaseCopy
 	}
+	cachedMeta := meta
+	ln.mu.Lock()
+	if ref != nil && ln.metaIndex[clean] == ref {
+		ref.cachedMeta = &cachedMeta
+	}
+	ln.mu.Unlock()
 	leaseOwner := ""
 	leaseExpires := int64(0)
 	if meta.Lease != nil {
@@ -414,10 +546,10 @@ func (s *Store) LoadMeta(ctx context.Context, namespace, key string) (storage.Lo
 		"state_etag", meta.StateETag,
 		"lease_owner", leaseOwner,
 		"lease_expires_at", leaseExpires,
-		"meta_etag", rec.ETag,
+		"meta_etag", record.ETag,
 		"elapsed", time.Since(start),
 	)
-	return storage.LoadMetaResult{Meta: &meta, ETag: rec.ETag}, nil
+	return storage.LoadMetaResult{Meta: &meta, ETag: record.ETag}, nil
 }
 
 // StoreMeta persists metadata with conditional semantics when expectedETag is provided.
@@ -445,22 +577,21 @@ func (s *Store) StoreMeta(ctx context.Context, namespace, key string, meta *stor
 		"lease_expires_at", leaseExpires,
 	)
 
-	ns, encoded, err := s.encodeKey(namespace, key)
+	ns, clean, err := s.normalizeKey(namespace, key)
 	if err != nil {
 		logger.Debug("disk.store_meta.encode_error", "key", key, "error", err)
 		return "", err
 	}
 
-	storageKey := path.Join(ns, key)
-	glob := globalKeyMutex(storageKey)
+	glob := globalKeyMutex(ns, clean)
 	glob.Lock()
 	defer glob.Unlock()
 
-	mu := s.keyLock(storageKey)
+	mu := s.keyLock(ns, clean)
 	mu.Lock()
 	defer mu.Unlock()
 
-	fl, err := s.acquireFileLock(storageKey)
+	fl, err := s.acquireFileLock(ns, clean)
 	if err != nil {
 		logger.Debug("disk.store_meta.filelock_error", "key", key, "error", err)
 		return "", err
@@ -471,51 +602,107 @@ func (s *Store) StoreMeta(ctx context.Context, namespace, key string, meta *stor
 		}
 	}()
 
-	current, err := s.readMetaRecord(namespace, encoded)
-	exists := err == nil
-	if err != nil && !errors.Is(err, storage.ErrNotFound) {
-		logger.Debug("disk.store_meta.read_error", "key", key, "error", err)
+	ln, err := s.logstore.namespace(ns)
+	if err != nil {
+		logger.Debug("disk.store_meta.namespace_error", "key", key, "error", err)
 		return "", err
 	}
+	if err := ln.refresh(); err != nil {
+		logger.Debug("disk.store_meta.refresh_error", "key", key, "error", err)
+		return "", err
+	}
+
+	ln.mu.Lock()
+	current := ln.metaIndex[clean]
+	pending := ln.pendingMeta[clean]
+	ln.mu.Unlock()
+	if pending == nil && expectedETag != "" && current == nil {
+		if err := ln.refreshForce(); err != nil {
+			logger.Debug("disk.store_meta.refresh_force_error", "key", key, "error", err)
+			return "", err
+		}
+		ln.mu.Lock()
+		current = ln.metaIndex[clean]
+		pending = ln.pendingMeta[clean]
+		ln.mu.Unlock()
+	}
+	if pending != nil && expectedETag != "" {
+		if !pendingGroupMatch(ctx, pending) {
+			if err := waitForPendingCommit(ctx, ln, pending); err != nil {
+				logger.Debug("disk.store_meta.pending_wait_error", "key", key, "error", err)
+				return "", err
+			}
+			ln.mu.Lock()
+			pending = ln.pendingMeta[clean]
+			ln.mu.Unlock()
+			if pending != nil && !pendingGroupMatch(ctx, pending) {
+				logger.Debug("disk.store_meta.cas_pending", "key", key)
+				return "", storage.ErrCASMismatch
+			}
+		}
+		if pending != nil && pending.ref.meta.etag != expectedETag {
+			expectedETag = pending.ref.meta.etag
+		}
+		if isDeleteRecord(pending.ref.recType) || pending.ref.meta.etag != expectedETag {
+			logger.Debug("disk.store_meta.cas_pending_mismatch", "key", key, "expected_etag", expectedETag)
+			return "", storage.ErrCASMismatch
+		}
+		current = pending.ref
+	}
 	if expectedETag != "" {
-		if errors.Is(err, storage.ErrNotFound) {
+		if current == nil {
 			logger.Debug("disk.store_meta.cas_not_found", "key", key, "expected_etag", expectedETag)
 			return "", storage.ErrNotFound
 		}
-		if current.ETag != expectedETag {
-			logger.Debug("disk.store_meta.cas_mismatch", "key", key, "expected_etag", expectedETag, "current_etag", current.ETag)
+		if current.meta.etag != expectedETag {
+			logger.Debug("disk.store_meta.cas_mismatch", "key", key, "expected_etag", expectedETag, "current_etag", current.meta.etag)
 			return "", storage.ErrCASMismatch
 		}
-	} else if exists {
-		logger.Debug("disk.store_meta.cas_exists", "key", key, "current_etag", current.ETag)
+	} else if current != nil {
+		logger.Debug("disk.store_meta.cas_exists", "key", key, "current_etag", current.meta.etag)
 		return "", storage.ErrCASMismatch
 	}
 
 	copyMeta := *meta
-	newRec := metaRecord{
-		ETag: uuidv7.NewString(),
-		Meta: &copyMeta,
+	if meta.Lease != nil {
+		leaseCopy := *meta.Lease
+		copyMeta.Lease = &leaseCopy
 	}
-	payload, err := storage.MarshalMetaRecord(newRec.ETag, newRec.Meta, s.crypto)
+	newETag := uuidv7.NewString()
+	payload, err := storage.MarshalMetaRecord(newETag, &copyMeta, s.crypto)
 	if err != nil {
 		logger.Debug("disk.store_meta.encode_error", "key", key, "error", err)
 		return "", err
 	}
-	metaFile := s.metaPath(namespace, encoded)
-	if err := os.MkdirAll(filepath.Dir(metaFile), 0o755); err != nil {
-		logger.Debug("disk.store_meta.mkdir_error", "key", key, "dir", filepath.Dir(metaFile), "error", err)
+	gen := uint64(1)
+	if current != nil {
+		gen = current.meta.gen + 1
+	}
+	ref, err := ln.appendRecord(ctx, logRecordMetaPut, clean, recordMeta{
+		gen:        gen,
+		modifiedAt: s.now().Unix(),
+		etag:       newETag,
+	}, bytes.NewReader(payload))
+	if err != nil {
+		logger.Debug("disk.store_meta.append_error", "key", key, "error", err)
 		return "", err
 	}
-	if err := s.writeBytesAtomic(namespace, metaFile, payload, "meta"); err != nil {
-		logger.Debug("disk.store_meta.write_error", "key", key, "error", err)
-		return "", err
+	if ref != nil {
+		cached := copyMeta
+		ln.mu.Lock()
+		ref.cachedMeta = &cached
+		ln.mu.Unlock()
 	}
+
 	verbose.Debug("disk.store_meta.success",
 		"key", key,
-		"new_etag", newRec.ETag,
+		"state_etag", meta.StateETag,
+		"lease_owner", leaseOwner,
+		"lease_expires_at", leaseExpires,
+		"new_etag", newETag,
 		"elapsed", time.Since(start),
 	)
-	return newRec.ETag, nil
+	return newETag, nil
 }
 
 // DeleteMeta removes the metadata document on disk, honouring an expected ETag when supplied.
@@ -524,20 +711,19 @@ func (s *Store) DeleteMeta(ctx context.Context, namespace, key string, expectedE
 	start := time.Now()
 	verbose.Trace("disk.delete_meta.begin", "key", key, "expected_etag", expectedETag)
 
-	ns, encoded, err := s.encodeKey(namespace, key)
+	ns, clean, err := s.normalizeKey(namespace, key)
 	if err != nil {
 		logger.Debug("disk.delete_meta.encode_error", "key", key, "error", err)
 		return err
 	}
-	storageKey := path.Join(ns, key)
-	glob := globalKeyMutex(storageKey)
+	glob := globalKeyMutex(ns, clean)
 	glob.Lock()
 	defer glob.Unlock()
-	mu := s.keyLock(storageKey)
+	mu := s.keyLock(ns, clean)
 	mu.Lock()
 	defer mu.Unlock()
 
-	fl, err := s.acquireFileLock(storageKey)
+	fl, err := s.acquireFileLock(ns, clean)
 	if err != nil {
 		logger.Debug("disk.delete_meta.filelock_error", "key", key, "error", err)
 		return err
@@ -548,24 +734,67 @@ func (s *Store) DeleteMeta(ctx context.Context, namespace, key string, expectedE
 		}
 	}()
 
-	if expectedETag != "" {
-		rec, err := s.readMetaRecord(ns, encoded)
-		if err != nil {
-			logger.Debug("disk.delete_meta.read_error", "key", key, "error", err)
+	ln, err := s.logstore.namespace(ns)
+	if err != nil {
+		logger.Debug("disk.delete_meta.namespace_error", "key", key, "error", err)
+		return err
+	}
+	if err := ln.refresh(); err != nil {
+		logger.Debug("disk.delete_meta.refresh_error", "key", key, "error", err)
+		return err
+	}
+
+	ln.mu.Lock()
+	current := ln.metaIndex[clean]
+	pending := ln.pendingMeta[clean]
+	ln.mu.Unlock()
+	if pending == nil && current == nil && expectedETag != "" {
+		if err := ln.refreshForce(); err != nil {
+			logger.Debug("disk.delete_meta.refresh_force_error", "key", key, "error", err)
 			return err
 		}
-		if rec.ETag != expectedETag {
-			logger.Debug("disk.delete_meta.cas_mismatch", "key", key, "expected_etag", expectedETag, "current_etag", rec.ETag)
+		ln.mu.Lock()
+		current = ln.metaIndex[clean]
+		pending = ln.pendingMeta[clean]
+		ln.mu.Unlock()
+	}
+	if pending != nil && expectedETag != "" {
+		if !pendingGroupMatch(ctx, pending) {
+			if err := waitForPendingCommit(ctx, ln, pending); err != nil {
+				logger.Debug("disk.delete_meta.pending_wait_error", "key", key, "error", err)
+				return err
+			}
+			ln.mu.Lock()
+			pending = ln.pendingMeta[clean]
+			ln.mu.Unlock()
+			if pending != nil && !pendingGroupMatch(ctx, pending) {
+				logger.Debug("disk.delete_meta.cas_pending", "key", key)
+				return storage.ErrCASMismatch
+			}
+		}
+		if pending != nil && pending.ref.meta.etag != expectedETag {
+			expectedETag = pending.ref.meta.etag
+		}
+		if isDeleteRecord(pending.ref.recType) || pending.ref.meta.etag != expectedETag {
+			logger.Debug("disk.delete_meta.cas_pending_mismatch", "key", key, "expected_etag", expectedETag)
 			return storage.ErrCASMismatch
 		}
+		current = pending.ref
 	}
-	metaFile := s.metaPath(ns, encoded)
-	if err := os.Remove(metaFile); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			logger.Debug("disk.delete_meta.not_found", "key", key)
-			return storage.ErrNotFound
-		}
-		logger.Debug("disk.delete_meta.remove_error", "key", key, "error", err)
+	if current == nil {
+		logger.Debug("disk.delete_meta.not_found", "key", key)
+		return storage.ErrNotFound
+	}
+	if expectedETag != "" && current.meta.etag != expectedETag {
+		logger.Debug("disk.delete_meta.cas_mismatch", "key", key, "expected_etag", expectedETag, "current_etag", current.meta.etag)
+		return storage.ErrCASMismatch
+	}
+	gen := current.meta.gen + 1
+	if _, err := ln.appendRecord(ctx, logRecordMetaDelete, clean, recordMeta{
+		gen:        gen,
+		modifiedAt: s.now().Unix(),
+	}, nil); err != nil {
+		logger.Debug("disk.delete_meta.append_error", "key", key, "error", err)
 		return err
 	}
 	verbose.Debug("disk.delete_meta.success", "key", key, "elapsed", time.Since(start))
@@ -581,34 +810,54 @@ func (s *Store) ListMetaKeys(ctx context.Context, namespace string) ([]string, e
 	if namespace == "" {
 		return nil, fmt.Errorf("disk: namespace required")
 	}
-	metaDir := s.namespaceMetaDir(namespace)
-	entries, err := os.ReadDir(metaDir)
+	ln, err := s.logstore.namespace(namespace)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		logger.Debug("disk.list_meta_keys.error", "namespace", namespace, "error", err)
+		logger.Debug("disk.list_meta_keys.namespace_error", "namespace", namespace, "error", err)
 		return nil, err
 	}
-	var keys []string
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if !strings.HasSuffix(name, ".pb") {
-			continue
-		}
-		encoded := strings.TrimSuffix(name, ".pb")
-		decoded, err := url.PathUnescape(encoded)
-		if err != nil {
-			logger.Debug("disk.list_meta_keys.decode_error", "namespace", namespace, "encoded", encoded, "error", err)
-			continue
-		}
-		keys = append(keys, decoded)
+	if err := ln.refresh(); err != nil {
+		logger.Debug("disk.list_meta_keys.refresh_error", "namespace", namespace, "error", err)
+		return nil, err
 	}
+	ln.mu.Lock()
+	keys := make([]string, 0, len(ln.metaIndex))
+	for key := range ln.metaIndex {
+		keys = append(keys, key)
+	}
+	ln.mu.Unlock()
+	sort.Strings(keys)
 	verbose.Debug("disk.list_meta_keys.success", "namespace", namespace, "count", len(keys), "elapsed", time.Since(start))
 	return keys, nil
+}
+
+// ListNamespaces enumerates namespace roots on disk.
+func (s *Store) ListNamespaces(ctx context.Context) ([]string, error) {
+	if s == nil {
+		return nil, storage.ErrNotImplemented
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(s.root)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if !entry.IsDir() {
+			continue
+		}
+		name := strings.TrimSpace(entry.Name())
+		if name == "" {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 // ReadState opens the immutable JSON state file for key and returns its metadata.
@@ -617,26 +866,44 @@ func (s *Store) ReadState(ctx context.Context, namespace, key string) (storage.R
 	start := time.Now()
 	verbose.Trace("disk.read_state.begin", "key", key)
 
-	_, encoded, err := s.encodeKey(namespace, key)
+	ns, clean, err := s.normalizeKey(namespace, key)
 	if err != nil {
 		logger.Debug("disk.read_state.encode_error", "key", key, "error", err)
 		return storage.ReadStateResult{}, err
 	}
-	info, err := s.readStateRecord(namespace, encoded)
+	ln, err := s.logstore.namespace(ns)
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			verbose.Debug("disk.read_state.not_found", "key", key, "elapsed", time.Since(start))
-		} else {
-			logger.Debug("disk.read_state.info_error", "key", key, "error", err)
-		}
+		logger.Debug("disk.read_state.namespace_error", "key", key, "error", err)
 		return storage.ReadStateResult{}, err
 	}
-	file, err := os.Open(s.stateDataPath(namespace, encoded))
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			verbose.Debug("disk.read_state.not_found", "key", key, "elapsed", time.Since(start))
-			return storage.ReadStateResult{}, storage.ErrNotFound
+	if err := ln.refresh(); err != nil {
+		logger.Debug("disk.read_state.refresh_error", "key", key, "error", err)
+		return storage.ReadStateResult{}, err
+	}
+	ln.mu.Lock()
+	ref := ln.stateIndex[clean]
+	pending := ln.pendingState[clean]
+	ln.mu.Unlock()
+	if pending != nil && !pendingGroupMatch(ctx, pending) {
+		if err := waitForPendingCommit(ctx, ln, pending); err != nil {
+			logger.Debug("disk.read_state.pending_wait_error", "key", key, "error", err)
+			return storage.ReadStateResult{}, err
 		}
+		ln.mu.Lock()
+		ref = ln.stateIndex[clean]
+		pending = ln.pendingState[clean]
+		ln.mu.Unlock()
+		if pending != nil && !pendingGroupMatch(ctx, pending) {
+			logger.Debug("disk.read_state.pending_mismatch", "key", key)
+			return storage.ReadStateResult{}, storage.ErrCASMismatch
+		}
+	}
+	if ref == nil {
+		verbose.Debug("disk.read_state.not_found", "key", key, "elapsed", time.Since(start))
+		return storage.ReadStateResult{}, storage.ErrNotFound
+	}
+	reader, err := ln.openPayloadReader(ref)
+	if err != nil {
 		logger.Debug("disk.read_state.open_error", "key", key, "error", err)
 		return storage.ReadStateResult{}, err
 	}
@@ -644,43 +911,37 @@ func (s *Store) ReadState(ctx context.Context, namespace, key string) (storage.R
 	var descriptor []byte
 	if descFromCtx, ok := storage.StateDescriptorFromContext(ctx); ok && len(descFromCtx) > 0 {
 		descriptor = append([]byte(nil), descFromCtx...)
-	} else if len(info.Descriptor) > 0 {
-		descriptor = append([]byte(nil), info.Descriptor...)
+	} else if len(ref.meta.descriptor) > 0 {
+		descriptor = append([]byte(nil), ref.meta.descriptor...)
 	}
-	var reader io.ReadCloser = file
+	outReader := reader
 	if encrypted {
 		if len(descriptor) == 0 {
-			file.Close()
+			reader.Close()
 			logger.Debug("disk.read_state.missing_descriptor", "key", key)
 			return storage.ReadStateResult{}, fmt.Errorf("disk: missing state descriptor for %q", key)
 		}
-		storageKey := path.Join(namespace, key)
-		mat, err := s.crypto.MaterialFromDescriptor(storage.StateObjectContext(storageKey), descriptor)
+		storageKey := joinNamespaceKey(ns, clean)
+		objectCtx := storage.StateObjectContextFromContext(ctx, storage.StateObjectContext(storageKey))
+		mat, err := s.crypto.MaterialFromDescriptor(objectCtx, descriptor)
 		if err != nil {
-			file.Close()
+			reader.Close()
 			logger.Debug("disk.read_state.material_error", "key", key, "error", err)
 			return storage.ReadStateResult{}, err
 		}
-		decReader, err := s.crypto.DecryptReaderForMaterial(file, mat)
+		decReader, err := s.crypto.DecryptReaderForMaterial(reader, mat)
 		if err != nil {
-			file.Close()
+			reader.Close()
 			logger.Debug("disk.read_state.decrypt_error", "key", key, "error", err)
 			return storage.ReadStateResult{}, err
 		}
-		reader = decReader
+		outReader = decReader
 	}
-	verbose.Debug("disk.read_state.success",
-		"key", key,
-		"etag", info.ETag,
-		"size", info.Size,
-		"cipher_size", info.CipherSize,
-		"elapsed", time.Since(start),
-	)
 	stateInfo := &storage.StateInfo{
-		Size:       info.Size,
-		CipherSize: info.CipherSize,
-		ETag:       info.ETag,
-		ModifiedAt: info.ModifiedAtUnix,
+		Size:       ref.meta.plaintextSize,
+		CipherSize: ref.meta.cipherSize,
+		ETag:       ref.meta.etag,
+		ModifiedAt: ref.meta.modifiedAt,
 	}
 	if plain, ok := storage.StatePlaintextSizeFromContext(ctx); ok && plain > 0 {
 		stateInfo.Size = plain
@@ -688,7 +949,14 @@ func (s *Store) ReadState(ctx context.Context, namespace, key string) (storage.R
 	if len(descriptor) > 0 {
 		stateInfo.Descriptor = append([]byte(nil), descriptor...)
 	}
-	return storage.ReadStateResult{Reader: reader, Info: stateInfo}, nil
+	verbose.Debug("disk.read_state.success",
+		"key", key,
+		"etag", ref.meta.etag,
+		"size", stateInfo.Size,
+		"cipher_size", stateInfo.CipherSize,
+		"elapsed", time.Since(start),
+	)
+	return storage.ReadStateResult{Reader: outReader, Info: stateInfo}, nil
 }
 
 // WriteState stages and atomically replaces the JSON state file, returning the new ETag.
@@ -696,21 +964,21 @@ func (s *Store) WriteState(ctx context.Context, namespace, key string, body io.R
 	logger, verbose := s.loggers(ctx)
 	start := time.Now()
 	verbose.Trace("disk.write_state.begin", "key", key, "expected_etag", opts.ExpectedETag)
+	expectedETag := opts.ExpectedETag
 
-	ns, encoded, err := s.encodeKey(namespace, key)
+	ns, clean, err := s.normalizeKey(namespace, key)
 	if err != nil {
 		logger.Debug("disk.write_state.encode_error", "key", key, "error", err)
 		return nil, err
 	}
-	storageKey := path.Join(ns, key)
-	glob := globalKeyMutex(storageKey)
+	glob := globalKeyMutex(ns, clean)
 	glob.Lock()
 	defer glob.Unlock()
-	mu := s.keyLock(storageKey)
+	mu := s.keyLock(ns, clean)
 	mu.Lock()
 	defer mu.Unlock()
 
-	fl, err := s.acquireFileLock(storageKey)
+	fl, err := s.acquireFileLock(ns, clean)
 	if err != nil {
 		logger.Debug("disk.write_state.filelock_error", "key", key, "error", err)
 		return nil, err
@@ -721,153 +989,96 @@ func (s *Store) WriteState(ctx context.Context, namespace, key string, body io.R
 		}
 	}()
 
-	stateDir := s.stateDirPath(ns, encoded)
-	if err := os.MkdirAll(stateDir, 0o755); err != nil {
-		err = fmt.Errorf("disk: ensure state dir: %w", err)
-		logger.Debug("disk.write_state.ensure_dir_error", "key", key, "error", err)
-		return nil, err
-	}
-	tmpDir := s.namespaceTmpDir(ns)
-	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
-		logger.Debug("disk.write_state.tmpdir_error", "key", key, "error", err)
-		return nil, err
-	}
-
-	tempFile, err := os.CreateTemp(tmpDir, "lockd-state-*")
+	ln, err := s.logstore.namespace(ns)
 	if err != nil {
-		logger.Debug("disk.write_state.tempfile_error", "key", key, "error", err)
+		logger.Debug("disk.write_state.namespace_error", "key", key, "error", err)
 		return nil, err
 	}
-	moved := false
-	defer func() {
-		_ = tempFile.Close()
-		if !moved {
-			_ = os.Remove(tempFile.Name())
-		}
-	}()
+	if err := ln.refresh(); err != nil {
+		logger.Debug("disk.write_state.refresh_error", "key", key, "error", err)
+		return nil, err
+	}
 
-	encrypted := s.crypto != nil && s.crypto.Enabled()
-	var descriptor []byte
-	hasher := sha256.New()
-	destWriter := io.Writer(tempFile)
-	closeDest := func() error { return nil }
-	if encrypted {
-		descFromCtx, ok := storage.StateDescriptorFromContext(ctx)
-		var mat kryptograf.Material
-		if ok && len(descFromCtx) > 0 {
-			descriptor = append([]byte(nil), descFromCtx...)
-			mat, err = s.crypto.MaterialFromDescriptor(storage.StateObjectContext(storageKey), descriptor)
-			if err != nil {
-				logger.Debug("disk.write_state.material_error", "key", key, "error", err)
+	ln.mu.Lock()
+	current := ln.stateIndex[clean]
+	pending := ln.pendingState[clean]
+	ln.mu.Unlock()
+	if pending == nil && (expectedETag != "" || opts.IfNotExists) && current == nil {
+		if err := ln.refreshForce(); err != nil {
+			logger.Debug("disk.write_state.refresh_force_error", "key", key, "error", err)
+			return nil, err
+		}
+		ln.mu.Lock()
+		current = ln.stateIndex[clean]
+		pending = ln.pendingState[clean]
+		ln.mu.Unlock()
+	}
+	if pending != nil && (expectedETag != "" || opts.IfNotExists) {
+		if !pendingGroupMatch(ctx, pending) {
+			if err := waitForPendingCommit(ctx, ln, pending); err != nil {
+				logger.Debug("disk.write_state.pending_wait_error", "key", key, "error", err)
 				return nil, err
 			}
-		} else {
-			var minted storage.MaterialResult
-			minted, err = s.crypto.MintMaterial(storage.StateObjectContext(storageKey))
-			if err != nil {
-				logger.Debug("disk.write_state.mint_descriptor_error", "key", key, "error", err)
-				return nil, err
+			ln.mu.Lock()
+			current = ln.stateIndex[clean]
+			pending = ln.pendingState[clean]
+			ln.mu.Unlock()
+			if pending != nil && !pendingGroupMatch(ctx, pending) {
+				logger.Debug("disk.write_state.cas_pending", "key", key)
+				return nil, storage.ErrCASMismatch
 			}
-			descriptor = append([]byte(nil), minted.Descriptor...)
-			mat = minted.Material
 		}
-		encWriter, err := s.crypto.EncryptWriterForMaterial(tempFile, mat)
-		if err != nil {
-			logger.Debug("disk.write_state.encrypt_writer_error", "key", key, "error", err)
-			return nil, err
-		}
-		destWriter = encWriter
-		closeDest = encWriter.Close
-	}
-	multi := io.MultiWriter(destWriter, hasher)
-	written, err := io.Copy(multi, body)
-	if err != nil {
-		logger.Debug("disk.write_state.copy_error", "key", key, "error", err)
-		return nil, err
-	}
-	if err := closeDest(); err != nil {
-		logger.Debug("disk.write_state.dest_close_error", "key", key, "error", err)
-		return nil, err
-	}
-	var cipherSize int64 = written
-	if encrypted {
-		if fileInfo, statErr := os.Stat(tempFile.Name()); statErr == nil {
-			cipherSize = fileInfo.Size()
-		}
-		if f, openErr := os.OpenFile(tempFile.Name(), os.O_RDONLY, 0); openErr == nil {
-			_ = f.Sync()
-			_ = f.Close()
-		}
-	} else {
-		if err := tempFile.Sync(); err != nil {
-			logger.Debug("disk.write_state.sync_error", "key", key, "error", err)
-			return nil, err
-		}
-		if err := tempFile.Close(); err != nil {
-			logger.Debug("disk.write_state.close_error", "key", key, "error", err)
-			return nil, err
-		}
-	}
-
-	newETag := hex.EncodeToString(hasher.Sum(nil))
-	if opts.ExpectedETag != "" {
-		info, err := s.readStateRecord(ns, encoded)
-		if err != nil {
-			if errors.Is(err, storage.ErrNotFound) {
-				logger.Debug("disk.write_state.cas_not_found", "key", key, "expected_etag", opts.ExpectedETag)
-				return nil, storage.ErrNotFound
+		if expectedETag != "" {
+			if pending != nil && pending.ref.meta.etag != expectedETag {
+				expectedETag = pending.ref.meta.etag
 			}
-			logger.Debug("disk.write_state.info_error", "key", key, "error", err)
-			return nil, err
+			if isDeleteRecord(pending.ref.recType) || pending.ref.meta.etag != expectedETag {
+				logger.Debug("disk.write_state.cas_pending_mismatch", "key", key, "expected_etag", expectedETag)
+				return nil, storage.ErrCASMismatch
+			}
+			current = pending.ref
 		}
-		if info.ETag != opts.ExpectedETag {
-			logger.Debug("disk.write_state.cas_mismatch", "key", key, "expected_etag", opts.ExpectedETag, "current_etag", info.ETag)
-			return nil, storage.ErrCASMismatch
-		}
-	} else if opts.IfNotExists {
-		if _, err := s.readStateRecord(ns, encoded); err == nil {
-			logger.Debug("disk.write_state.if_not_exists_conflict", "key", key)
+		if opts.IfNotExists && pending != nil {
+			logger.Debug("disk.write_state.if_not_exists_pending", "key", key)
 			return nil, storage.ErrCASMismatch
 		}
 	}
-
-	dataPath := s.stateDataPath(ns, encoded)
-	if err := os.Rename(tempFile.Name(), dataPath); err != nil {
-		if removeErr := os.Remove(dataPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-			logger.Debug("disk.write_state.rename_remove_error", "key", key, "error", removeErr)
-			return nil, err
+	if expectedETag != "" {
+		if current == nil {
+			logger.Debug("disk.write_state.cas_not_found", "key", key, "expected_etag", expectedETag)
+			return nil, storage.ErrNotFound
 		}
-		if err2 := os.Rename(tempFile.Name(), dataPath); err2 != nil {
-			logger.Debug("disk.write_state.rename_error", "key", key, "error", err2)
-			return nil, err2
+		if current.meta.etag != expectedETag {
+			logger.Debug("disk.write_state.cas_mismatch", "key", key, "expected_etag", expectedETag, "current_etag", current.meta.etag)
+			return nil, storage.ErrCASMismatch
 		}
 	}
-	moved = true
-	_ = syncDir(filepath.Dir(dataPath))
-
-	info := stateRecord{
-		ETag:           newETag,
-		Size:           written,
-		CipherSize:     cipherSize,
-		ModifiedAtUnix: s.now().Unix(),
-		Descriptor:     append([]byte(nil), descriptor...),
+	if opts.IfNotExists && current != nil {
+		logger.Debug("disk.write_state.if_not_exists_conflict", "key", key)
+		return nil, storage.ErrCASMismatch
 	}
-	if err := s.writeJSONAtomic(ns, s.stateInfoPath(ns, encoded), info, "state-info"); err != nil {
-		logger.Debug("disk.write_state.write_info_error", "key", key, "error", err)
+
+	gen := uint64(1)
+	if current != nil {
+		gen = current.meta.gen + 1
+	}
+	ref, err := ln.appendRecord(ctx, logRecordStatePut, clean, recordMeta{gen: gen, modifiedAt: s.now().Unix()}, body)
+	if err != nil {
+		logger.Debug("disk.write_state.append_error", "key", key, "error", err)
 		return nil, err
 	}
 
 	result = &storage.PutStateResult{
-		BytesWritten: written,
-		NewETag:      newETag,
+		BytesWritten: ref.meta.plaintextSize,
+		NewETag:      ref.meta.etag,
 	}
-	if len(descriptor) > 0 {
-		result.Descriptor = append([]byte(nil), descriptor...)
+	if len(ref.meta.descriptor) > 0 {
+		result.Descriptor = append([]byte(nil), ref.meta.descriptor...)
 	}
 	verbose.Debug("disk.write_state.success",
 		"key", key,
-		"bytes", written,
-		"new_etag", newETag,
+		"bytes", ref.meta.plaintextSize,
+		"new_etag", ref.meta.etag,
 		"elapsed", time.Since(start),
 	)
 	return result, nil
@@ -879,20 +1090,19 @@ func (s *Store) Remove(ctx context.Context, namespace, key string, expectedETag 
 	start := time.Now()
 	verbose.Trace("disk.remove_state.begin", "key", key, "expected_etag", expectedETag)
 
-	ns, encoded, err := s.encodeKey(namespace, key)
+	ns, clean, err := s.normalizeKey(namespace, key)
 	if err != nil {
 		logger.Debug("disk.remove_state.encode_error", "key", key, "error", err)
 		return err
 	}
-	storageKey := path.Join(ns, key)
-	glob := globalKeyMutex(storageKey)
+	glob := globalKeyMutex(ns, clean)
 	glob.Lock()
 	defer glob.Unlock()
-	mu := s.keyLock(storageKey)
+	mu := s.keyLock(ns, clean)
 	mu.Lock()
 	defer mu.Unlock()
 
-	fl, err := s.acquireFileLock(storageKey)
+	fl, err := s.acquireFileLock(ns, clean)
 	if err != nil {
 		logger.Debug("disk.remove_state.filelock_error", "key", key, "error", err)
 		return err
@@ -903,118 +1113,70 @@ func (s *Store) Remove(ctx context.Context, namespace, key string, expectedETag 
 		}
 	}()
 
-	if expectedETag != "" {
-		info, err := s.readStateRecord(ns, encoded)
-		if err != nil {
-			logger.Debug("disk.remove_state.info_error", "key", key, "error", err)
-			return err
-		}
-		if info.ETag != expectedETag {
-			logger.Debug("disk.remove_state.cas_mismatch", "key", key, "expected_etag", expectedETag, "current_etag", info.ETag)
-			return storage.ErrCASMismatch
-		}
-	}
-
-	dataPath := s.stateDataPath(ns, encoded)
-	infoPath := s.stateInfoPath(ns, encoded)
-	errData := os.Remove(dataPath)
-	errInfo := os.Remove(infoPath)
-	if errData != nil && !errors.Is(errData, os.ErrNotExist) {
-		logger.Debug("disk.remove_state.remove_data_error", "key", key, "error", errData)
-		return errData
-	}
-	if errInfo != nil && !errors.Is(errInfo, os.ErrNotExist) {
-		logger.Debug("disk.remove_state.remove_info_error", "key", key, "error", errInfo)
-		return errInfo
-	}
-	_ = os.Remove(s.stateDirPath(ns, encoded))
-	if errors.Is(errData, os.ErrNotExist) && errors.Is(errInfo, os.ErrNotExist) {
-		verbose.Debug("disk.remove_state.not_found", "key", key, "elapsed", time.Since(start))
-		return storage.ErrNotFound
-	}
-	verbose.Debug("disk.remove_state.success", "key", key, "elapsed", time.Since(start))
-	return nil
-}
-
-func (s *Store) loadObjectInfo(namespace, key string) (*storage.ObjectInfo, error) {
-	dataPath, err := s.objectDataPath(namespace, key)
+	ln, err := s.logstore.namespace(ns)
 	if err != nil {
-		return nil, err
-	}
-	infoPath, err := s.objectInfoPath(namespace, key)
-	if err != nil {
-		return nil, err
-	}
-	fi, err := os.Stat(dataPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, storage.ErrNotFound
-		}
-		return nil, fmt.Errorf("disk: stat object %q: %w", key, err)
-	}
-	payload, err := os.ReadFile(infoPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, storage.ErrNotFound
-		}
-		return nil, fmt.Errorf("disk: read object metadata for %q: %w", key, err)
-	}
-	var rec objectInfoRecord
-	if err := json.Unmarshal(payload, &rec); err != nil {
-		return nil, fmt.Errorf("disk: decode object metadata for %q: %w", key, err)
-	}
-	if rec.ETag == "" {
-		return nil, fmt.Errorf("disk: object %q missing etag", key)
-	}
-	info := &storage.ObjectInfo{
-		Key:          key,
-		ETag:         rec.ETag,
-		Size:         fi.Size(),
-		LastModified: fi.ModTime(),
-		ContentType:  rec.ContentType,
-		Descriptor:   append([]byte(nil), rec.Descriptor...),
-	}
-	return info, nil
-}
-
-func (s *Store) storeObjectInfo(namespace, key string, rec objectInfoRecord) error {
-	infoPath, err := s.objectInfoPath(namespace, key)
-	if err != nil {
+		logger.Debug("disk.remove_state.namespace_error", "key", key, "error", err)
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(infoPath), 0o755); err != nil {
-		return fmt.Errorf("disk: prepare object metadata dir for %q: %w", key, err)
+	if err := ln.refresh(); err != nil {
+		logger.Debug("disk.remove_state.refresh_error", "key", key, "error", err)
+		return err
 	}
-	payload, err := json.Marshal(rec)
-	if err != nil {
-		return fmt.Errorf("disk: encode object metadata for %q: %w", key, err)
+
+	ln.mu.Lock()
+	current := ln.stateIndex[clean]
+	pending := ln.pendingState[clean]
+	ln.mu.Unlock()
+	if pending == nil && current == nil && expectedETag != "" {
+		if err := ln.refreshForce(); err != nil {
+			logger.Debug("disk.remove_state.refresh_force_error", "key", key, "error", err)
+			return err
+		}
+		ln.mu.Lock()
+		current = ln.stateIndex[clean]
+		pending = ln.pendingState[clean]
+		ln.mu.Unlock()
 	}
-	tmpDir := s.namespaceTmpDir(namespace)
-	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
-		return fmt.Errorf("disk: prepare tmp dir for %q: %w", key, err)
+	if pending != nil && expectedETag != "" {
+		if !pendingGroupMatch(ctx, pending) {
+			if err := waitForPendingCommit(ctx, ln, pending); err != nil {
+				logger.Debug("disk.remove_state.pending_wait_error", "key", key, "error", err)
+				return err
+			}
+			ln.mu.Lock()
+			pending = ln.pendingState[clean]
+			ln.mu.Unlock()
+			if pending != nil && !pendingGroupMatch(ctx, pending) {
+				logger.Debug("disk.remove_state.cas_pending", "key", key)
+				return storage.ErrCASMismatch
+			}
+		}
+		if pending != nil && pending.ref.meta.etag != expectedETag {
+			expectedETag = pending.ref.meta.etag
+		}
+		if isDeleteRecord(pending.ref.recType) || pending.ref.meta.etag != expectedETag {
+			logger.Debug("disk.remove_state.cas_pending_mismatch", "key", key, "expected_etag", expectedETag)
+			return storage.ErrCASMismatch
+		}
+		current = pending.ref
 	}
-	tmp, err := os.CreateTemp(tmpDir, "objectinfo-*")
-	if err != nil {
-		return fmt.Errorf("disk: create temp metadata file for %q: %w", key, err)
+	if current == nil {
+		logger.Debug("disk.remove_state.not_found", "key", key)
+		return storage.ErrNotFound
 	}
-	if _, err := tmp.Write(payload); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
-		return fmt.Errorf("disk: write metadata for %q: %w", key, err)
+	if expectedETag != "" && current.meta.etag != expectedETag {
+		logger.Debug("disk.remove_state.cas_mismatch", "key", key, "expected_etag", expectedETag, "current_etag", current.meta.etag)
+		return storage.ErrCASMismatch
 	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
-		return fmt.Errorf("disk: sync metadata for %q: %w", key, err)
+	gen := current.meta.gen + 1
+	if _, err := ln.appendRecord(ctx, logRecordStateDelete, clean, recordMeta{
+		gen:        gen,
+		modifiedAt: s.now().Unix(),
+	}, nil); err != nil {
+		logger.Debug("disk.remove_state.append_error", "key", key, "error", err)
+		return err
 	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmp.Name())
-		return fmt.Errorf("disk: close metadata for %q: %w", key, err)
-	}
-	if err := os.Rename(tmp.Name(), infoPath); err != nil {
-		os.Remove(tmp.Name())
-		return fmt.Errorf("disk: rename metadata for %q: %w", key, err)
-	}
+	verbose.Debug("disk.remove_state.success", "key", key, "elapsed", time.Since(start))
 	return nil
 }
 
@@ -1022,104 +1184,61 @@ func (s *Store) storeObjectInfo(namespace, key string, rec objectInfoRecord) err
 func (s *Store) ListObjects(ctx context.Context, namespace string, opts storage.ListOptions) (*storage.ListResult, error) {
 	logger, verbose := s.loggers(ctx)
 	start := time.Now()
-	namespace = strings.TrimSpace(namespace)
-	if namespace == "" {
-		return nil, fmt.Errorf("disk: namespace required")
-	}
 	verbose.Trace("disk.list_objects.begin",
 		"namespace", namespace,
 		"prefix", opts.Prefix,
 		"start_after", opts.StartAfter,
 		"limit", opts.Limit,
 	)
-
-	objectsDir := s.namespaceObjectsDir(namespace)
-	if _, err := os.Stat(objectsDir); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return &storage.ListResult{}, nil
-		}
-		logger.Debug("disk.list_objects.stat_error", "namespace", namespace, "error", err)
-		return nil, fmt.Errorf("disk: list objects: %w", err)
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		return nil, fmt.Errorf("disk: namespace required")
 	}
-
-	walkRoot := objectsDir
-	if strings.HasSuffix(opts.Prefix, "/") && opts.Prefix != "" {
-		trimmed := strings.TrimSuffix(opts.Prefix, "/")
-		if trimmed != "" {
-			if prefixRoot, err := s.objectDataPath(namespace, trimmed); err == nil {
-				if _, err := os.Stat(prefixRoot); err != nil {
-					if errors.Is(err, os.ErrNotExist) {
-						return &storage.ListResult{}, nil
-					}
-					logger.Debug("disk.list_objects.prefix_stat_error", "namespace", namespace, "prefix", opts.Prefix, "error", err)
-					return nil, fmt.Errorf("disk: list objects: %w", err)
-				}
-				walkRoot = prefixRoot
-			}
-		}
-	}
-
-	keys := make([]string, 0, 64)
-	err := filepath.WalkDir(walkRoot, func(p string, d os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			if errors.Is(walkErr, os.ErrNotExist) {
-				return nil
-			}
-			return walkErr
-		}
-		if d.IsDir() {
-			return nil
-		}
-		if strings.HasSuffix(d.Name(), ".info.json") {
-			return nil
-		}
-		key, err := s.keyFromObjectPath(namespace, p)
-		if err != nil {
-			return err
-		}
-		if opts.Prefix != "" && !strings.HasPrefix(key, opts.Prefix) {
-			return nil
-		}
-		if opts.StartAfter != "" && key <= opts.StartAfter {
-			return nil
-		}
-		keys = append(keys, key)
-		return nil
-	})
+	ln, err := s.logstore.namespace(namespace)
 	if err != nil {
-		logger.Debug("disk.list_objects.walk_error", "namespace", namespace, "error", err)
-		return nil, fmt.Errorf("disk: list objects: %w", err)
+		logger.Debug("disk.list_objects.namespace_error", "namespace", namespace, "error", err)
+		return nil, err
 	}
+	if err := ln.refresh(); err != nil {
+		logger.Debug("disk.list_objects.refresh_error", "namespace", namespace, "error", err)
+		return nil, err
+	}
+	prefix := strings.TrimPrefix(strings.TrimSpace(opts.Prefix), "/")
+	startAfter := strings.TrimPrefix(strings.TrimSpace(opts.StartAfter), "/")
+	result := &storage.ListResult{}
+	count := 0
 
-	sort.Strings(keys)
-	capHint := len(keys)
-	if opts.Limit > 0 && opts.Limit < capHint {
-		capHint = opts.Limit
-	}
-	result := &storage.ListResult{
-		Objects: make([]storage.ObjectInfo, 0, capHint),
-	}
-	maxItems := opts.Limit
-	if maxItems <= 0 {
-		maxItems = len(keys)
-	}
-	lastReturned := ""
-	for _, key := range keys {
-		if maxItems > 0 && len(result.Objects) >= maxItems {
+	ln.mu.Lock()
+	defer ln.mu.Unlock()
+	for _, key := range ln.sortedObjects {
+		if startAfter != "" && key <= startAfter {
+			continue
+		}
+		if prefix != "" && !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		ref := ln.objectIndex[key]
+		if ref == nil {
+			continue
+		}
+		info := storage.ObjectInfo{
+			Key:          key,
+			ETag:         ref.meta.etag,
+			Size:         ref.meta.plaintextSize,
+			LastModified: time.Unix(ref.meta.modifiedAt, 0).UTC(),
+			ContentType:  ref.meta.contentType,
+			Descriptor:   append([]byte(nil), ref.meta.descriptor...),
+		}
+		if plain, ok := storage.ObjectPlaintextSizeFromContext(ctx); ok && plain > 0 {
+			info.Size = plain
+		}
+		result.Objects = append(result.Objects, info)
+		count++
+		if opts.Limit > 0 && count >= opts.Limit {
 			result.Truncated = true
-			result.NextStartAfter = lastReturned
+			result.NextStartAfter = key
 			break
 		}
-		info, err := s.loadObjectInfo(namespace, key)
-		if err != nil {
-			if errors.Is(err, storage.ErrNotFound) {
-				continue
-			}
-			logger.Debug("disk.list_objects.load_error", "namespace", namespace, "key", key, "error", err)
-			return nil, err
-		}
-		result.Objects = append(result.Objects, *info)
-		lastReturned = key
 	}
 	verbose.Debug("disk.list_objects.success",
 		"namespace", namespace,
@@ -1141,29 +1260,59 @@ func (s *Store) GetObject(ctx context.Context, namespace, key string) (storage.G
 		return storage.GetObjectResult{}, fmt.Errorf("disk: namespace required")
 	}
 	verbose.Trace("disk.get_object.begin", "namespace", namespace, "key", key)
-	dataPath, err := s.objectDataPath(namespace, key)
+	ns, clean, err := s.normalizeKey(namespace, key)
 	if err != nil {
 		return storage.GetObjectResult{}, err
 	}
-	f, err := os.Open(dataPath)
+	ln, err := s.logstore.namespace(ns)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			verbose.Debug("disk.get_object.not_found", "key", key)
-			return storage.GetObjectResult{}, storage.ErrNotFound
+		logger.Debug("disk.get_object.namespace_error", "namespace", namespace, "key", key, "error", err)
+		return storage.GetObjectResult{}, err
+	}
+	if err := ln.refresh(); err != nil {
+		logger.Debug("disk.get_object.refresh_error", "namespace", namespace, "key", key, "error", err)
+		return storage.GetObjectResult{}, err
+	}
+	ln.mu.Lock()
+	ref := ln.objectIndex[clean]
+	pending := ln.pendingObject[clean]
+	ln.mu.Unlock()
+	if pending != nil && !pendingGroupMatch(ctx, pending) {
+		if err := waitForPendingCommit(ctx, ln, pending); err != nil {
+			logger.Debug("disk.get_object.pending_wait_error", "namespace", namespace, "key", key, "error", err)
+			return storage.GetObjectResult{}, err
 		}
-		logger.Debug("disk.get_object.open_error", "namespace", namespace, "key", key, "error", err)
-		return storage.GetObjectResult{}, fmt.Errorf("disk: open object %q: %w", key, err)
+		ln.mu.Lock()
+		ref = ln.objectIndex[clean]
+		pending = ln.pendingObject[clean]
+		ln.mu.Unlock()
+		if pending != nil && !pendingGroupMatch(ctx, pending) {
+			logger.Debug("disk.get_object.pending_mismatch", "namespace", namespace, "key", key)
+			return storage.GetObjectResult{}, storage.ErrCASMismatch
+		}
 	}
-	info, err := s.loadObjectInfo(namespace, key)
+	if ref == nil {
+		verbose.Debug("disk.get_object.not_found", "key", key)
+		return storage.GetObjectResult{}, storage.ErrNotFound
+	}
+	reader, err := ln.openPayloadReader(ref)
 	if err != nil {
-		f.Close()
+		logger.Debug("disk.get_object.open_error", "namespace", namespace, "key", key, "error", err)
 		return storage.GetObjectResult{}, err
+	}
+	info := &storage.ObjectInfo{
+		Key:          clean,
+		ETag:         ref.meta.etag,
+		Size:         ref.meta.plaintextSize,
+		LastModified: time.Unix(ref.meta.modifiedAt, 0).UTC(),
+		ContentType:  ref.meta.contentType,
+		Descriptor:   append([]byte(nil), ref.meta.descriptor...),
 	}
 	if plain, ok := storage.ObjectPlaintextSizeFromContext(ctx); ok && plain > 0 {
 		info.Size = plain
 	}
 	verbose.Debug("disk.get_object.success", "namespace", namespace, "key", key, "etag", info.ETag, "size", info.Size)
-	return storage.GetObjectResult{Reader: f, Info: info}, nil
+	return storage.GetObjectResult{Reader: reader, Info: info}, nil
 }
 
 // PutObject writes an object to disk with optional conditional semantics.
@@ -1174,91 +1323,129 @@ func (s *Store) PutObject(ctx context.Context, namespace, key string, body io.Re
 		return nil, fmt.Errorf("disk: namespace required")
 	}
 	verbose.Trace("disk.put_object.begin", "namespace", namespace, "key", key, "expected_etag", opts.ExpectedETag, "if_not_exists", opts.IfNotExists)
-	dataPath, err := s.objectDataPath(namespace, key)
+	expectedETag := opts.ExpectedETag
+
+	ns, clean, err := s.normalizeKey(namespace, key)
 	if err != nil {
 		return nil, err
 	}
-	var current *storage.ObjectInfo
-	if opts.IfNotExists || opts.ExpectedETag != "" {
-		info, err := s.loadObjectInfo(namespace, key)
-		if err != nil && !errors.Is(err, storage.ErrNotFound) {
-			logger.Debug("disk.put_object.load_error", "namespace", namespace, "key", key, "error", err)
+	glob := globalKeyMutex(ns, clean)
+	glob.Lock()
+	defer glob.Unlock()
+	mu := s.keyLock(ns, clean)
+	mu.Lock()
+	defer mu.Unlock()
+
+	fl, err := s.acquireFileLock(ns, clean)
+	if err != nil {
+		logger.Debug("disk.put_object.filelock_error", "key", key, "error", err)
+		return nil, err
+	}
+	defer func() {
+		if unlockErr := fl.Unlock(); unlockErr != nil && err == nil {
+			err = unlockErr
+		}
+	}()
+
+	ln, err := s.logstore.namespace(ns)
+	if err != nil {
+		logger.Debug("disk.put_object.namespace_error", "namespace", namespace, "key", key, "error", err)
+		return nil, err
+	}
+	if err := ln.refresh(); err != nil {
+		logger.Debug("disk.put_object.refresh_error", "namespace", namespace, "key", key, "error", err)
+		return nil, err
+	}
+
+	ln.mu.Lock()
+	current := ln.objectIndex[clean]
+	pending := ln.pendingObject[clean]
+	ln.mu.Unlock()
+	if pending == nil && (expectedETag != "" || opts.IfNotExists) && current == nil {
+		if err := ln.refreshForce(); err != nil {
+			logger.Debug("disk.put_object.refresh_force_error", "namespace", namespace, "key", key, "error", err)
 			return nil, err
 		}
-		if err == nil {
-			current = info
-		}
-		if opts.IfNotExists && current != nil {
-			verbose.Debug("disk.put_object.exists", "namespace", namespace, "key", key)
-			return nil, storage.ErrCASMismatch
-		}
-		if opts.ExpectedETag != "" {
-			if current == nil {
-				verbose.Debug("disk.put_object.cas_missing", "namespace", namespace, "key", key, "expected_etag", opts.ExpectedETag)
-				return nil, storage.ErrNotFound
+		ln.mu.Lock()
+		current = ln.objectIndex[clean]
+		pending = ln.pendingObject[clean]
+		ln.mu.Unlock()
+	}
+	if pending != nil && (expectedETag != "" || opts.IfNotExists) {
+		if !pendingGroupMatch(ctx, pending) {
+			if err := waitForPendingCommit(ctx, ln, pending); err != nil {
+				verbose.Debug("disk.put_object.pending_wait_error", "namespace", namespace, "key", key, "error", err)
+				return nil, err
 			}
-			if current.ETag != opts.ExpectedETag {
-				verbose.Debug("disk.put_object.cas_mismatch", "namespace", namespace, "key", key, "expected_etag", opts.ExpectedETag, "current_etag", current.ETag)
+			ln.mu.Lock()
+			current = ln.objectIndex[clean]
+			pending = ln.pendingObject[clean]
+			ln.mu.Unlock()
+			if pending != nil && !pendingGroupMatch(ctx, pending) {
+				verbose.Debug("disk.put_object.cas_pending", "namespace", namespace, "key", key)
 				return nil, storage.ErrCASMismatch
 			}
 		}
+		if expectedETag != "" {
+			if pending != nil && pending.ref.meta.etag != expectedETag {
+				expectedETag = pending.ref.meta.etag
+			}
+			if isDeleteRecord(pending.ref.recType) || pending.ref.meta.etag != expectedETag {
+				verbose.Debug("disk.put_object.cas_pending_mismatch", "namespace", namespace, "key", key, "expected_etag", expectedETag)
+				return nil, storage.ErrCASMismatch
+			}
+			current = pending.ref
+		}
+		if opts.IfNotExists {
+			verbose.Debug("disk.put_object.exists_pending", "namespace", namespace, "key", key)
+			return nil, storage.ErrCASMismatch
+		}
 	}
-	if err := os.MkdirAll(filepath.Dir(dataPath), 0o755); err != nil {
-		return nil, fmt.Errorf("disk: prepare object directory for %q: %w", key, err)
+	if expectedETag != "" {
+		if current == nil {
+			verbose.Debug("disk.put_object.cas_missing", "namespace", namespace, "key", key, "expected_etag", expectedETag)
+			return nil, storage.ErrNotFound
+		}
+		if current.meta.etag != expectedETag {
+			verbose.Debug("disk.put_object.cas_mismatch", "namespace", namespace, "key", key, "expected_etag", expectedETag, "current_etag", current.meta.etag)
+			return nil, storage.ErrCASMismatch
+		}
 	}
-	tmpDir := s.namespaceTmpDir(namespace)
-	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
-		return nil, fmt.Errorf("disk: prepare tmp dir for %q: %w", key, err)
+	if opts.IfNotExists && current != nil {
+		verbose.Debug("disk.put_object.exists", "namespace", namespace, "key", key)
+		return nil, storage.ErrCASMismatch
 	}
-	tmp, err := os.CreateTemp(tmpDir, "object-*")
+
+	gen := uint64(1)
+	if current != nil {
+		gen = current.meta.gen + 1
+	}
+	meta := recordMeta{
+		gen:         gen,
+		modifiedAt:  s.now().Unix(),
+		contentType: opts.ContentType,
+		descriptor:  append([]byte(nil), opts.Descriptor...),
+	}
+	ref, err := ln.appendRecord(ctx, logRecordObjectPut, clean, meta, body)
 	if err != nil {
-		return nil, fmt.Errorf("disk: create temp object for %q: %w", key, err)
-	}
-	hasher := sha256.New()
-	written, err := io.Copy(io.MultiWriter(tmp, hasher), body)
-	if err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
-		return nil, fmt.Errorf("disk: write object %q: %w", key, err)
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
-		return nil, fmt.Errorf("disk: sync object %q: %w", key, err)
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmp.Name())
-		return nil, fmt.Errorf("disk: close object %q: %w", key, err)
-	}
-	newETag := hex.EncodeToString(hasher.Sum(nil))
-	if err := os.Rename(tmp.Name(), dataPath); err != nil {
-		os.Remove(tmp.Name())
-		return nil, fmt.Errorf("disk: rename object %q: %w", key, err)
-	}
-	now := s.now()
-	if err := s.storeObjectInfo(namespace, key, objectInfoRecord{
-		ETag:          newETag,
-		ContentType:   opts.ContentType,
-		UpdatedAtUnix: now.Unix(),
-		Descriptor:    append([]byte(nil), opts.Descriptor...),
-	}); err != nil {
+		logger.Debug("disk.put_object.append_error", "namespace", namespace, "key", key, "error", err)
 		return nil, err
 	}
 	info := &storage.ObjectInfo{
-		Key:          key,
-		ETag:         newETag,
-		Size:         written,
-		LastModified: now,
-		ContentType:  opts.ContentType,
-		Descriptor:   append([]byte(nil), opts.Descriptor...),
+		Key:          clean,
+		ETag:         ref.meta.etag,
+		Size:         ref.meta.plaintextSize,
+		LastModified: time.Unix(ref.meta.modifiedAt, 0).UTC(),
+		ContentType:  ref.meta.contentType,
+		Descriptor:   append([]byte(nil), ref.meta.descriptor...),
 	}
-	if fi, err := os.Stat(dataPath); err == nil {
-		info.Size = fi.Size()
-		info.LastModified = fi.ModTime()
-	} else {
-		logger.Debug("disk.put_object.stat_error", "namespace", namespace, "key", key, "error", err)
+	if plain, ok := storage.ObjectPlaintextSizeFromContext(ctx); ok && plain > 0 {
+		info.Size = plain
 	}
 	verbose.Debug("disk.put_object.success", "namespace", namespace, "key", key, "size", info.Size, "etag", info.ETag)
+	if queue, ok := queueNameFromObjectKey(clean); ok {
+		s.touchQueueNotify(ns, queue)
+	}
 	return info, nil
 }
 
@@ -1270,49 +1457,97 @@ func (s *Store) DeleteObject(ctx context.Context, namespace, key string, opts st
 		return fmt.Errorf("disk: namespace required")
 	}
 	verbose.Trace("disk.delete_object.begin", "namespace", namespace, "key", key, "expected_etag", opts.ExpectedETag, "ignore_not_found", opts.IgnoreNotFound)
-	dataPath, err := s.objectDataPath(namespace, key)
+	expectedETag := opts.ExpectedETag
+
+	ns, clean, err := s.normalizeKey(namespace, key)
 	if err != nil {
 		return err
 	}
-	info, err := s.loadObjectInfo(namespace, key)
+	glob := globalKeyMutex(ns, clean)
+	glob.Lock()
+	defer glob.Unlock()
+	mu := s.keyLock(ns, clean)
+	mu.Lock()
+	defer mu.Unlock()
+
+	fl, err := s.acquireFileLock(ns, clean)
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			if opts.IgnoreNotFound {
-				return nil
-			}
-			return storage.ErrNotFound
+		logger.Debug("disk.delete_object.filelock_error", "key", key, "error", err)
+		return err
+	}
+	defer func() {
+		_ = fl.Unlock()
+	}()
+
+	ln, err := s.logstore.namespace(ns)
+	if err != nil {
+		logger.Debug("disk.delete_object.namespace_error", "namespace", namespace, "key", key, "error", err)
+		return err
+	}
+	if err := ln.refresh(); err != nil {
+		logger.Debug("disk.delete_object.refresh_error", "namespace", namespace, "key", key, "error", err)
+		return err
+	}
+
+	ln.mu.Lock()
+	current := ln.objectIndex[clean]
+	pending := ln.pendingObject[clean]
+	ln.mu.Unlock()
+	if pending == nil && current == nil && expectedETag != "" {
+		if err := ln.refreshForce(); err != nil {
+			logger.Debug("disk.delete_object.refresh_force_error", "namespace", namespace, "key", key, "error", err)
+			return err
 		}
-		return err
+		ln.mu.Lock()
+		current = ln.objectIndex[clean]
+		pending = ln.pendingObject[clean]
+		ln.mu.Unlock()
 	}
-	if opts.ExpectedETag != "" && info.ETag != opts.ExpectedETag {
-		verbose.Debug("disk.delete_object.cas_mismatch", "key", key, "expected_etag", opts.ExpectedETag, "current_etag", info.ETag)
+	if pending != nil && expectedETag != "" {
+		if !pendingGroupMatch(ctx, pending) {
+			if err := waitForPendingCommit(ctx, ln, pending); err != nil {
+				verbose.Debug("disk.delete_object.pending_wait_error", "key", key, "error", err)
+				return err
+			}
+			ln.mu.Lock()
+			pending = ln.pendingObject[clean]
+			ln.mu.Unlock()
+			if pending != nil && !pendingGroupMatch(ctx, pending) {
+				verbose.Debug("disk.delete_object.cas_pending", "key", key)
+				return storage.ErrCASMismatch
+			}
+		}
+		if pending != nil && pending.ref.meta.etag != expectedETag {
+			expectedETag = pending.ref.meta.etag
+		}
+		if isDeleteRecord(pending.ref.recType) || pending.ref.meta.etag != expectedETag {
+			verbose.Debug("disk.delete_object.cas_pending_mismatch", "key", key, "expected_etag", expectedETag)
+			return storage.ErrCASMismatch
+		}
+		current = pending.ref
+	}
+	if current == nil {
+		if opts.IgnoreNotFound {
+			return nil
+		}
+		logger.Debug("disk.delete_object.not_found", "key", key)
+		return storage.ErrNotFound
+	}
+	if expectedETag != "" && current.meta.etag != expectedETag {
+		verbose.Debug("disk.delete_object.cas_mismatch", "key", key, "expected_etag", expectedETag, "current_etag", current.meta.etag)
 		return storage.ErrCASMismatch
 	}
-	if err := os.Remove(dataPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		logger.Debug("disk.delete_object.remove_error", "namespace", namespace, "key", key, "error", err)
-		return fmt.Errorf("disk: remove object %q: %w", key, err)
-	}
-	infoPath, err := s.objectInfoPath(namespace, key)
-	if err != nil {
+	gen := current.meta.gen + 1
+	if _, err := ln.appendRecord(ctx, logRecordObjectDelete, clean, recordMeta{
+		gen:        gen,
+		modifiedAt: s.now().Unix(),
+	}, nil); err != nil {
+		logger.Debug("disk.delete_object.append_error", "namespace", namespace, "key", key, "error", err)
 		return err
 	}
-	if err := os.Remove(infoPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		logger.Debug("disk.delete_object.remove_info_error", "namespace", namespace, "key", key, "error", err)
-		return fmt.Errorf("disk: remove object metadata %q: %w", key, err)
-	}
-	verbose.Debug("disk.delete_object.success", "namespace", namespace, "key", key)
-
-	base := s.namespaceObjectsDir(namespace)
-	dir := filepath.Dir(dataPath)
-	for dir != base && dir != "." {
-		if err := os.Remove(dir); err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ENOTEMPTY) {
-			break
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
+	verbose.Debug("disk.delete_object.success", "key", key)
+	if queue, ok := queueNameFromObjectKey(clean); ok {
+		s.touchQueueNotify(ns, queue)
 	}
 	return nil
 }
@@ -1320,112 +1555,6 @@ func (s *Store) DeleteObject(ctx context.Context, namespace, key string, opts st
 // SweepOnceForTests exposes the retention sweeper for testing.
 func (s *Store) SweepOnceForTests() {
 	s.sweepOnce()
-}
-
-func (s *Store) readMetaRecord(namespace, encoded string) (*metaRecord, error) {
-	data, err := os.ReadFile(s.metaPath(namespace, encoded))
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, storage.ErrNotFound
-		}
-		return nil, err
-	}
-	record, err := storage.UnmarshalMetaRecord(data, s.crypto)
-	if err != nil {
-		return nil, fmt.Errorf("disk: decode meta: %w", err)
-	}
-	meta := record.Meta
-	if meta == nil {
-		meta = &storage.Meta{}
-	}
-	return &metaRecord{
-		ETag: record.ETag,
-		Meta: meta,
-	}, nil
-}
-
-func (s *Store) readStateRecord(namespace, encoded string) (*stateRecord, error) {
-	data, err := os.ReadFile(s.stateInfoPath(namespace, encoded))
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, storage.ErrNotFound
-		}
-		return nil, err
-	}
-	var rec stateRecord
-	if err := json.Unmarshal(data, &rec); err != nil {
-		return nil, fmt.Errorf("disk: decode state info: %w", err)
-	}
-	return &rec, nil
-}
-
-func (s *Store) writeBytesAtomic(namespace, dest string, payload []byte, prefix string) error {
-	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-		return err
-	}
-	tmpDir := s.namespaceTmpDir(namespace)
-	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(tmpDir, "lockd-"+prefix+"-*")
-	if err != nil {
-		return err
-	}
-	if _, err := tmp.Write(payload); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmp.Name())
-		return err
-	}
-	if err := os.Rename(tmp.Name(), dest); err != nil {
-		os.Remove(tmp.Name())
-		return err
-	}
-	return nil
-}
-
-func (s *Store) writeJSONAtomic(namespace, dest string, v any, prefix string) error {
-	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-		return err
-	}
-	tmpDir := s.namespaceTmpDir(namespace)
-	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(tmpDir, "lockd-"+prefix+"-*")
-	if err != nil {
-		return err
-	}
-	enc := json.NewEncoder(tmp)
-	enc.SetIndent("", "")
-	if err := enc.Encode(v); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmp.Name())
-		return err
-	}
-	if err := os.Rename(tmp.Name(), dest); err != nil {
-		os.Remove(tmp.Name())
-		return err
-	}
-	_ = syncDir(filepath.Dir(dest))
-	return nil
 }
 
 func (s *Store) janitorLoop() {
@@ -1457,50 +1586,90 @@ func (s *Store) sweepOnce() {
 			continue
 		}
 		namespace := nsEntry.Name()
-		metaDir := s.namespaceMetaDir(namespace)
-		metaEntries, err := os.ReadDir(metaDir)
+		ln, err := s.logstore.namespace(namespace)
 		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
 			continue
 		}
-		for _, entry := range metaEntries {
-			if entry.IsDir() {
-				continue
-			}
-			name := entry.Name()
-			if !strings.HasSuffix(name, ".pb") {
-				continue
-			}
-			encoded := strings.TrimSuffix(name, ".pb")
-			rec, err := s.readMetaRecord(namespace, encoded)
+		if err := ln.refresh(); err != nil {
+			continue
+		}
+		ln.mu.Lock()
+		refs := make([]*recordRef, 0, len(ln.metaIndex))
+		for _, ref := range ln.metaIndex {
+			refs = append(refs, ref)
+		}
+		ln.mu.Unlock()
+		for _, ref := range refs {
+			payload, err := ln.readPayload(ref)
 			if err != nil {
 				continue
 			}
-			if rec.Meta.UpdatedAtUnix == 0 {
+			record, err := storage.UnmarshalMetaRecord(payload, s.crypto)
+			if err != nil {
 				continue
 			}
-			age := now.Sub(time.Unix(rec.Meta.UpdatedAtUnix, 0))
+			if record.Meta.UpdatedAtUnix == 0 {
+				continue
+			}
+			age := now.Sub(time.Unix(record.Meta.UpdatedAtUnix, 0))
 			if age <= s.retention {
 				continue
 			}
-			decoded, err := url.PathUnescape(encoded)
-			if err != nil {
-				continue
-			}
-			key := decoded
-			_ = s.DeleteMeta(ctx, namespace, key, rec.ETag)
+			key := ref.key
+			_ = s.DeleteMeta(ctx, namespace, key, record.ETag)
 			_ = s.Remove(ctx, namespace, key, "")
 		}
 	}
 }
 
-func syncDir(path string) error {
-	dir, err := os.Open(path)
-	if err != nil {
-		return err
+func isDeleteRecord(recType logRecordType) bool {
+	switch recType {
+	case logRecordMetaDelete, logRecordStateDelete, logRecordObjectDelete:
+		return true
+	default:
+		return false
 	}
-	defer dir.Close()
-	return dir.Sync()
+}
+
+func pendingGroupMatch(ctx context.Context, pending *pendingRef) bool {
+	if pending == nil || pending.group == nil {
+		return false
+	}
+	group, ok := storage.CommitGroupFromContext(ctx)
+	if !ok || group == nil {
+		return false
+	}
+	return group == pending.group
+}
+
+func waitForPendingCommit(ctx context.Context, ln *logNamespace, pending *pendingRef) error {
+	if pending == nil || pending.group == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	if pending.done != nil {
+		select {
+		case <-pending.done:
+			if pending.err != nil {
+				return pending.err
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	} else {
+		if err := pending.group.Wait(); err != nil {
+			return err
+		}
+	}
+	if ln == nil {
+		return nil
+	}
+	return ln.refreshForce()
 }

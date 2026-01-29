@@ -82,6 +82,10 @@ func (c *Crypto) EncryptMetadata(plaintext []byte) ([]byte, error) {
 		return plaintext, nil
 	}
 	var buf bytes.Buffer
+	if len(plaintext) > 0 {
+		// Pre-grow to reduce reallocations for small metadata payloads.
+		buf.Grow(len(plaintext) + 256)
+	}
 	writer, err := c.kg.EncryptWriter(&buf, c.metadataMaterial)
 	if err != nil {
 		return nil, fmt.Errorf("storage crypto: encrypt metadata: %w", err)

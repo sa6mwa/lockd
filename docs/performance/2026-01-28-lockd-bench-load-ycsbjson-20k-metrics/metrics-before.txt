@@ -1,0 +1,525 @@
+# HELP go_config_gogc_percent Heap size target percentage configured by the user, otherwise 100.
+# TYPE go_config_gogc_percent gauge
+go_config_gogc_percent{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0"} 100
+# HELP go_goroutine_count Count of live goroutines.
+# TYPE go_goroutine_count gauge
+go_goroutine_count{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0"} 29
+# HELP go_memory_allocated_bytes_total Memory allocated to the heap by the application.
+# TYPE go_memory_allocated_bytes_total counter
+go_memory_allocated_bytes_total{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0"} 1.005470372e+10
+# HELP go_memory_allocations_total Count of allocations to the heap by the application.
+# TYPE go_memory_allocations_total counter
+go_memory_allocations_total{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0"} 1.11305201e+08
+# HELP go_memory_gc_goal_bytes Heap size target for the end of the GC cycle.
+# TYPE go_memory_gc_goal_bytes gauge
+go_memory_gc_goal_bytes{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0"} 4.08768594e+08
+# HELP go_memory_used_bytes Memory used by the Go runtime.
+# TYPE go_memory_used_bytes gauge
+go_memory_used_bytes{go_memory_type="other",otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0"} 3.51924584e+08
+go_memory_used_bytes{go_memory_type="stack",otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0"} 2.359296e+06
+# HELP go_processor_limit The number of OS threads that can execute user-level Go code simultaneously.
+# TYPE go_processor_limit gauge
+go_processor_limit{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0"} 12
+# HELP go_schedule_duration_seconds The time goroutines have spent in the scheduler in a runnable state before actually running.
+# TYPE go_schedule_duration_seconds histogram
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0"} 0
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="6.4e-08"} 314970
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="1.28e-07"} 315416
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="1.92e-07"} 316406
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="2.56e-07"} 317837
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="3.2e-07"} 319777
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="3.84e-07"} 322718
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="4.48e-07"} 326400
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="5.12e-07"} 330796
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="6.4e-07"} 341487
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="7.68e-07"} 354857
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="8.96e-07"} 371673
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="1.024e-06"} 389896
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="1.28e-06"} 424518
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="1.536e-06"} 453873
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="1.792e-06"} 476844
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="2.048e-06"} 493330
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="2.56e-06"} 513098
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="3.072e-06"} 523593
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="3.584e-06"} 530796
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="4.096e-06"} 536907
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="5.12e-06"} 548354
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="6.144e-06"} 558688
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="7.168e-06"} 567805
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="8.192e-06"} 575333
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="1.024e-05"} 586747
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="1.2288e-05"} 595411
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="1.4336e-05"} 602768
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="1.6384e-05"} 609296
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="2.048e-05"} 620380
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="2.4576e-05"} 629259
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="2.8672e-05"} 636564
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="3.2768e-05"} 642637
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="4.096e-05"} 652396
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="4.9152e-05"} 660229
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="5.7344e-05"} 666224
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="6.5536e-05"} 671330
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="8.192e-05"} 681449
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="9.8304e-05"} 686356
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.000114688"} 688103
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.000131072"} 688934
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.00016384"} 689601
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.000196608"} 689891
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.000229376"} 690036
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.000262144"} 690153
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.00032768"} 690292
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.000393216"} 690381
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.000458752"} 690432
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.000524288"} 690463
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.00065536"} 690501
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.000786432"} 690523
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.000917504"} 690537
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.001048576"} 690541
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.00131072"} 690547
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.001572864"} 690558
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.001835008"} 690561
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.002097152"} 690563
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.00262144"} 690571
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.003145728"} 690574
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.003670016"} 690574
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.004194304"} 690576
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.00524288"} 690576
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.006291456"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.007340032"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.008388608"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.01048576"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.012582912"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.014680064"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.016777216"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.02097152"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.025165824"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.029360128"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.033554432"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.04194304"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.050331648"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.058720256"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.067108864"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.08388608"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.100663296"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.117440512"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.134217728"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.16777216"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.201326592"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.234881024"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.268435456"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.33554432"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.402653184"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.469762048"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.536870912"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.67108864"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.805306368"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="0.939524096"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="1.073741824"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="1.34217728"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="1.610612736"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="1.879048192"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="2.147483648"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="2.68435456"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="3.221225472"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="3.758096384"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="4.294967296"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="5.36870912"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="6.442450944"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="7.516192768"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="8.589934592"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="10.73741824"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="12.884901888"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="15.032385536"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="17.179869184"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="21.47483648"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="25.769803776"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="30.064771072"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="34.359738368"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="42.94967296"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="51.539607552"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="60.129542144"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="68.719476736"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="85.89934592"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="103.079215104"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="120.259084288"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="137.438953472"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="171.79869184"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="206.158430208"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="240.518168576"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="274.877906944"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="343.59738368"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="412.316860416"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="481.036337152"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="549.755813888"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="687.19476736"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="824.633720832"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="962.072674304"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="1099.511627776"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="1374.38953472"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="1649.267441664"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="1924.145348608"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="2199.023255552"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="2748.77906944"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="3298.534883328"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="3848.290697216"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="4398.046511104"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="5497.55813888"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="6597.069766656"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="7696.581394432"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="8796.093022208"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="10995.11627776"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="13194.139533312"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="15393.162788864"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="17592.186044416"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="21990.23255552"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="26388.279066624"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="30786.325577728"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="35184.372088832"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="43980.46511104"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="52776.558133248"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="61572.651155456"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="70368.744177664"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="87960.93022208"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="105553.116266496"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="123145.302310912"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="140737.488355328"} 690577
+go_schedule_duration_seconds_bucket{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0",le="+Inf"} 690577
+go_schedule_duration_seconds_sum{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0"} 6.317354711991981e+11
+go_schedule_duration_seconds_count{otel_scope_name="go.opentelemetry.io/contrib/instrumentation/runtime",otel_scope_schema_url="",otel_scope_version="0.64.0"} 690577
+# HELP lockd_index_flush_duration_ms_milliseconds Index segment flush duration
+# TYPE lockd_index_flush_duration_ms_milliseconds histogram
+lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="0"} 0
+lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="5"} 0
+lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="10"} 0
+lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="25"} 8
+lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="50"} 21
+lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="75"} 21
+lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="100"} 21
+lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="250"} 21
+lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="500"} 21
+lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="750"} 21
+lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="1000"} 21
+lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="2500"} 21
+lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="5000"} 21
+lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="7500"} 21
+lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="10000"} 21
+lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="+Inf"} 21
+lockd_index_flush_duration_ms_milliseconds_sum{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 560
+lockd_index_flush_duration_ms_milliseconds_count{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 21
+lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="0"} 0
+lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="5"} 0
+lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="10"} 0
+lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="25"} 7
+lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="50"} 20
+lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="75"} 21
+lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="100"} 21
+lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="250"} 21
+lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="500"} 21
+lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="750"} 21
+lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="1000"} 21
+lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="2500"} 21
+lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="5000"} 21
+lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="7500"} 21
+lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="10000"} 21
+lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="+Inf"} 21
+lockd_index_flush_duration_ms_milliseconds_sum{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 622
+lockd_index_flush_duration_ms_milliseconds_count{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 21
+# HELP lockd_index_queue_depth Pending documents queued for indexing
+# TYPE lockd_index_queue_depth gauge
+lockd_index_queue_depth{lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 0
+lockd_index_queue_depth{lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 0
+# HELP lockd_index_queue_lag_ms_milliseconds Age of the oldest pending indexed document
+# TYPE lockd_index_queue_lag_ms_milliseconds gauge
+lockd_index_queue_lag_ms_milliseconds{lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 0
+lockd_index_queue_lag_ms_milliseconds{lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 0
+# HELP lockd_index_segment_docs Document count per index segment
+# TYPE lockd_index_segment_docs histogram
+lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="0"} 0
+lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="5"} 0
+lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="10"} 0
+lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="25"} 0
+lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="50"} 0
+lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="75"} 0
+lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="100"} 0
+lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="250"} 1
+lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="500"} 1
+lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="750"} 1
+lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="1000"} 21
+lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="2500"} 21
+lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="5000"} 21
+lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="7500"} 21
+lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="10000"} 21
+lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="+Inf"} 21
+lockd_index_segment_docs_sum{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 20000
+lockd_index_segment_docs_count{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 21
+lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="0"} 0
+lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="5"} 0
+lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="10"} 0
+lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="25"} 0
+lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="50"} 0
+lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="75"} 0
+lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="100"} 1
+lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="250"} 1
+lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="500"} 1
+lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="750"} 1
+lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="1000"} 21
+lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="2500"} 21
+lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="5000"} 21
+lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="7500"} 21
+lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="10000"} 21
+lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="+Inf"} 21
+lockd_index_segment_docs_sum{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 20000
+lockd_index_segment_docs_count{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 21
+# HELP lockd_index_segment_size_bytes Index segment payload size
+# TYPE lockd_index_segment_size_bytes histogram
+lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="0"} 0
+lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="5"} 0
+lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="10"} 0
+lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="25"} 0
+lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="50"} 0
+lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="75"} 0
+lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="100"} 0
+lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="250"} 0
+lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="500"} 0
+lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="750"} 0
+lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="1000"} 0
+lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="2500"} 0
+lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="5000"} 0
+lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="7500"} 0
+lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="10000"} 0
+lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="+Inf"} 21
+lockd_index_segment_size_bytes_sum{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 1.3167182e+07
+lockd_index_segment_size_bytes_count{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 21
+lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="0"} 0
+lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="5"} 0
+lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="10"} 0
+lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="25"} 0
+lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="50"} 0
+lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="75"} 0
+lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="100"} 0
+lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="250"} 0
+lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="500"} 0
+lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="750"} 0
+lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="1000"} 0
+lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="2500"} 0
+lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="5000"} 0
+lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="7500"} 0
+lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="10000"} 0
+lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="+Inf"} 21
+lockd_index_segment_size_bytes_sum{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 1.3167182e+07
+lockd_index_segment_size_bytes_count{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 21
+# HELP lockd_index_segment_written_total Index segments persisted
+# TYPE lockd_index_segment_written_total counter
+lockd_index_segment_written_total{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 21
+lockd_index_segment_written_total{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 21
+# HELP lockd_lease_acquire_duration_ms_milliseconds Lease acquire duration
+# TYPE lockd_lease_acquire_duration_ms_milliseconds histogram
+lockd_lease_acquire_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="0"} 1
+lockd_lease_acquire_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="5"} 4101
+lockd_lease_acquire_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="10"} 7992
+lockd_lease_acquire_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="25"} 19667
+lockd_lease_acquire_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="50"} 19995
+lockd_lease_acquire_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="75"} 20000
+lockd_lease_acquire_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="100"} 20000
+lockd_lease_acquire_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="250"} 20000
+lockd_lease_acquire_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="500"} 20000
+lockd_lease_acquire_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="750"} 20000
+lockd_lease_acquire_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="1000"} 20000
+lockd_lease_acquire_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="2500"} 20000
+lockd_lease_acquire_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="5000"} 20000
+lockd_lease_acquire_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="7500"} 20000
+lockd_lease_acquire_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="10000"} 20000
+lockd_lease_acquire_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="+Inf"} 20000
+lockd_lease_acquire_duration_ms_milliseconds_sum{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version=""} 301063
+lockd_lease_acquire_duration_ms_milliseconds_count{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version=""} 20000
+lockd_lease_acquire_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="0"} 0
+lockd_lease_acquire_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="5"} 4599
+lockd_lease_acquire_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="10"} 8299
+lockd_lease_acquire_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="25"} 19614
+lockd_lease_acquire_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="50"} 19990
+lockd_lease_acquire_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="75"} 20000
+lockd_lease_acquire_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="100"} 20000
+lockd_lease_acquire_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="250"} 20000
+lockd_lease_acquire_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="500"} 20000
+lockd_lease_acquire_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="750"} 20000
+lockd_lease_acquire_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="1000"} 20000
+lockd_lease_acquire_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="2500"} 20000
+lockd_lease_acquire_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="5000"} 20000
+lockd_lease_acquire_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="7500"} 20000
+lockd_lease_acquire_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="10000"} 20000
+lockd_lease_acquire_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="+Inf"} 20000
+lockd_lease_acquire_duration_ms_milliseconds_sum{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version=""} 294439
+lockd_lease_acquire_duration_ms_milliseconds_count{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version=""} 20000
+# HELP lockd_lease_acquire_total Lease acquisitions
+# TYPE lockd_lease_acquire_total counter
+lockd_lease_acquire_total{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version=""} 20000
+lockd_lease_acquire_total{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version=""} 20000
+# HELP lockd_lease_active Active leases (best-effort)
+# TYPE lockd_lease_active gauge
+lockd_lease_active{lockd_lease_kind="lock",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version=""} 0
+lockd_lease_active{lockd_lease_kind="queue_message",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version=""} 0
+lockd_lease_active{lockd_lease_kind="queue_state",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version=""} 0
+# HELP lockd_lease_release_duration_ms_milliseconds Lease release duration
+# TYPE lockd_lease_release_duration_ms_milliseconds histogram
+lockd_lease_release_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="0"} 6738
+lockd_lease_release_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="5"} 19831
+lockd_lease_release_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="10"} 19838
+lockd_lease_release_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="25"} 19873
+lockd_lease_release_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="50"} 19922
+lockd_lease_release_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="75"} 20000
+lockd_lease_release_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="100"} 20000
+lockd_lease_release_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="250"} 20000
+lockd_lease_release_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="500"} 20000
+lockd_lease_release_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="750"} 20000
+lockd_lease_release_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="1000"} 20000
+lockd_lease_release_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="2500"} 20000
+lockd_lease_release_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="5000"} 20000
+lockd_lease_release_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="7500"} 20000
+lockd_lease_release_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="10000"} 20000
+lockd_lease_release_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="+Inf"} 20000
+lockd_lease_release_duration_ms_milliseconds_sum{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version=""} 21484
+lockd_lease_release_duration_ms_milliseconds_count{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version=""} 20000
+lockd_lease_release_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="0"} 6773
+lockd_lease_release_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="5"} 19822
+lockd_lease_release_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="10"} 19834
+lockd_lease_release_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="25"} 19863
+lockd_lease_release_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="50"} 19916
+lockd_lease_release_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="75"} 19998
+lockd_lease_release_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="100"} 20000
+lockd_lease_release_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="250"} 20000
+lockd_lease_release_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="500"} 20000
+lockd_lease_release_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="750"} 20000
+lockd_lease_release_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="1000"} 20000
+lockd_lease_release_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="2500"} 20000
+lockd_lease_release_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="5000"} 20000
+lockd_lease_release_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="7500"} 20000
+lockd_lease_release_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="10000"} 20000
+lockd_lease_release_duration_ms_milliseconds_bucket{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version="",le="+Inf"} 20000
+lockd_lease_release_duration_ms_milliseconds_sum{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version=""} 22087
+lockd_lease_release_duration_ms_milliseconds_count{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version=""} 20000
+# HELP lockd_lease_release_total Lease release operations
+# TYPE lockd_lease_release_total counter
+lockd_lease_release_total{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version=""} 20000
+lockd_lease_release_total{lockd_lease_kind="lock",lockd_lease_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/lease",otel_scope_schema_url="",otel_scope_version=""} 20000
+# HELP lockd_lsf_cpu_percent LSF system CPU percent
+# TYPE lockd_lsf_cpu_percent gauge
+lockd_lsf_cpu_percent{otel_scope_name="pkt.systems/lockd/lsf",otel_scope_schema_url="",otel_scope_version=""} 13.733905342918792
+# HELP lockd_lsf_goroutines LSF goroutine count
+# TYPE lockd_lsf_goroutines gauge
+lockd_lsf_goroutines{otel_scope_name="pkt.systems/lockd/lsf",otel_scope_schema_url="",otel_scope_version=""} 26
+# HELP lockd_lsf_load LSF system load average
+# TYPE lockd_lsf_load gauge
+lockd_lsf_load{lockd_load_window="1",otel_scope_name="pkt.systems/lockd/lsf",otel_scope_schema_url="",otel_scope_version=""} 0.91
+lockd_lsf_load{lockd_load_window="15",otel_scope_name="pkt.systems/lockd/lsf",otel_scope_schema_url="",otel_scope_version=""} 1.3
+lockd_lsf_load{lockd_load_window="5",otel_scope_name="pkt.systems/lockd/lsf",otel_scope_schema_url="",otel_scope_version=""} 0.97
+# HELP lockd_lsf_load_baseline LSF load baseline
+# TYPE lockd_lsf_load_baseline gauge
+lockd_lsf_load_baseline{lockd_load_window="1",otel_scope_name="pkt.systems/lockd/lsf",otel_scope_schema_url="",otel_scope_version=""} 0.853591095159915
+lockd_lsf_load_baseline{lockd_load_window="15",otel_scope_name="pkt.systems/lockd/lsf",otel_scope_schema_url="",otel_scope_version=""} 1.294414636761585
+lockd_lsf_load_baseline{lockd_load_window="5",otel_scope_name="pkt.systems/lockd/lsf",otel_scope_schema_url="",otel_scope_version=""} 0.9649129719620481
+# HELP lockd_lsf_load_multiplier LSF load multiplier
+# TYPE lockd_lsf_load_multiplier gauge
+lockd_lsf_load_multiplier{lockd_load_window="1",otel_scope_name="pkt.systems/lockd/lsf",otel_scope_schema_url="",otel_scope_version=""} 1.0660842236522128
+lockd_lsf_load_multiplier{lockd_load_window="15",otel_scope_name="pkt.systems/lockd/lsf",otel_scope_schema_url="",otel_scope_version=""} 1.0043149722506142
+lockd_lsf_load_multiplier{lockd_load_window="5",otel_scope_name="pkt.systems/lockd/lsf",otel_scope_schema_url="",otel_scope_version=""} 1.0052720070988455
+# HELP lockd_lsf_lock_inflight LSF lock inflight count
+# TYPE lockd_lsf_lock_inflight gauge
+lockd_lsf_lock_inflight{otel_scope_name="pkt.systems/lockd/lsf",otel_scope_schema_url="",otel_scope_version=""} 0
+# HELP lockd_lsf_memory_percent LSF system memory used percent
+# TYPE lockd_lsf_memory_percent gauge
+lockd_lsf_memory_percent{otel_scope_name="pkt.systems/lockd/lsf",otel_scope_schema_url="",otel_scope_version=""} 52.53493199571923
+# HELP lockd_lsf_query_inflight LSF query inflight count
+# TYPE lockd_lsf_query_inflight gauge
+lockd_lsf_query_inflight{otel_scope_name="pkt.systems/lockd/lsf",otel_scope_schema_url="",otel_scope_version=""} 0
+# HELP lockd_lsf_queue_inflight LSF queue inflight counts
+# TYPE lockd_lsf_queue_inflight gauge
+lockd_lsf_queue_inflight{lockd_queue_kind="ack",otel_scope_name="pkt.systems/lockd/lsf",otel_scope_schema_url="",otel_scope_version=""} 0
+lockd_lsf_queue_inflight{lockd_queue_kind="consumer",otel_scope_name="pkt.systems/lockd/lsf",otel_scope_schema_url="",otel_scope_version=""} 0
+lockd_lsf_queue_inflight{lockd_queue_kind="producer",otel_scope_name="pkt.systems/lockd/lsf",otel_scope_schema_url="",otel_scope_version=""} 0
+# HELP lockd_lsf_rss_bytes LSF RSS bytes
+# TYPE lockd_lsf_rss_bytes gauge
+lockd_lsf_rss_bytes{otel_scope_name="pkt.systems/lockd/lsf",otel_scope_schema_url="",otel_scope_version=""} 3.77204736e+08
+# HELP lockd_lsf_sample_total LSF samples collected
+# TYPE lockd_lsf_sample_total counter
+lockd_lsf_sample_total{otel_scope_name="pkt.systems/lockd/lsf",otel_scope_schema_url="",otel_scope_version=""} 4361
+# HELP lockd_lsf_swap_bytes LSF swap bytes
+# TYPE lockd_lsf_swap_bytes gauge
+lockd_lsf_swap_bytes{otel_scope_name="pkt.systems/lockd/lsf",otel_scope_schema_url="",otel_scope_version=""} 6.185484288e+09
+# HELP lockd_lsf_swap_percent LSF system swap used percent
+# TYPE lockd_lsf_swap_percent gauge
+lockd_lsf_swap_percent{otel_scope_name="pkt.systems/lockd/lsf",otel_scope_schema_url="",otel_scope_version=""} 72.00854874064862
+# HELP lockd_qrf_decision_total QRF throttle decisions
+# TYPE lockd_qrf_decision_total counter
+lockd_qrf_decision_total{lockd_qrf_kind="lock",lockd_qrf_state="disengaged",lockd_qrf_throttle="false",otel_scope_name="pkt.systems/lockd/qrf",otel_scope_schema_url="",otel_scope_version=""} 120000
+# HELP lockd_qrf_state Current QRF state
+# TYPE lockd_qrf_state gauge
+lockd_qrf_state{otel_scope_name="pkt.systems/lockd/qrf",otel_scope_schema_url="",otel_scope_version=""} 0
+# HELP lockd_queue_consumers Total active queue consumers
+# TYPE lockd_queue_consumers gauge
+lockd_queue_consumers{otel_scope_name="pkt.systems/lockd/queue",otel_scope_schema_url="",otel_scope_version=""} 0
+# HELP lockd_sweeper_idle_duration_ms_milliseconds Idle maintenance sweeper duration
+# TYPE lockd_sweeper_idle_duration_ms_milliseconds histogram
+lockd_sweeper_idle_duration_ms_milliseconds_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="0"} 92
+lockd_sweeper_idle_duration_ms_milliseconds_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="5"} 92
+lockd_sweeper_idle_duration_ms_milliseconds_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="10"} 92
+lockd_sweeper_idle_duration_ms_milliseconds_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="25"} 92
+lockd_sweeper_idle_duration_ms_milliseconds_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="50"} 92
+lockd_sweeper_idle_duration_ms_milliseconds_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="75"} 92
+lockd_sweeper_idle_duration_ms_milliseconds_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="100"} 92
+lockd_sweeper_idle_duration_ms_milliseconds_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="250"} 92
+lockd_sweeper_idle_duration_ms_milliseconds_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="500"} 92
+lockd_sweeper_idle_duration_ms_milliseconds_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="750"} 92
+lockd_sweeper_idle_duration_ms_milliseconds_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="1000"} 92
+lockd_sweeper_idle_duration_ms_milliseconds_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="2500"} 93
+lockd_sweeper_idle_duration_ms_milliseconds_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="5000"} 93
+lockd_sweeper_idle_duration_ms_milliseconds_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="7500"} 93
+lockd_sweeper_idle_duration_ms_milliseconds_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="10000"} 93
+lockd_sweeper_idle_duration_ms_milliseconds_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="+Inf"} 93
+lockd_sweeper_idle_duration_ms_milliseconds_sum{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version=""} 1940
+lockd_sweeper_idle_duration_ms_milliseconds_count{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version=""} 93
+# HELP lockd_sweeper_idle_ops Idle maintenance sweeper operations
+# TYPE lockd_sweeper_idle_ops histogram
+lockd_sweeper_idle_ops_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="0"} 93
+lockd_sweeper_idle_ops_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="5"} 93
+lockd_sweeper_idle_ops_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="10"} 93
+lockd_sweeper_idle_ops_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="25"} 93
+lockd_sweeper_idle_ops_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="50"} 93
+lockd_sweeper_idle_ops_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="75"} 93
+lockd_sweeper_idle_ops_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="100"} 93
+lockd_sweeper_idle_ops_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="250"} 93
+lockd_sweeper_idle_ops_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="500"} 93
+lockd_sweeper_idle_ops_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="750"} 93
+lockd_sweeper_idle_ops_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="1000"} 93
+lockd_sweeper_idle_ops_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="2500"} 93
+lockd_sweeper_idle_ops_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="5000"} 93
+lockd_sweeper_idle_ops_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="7500"} 93
+lockd_sweeper_idle_ops_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="10000"} 93
+lockd_sweeper_idle_ops_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="+Inf"} 93
+lockd_sweeper_idle_ops_sum{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version=""} 0
+lockd_sweeper_idle_ops_count{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version=""} 93
+# HELP lockd_sweeper_idle_run_total Idle maintenance sweeper runs
+# TYPE lockd_sweeper_idle_run_total counter
+lockd_sweeper_idle_run_total{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version=""} 93
+# HELP lockd_txn_sweep_duration_ms_milliseconds Time spent sweeping transaction records
+# TYPE lockd_txn_sweep_duration_ms_milliseconds histogram
+lockd_txn_sweep_duration_ms_milliseconds_bucket{lockd_txn_sweep_mode="idle",otel_scope_name="pkt.systems/lockd/txn",otel_scope_schema_url="",otel_scope_version="",le="0"} 93
+lockd_txn_sweep_duration_ms_milliseconds_bucket{lockd_txn_sweep_mode="idle",otel_scope_name="pkt.systems/lockd/txn",otel_scope_schema_url="",otel_scope_version="",le="5"} 93
+lockd_txn_sweep_duration_ms_milliseconds_bucket{lockd_txn_sweep_mode="idle",otel_scope_name="pkt.systems/lockd/txn",otel_scope_schema_url="",otel_scope_version="",le="10"} 93
+lockd_txn_sweep_duration_ms_milliseconds_bucket{lockd_txn_sweep_mode="idle",otel_scope_name="pkt.systems/lockd/txn",otel_scope_schema_url="",otel_scope_version="",le="25"} 93
+lockd_txn_sweep_duration_ms_milliseconds_bucket{lockd_txn_sweep_mode="idle",otel_scope_name="pkt.systems/lockd/txn",otel_scope_schema_url="",otel_scope_version="",le="50"} 93
+lockd_txn_sweep_duration_ms_milliseconds_bucket{lockd_txn_sweep_mode="idle",otel_scope_name="pkt.systems/lockd/txn",otel_scope_schema_url="",otel_scope_version="",le="75"} 93
+lockd_txn_sweep_duration_ms_milliseconds_bucket{lockd_txn_sweep_mode="idle",otel_scope_name="pkt.systems/lockd/txn",otel_scope_schema_url="",otel_scope_version="",le="100"} 93
+lockd_txn_sweep_duration_ms_milliseconds_bucket{lockd_txn_sweep_mode="idle",otel_scope_name="pkt.systems/lockd/txn",otel_scope_schema_url="",otel_scope_version="",le="250"} 93
+lockd_txn_sweep_duration_ms_milliseconds_bucket{lockd_txn_sweep_mode="idle",otel_scope_name="pkt.systems/lockd/txn",otel_scope_schema_url="",otel_scope_version="",le="500"} 93
+lockd_txn_sweep_duration_ms_milliseconds_bucket{lockd_txn_sweep_mode="idle",otel_scope_name="pkt.systems/lockd/txn",otel_scope_schema_url="",otel_scope_version="",le="750"} 93
+lockd_txn_sweep_duration_ms_milliseconds_bucket{lockd_txn_sweep_mode="idle",otel_scope_name="pkt.systems/lockd/txn",otel_scope_schema_url="",otel_scope_version="",le="1000"} 93
+lockd_txn_sweep_duration_ms_milliseconds_bucket{lockd_txn_sweep_mode="idle",otel_scope_name="pkt.systems/lockd/txn",otel_scope_schema_url="",otel_scope_version="",le="2500"} 93
+lockd_txn_sweep_duration_ms_milliseconds_bucket{lockd_txn_sweep_mode="idle",otel_scope_name="pkt.systems/lockd/txn",otel_scope_schema_url="",otel_scope_version="",le="5000"} 93
+lockd_txn_sweep_duration_ms_milliseconds_bucket{lockd_txn_sweep_mode="idle",otel_scope_name="pkt.systems/lockd/txn",otel_scope_schema_url="",otel_scope_version="",le="7500"} 93
+lockd_txn_sweep_duration_ms_milliseconds_bucket{lockd_txn_sweep_mode="idle",otel_scope_name="pkt.systems/lockd/txn",otel_scope_schema_url="",otel_scope_version="",le="10000"} 93
+lockd_txn_sweep_duration_ms_milliseconds_bucket{lockd_txn_sweep_mode="idle",otel_scope_name="pkt.systems/lockd/txn",otel_scope_schema_url="",otel_scope_version="",le="+Inf"} 93
+lockd_txn_sweep_duration_ms_milliseconds_sum{lockd_txn_sweep_mode="idle",otel_scope_name="pkt.systems/lockd/txn",otel_scope_schema_url="",otel_scope_version=""} 0
+lockd_txn_sweep_duration_ms_milliseconds_count{lockd_txn_sweep_mode="idle",otel_scope_name="pkt.systems/lockd/txn",otel_scope_schema_url="",otel_scope_version=""} 93
+# HELP target_info Target metadata
+# TYPE target_info gauge
+target_info{service_name="lockd"} 1

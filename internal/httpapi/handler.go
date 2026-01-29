@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -147,6 +148,7 @@ type indexFlushController interface {
 	FlushNamespace(ctx context.Context, namespace string) error
 	ManifestSeq(ctx context.Context, namespace string) (uint64, error)
 	WaitForReadable(ctx context.Context, namespace string) error
+	WarmNamespace(ctx context.Context, namespace string) error
 }
 
 // ShutdownState exposes the server's current shutdown posture.
@@ -207,6 +209,22 @@ func (h *Handler) currentShutdownState() ShutdownState {
 	return state
 }
 
+// StopHA stops the HA lease refresh loop for the handler's core service.
+func (h *Handler) StopHA() {
+	if h == nil || h.core == nil {
+		return
+	}
+	h.core.StopHA()
+}
+
+// ReleaseHA releases the HA lease via the handler's core service.
+func (h *Handler) ReleaseHA(ctx context.Context) {
+	if h == nil || h.core == nil {
+		return
+	}
+	h.core.ReleaseHA(ctx)
+}
+
 func (h *Handler) releasePendingDeliveries(namespace, queue, owner string) {
 	if h == nil || h.pendingDeliveries == nil {
 		return
@@ -225,40 +243,27 @@ func (h *Handler) maybeThrottleQueue(kind qrf.Kind) error {
 	if h.qrf == nil {
 		return nil
 	}
-	decision := h.qrf.Decide(kind)
-	if !decision.Throttle {
-		return nil
-	}
-	retry := durationToSeconds(decision.RetryAfter)
-	if retry <= 0 {
-		retry = 1
-	}
-	return httpError{
-		Status:     http.StatusTooManyRequests,
-		Code:       "throttled",
-		Detail:     "perimeter defence engaged",
-		RetryAfter: retry,
-	}
+	return h.qrfThrottleError(h.qrf.Wait(context.Background(), kind))
 }
 
-func (h *Handler) maybeThrottleLock() error {
-	if h.qrf == nil {
+func (h *Handler) qrfThrottleError(err error) error {
+	if err == nil {
 		return nil
 	}
-	decision := h.qrf.Decide(qrf.KindLock)
-	if !decision.Throttle {
-		return nil
+	var waitErr *qrf.WaitError
+	if errors.As(err, &waitErr) {
+		retry := durationToSeconds(waitErr.Delay)
+		if retry <= 0 {
+			retry = 1
+		}
+		return httpError{
+			Status:     http.StatusTooManyRequests,
+			Code:       "throttled",
+			Detail:     "perimeter defence engaged",
+			RetryAfter: retry,
+		}
 	}
-	retry := durationToSeconds(decision.RetryAfter)
-	if retry <= 0 {
-		retry = 1
-	}
-	return httpError{
-		Status:     http.StatusTooManyRequests,
-		Code:       "throttled",
-		Detail:     "perimeter defence engaged",
-		RetryAfter: retry,
-	}
+	return err
 }
 
 func (h *Handler) requireQueueService() (*queue.Service, error) {
@@ -420,6 +425,8 @@ type Config struct {
 	IndexManager               *indexer.Manager
 	Logger                     pslog.Logger
 	Clock                      clock.Clock
+	HAMode                     string
+	HALeaseTTL                 time.Duration
 	DefaultNamespace           string
 	JSONMaxBytes               int64
 	AttachmentMaxBytes         int64
@@ -430,6 +437,11 @@ type Config struct {
 	SpoolMemoryThreshold       int64
 	TxnDecisionRetention       time.Duration
 	TxnReplayInterval          time.Duration
+	QueueDecisionCacheTTL      time.Duration
+	QueueDecisionMaxApply      int
+	QueueDecisionApplyTimeout  time.Duration
+	StateCacheBytes            int64
+	QueryDocPrefetch           int
 	EnforceClientIdentity      bool
 	MetaWarmupAttempts         int
 	MetaWarmupInitialDelay     time.Duration
@@ -441,6 +453,7 @@ type Config struct {
 	QueuePollInterval          time.Duration
 	QueuePollJitter            time.Duration
 	QueueResilientPollInterval time.Duration
+	QueueListPageSize          int
 	LSFObserver                *lsf.Observer
 	QRFController              *qrf.Controller
 	ShutdownState              func() ShutdownState
@@ -520,7 +533,10 @@ func New(cfg Config) *Handler {
 	queueSvc := cfg.QueueService
 	crypto := cfg.Crypto
 	if queueSvc == nil && cfg.Store != nil {
-		if svc, err := queue.New(cfg.Store, clk, queue.Config{Crypto: crypto}); err == nil {
+		if svc, err := queue.New(cfg.Store, clk, queue.Config{
+			Crypto:            crypto,
+			QueuePollInterval: cfg.QueuePollInterval,
+		}); err == nil {
 			queueSvc = svc
 		}
 	}
@@ -532,6 +548,7 @@ func New(cfg Config) *Handler {
 			queue.WithMaxConsumers(cfg.QueueMaxConsumers),
 			queue.WithPollInterval(cfg.QueuePollInterval),
 			queue.WithPollJitter(cfg.QueuePollJitter),
+			queue.WithQueuePageSize(cfg.QueueListPageSize),
 		}
 		if cfg.QueueResilientPollInterval > 0 {
 			opts = append(opts, queue.WithResilientPollInterval(cfg.QueueResilientPollInterval))
@@ -539,7 +556,6 @@ func New(cfg Config) *Handler {
 		watchMode := "polling"
 		watchReason := "backend_no_change_feed"
 		if feed, ok := cfg.Store.(storage.QueueChangeFeed); ok {
-			watchReason = "backend_missing_change_feed"
 			if factory := queue.WatchFactoryFromStorage(feed); factory != nil {
 				opts = append(opts, queue.WithWatchFactory(factory))
 				watchMode = "change_feed"
@@ -554,6 +570,7 @@ func New(cfg Config) *Handler {
 			"poll_interval", cfg.QueuePollInterval,
 			"poll_jitter", cfg.QueuePollJitter,
 			"resilient_poll_interval", cfg.QueueResilientPollInterval,
+			"page_size", cfg.QueueListPageSize,
 			"watch_mode", watchMode,
 			"watch_reason", watchReason,
 		)
@@ -600,27 +617,34 @@ func New(cfg Config) *Handler {
 		}
 	}
 	coreSvc := core.New(core.Config{
-		Store:                  cfg.Store,
-		BackendHash:            backendHash,
-		Crypto:                 crypto,
-		QueueService:           queueSvc,
-		QueueDispatcher:        queueDisp,
-		SearchAdapter:          cfg.SearchAdapter,
-		NamespaceConfigs:       cfg.NamespaceConfigs,
-		DefaultNamespaceConfig: defaultNamespaceConfig,
-		IndexManager:           cfg.IndexManager,
-		DefaultNamespace:       defaultNamespace,
-		Logger:                 logger,
-		Clock:                  clk,
-		DefaultTTL:             cfg.DefaultTTL,
-		MaxTTL:                 cfg.MaxTTL,
-		AcquireBlock:           cfg.AcquireBlock,
-		JSONMaxBytes:           cfg.JSONMaxBytes,
-		AttachmentMaxBytes:     cfg.AttachmentMaxBytes,
-		SpoolThreshold:         threshold,
-		TxnDecisionRetention:   cfg.TxnDecisionRetention,
-		TxnReplayInterval:      cfg.TxnReplayInterval,
-		EnforceIdentity:        cfg.EnforceClientIdentity,
+		Store:                     cfg.Store,
+		BackendHash:               backendHash,
+		Crypto:                    crypto,
+		HAMode:                    cfg.HAMode,
+		HALeaseTTL:                cfg.HALeaseTTL,
+		QueueService:              queueSvc,
+		QueueDispatcher:           queueDisp,
+		SearchAdapter:             cfg.SearchAdapter,
+		NamespaceConfigs:          cfg.NamespaceConfigs,
+		DefaultNamespaceConfig:    defaultNamespaceConfig,
+		IndexManager:              cfg.IndexManager,
+		DefaultNamespace:          defaultNamespace,
+		Logger:                    logger,
+		Clock:                     clk,
+		DefaultTTL:                cfg.DefaultTTL,
+		MaxTTL:                    cfg.MaxTTL,
+		AcquireBlock:              cfg.AcquireBlock,
+		JSONMaxBytes:              cfg.JSONMaxBytes,
+		AttachmentMaxBytes:        cfg.AttachmentMaxBytes,
+		SpoolThreshold:            threshold,
+		TxnDecisionRetention:      cfg.TxnDecisionRetention,
+		TxnReplayInterval:         cfg.TxnReplayInterval,
+		QueueDecisionCacheTTL:     cfg.QueueDecisionCacheTTL,
+		QueueDecisionMaxApply:     cfg.QueueDecisionMaxApply,
+		QueueDecisionApplyTimeout: cfg.QueueDecisionApplyTimeout,
+		StateCacheBytes:           cfg.StateCacheBytes,
+		QueryDocPrefetch:          cfg.QueryDocPrefetch,
+		EnforceIdentity:           cfg.EnforceClientIdentity,
 		MetaWarmup: core.WarmupConfig{
 			Attempts: metaWarmupAttempts,
 			Initial:  metaWarmupInitial,
@@ -827,6 +851,32 @@ type acquireOutcome struct {
 	MetaETag string
 }
 
+func (h *Handler) requireNodeActive(ctx context.Context) error {
+	if h == nil || h.core == nil {
+		return nil
+	}
+	if err := h.core.RequireNodeActive(); err != nil {
+		return convertCoreError(err)
+	}
+	return nil
+}
+
+// NodeActive reports whether this server is currently active for failover mode.
+func (h *Handler) NodeActive() bool {
+	if h == nil || h.core == nil {
+		return true
+	}
+	return h.core.NodeActive()
+}
+
+func requiresNodeActive(operation string) bool {
+	switch operation {
+	case "healthz", "readyz", "get", "describe", "query", "attachments", "attachment":
+		return false
+	}
+	return !strings.HasPrefix(operation, "tc.")
+}
+
 func (h *Handler) wrap(operation string, fn handlerFunc) http.Handler {
 	sys := routerSys(operation)
 	httpSpanName := "lockd.http." + operation
@@ -902,6 +952,15 @@ func (h *Handler) wrap(operation string, fn handlerFunc) http.Handler {
 		result := "ok"
 		status := codes.Ok
 		statusMsg := ""
+		if requiresNodeActive(operation) {
+			if err := h.requireNodeActive(ctx); err != nil {
+				result = "error"
+				status = codes.Error
+				statusMsg = "node_passive"
+				h.handleError(ctx, w, err)
+				return
+			}
+		}
 		defer func() {
 			if instrument {
 				duration := time.Since(start).Milliseconds()
@@ -995,46 +1054,53 @@ func (h *Handler) writeQueryDocumentsCore(ctx context.Context, w http.ResponseWr
 		logger = h.logger
 	}
 	sink := &ndjsonSink{
-		writer:  w,
-		flusher: flusher,
-		logger:  logger,
-		stream:  h.streamDocumentRow,
-		ns:      cmd.Namespace,
+		writer:     w,
+		flusher:    flusher,
+		logger:     logger,
+		stream:     h.streamDocumentRow,
+		ns:         cmd.Namespace,
+		copyBuf:    make([]byte, queryStreamCopyBufSize),
+		rowBuf:     make([]byte, 0, queryStreamRowBufSize),
+		flushEvery: queryStreamFlushEvery,
 	}
 	_, err = h.core.QueryDocuments(ctx, cmd, sink)
+	sink.Flush()
 	return err
 }
 
-type queryDocumentRow struct {
-	Namespace string `json:"ns"`
-	Key       string `json:"key"`
-	Version   int64  `json:"ver,omitempty"`
-}
+const (
+	queryStreamCopyBufSize = 32 * 1024
+	queryStreamRowBufSize  = 256
+	queryStreamFlushEvery  = 16
+)
 
-func (h *Handler) streamDocumentRow(w io.Writer, namespace, key string, version int64, doc io.Reader) error {
-	row := queryDocumentRow{Namespace: namespace, Key: key, Version: version}
-	prefix, err := json.Marshal(row)
-	if err != nil {
-		return err
+func (h *Handler) streamDocumentRow(w io.Writer, namespace, key string, version int64, doc io.Reader, copyBuf []byte, rowBuf []byte) ([]byte, error) {
+	buf := rowBuf[:0]
+	buf = append(buf, '{')
+	buf = append(buf, `"ns":`...)
+	buf = strconv.AppendQuote(buf, namespace)
+	buf = append(buf, `,"key":`...)
+	buf = strconv.AppendQuote(buf, key)
+	if version != 0 {
+		buf = append(buf, `,"ver":`...)
+		buf = strconv.AppendInt(buf, version, 10)
 	}
-	if len(prefix) == 0 {
-		return fmt.Errorf("empty prefix")
-	}
-	// Write prefix without trailing '}'
-	if _, err := w.Write(prefix[:len(prefix)-1]); err != nil {
-		return err
-	}
-	if _, err := io.WriteString(w, `,"doc":`); err != nil {
-		return err
+	buf = append(buf, `,"doc":`...)
+	if _, err := w.Write(buf); err != nil {
+		return rowBuf, err
 	}
 	lw := &limitedWriter{Writer: w, limit: h.jsonMaxBytes}
-	if _, err := io.Copy(lw, doc); err != nil {
-		return err
+	if len(copyBuf) == 0 {
+		if _, err := io.Copy(lw, doc); err != nil {
+			return rowBuf, err
+		}
+	} else if _, err := io.CopyBuffer(lw, doc, copyBuf); err != nil {
+		return rowBuf, err
 	}
 	if _, err := io.WriteString(w, "}\n"); err != nil {
-		return err
+		return rowBuf, err
 	}
-	return nil
+	return buf[:0], nil
 }
 
 func (h *Handler) selectQueryEngine(ctx context.Context, namespace string, hint search.EngineHint) (search.EngineHint, error) {
@@ -1055,10 +1121,6 @@ func (h *Handler) selectQueryEngine(ctx context.Context, namespace string, hint 
 	}
 	engine, err := cfg.SelectEngine(hint, caps)
 	if err != nil {
-		requested := string(hint)
-		if requested == "" || hint == search.EngineAuto {
-			requested = "auto"
-		}
 		return "", httpError{
 			Status: http.StatusBadRequest,
 			Code:   "query_engine_unavailable",

@@ -55,6 +55,7 @@ func buildNFSQueueConfig(t testing.TB, root string, opts nfsQueueOptions) lockd.
 		QueuePollInterval:          opts.PollInterval,
 		QueuePollJitter:            opts.PollJitter,
 		QueueResilientPollInterval: opts.ResilientInterval,
+		HAMode:                     "failover",
 	}
 	if cfg.QueuePollInterval <= 0 {
 		cfg.QueuePollInterval = 100 * time.Millisecond

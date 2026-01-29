@@ -633,6 +633,7 @@ func TestMemQueryTxnDecisionEndpoints(t *testing.T) {
 func TestMemQueryTxnFanoutAcrossNodes(t *testing.T) {
 	backend := memory.New()
 	cfg := memQueryConfigWithSweeper(2 * time.Second)
+	cfg.HAMode = "concurrent"
 	bundlePath := cryptotest.SharedTCClientBundlePath(t)
 	if bundlePath == "" {
 		cfg.DisableMTLS = true
@@ -750,6 +751,7 @@ func TestMemQueryTxnFanoutAcrossNodes(t *testing.T) {
 func TestMemQueryTxnFanoutRollbackAcrossNodes(t *testing.T) {
 	backend := memory.New()
 	cfg := memQueryConfigWithSweeper(2 * time.Second)
+	cfg.HAMode = "concurrent"
 	bundlePath := cryptotest.SharedTCClientBundlePath(t)
 	if bundlePath == "" {
 		cfg.DisableMTLS = true
@@ -860,6 +862,7 @@ func TestMemQueryTxnFanoutRollbackAcrossNodes(t *testing.T) {
 func TestMemQueryTxnReplayAfterRestartAcrossNodes(t *testing.T) {
 	backend := memory.New()
 	cfg := memQueryConfigWithSweeper(time.Hour) // disable sweeper; explicit replay after restart
+	cfg.HAMode = "concurrent"
 	tsA := startMemQueryServerWithBackend(t, backend, cfg)
 	tsB := startMemQueryServerWithBackend(t, backend, cfg)
 

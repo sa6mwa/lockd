@@ -12,7 +12,7 @@ import (
 	lockd "pkt.systems/lockd"
 	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/client"
-	"pkt.systems/lockd/lql"
+	"pkt.systems/lql"
 )
 
 func ExampleClient_Acquire() {

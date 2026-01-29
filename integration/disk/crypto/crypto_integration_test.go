@@ -70,6 +70,62 @@ func TestCryptoDiskLocks(t *testing.T) {
 	}
 }
 
+func TestCryptoDiskUpdateReleaseRead(t *testing.T) {
+	cfg := buildDiskConfig(t)
+	options := []lockd.TestServerOption{
+		lockd.WithTestConfig(cfg),
+		lockd.WithTestLogger(pslog.NoopLogger()),
+		lockd.WithTestClientOptions(
+			lockdclient.WithHTTPTimeout(30*time.Second),
+			lockdclient.WithKeepAliveTimeout(30*time.Second),
+			lockdclient.WithCloseTimeout(30*time.Second),
+			lockdclient.WithLogger(pslog.NoopLogger()),
+		),
+	}
+	options = append(options, cryptotest.SharedMTLSOptions(t)...)
+	ts := lockd.StartTestServer(t, options...)
+	cli := ts.Client
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	key := "crypto-disk-update"
+	initial, err := cli.Acquire(ctx, api.AcquireRequest{
+		Key:        key,
+		Owner:      "disk-writer",
+		TTLSeconds: 30,
+	})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+
+	state := map[string]any{"stage": "committed", "count": 2}
+	if err := initial.Save(ctx, state); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+	if err := initial.Release(ctx); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	reader, err := cli.Acquire(ctx, api.AcquireRequest{
+		Key:        key,
+		Owner:      "disk-reader",
+		TTLSeconds: 30,
+	})
+	if err != nil {
+		t.Fatalf("reacquire: %v", err)
+	}
+	defer reader.Release(context.Background())
+
+	var loaded map[string]any
+	if err := reader.Load(ctx, &loaded); err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if fmt.Sprint(loaded["stage"]) != "committed" {
+		t.Fatalf("unexpected state: %+v", loaded)
+	}
+}
+
 func TestCryptoDiskQueues(t *testing.T) {
 	cfg := buildDiskConfig(t)
 	options := []lockd.TestServerOption{

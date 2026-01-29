@@ -90,6 +90,8 @@ func kindLabel(kind Kind) string {
 		return "queue_ack"
 	case KindLock:
 		return "lock"
+	case KindQuery:
+		return "query"
 	default:
 		return "unknown"
 	}

@@ -2,6 +2,7 @@ package storage
 
 import (
 	"fmt"
+	"sync"
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -14,7 +15,10 @@ func MarshalMeta(meta *Meta, crypto *Crypto) ([]byte, error) {
 	if meta == nil {
 		meta = &Meta{}
 	}
-	payload, err := proto.Marshal(metaToProto(meta))
+	pm := borrowLockMeta()
+	fillLockMeta(meta, pm)
+	payload, err := proto.Marshal(pm)
+	releaseLockMeta(pm)
 	if err != nil {
 		return nil, fmt.Errorf("storage: encode meta protobuf: %w", err)
 	}
@@ -46,11 +50,14 @@ func UnmarshalMeta(payload []byte, crypto *Crypto) (*Meta, error) {
 
 // MarshalMetaRecord encodes an ETag and meta pair for storage backends that persist both values together.
 func MarshalMetaRecord(etag string, meta *Meta, crypto *Crypto) ([]byte, error) {
-	record := &lockdproto.MetaRecord{
-		Etag: etag,
-		Meta: metaToProto(meta),
-	}
+	record := borrowMetaRecord()
+	pm := borrowLockMeta()
+	fillLockMeta(meta, pm)
+	record.Etag = etag
+	record.Meta = pm
 	payload, err := proto.Marshal(record)
+	releaseLockMeta(pm)
+	releaseMetaRecord(record)
 	if err != nil {
 		return nil, fmt.Errorf("storage: encode meta record protobuf: %w", err)
 	}
@@ -80,24 +87,62 @@ func UnmarshalMetaRecord(payload []byte, crypto *Crypto) (MetaRecord, error) {
 	return MetaRecord{ETag: record.GetEtag(), Meta: metaFromProto(record.GetMeta())}, nil
 }
 
-func metaToProto(meta *Meta) *lockdproto.LockMeta {
-	if meta == nil {
+var lockMetaPool = sync.Pool{
+	New: func() any {
 		return &lockdproto.LockMeta{}
+	},
+}
+
+var metaRecordPool = sync.Pool{
+	New: func() any {
+		return &lockdproto.MetaRecord{}
+	},
+}
+
+func borrowLockMeta() *lockdproto.LockMeta {
+	pm := lockMetaPool.Get().(*lockdproto.LockMeta)
+	*pm = lockdproto.LockMeta{}
+	return pm
+}
+
+func releaseLockMeta(pm *lockdproto.LockMeta) {
+	if pm == nil {
+		return
 	}
-	pm := &lockdproto.LockMeta{
-		Version:                   meta.Version,
-		PublishedVersion:          meta.PublishedVersion,
-		StateEtag:                 meta.StateETag,
-		UpdatedAtUnix:             meta.UpdatedAtUnix,
-		FencingToken:              meta.FencingToken,
-		StatePlaintextBytes:       meta.StatePlaintextBytes,
-		StagedTxnId:               meta.StagedTxnID,
-		StagedStateEtag:           meta.StagedStateETag,
-		StagedStateDescriptor:     meta.StagedStateDescriptor,
-		StagedStatePlaintextBytes: meta.StagedStatePlaintextBytes,
-		StagedVersion:             meta.StagedVersion,
-		StagedRemove:              meta.StagedRemove,
+	*pm = lockdproto.LockMeta{}
+	lockMetaPool.Put(pm)
+}
+
+func borrowMetaRecord() *lockdproto.MetaRecord {
+	record := metaRecordPool.Get().(*lockdproto.MetaRecord)
+	*record = lockdproto.MetaRecord{}
+	return record
+}
+
+func releaseMetaRecord(record *lockdproto.MetaRecord) {
+	if record == nil {
+		return
 	}
+	*record = lockdproto.MetaRecord{}
+	metaRecordPool.Put(record)
+}
+
+func fillLockMeta(meta *Meta, pm *lockdproto.LockMeta) {
+	if meta == nil || pm == nil {
+		return
+	}
+	pm.Version = meta.Version
+	pm.PublishedVersion = meta.PublishedVersion
+	pm.StateEtag = meta.StateETag
+	pm.UpdatedAtUnix = meta.UpdatedAtUnix
+	pm.FencingToken = meta.FencingToken
+	pm.StatePlaintextBytes = meta.StatePlaintextBytes
+	pm.StagedTxnId = meta.StagedTxnID
+	pm.StagedStateEtag = meta.StagedStateETag
+	pm.StagedStateDescriptor = meta.StagedStateDescriptor
+	pm.StagedStatePlaintextBytes = meta.StagedStatePlaintextBytes
+	pm.StagedVersion = meta.StagedVersion
+	pm.StagedRemove = meta.StagedRemove
 	if meta.Lease != nil {
 		pm.Lease = &lockdproto.Lease{
 			LeaseId:       meta.Lease.ID,
@@ -105,19 +150,18 @@ func metaToProto(meta *Meta) *lockdproto.LockMeta {
 			ExpiresAtUnix: meta.Lease.ExpiresAtUnix,
 			FencingToken:  meta.Lease.FencingToken,
 			TxnId:         meta.Lease.TxnID,
+			TxnExplicit:   meta.Lease.TxnExplicit,
 		}
 	}
 	if len(meta.StateDescriptor) > 0 {
 		pm.StateDescriptor = append([]byte(nil), meta.StateDescriptor...)
 	}
 	if len(meta.Attributes) > 0 {
-		attrs := make(map[string]interface{}, len(meta.Attributes))
+		fields := make(map[string]*structpb.Value, len(meta.Attributes))
 		for k, v := range meta.Attributes {
-			attrs[k] = v
+			fields[k] = structpb.NewStringValue(v)
 		}
-		if s, err := structpb.NewStruct(attrs); err == nil {
-			pm.Attributes = s
-		}
+		pm.Attributes = &structpb.Struct{Fields: fields}
 	}
 	if len(meta.StagedAttributes) > 0 {
 		pm.StagedAttributes = make(map[string]string, len(meta.StagedAttributes))
@@ -161,7 +205,6 @@ func metaToProto(meta *Meta) *lockdproto.LockMeta {
 	if meta.StagedAttachmentsClear {
 		pm.StagedAttachmentsClear = true
 	}
-	return pm
 }
 
 func metaFromProto(pm *lockdproto.LockMeta) *Meta {
@@ -188,6 +231,7 @@ func metaFromProto(pm *lockdproto.LockMeta) *Meta {
 			ExpiresAtUnix: lease.GetExpiresAtUnix(),
 			FencingToken:  lease.GetFencingToken(),
 			TxnID:         lease.GetTxnId(),
+			TxnExplicit:   lease.GetTxnExplicit(),
 		}
 	}
 	if desc := pm.GetStateDescriptor(); len(desc) > 0 {

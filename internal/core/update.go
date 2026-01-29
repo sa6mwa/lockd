@@ -1,12 +1,14 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"strings"
 
 	"pkt.systems/lockd/internal/storage"
@@ -49,7 +51,7 @@ type UpdateResult struct {
 
 // Update streams new state into storage with lease/CAS enforcement.
 func (s *Service) Update(ctx context.Context, cmd UpdateCommand) (*UpdateResult, error) {
-	if err := s.maybeThrottleLock(); err != nil {
+	if err := s.maybeThrottleLock(ctx); err != nil {
 		return nil, err
 	}
 	finish := s.beginLockOp()
@@ -77,6 +79,8 @@ func (s *Service) Update(ctx context.Context, cmd UpdateCommand) (*UpdateResult,
 		return nil, Failure{Code: "invalid_key", Detail: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
 	keyComponent := relativeKey(namespace, storageKey)
+	knownMeta := cmd.KnownMeta
+	knownMetaETag := cmd.KnownMetaETag
 
 	// Enforce optional payload size limit
 	limited := cmd.Body
@@ -100,23 +104,30 @@ func (s *Service) Update(ctx context.Context, cmd UpdateCommand) (*UpdateResult,
 	}
 
 	for {
+		plan := s.newWritePlan(ctx)
+		commitCtx := plan.Context()
 		now := s.clock.Now()
-		meta, metaETag, err := s.loadMetaMaybeCached(ctx, namespace, storageKey, cmd.KnownMeta, cmd.KnownMetaETag)
+		meta, metaETag, err := s.loadMetaMaybeCached(commitCtx, namespace, storageKey, knownMeta, knownMetaETag)
 		if err != nil {
-			return nil, err
+			return nil, plan.Wait(err)
 		}
 		if meta.Lease != nil && meta.Lease.ExpiresAtUnix <= now.Unix() {
 			leaseErr := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now)
-			if _, _, err := s.clearExpiredLease(ctx, namespace, keyComponent, meta, metaETag, now, sweepModeTransparent, true); err != nil {
+			if _, _, err := s.clearExpiredLease(commitCtx, namespace, keyComponent, meta, metaETag, now, sweepModeTransparent, true); err != nil {
 				if errors.Is(err, storage.ErrCASMismatch) {
+					if waitErr := plan.Wait(nil); waitErr != nil {
+						return nil, waitErr
+					}
+					knownMeta = nil
+					knownMetaETag = ""
 					continue
 				}
-				return nil, err
+				return nil, plan.Wait(err)
 			}
-			return nil, leaseErr
+			return nil, plan.Wait(leaseErr)
 		}
 		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now); err != nil {
-			return nil, err
+			return nil, plan.Wait(err)
 		}
 		if meta.StagedTxnID != "" && meta.StagedTxnID != cmd.TxnID {
 			return nil, Failure{
@@ -154,14 +165,12 @@ func (s *Service) Update(ctx context.Context, cmd UpdateCommand) (*UpdateResult,
 			}
 		}
 
-		// Always mint fresh encryption material for staged writes. Reusing the
-		// committed state's descriptor would fail on backends that bind crypto
-		// material to the object path (staging writes live under a different
-		// key such as <key>/.staging/<txn>). Let the backend generate a
-		// descriptor tied to the staging object instead.
-		result, err := s.staging.StageState(ctx, namespace, keyComponent, cmd.TxnID, reader, storage.PutStateOptions{})
+		// Mint staged encryption material using the committed key context so the
+		// ciphertext is already valid for promotion.
+		stageCtx := storage.ContextWithStateObjectContext(commitCtx, storage.StateObjectContext(path.Join(namespace, keyComponent)))
+		result, err := s.staging.StageState(stageCtx, namespace, keyComponent, cmd.TxnID, reader, storage.PutStateOptions{})
 		if err != nil {
-			return nil, fmt.Errorf("stage state: %w", err)
+			return nil, plan.Wait(fmt.Errorf("stage state: %w", err))
 		}
 
 		meta.StagedTxnID = cmd.TxnID
@@ -177,17 +186,25 @@ func (s *Service) Update(ctx context.Context, cmd UpdateCommand) (*UpdateResult,
 			meta.FencingToken = cmd.FencingToken
 		}
 
-		newMetaETag, err := s.store.StoreMeta(ctx, namespace, keyComponent, meta, metaETag)
+		newMetaETag, err := s.store.StoreMeta(commitCtx, namespace, keyComponent, meta, metaETag)
 		if err != nil {
 			if errors.Is(err, storage.ErrCASMismatch) {
+				if waitErr := plan.Wait(nil); waitErr != nil {
+					return nil, waitErr
+				}
+				knownMeta = nil
+				knownMetaETag = ""
 				continue
 			}
-			return nil, fmt.Errorf("store meta: %w", err)
+			return nil, plan.Wait(fmt.Errorf("store meta: %w", err))
 		}
-		if meta.Lease != nil {
-			if _, _, err := s.enlistTxnParticipant(ctx, cmd.TxnID, namespace, keyComponent, meta.Lease.ExpiresAtUnix); err != nil {
-				return nil, fmt.Errorf("register txn participant: %w", err)
+		if txnExplicit(meta) {
+			if _, _, err := s.enlistTxnParticipant(commitCtx, cmd.TxnID, namespace, keyComponent, meta.Lease.ExpiresAtUnix); err != nil {
+				return nil, plan.Wait(fmt.Errorf("register txn participant: %w", err))
 			}
+		}
+		if waitErr := plan.Wait(nil); waitErr != nil {
+			return nil, waitErr
 		}
 		return &UpdateResult{
 			NewVersion:   meta.StagedVersion,
@@ -204,7 +221,7 @@ func (s *Service) Update(ctx context.Context, cmd UpdateCommand) (*UpdateResult,
 
 // Remove deletes state and meta if lease matches.
 func (s *Service) Remove(ctx context.Context, cmd RemoveCommand) (*RemoveResult, error) {
-	if err := s.maybeThrottleLock(); err != nil {
+	if err := s.maybeThrottleLock(ctx); err != nil {
 		return nil, err
 	}
 	finish := s.beginLockOp()
@@ -228,25 +245,34 @@ func (s *Service) Remove(ctx context.Context, cmd RemoveCommand) (*RemoveResult,
 		return nil, Failure{Code: "invalid_key", Detail: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
 	keyComponent := relativeKey(namespace, storageKey)
+	knownMeta := cmd.KnownMeta
+	knownMetaETag := cmd.KnownMetaETag
 
 	for {
+		plan := s.newWritePlan(ctx)
+		commitCtx := plan.Context()
 		now := s.clock.Now()
-		meta, metaETag, err := s.loadMetaMaybeCached(ctx, namespace, storageKey, cmd.KnownMeta, cmd.KnownMetaETag)
+		meta, metaETag, err := s.loadMetaMaybeCached(commitCtx, namespace, storageKey, knownMeta, knownMetaETag)
 		if err != nil {
-			return nil, err
+			return nil, plan.Wait(err)
 		}
 		if meta.Lease != nil && meta.Lease.ExpiresAtUnix <= now.Unix() {
 			leaseErr := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now)
-			if _, _, err := s.clearExpiredLease(ctx, namespace, keyComponent, meta, metaETag, now, sweepModeTransparent, true); err != nil {
+			if _, _, err := s.clearExpiredLease(commitCtx, namespace, keyComponent, meta, metaETag, now, sweepModeTransparent, true); err != nil {
 				if errors.Is(err, storage.ErrCASMismatch) {
+					if waitErr := plan.Wait(nil); waitErr != nil {
+						return nil, waitErr
+					}
+					knownMeta = nil
+					knownMetaETag = ""
 					continue
 				}
-				return nil, err
+				return nil, plan.Wait(err)
 			}
-			return nil, leaseErr
+			return nil, plan.Wait(leaseErr)
 		}
 		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now); err != nil {
-			return nil, err
+			return nil, plan.Wait(err)
 		}
 		currentVersion := meta.Version
 		if meta.StagedTxnID == cmd.TxnID && meta.StagedVersion > 0 {
@@ -287,7 +313,7 @@ func (s *Service) Remove(ctx context.Context, cmd RemoveCommand) (*RemoveResult,
 			}, nil
 		}
 
-		_ = s.staging.DiscardStagedState(ctx, namespace, keyComponent, cmd.TxnID, storage.DiscardStagedOptions{IgnoreNotFound: true})
+		_ = s.staging.DiscardStagedState(commitCtx, namespace, keyComponent, cmd.TxnID, storage.DiscardStagedOptions{IgnoreNotFound: true})
 		meta.StagedTxnID = cmd.TxnID
 		meta.StagedRemove = true
 		meta.StagedStateETag = ""
@@ -302,17 +328,25 @@ func (s *Service) Remove(ctx context.Context, cmd RemoveCommand) (*RemoveResult,
 		meta.StagedVersion = versionBase + 1
 		meta.UpdatedAtUnix = now.Unix()
 
-		newMetaETag, err := s.store.StoreMeta(ctx, namespace, keyComponent, meta, metaETag)
+		newMetaETag, err := s.store.StoreMeta(commitCtx, namespace, keyComponent, meta, metaETag)
 		if err != nil {
 			if errors.Is(err, storage.ErrCASMismatch) {
+				if waitErr := plan.Wait(nil); waitErr != nil {
+					return nil, waitErr
+				}
+				knownMeta = nil
+				knownMetaETag = ""
 				continue
 			}
-			return nil, fmt.Errorf("store meta: %w", err)
+			return nil, plan.Wait(fmt.Errorf("store meta: %w", err))
 		}
-		if meta.Lease != nil {
-			if _, _, err := s.enlistTxnParticipant(ctx, cmd.TxnID, namespace, keyComponent, meta.Lease.ExpiresAtUnix); err != nil {
-				return nil, fmt.Errorf("register txn participant: %w", err)
+		if txnExplicit(meta) {
+			if _, _, err := s.enlistTxnParticipant(commitCtx, cmd.TxnID, namespace, keyComponent, meta.Lease.ExpiresAtUnix); err != nil {
+				return nil, plan.Wait(fmt.Errorf("register txn participant: %w", err))
 			}
+		}
+		if waitErr := plan.Wait(nil); waitErr != nil {
+			return nil, waitErr
 		}
 		return &RemoveResult{
 			Removed:    true,
@@ -325,7 +359,7 @@ func (s *Service) Remove(ctx context.Context, cmd RemoveCommand) (*RemoveResult,
 
 // Metadata mutates metadata attributes guarded by fencing.
 func (s *Service) Metadata(ctx context.Context, cmd MetadataCommand) (*MetadataResult, error) {
-	if err := s.maybeThrottleLock(); err != nil {
+	if err := s.maybeThrottleLock(ctx); err != nil {
 		return nil, err
 	}
 	finish := s.beginLockOp()
@@ -353,25 +387,34 @@ func (s *Service) Metadata(ctx context.Context, cmd MetadataCommand) (*MetadataR
 		return nil, Failure{Code: "invalid_key", Detail: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
 	keyComponent := relativeKey(namespace, storageKey)
+	knownMeta := cmd.KnownMeta
+	knownMetaETag := cmd.KnownMetaETag
 
 	for {
+		plan := s.newWritePlan(ctx)
+		commitCtx := plan.Context()
 		now := s.clock.Now()
-		meta, metaETag, err := s.loadMetaMaybeCached(ctx, namespace, storageKey, cmd.KnownMeta, cmd.KnownMetaETag)
+		meta, metaETag, err := s.loadMetaMaybeCached(commitCtx, namespace, storageKey, knownMeta, knownMetaETag)
 		if err != nil {
-			return nil, err
+			return nil, plan.Wait(err)
 		}
 		if meta.Lease != nil && meta.Lease.ExpiresAtUnix <= now.Unix() {
 			leaseErr := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now)
-			if _, _, err := s.clearExpiredLease(ctx, namespace, keyComponent, meta, metaETag, now, sweepModeTransparent, true); err != nil {
+			if _, _, err := s.clearExpiredLease(commitCtx, namespace, keyComponent, meta, metaETag, now, sweepModeTransparent, true); err != nil {
 				if errors.Is(err, storage.ErrCASMismatch) {
+					if waitErr := plan.Wait(nil); waitErr != nil {
+						return nil, waitErr
+					}
+					knownMeta = nil
+					knownMetaETag = ""
 					continue
 				}
-				return nil, err
+				return nil, plan.Wait(err)
 			}
-			return nil, leaseErr
+			return nil, plan.Wait(leaseErr)
 		}
 		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now); err != nil {
-			return nil, err
+			return nil, plan.Wait(err)
 		}
 		currentVersion := meta.Version
 		if meta.StagedTxnID == cmd.TxnID && meta.StagedVersion > 0 {
@@ -417,17 +460,25 @@ func (s *Service) Metadata(ctx context.Context, cmd MetadataCommand) (*MetadataR
 			meta.StagedVersion = meta.Version + 1
 		}
 		meta.UpdatedAtUnix = now.Unix()
-		newMetaETag, err := s.store.StoreMeta(ctx, namespace, keyComponent, meta, metaETag)
+		newMetaETag, err := s.store.StoreMeta(commitCtx, namespace, keyComponent, meta, metaETag)
 		if err != nil {
 			if errors.Is(err, storage.ErrCASMismatch) {
+				if waitErr := plan.Wait(nil); waitErr != nil {
+					return nil, waitErr
+				}
+				knownMeta = nil
+				knownMetaETag = ""
 				continue
 			}
-			return nil, fmt.Errorf("store meta: %w", err)
+			return nil, plan.Wait(fmt.Errorf("store meta: %w", err))
 		}
-		if meta.Lease != nil {
-			if _, _, err := s.enlistTxnParticipant(ctx, cmd.TxnID, namespace, keyComponent, meta.Lease.ExpiresAtUnix); err != nil {
-				return nil, fmt.Errorf("register txn participant: %w", err)
+		if txnExplicit(meta) {
+			if _, _, err := s.enlistTxnParticipant(commitCtx, cmd.TxnID, namespace, keyComponent, meta.Lease.ExpiresAtUnix); err != nil {
+				return nil, plan.Wait(fmt.Errorf("register txn participant: %w", err))
 			}
+		}
+		if waitErr := plan.Wait(nil); waitErr != nil {
+			return nil, waitErr
 		}
 		logger := pslog.LoggerFromContext(ctx)
 		if logger == nil {
@@ -496,7 +547,7 @@ func (p *payloadSpool) Reader() (io.ReadSeeker, error) {
 		}
 		return p.file, nil
 	}
-	return strings.NewReader(string(p.buf)), nil
+	return bytes.NewReader(p.buf), nil
 }
 
 func (p *payloadSpool) Close() error {

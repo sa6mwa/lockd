@@ -165,6 +165,9 @@ for suite in "${SUITES_TO_RUN[@]}"; do
   if [[ $suite == nfs* ]]; then
     suite_timeout=${LOCKD_NFS_GO_TEST_TIMEOUT:-5m}
   fi
+  if [[ $suite == minio* ]]; then
+    suite_timeout=${LOCKD_MINIO_GO_TEST_TIMEOUT:-5m}
+  fi
   if [[ $suite == azure* ]]; then
     suite_timeout=${LOCKD_AZURE_GO_TEST_TIMEOUT:-5m}
   fi

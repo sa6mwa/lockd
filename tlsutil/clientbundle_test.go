@@ -34,7 +34,7 @@ func TestLoadClientBundle(t *testing.T) {
 	if parsed.ClientCert == nil {
 		t.Fatal("expected client certificate")
 	}
-	if parsed.CAPool == nil || len(parsed.CAPool.Subjects()) == 0 {
+	if parsed.CAPool == nil || len(parsed.CAPool.Subjects()) == 0 { //nolint:staticcheck // Subjects is deprecated but sufficient for test signal.
 		t.Fatal("expected CA pool populated")
 	}
 	if len(parsed.CACerts) != 1 {

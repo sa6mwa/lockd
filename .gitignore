@@ -1,5 +1,6 @@
 testdata/
 !integration/query/querydata/
+/lockd-bench
 /lockd
 /lockc
 /cmd/lockd/lockd
@@ -13,6 +14,8 @@ testdata/
 /integration-logs
 /devenv/volumes
 /devenv/out
+/stash
+/benchmark-logs/
 bin/
 \#*\#
 .vscode/

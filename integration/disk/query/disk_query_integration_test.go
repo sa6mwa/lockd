@@ -20,6 +20,7 @@ import (
 	"pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/integration/internal/cryptotest"
+	"pkt.systems/lockd/integration/internal/hatest"
 	queriesuite "pkt.systems/lockd/integration/query/suite"
 	"pkt.systems/lockd/internal/core"
 	"pkt.systems/lockd/internal/storage"
@@ -627,15 +628,26 @@ func TestDiskQueryTxnDecisionEndpoints(t *testing.T) {
 }
 
 func TestDiskQueryTxnFanoutAcrossNodes(t *testing.T) {
-	t.Run("FSNotify", func(t *testing.T) {
-		runDiskQueryTxnFanoutAcrossNodes(t, true)
-	})
-	t.Run("Polling", func(t *testing.T) {
-		runDiskQueryTxnFanoutAcrossNodes(t, false)
-	})
+	tests := []struct {
+		name   string
+		notify bool
+	}{
+		{name: "FSNotify", notify: true},
+		{name: "Polling", notify: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Run("Commit", func(t *testing.T) {
+				runDiskQueryTxnFanoutAcrossNodes(t, tt.notify, true)
+			})
+			t.Run("Rollback", func(t *testing.T) {
+				runDiskQueryTxnFanoutAcrossNodes(t, tt.notify, false)
+			})
+		})
+	}
 }
 
-func runDiskQueryTxnFanoutAcrossNodes(t *testing.T, notify bool) {
+func runDiskQueryTxnFanoutAcrossNodes(t *testing.T, notify bool, commit bool) {
 	root := prepareDiskQueryRoot(t)
 	cfg := diskQueryConfigWithSweeper(root, 2*time.Second)
 	cfg.DiskQueueWatch = notify
@@ -659,15 +671,35 @@ func runDiskQueryTxnFanoutAcrossNodes(t *testing.T, notify bool) {
 	t.Cleanup(func() { stop(tsB) })
 	t.Cleanup(func() { stop(tsA) })
 
-	cryptotest.RegisterRM(t, tsB, tsA)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
+	activeServer, activeClient, err := hatest.FindActiveServer(ctx, tsA, tsB)
+	if err != nil {
+		t.Fatalf("find active server: %v", err)
+	}
+	passiveServer := tsB
+	if activeServer == tsB {
+		passiveServer = tsA
+	}
+	passiveClient := passiveServer.Client
+	if passiveClient == nil {
+		t.Fatalf("passive server missing client")
+	}
 
 	keyA := fmt.Sprintf("disk-multinode-commit-a-%d", time.Now().UnixNano())
 	keyB := fmt.Sprintf("disk-multinode-commit-b-%d", time.Now().UnixNano())
 
-	leaseA, err := tsA.Client.Acquire(ctx, api.AcquireRequest{
+	if _, err := passiveClient.Acquire(ctx, api.AcquireRequest{
+		Namespace:  namespaces.Default,
+		Key:        "disk-passive-probe-" + fmt.Sprint(time.Now().UnixNano()),
+		Owner:      "passive-probe",
+		TTLSeconds: 5,
+		BlockSecs:  lockdclient.BlockNoWait,
+	}); err == nil || !hatest.IsNodePassive(err) {
+		t.Fatalf("expected ha passive on acquire, got %v", err)
+	}
+
+	leaseA, err := activeClient.Acquire(ctx, api.AcquireRequest{
 		Namespace:  namespaces.Default,
 		Key:        keyA,
 		Owner:      "multinode-commit",
@@ -677,7 +709,7 @@ func runDiskQueryTxnFanoutAcrossNodes(t *testing.T, notify bool) {
 	if err != nil {
 		t.Fatalf("acquire A: %v", err)
 	}
-	leaseB, err := tsB.Client.Acquire(ctx, api.AcquireRequest{
+	leaseB, err := activeClient.Acquire(ctx, api.AcquireRequest{
 		Namespace:  namespaces.Default,
 		Key:        keyB,
 		Owner:      "multinode-commit",
@@ -696,7 +728,6 @@ func runDiskQueryTxnFanoutAcrossNodes(t *testing.T, notify bool) {
 		t.Fatalf("save B: %v", err)
 	}
 
-	httpClient := newHTTPClient(t, tsB)
 	decReq := api.TxnDecisionRequest{
 		TxnID: leaseA.TxnID,
 		State: "commit",
@@ -706,22 +737,26 @@ func runDiskQueryTxnFanoutAcrossNodes(t *testing.T, notify bool) {
 		},
 		ExpiresAtUnix: time.Now().Add(45 * time.Second).Unix(),
 	}
-	body, err := json.Marshal(decReq)
-	if err != nil {
-		t.Fatalf("marshal decision: %v", err)
+	if !commit {
+		decReq.State = "rollback"
 	}
-	req, err := http.NewRequest(http.MethodPost, tsB.URL()+"/v1/txn/decide", bytes.NewReader(body))
-	if err != nil {
-		t.Fatalf("new decision request: %v", err)
+	if commit {
+		if _, err := passiveClient.TxnCommit(ctx, decReq); err == nil || !hatest.IsNodePassive(err) {
+			t.Fatalf("expected ha passive on commit, got %v", err)
+		}
+	} else {
+		if _, err := passiveClient.TxnRollback(ctx, decReq); err == nil || !hatest.IsNodePassive(err) {
+			t.Fatalf("expected ha passive on rollback, got %v", err)
+		}
 	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		t.Fatalf("decision request failed: %v", err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("decision status=%d", resp.StatusCode)
+	if commit {
+		if _, err := activeClient.TxnCommit(ctx, decReq); err != nil {
+			t.Fatalf("decision commit failed: %v", err)
+		}
+	} else {
+		if _, err := activeClient.TxnRollback(ctx, decReq); err != nil {
+			t.Fatalf("decision rollback failed: %v", err)
+		}
 	}
 
 	waitCtx, waitCancel := context.WithTimeout(ctx, 15*time.Second)
@@ -744,114 +779,6 @@ func runDiskQueryTxnFanoutAcrossNodes(t *testing.T, notify bool) {
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
-	assertCommitted(tsA.Client, keyA, "a")
-	assertCommitted(tsB.Client, keyB, "b")
-
-	recordCtx, recordCancel := context.WithTimeout(ctx, 5*time.Second)
-	defer recordCancel()
-	if err := waitForTxnRecordDecided(recordCtx, tsA.Backend(), leaseA.TxnID); err != nil {
-		t.Fatalf("waiting for txn record cleanup: %v", err)
-	}
-}
-
-func TestDiskQueryTxnFanoutRollbackAcrossNodes(t *testing.T) {
-	t.Run("FSNotify", func(t *testing.T) {
-		runDiskQueryTxnFanoutRollbackAcrossNodes(t, true)
-	})
-	t.Run("Polling", func(t *testing.T) {
-		runDiskQueryTxnFanoutRollbackAcrossNodes(t, false)
-	})
-}
-
-func runDiskQueryTxnFanoutRollbackAcrossNodes(t *testing.T, notify bool) {
-	root := prepareDiskQueryRoot(t)
-	cfg := diskQueryConfigWithSweeper(root, 2*time.Second)
-	cfg.DiskQueueWatch = notify
-	bundlePath := cryptotest.SharedTCClientBundlePath(t)
-	if bundlePath == "" {
-		cfg.DisableMTLS = true
-	}
-
-	tsA := startDiskQueryServerWithRootAndConfig(t, cfg)
-	cfgB := cfg
-	if bundlePath != "" {
-		cfgB.TCClientBundlePath = bundlePath
-	}
-	tsB := startDiskQueryServerWithRootAndConfig(t, cfgB)
-	stop := func(ts *lockd.TestServer) {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_ = ts.Stop(ctx)
-	}
-	t.Cleanup(func() { stop(tsB) })
-	t.Cleanup(func() { stop(tsA) })
-
-	cryptotest.RegisterRM(t, tsB, tsA)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
-
-	keyA := fmt.Sprintf("disk-multinode-rollback-a-%d", time.Now().UnixNano())
-	keyB := fmt.Sprintf("disk-multinode-rollback-b-%d", time.Now().UnixNano())
-
-	leaseA, err := tsA.Client.Acquire(ctx, api.AcquireRequest{
-		Namespace:  namespaces.Default,
-		Key:        keyA,
-		Owner:      "multinode-rollback",
-		TTLSeconds: 30,
-		BlockSecs:  lockdclient.BlockWaitForever,
-	})
-	if err != nil {
-		t.Fatalf("acquire A: %v", err)
-	}
-	leaseB, err := tsB.Client.Acquire(ctx, api.AcquireRequest{
-		Namespace:  namespaces.Default,
-		Key:        keyB,
-		Owner:      "multinode-rollback",
-		TTLSeconds: 30,
-		TxnID:      leaseA.TxnID,
-		BlockSecs:  lockdclient.BlockWaitForever,
-	})
-	if err != nil {
-		t.Fatalf("acquire B: %v", err)
-	}
-
-	if err := leaseA.Save(ctx, map[string]any{"value": "rollback-a"}); err != nil {
-		t.Fatalf("save A: %v", err)
-	}
-	if err := leaseB.Save(ctx, map[string]any{"value": "rollback-b"}); err != nil {
-		t.Fatalf("save B: %v", err)
-	}
-
-	httpClient := newHTTPClient(t, tsB)
-	rbReq := api.TxnDecisionRequest{
-		TxnID: leaseA.TxnID,
-		State: "rollback",
-		Participants: []api.TxnParticipant{
-			{Namespace: namespaces.Default, Key: keyA},
-			{Namespace: namespaces.Default, Key: keyB},
-		},
-	}
-	rbBody, err := json.Marshal(rbReq)
-	if err != nil {
-		t.Fatalf("marshal rollback: %v", err)
-	}
-	rbHTTP, err := http.NewRequest(http.MethodPost, tsB.URL()+"/v1/txn/decide", bytes.NewReader(rbBody))
-	if err != nil {
-		t.Fatalf("new rollback request: %v", err)
-	}
-	rbHTTP.Header.Set("Content-Type", "application/json")
-	rbResp, err := httpClient.Do(rbHTTP)
-	if err != nil {
-		t.Fatalf("rollback request failed: %v", err)
-	}
-	rbResp.Body.Close()
-	if rbResp.StatusCode != http.StatusOK {
-		t.Fatalf("rollback status=%d", rbResp.StatusCode)
-	}
-
-	waitCtx, waitCancel := context.WithTimeout(ctx, 15*time.Second)
-	defer waitCancel()
 	assertRolledBack := func(cli *lockdclient.Client, key string) {
 		for {
 			state, err := cli.Get(waitCtx, key, lockdclient.WithGetNamespace(namespaces.Default))
@@ -864,12 +791,17 @@ func runDiskQueryTxnFanoutRollbackAcrossNodes(t *testing.T, notify bool) {
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
-	assertRolledBack(tsA.Client, keyA)
-	assertRolledBack(tsB.Client, keyB)
+	if commit {
+		assertCommitted(activeClient, keyA, "a")
+		assertCommitted(activeClient, keyB, "b")
+	} else {
+		assertRolledBack(activeClient, keyA)
+		assertRolledBack(activeClient, keyB)
+	}
 
 	recordCtx, recordCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer recordCancel()
-	if err := waitForTxnRecordDecided(recordCtx, tsA.Backend(), leaseA.TxnID); err != nil {
+	if err := waitForTxnRecordDecided(recordCtx, activeServer.Backend(), leaseA.TxnID); err != nil {
 		t.Fatalf("waiting for txn record cleanup: %v", err)
 	}
 }
@@ -887,9 +819,7 @@ func runDiskQueryTxnReplayAfterRestartAcrossNodes(t *testing.T, notify bool) {
 	root := prepareDiskQueryRoot(t)
 	cfg := diskQueryConfigWithSweeper(root, time.Hour) // disable sweeper; explicit replay after restart
 	cfg.DiskQueueWatch = notify
-
-	tsA := startDiskQueryServerWithRootAndConfig(t, cfg)
-	tsB := startDiskQueryServerWithRootAndConfig(t, cfg)
+	ts := startDiskQueryServerWithRootAndConfig(t, cfg)
 
 	stop := func(ts *lockd.TestServer) {
 		if ts == nil {
@@ -899,15 +829,18 @@ func runDiskQueryTxnReplayAfterRestartAcrossNodes(t *testing.T, notify bool) {
 		defer cancel()
 		_ = ts.Stop(ctx)
 	}
-	t.Cleanup(func() { stop(tsA) })
-	t.Cleanup(func() { stop(tsB) })
+	t.Cleanup(func() { stop(ts) })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+	activeServer, activeClient, err := hatest.FindActiveServer(ctx, ts)
+	if err != nil {
+		t.Fatalf("find active server: %v", err)
+	}
 
 	commitKeyA := fmt.Sprintf("disk-restart-commit-a-%d", time.Now().UnixNano())
 	commitKeyB := fmt.Sprintf("disk-restart-commit-b-%d", time.Now().UnixNano())
-	leaseA, err := tsA.Client.Acquire(ctx, api.AcquireRequest{
+	leaseA, err := activeClient.Acquire(ctx, api.AcquireRequest{
 		Namespace:  namespaces.Default,
 		Key:        commitKeyA,
 		Owner:      "restart-commit",
@@ -917,7 +850,7 @@ func runDiskQueryTxnReplayAfterRestartAcrossNodes(t *testing.T, notify bool) {
 	if err != nil {
 		t.Fatalf("acquire commit A: %v", err)
 	}
-	leaseB, err := tsB.Client.Acquire(ctx, api.AcquireRequest{
+	leaseB, err := activeClient.Acquire(ctx, api.AcquireRequest{
 		Namespace:  namespaces.Default,
 		Key:        commitKeyB,
 		Owner:      "restart-commit",
@@ -937,7 +870,7 @@ func runDiskQueryTxnReplayAfterRestartAcrossNodes(t *testing.T, notify bool) {
 
 	rollbackKeyA := fmt.Sprintf("disk-restart-rollback-a-%d", time.Now().UnixNano())
 	rollbackKeyB := fmt.Sprintf("disk-restart-rollback-b-%d", time.Now().UnixNano())
-	leaseC, err := tsA.Client.Acquire(ctx, api.AcquireRequest{
+	leaseC, err := activeClient.Acquire(ctx, api.AcquireRequest{
 		Namespace:  namespaces.Default,
 		Key:        rollbackKeyA,
 		Owner:      "restart-rollback",
@@ -947,7 +880,7 @@ func runDiskQueryTxnReplayAfterRestartAcrossNodes(t *testing.T, notify bool) {
 	if err != nil {
 		t.Fatalf("acquire rollback A: %v", err)
 	}
-	leaseD, err := tsB.Client.Acquire(ctx, api.AcquireRequest{
+	leaseD, err := activeClient.Acquire(ctx, api.AcquireRequest{
 		Namespace:  namespaces.Default,
 		Key:        rollbackKeyB,
 		Owner:      "restart-rollback",
@@ -979,7 +912,7 @@ func runDiskQueryTxnReplayAfterRestartAcrossNodes(t *testing.T, notify bool) {
 		if err := json.NewEncoder(buf).Encode(rec); err != nil {
 			t.Fatalf("encode txn record: %v", err)
 		}
-		if _, err := tsA.Backend().PutObject(ctx, ".txns", rec.TxnID, bytes.NewReader(buf.Bytes()), storage.PutObjectOptions{
+		if _, err := activeServer.Backend().PutObject(ctx, ".txns", rec.TxnID, bytes.NewReader(buf.Bytes()), storage.PutObjectOptions{
 			ContentType: storage.ContentTypeJSON,
 		}); err != nil {
 			t.Fatalf("persist txn record: %v", err)
@@ -994,34 +927,19 @@ func runDiskQueryTxnReplayAfterRestartAcrossNodes(t *testing.T, notify bool) {
 		{Namespace: namespaces.Default, Key: rollbackKeyB},
 	})
 
-	stop(tsA)
-	stop(tsB)
+	stop(activeServer)
 
-	tsA = startDiskQueryServerWithRootAndConfig(t, cfg)
-	tsB = startDiskQueryServerWithRootAndConfig(t, cfg)
-
-	httpClient := newHTTPClient(t, tsA)
-	replay := func(txnID string) {
-		body, err := json.Marshal(api.TxnReplayRequest{TxnID: txnID})
-		if err != nil {
-			t.Fatalf("marshal replay request: %v", err)
-		}
-		req, err := http.NewRequest(http.MethodPost, tsA.URL()+"/v1/txn/replay", bytes.NewReader(body))
-		if err != nil {
-			t.Fatalf("new replay request: %v", err)
-		}
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			t.Fatalf("replay request failed: %v", err)
-		}
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("replay status=%d", resp.StatusCode)
-		}
+	ts = startDiskQueryServerWithRootAndConfig(t, cfg)
+	activeServer, activeClient, err = hatest.FindActiveServer(ctx, ts)
+	if err != nil {
+		t.Fatalf("find active server after restart: %v", err)
 	}
-	replay(leaseA.TxnID)
-	replay(leaseC.TxnID)
+	if _, err := activeClient.TxnReplay(ctx, leaseA.TxnID); err != nil {
+		t.Fatalf("replay commit: %v", err)
+	}
+	if _, err := activeClient.TxnReplay(ctx, leaseC.TxnID); err != nil {
+		t.Fatalf("replay rollback: %v", err)
+	}
 
 	waitCommitCtx, waitCommitCancel := context.WithTimeout(ctx, 20*time.Second)
 	defer waitCommitCancel()
@@ -1043,8 +961,8 @@ func runDiskQueryTxnReplayAfterRestartAcrossNodes(t *testing.T, notify bool) {
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
-	assertCommitted(tsA.Client, commitKeyA, "a")
-	assertCommitted(tsB.Client, commitKeyB, "b")
+	assertCommitted(activeClient, commitKeyA, "a")
+	assertCommitted(activeClient, commitKeyB, "b")
 
 	waitRollbackCtx, waitRollbackCancel := context.WithTimeout(ctx, 20*time.Second)
 	defer waitRollbackCancel()
@@ -1060,18 +978,18 @@ func runDiskQueryTxnReplayAfterRestartAcrossNodes(t *testing.T, notify bool) {
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
-	assertRolledBack(tsA.Client, rollbackKeyA)
-	assertRolledBack(tsB.Client, rollbackKeyB)
+	assertRolledBack(activeClient, rollbackKeyA)
+	assertRolledBack(activeClient, rollbackKeyB)
 
 	recordCommitCtx, recordCommitCancel := context.WithTimeout(ctx, 8*time.Second)
 	defer recordCommitCancel()
-	if err := waitForTxnRecordDecided(recordCommitCtx, tsA.Backend(), leaseA.TxnID); err != nil {
+	if err := waitForTxnRecordDecided(recordCommitCtx, activeServer.Backend(), leaseA.TxnID); err != nil {
 		t.Fatalf("waiting for commit txn record cleanup: %v", err)
 	}
 
 	recordRollbackCtx, recordRollbackCancel := context.WithTimeout(ctx, 8*time.Second)
 	defer recordRollbackCancel()
-	if err := waitForTxnRecordDecided(recordRollbackCtx, tsA.Backend(), leaseC.TxnID); err != nil {
+	if err := waitForTxnRecordDecided(recordRollbackCtx, activeServer.Backend(), leaseC.TxnID); err != nil {
 		t.Fatalf("waiting for rollback txn record cleanup: %v", err)
 	}
 }

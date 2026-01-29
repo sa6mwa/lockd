@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -22,6 +23,7 @@ import (
 	api "pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/integration/internal/cryptotest"
+	"pkt.systems/lockd/integration/internal/storepath"
 	"pkt.systems/lockd/internal/diagnostics/storagecheck"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/s3"
@@ -29,6 +31,26 @@ import (
 	"pkt.systems/lockd/namespaces"
 	"pkt.systems/pslog"
 )
+
+func retryableTransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if strings.Contains(err.Error(), "all endpoints unreachable") {
+		return true
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) || strings.Contains(err.Error(), "unexpected EOF") {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return netErr.Timeout() || netErr.Temporary()
+	}
+	return false
+}
 
 func loadMinioConfig(tb testing.TB) lockd.Config {
 	ensureMinioCredentials(tb)
@@ -39,6 +61,7 @@ func loadMinioConfig(tb testing.TB) lockd.Config {
 	if !strings.HasPrefix(store, "s3://") {
 		tb.Fatalf("LOCKD_STORE must reference an s3:// URI for MinIO integration tests, got %q", store)
 	}
+	store = storepath.Scoped(tb, store, "minio")
 
 	cfg := lockd.Config{
 		Store:           store,
@@ -85,14 +108,38 @@ func ensureMinioBucket(tb testing.TB, cfg lockd.Config) {
 func ensureStoreReady(tb testing.TB, ctx context.Context, cfg lockd.Config) {
 	WithMinioStorageLock(tb, func() {
 		ResetMinioBucketForCrypto(tb, cfg)
-		res, err := storagecheck.VerifyStore(ctx, cfg)
-		if err != nil {
-			tb.Fatalf("verify store: %v", err)
+		var lastRes storagecheck.Result
+		var lastErr error
+		for attempt := 0; attempt < 5; attempt++ {
+			res, err := storagecheck.VerifyStore(ctx, cfg)
+			lastRes = res
+			lastErr = err
+			if err == nil && res.Passed() {
+				return
+			}
+			if err != nil {
+				if !retryableTransportError(err) {
+					tb.Fatalf("verify store: %v", err)
+				}
+			} else if !shouldRetryStoreVerification(res) {
+				tb.Fatalf("store verification failed: %+v", res)
+			}
+			time.Sleep(500 * time.Millisecond)
 		}
-		if !res.Passed() {
-			tb.Fatalf("store verification failed: %+v", res)
+		if lastErr != nil {
+			tb.Fatalf("verify store: %v", lastErr)
 		}
+		tb.Fatalf("store verification failed: %+v", lastRes)
 	})
+}
+
+func shouldRetryStoreVerification(res storagecheck.Result) bool {
+	for _, check := range res.Checks {
+		if check.Err != nil && retryableTransportError(check.Err) {
+			return true
+		}
+	}
+	return false
 }
 
 func startLockdServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client {
@@ -268,15 +315,31 @@ func minioTestLoggerOption(tb testing.TB) lockd.TestServerOption {
 
 func acquireWithRetry(t *testing.T, ctx context.Context, cli *lockdclient.Client, key, owner string, ttl, block int64) *lockdclient.LeaseSession {
 	for attempt := 0; attempt < 60; attempt++ {
-		lease, err := cli.Acquire(ctx, api.AcquireRequest{Key: key, Owner: owner, TTLSeconds: ttl, BlockSecs: block})
+		attemptCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		lease, err := cli.Acquire(attemptCtx, api.AcquireRequest{Key: key, Owner: owner, TTLSeconds: ttl, BlockSecs: block})
+		cancel()
 		if err == nil {
 			return lease
 		}
-		if apiErr := (*lockdclient.APIError)(nil); errors.As(err, &apiErr) {
-			if apiErr.Status == http.StatusConflict {
-				time.Sleep(200 * time.Millisecond)
+		retryDelay := 200 * time.Millisecond
+		var apiErr *lockdclient.APIError
+		if errors.As(err, &apiErr) {
+			switch {
+			case apiErr.Status == http.StatusConflict,
+				apiErr.Status == http.StatusTooManyRequests,
+				apiErr.Status >= http.StatusInternalServerError,
+				apiErr.Response.ErrorCode == "node_passive",
+				apiErr.Response.ErrorCode == "shutdown_draining":
+				if retryAfter := apiErr.RetryAfterDuration(); retryAfter > retryDelay {
+					retryDelay = retryAfter
+				}
+				time.Sleep(retryDelay)
 				continue
 			}
+		}
+		if errors.Is(err, context.DeadlineExceeded) || retryableTransportError(err) {
+			time.Sleep(retryDelay)
+			continue
 		}
 		t.Fatalf("acquire failed: %v", err)
 	}

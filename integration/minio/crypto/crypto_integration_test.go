@@ -19,6 +19,7 @@ import (
 	api "pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/integration/internal/cryptotest"
+	"pkt.systems/lockd/integration/internal/storepath"
 	miniointegration "pkt.systems/lockd/integration/minio"
 	queuetestutil "pkt.systems/lockd/integration/queue/testutil"
 	"pkt.systems/lockd/internal/diagnostics/storagecheck"
@@ -157,6 +158,7 @@ func buildMinioConfig(t testing.TB) lockd.Config {
 	if !strings.HasPrefix(store, "s3://") {
 		t.Fatalf("LOCKD_STORE must reference an s3:// URI, got %q", store)
 	}
+	store = storepath.Scoped(t, store, "minio-crypto")
 
 	cfg := lockd.Config{
 		Store:                      store,

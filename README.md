@@ -89,6 +89,7 @@ internals (e.g. `.txns` stores transaction decisions) and are rejected.
 
 - **Structured logging** (`pslog`) with subsystem tagging (`server.lifecycle.core`, `search.index`, `queue.dispatcher`, etc.).
 - **Transaction telemetry**: decision/apply/replay/sweep logs (`txn.*`, `txn.tc.*`, `txn.rm.*`), watchdog warnings for long-running operations, and Prometheus metrics (`lockd.txn.*`, `lockd.txn.fanout.*`).
+- **Internal batching**: disk/NFS backends group logstore fsyncs automatically to amortize load without a bulk API; see `docs/BATCHING.md`.
 - **Watchdogs** baked into unit/integration tests to catch hangs instantly.
 - **`lockd verify store`** diagnostics ensure backend credentials + permissions + encryption descriptors are valid before deploying.
 - **Integration suites** (`run-integration-suites.sh`) cover every backend/feature combination; use them before landing cross-cutting changes.
@@ -233,15 +234,16 @@ These files live alongside the CLI so the reusable server library stays swaggo-f
 ## Storage Backends
 
 `lockd` picks the storage implementation from the `--store` flag (or `LOCKD_STORE`
-environment variable) by inspecting the URL scheme:
+environment variable) by inspecting the URL scheme. Each backend maps to a
+dedicated driver with its own consistency and HA characteristics.
 
-| Scheme | Example | Backend | Notes |
-|--------|---------|---------|-------|
+| Scheme | Example | Driver | Notes |
+|--------|---------|--------|-------|
 | `mem://` or empty | `mem://` | In-memory | Ephemeral; test only. |
-| `aws://` | `aws://my-bucket/prefix` | AWS S3 | Provide AWS credentials via `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` (and optional `AWS_SESSION_TOKEN`). Set the region via `--aws-region`, `LOCKD_AWS_REGION`, `AWS_REGION`, or `AWS_DEFAULT_REGION`. |
-| `s3://` | `s3://localhost:9000/lockd-data?insecure=1` | S3-compatible (MinIO, Localstack, etc.) | TLS **enabled by default**. Append `?insecure=1` for HTTP. Supply credentials with `LOCKD_S3_ACCESS_KEY_ID`/`LOCKD_S3_SECRET_ACCESS_KEY` (falls back to `LOCKD_S3_ROOT_USER`/`LOCKD_S3_ROOT_PASSWORD`). |
-| `disk://` | `disk:///var/lib/lockd-data` | SSD/NVMe-tailored disk backend | Stores state/meta beneath the provided root; optional retention window. |
-| `azure://` | `azure://account/container/prefix` | Azure Blob Storage | Account name in host, container + optional prefix in path. Authentication via account key or SAS token. |
+| `aws://` | `aws://my-bucket/prefix` | AWS S3 (AWS SDK) | Uses the official AWS SDK and credential chain (not an alias of `s3://`). |
+| `s3://` | `s3://localhost:9000/lockd-data?insecure=1` | S3-compatible (MinIO, Localstack, etc.) | TLS **enabled by default**. Append `?insecure=1` for HTTP. Uses explicit `LOCKD_S3_*` credentials. |
+| `disk://` | `disk:///var/lib/lockd-data` | Local disk / NFS | SSD/NVMe‑tailored logstore. NFS is supported via the same driver. |
+| `azure://` | `azure://account/container/prefix` | Azure Blob Storage | Host = account; path = container + optional prefix. |
 
 For AWS, the standard credential chain (`AWS_ACCESS_KEY_ID` /
 `AWS_SECRET_ACCESS_KEY`, profiles, IAM roles, etc.) is used. For other
@@ -250,22 +252,34 @@ S3-compatible stores, `lockd` reads `LOCKD_S3_ACCESS_KEY_ID` and
 `LOCKD_S3_ROOT_USER`/`LOCKD_S3_ROOT_PASSWORD`). No secret keys are stored in the
 `lockd` config file.
 
-### S3 / S3-compatible
+### AWS S3 (`aws://`)
+
+- Uses the AWS SDK (v2) and the standard AWS credential chain.
+- HA: **concurrent** and **failover** are supported. Concurrent mode is the
+  default choice for multi-node clusters sharing the same bucket/prefix.
+- Best fit for production HA on AWS. Use `--aws-region` (or env) plus optional
+  `--aws-kms-key-id` for SSE‑KMS.
+- URL format: `aws://<bucket>/<optional-prefix>`.
+
+### S3-compatible (`s3://`)
 
 - Uses temp uploads + `CopyObject` with conditional headers for CAS.
 - Supports SSE (`aws:kms` / `AES256`) and custom endpoints (MinIO, Localstack).
 - Default retry budget: 12 attempts, 500 ms base delay, capped at 15 s.
+- HA: **concurrent** and **failover** are supported. For shared MinIO clusters,
+  concurrent mode is typical; for single‑node MinIO, failover also works.
 
 Configuration (flags or env via `LOCKD_` prefix):
 
-| Flag / Env                 | Description                                   |
-|---------------------------|-----------------------------------------------|
-| `--store` / `LOCKD_STORE` | `aws://bucket/prefix` or `s3://host:port/bucket` |
-| `--aws-region`            | AWS region for `aws://` stores (required unless provided via env) |
-| `--s3-sse`                | `AES256` or `aws:kms`                          |
-| `--s3-kms-key-id`         | KMS key for generic `s3://` stores             |
-| `--aws-kms-key-id`        | KMS key for `aws://` stores                    |
-| `--s3-max-part-size`      | Multipart upload part size                     |
+| Flag / Env                    | Description                                      |
+|------------------------------|--------------------------------------------------|
+| `--store` / `LOCKD_STORE`    | `aws://bucket/prefix` or `s3://host:port/bucket` |
+| `--aws-region`               | AWS region for `aws://` stores (required unless provided via env) |
+| `--s3-sse`                   | `AES256` or `aws:kms`                             |
+| `--s3-kms-key-id`            | KMS key for generic `s3://` stores                |
+| `--aws-kms-key-id`           | KMS key for `aws://` stores                       |
+| `--s3-max-part-size`         | Multipart upload part size                        |
+| `--s3-encrypt-buffer-budget` | Max total bytes for buffered S3 encryption payloads before streaming |
 
 Shutdown tuning:
 
@@ -274,13 +288,21 @@ Shutdown tuning:
 | `--drain-grace` / `LOCKD_DRAIN_GRACE` | How long to keep serving existing lease holders before HTTP shutdown begins (default `10s`; set `0s` to disable draining). |
 | `--shutdown-timeout` / `LOCKD_SHUTDOWN_TIMEOUT` | Overall shutdown budget, split 80/20 between drain and HTTP server teardown (default `10s`; set `0s` to rely on the orchestrator’s deadline). |
 
-### Disk (SSD/NVMe)
+### HA modes
 
-- Streams JSON payloads directly to files beneath the store root, hashing on the fly to produce deterministic ETags.
-- Keeps metadata in per-key protobuf documents; state lives under `<namespace>/state/<encoded-key>/data`, keeping every payload inside its namespace directory (for example `default/state/orders/data`).
+Lockd defaults to **failover** mode (single active writer per backend). Passive nodes return HTTP 503 so clients can retry another endpoint. Use `--ha concurrent` to enable concurrent multi‑writer semantics when multiple servers share the same backend.
+
+### Disk / NFS (logstore)
+
+- Uses a **log-structured store** on disk/NFS to minimize small-file churn: writes are append-only into segment files, each segment is recorded in a manifest, and periodic snapshots bound recovery time. Reads consult the in-memory index + manifest to find the newest record for a key, while background compaction rewrites hot data into fewer segments.
 - Optional retention (`--disk-retention`, `LOCKD_DISK_RETENTION`) prunes keys whose metadata `updated_at_unix` is older than the configured duration. Set to `0` (default) to keep data indefinitely.
+- Disk/NFS backends use **durable group commit** driven by natural backpressure. `--logstore-commit-max-ops` caps batch size, and `--logstore-segment-size` rolls segment files at a fixed size.
+- HA: **failover only**. The logstore is single‑writer; requesting `--ha concurrent`
+  is automatically downgraded to failover.
 - The janitor sweep interval defaults to half the retention window (clamped between 1 minute and 1 hour). Override via `--disk-janitor-interval`.
-- Configure with `--store disk:///var/lib/lockd-data`. All files live beneath the specified root; lockd creates `meta/`, `state/`, and `tmp/` directories automatically, and every metadata/state object is stored with its namespace as part of the key (e.g. `default/q/orders/msg/...`).
+- Configure with `--store disk:///var/lib/lockd-data`. All files live beneath the specified root; lockd creates `logstore/segments`, `logstore/manifest`, and `logstore/snapshots` directories per namespace.
+- For NFS: supported via the same driver with polling (queue watcher disabled on
+  unsupported filesystems). Use failover mode to avoid concurrent writers.
 
 ### Azure Blob Storage
 
@@ -288,6 +310,8 @@ Shutdown tuning:
 - Supply credentials via `--azure-key` / `LOCKD_AZURE_ACCOUNT_KEY` (Shared Key) or `--azure-sas-token` / `LOCKD_AZURE_SAS_TOKEN` (SAS). Standard Azure environment variables such as `AZURE_STORAGE_ACCOUNT` are also honoured if the account is omitted from the URL.
 - Default endpoint is `https://<account>.blob.core.windows.net`; override with `--azure-endpoint` or `?endpoint=` on the store URL when using custom domains/emulators.
 - Authentication supports either account keys (Shared Key) or SAS tokens. Provide exactly one of the above secrets; the CLI no longer requires `--azure-account` because the account name is embedded in the store URL.
+- HA: **concurrent** and **failover** are supported; concurrent mode is the
+  normal choice for multi‑node clusters sharing the same container/prefix.
 - Example:
 
 ```sh
@@ -299,6 +323,7 @@ lockd --store "azure://lockdintegration/container/pipelines" --listen :9341 --di
 
 In-process backend utilized for unit tests (`mem://`); it can also serve for
 experimentation or support a no-footprint ephemeral instance.
+HA is not applicable: each process has its own isolated in-memory store.
 
 ### Drain-aware shutdown
 
@@ -467,6 +492,17 @@ Metrics are served via a Prometheus scrape endpoint on a separate listener. Set
 
 ```sh
 LOCKD_METRICS_LISTEN=:9464 \
+lockd
+```
+
+Profiling tools can be enabled independently. Use `--pprof-listen` to expose
+`/debug/pprof` endpoints and `--enable-profiling-metrics` to export Go runtime
+metrics via Prometheus:
+
+```sh
+LOCKD_METRICS_LISTEN=:9464 \
+LOCKD_ENABLE_PROFILING_METRICS=1 \
+LOCKD_PPROF_LISTEN=:6060 \
 lockd
 ```
 

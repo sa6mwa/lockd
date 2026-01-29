@@ -17,6 +17,7 @@ type lsfMetrics struct {
 	sample         metric.Int64Counter
 	queueInflight  metric.Int64ObservableGauge
 	lockInflight   metric.Int64ObservableGauge
+	queryInflight  metric.Int64ObservableGauge
 	rssBytes       metric.Int64ObservableGauge
 	swapBytes      metric.Int64ObservableGauge
 	memoryPercent  metric.Float64ObservableGauge
@@ -52,6 +53,12 @@ func newLSFMetrics(logger pslog.Logger) *lsfMetrics {
 		metric.WithDescription("LSF lock inflight count"),
 	)
 	logMetricInitError(logger, "lockd.lsf.lock.inflight", err)
+
+	m.queryInflight, err = meter.Int64ObservableGauge(
+		"lockd.lsf.query.inflight",
+		metric.WithDescription("LSF query inflight count"),
+	)
+	logMetricInitError(logger, "lockd.lsf.query.inflight", err)
 
 	m.rssBytes, err = meter.Int64ObservableGauge(
 		"lockd.lsf.rss.bytes",
@@ -112,7 +119,7 @@ func newLSFMetrics(logger pslog.Logger) *lsfMetrics {
 	if _, err := meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
 		m.observe(ctx, o)
 		return nil
-	}, m.queueInflight, m.lockInflight, m.rssBytes, m.swapBytes, m.memoryPercent, m.swapPercent, m.cpuPercent, m.load, m.loadBaseline, m.loadMultiplier, m.goroutines); err != nil && logger != nil {
+	}, m.queueInflight, m.lockInflight, m.queryInflight, m.rssBytes, m.swapBytes, m.memoryPercent, m.swapPercent, m.cpuPercent, m.load, m.loadBaseline, m.loadMultiplier, m.goroutines); err != nil && logger != nil {
 		logger.Warn("telemetry.metric.callback_failed", "name", "lockd.lsf.metrics", "error", err)
 	}
 
@@ -148,6 +155,9 @@ func (m *lsfMetrics) observe(ctx context.Context, o metric.Observer) {
 	}
 	if m.lockInflight != nil {
 		o.ObserveInt64(m.lockInflight, snapshot.LockInflight)
+	}
+	if m.queryInflight != nil {
+		o.ObserveInt64(m.queryInflight, snapshot.QueryInflight)
 	}
 	if m.rssBytes != nil {
 		o.ObserveInt64(m.rssBytes, clampUint64(snapshot.RSSBytes))

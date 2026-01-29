@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -95,7 +96,7 @@ type Server struct {
 	lsfObserver   *lsf.Observer
 	lsfCancel     context.CancelFunc
 
-	lastActivity   atomic.Int64
+	lastActivity     atomic.Int64
 	idleSweepRunning atomic.Bool
 
 	draining      atomic.Bool
@@ -130,16 +131,20 @@ type drainSummary struct {
 type Option func(*options)
 
 type options struct {
-	Logger        pslog.Logger
-	Backend       storage.Backend
-	Clock         clock.Clock
-	OTLPEndpoint  string
-	MetricsListen string
-	MetricsSet    bool
-	configHooks   []func(*Config)
-	closeDefaults []CloseOption
-	tcLeaseTTL    time.Duration
-	tcFanoutGate  txncoord.FanoutGate
+	Logger              pslog.Logger
+	Backend             storage.Backend
+	Clock               clock.Clock
+	OTLPEndpoint        string
+	MetricsListen       string
+	MetricsSet          bool
+	PprofListen         string
+	PprofSet            bool
+	ProfilingMetrics    bool
+	ProfilingMetricsSet bool
+	configHooks         []func(*Config)
+	closeDefaults       []CloseOption
+	tcLeaseTTL          time.Duration
+	tcFanoutGate        txncoord.FanoutGate
 }
 
 // WithLogger supplies a custom logger.
@@ -192,6 +197,22 @@ func WithMetricsListen(addr string) Option {
 	}
 }
 
+// WithPprofListen overrides the pprof listener address (empty disables).
+func WithPprofListen(addr string) Option {
+	return func(o *options) {
+		o.PprofListen = addr
+		o.PprofSet = true
+	}
+}
+
+// WithProfilingMetrics toggles Go runtime profiling metrics on the metrics endpoint.
+func WithProfilingMetrics(enabled bool) Option {
+	return func(o *options) {
+		o.ProfilingMetrics = enabled
+		o.ProfilingMetricsSet = true
+	}
+}
+
 // WithLSFLogInterval overrides the cadence for lockd.lsf.sample telemetry logs; use 0 to disable logging.
 func WithLSFLogInterval(interval time.Duration) Option {
 	return func(o *options) {
@@ -222,8 +243,9 @@ type closeOptions struct {
 const drainShutdownSplit = 0.8
 
 const (
-	rmRegistrationInterval = 30 * time.Second
-	rmRegistrationTimeout  = 5 * time.Second
+	rmRegistrationInterval     = 30 * time.Second
+	rmRegistrationPollInterval = 1 * time.Second
+	rmRegistrationTimeout      = 5 * time.Second
 )
 
 const (
@@ -385,6 +407,18 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 	if logger == nil {
 		logger = pslog.NoopLogger()
 	}
+	if parsed, err := url.Parse(cfg.Store); err == nil {
+		scheme := strings.ToLower(strings.TrimSpace(parsed.Scheme))
+		if scheme == "disk" && strings.EqualFold(cfg.HAMode, "concurrent") {
+			logger.Warn("ha.mode.override",
+				"requested", "concurrent",
+				"effective", "failover",
+				"store", cfg.Store,
+				"reason", "disk/nfs backends require a single serialized writer for performance and correctness; concurrent mode is supported for object stores",
+			)
+			cfg.HAMode = "failover"
+		}
+	}
 	serverClock := o.Clock
 	if serverClock == nil {
 		serverClock = clock.Real{}
@@ -476,6 +510,7 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 	if cfg.MTLSEnabled() && tcClusterIdentity != "" {
 		leaderSelfID = tcClusterIdentity
 	}
+	var handler *httpapi.Handler
 	var tcLeader *tcleader.Manager
 	if strings.TrimSpace(cfg.SelfEndpoint) != "" {
 		tcLeader, err = tcleader.NewManager(tcleader.Config{
@@ -487,6 +522,12 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 			TrustPEM:     tcClientTrustPEM,
 			LeaseTTL:     o.tcLeaseTTL,
 			Clock:        serverClock,
+			Eligible: func() bool {
+				if handler == nil {
+					return true
+				}
+				return handler.NodeActive()
+			},
 		})
 		if err != nil {
 			return nil, err
@@ -497,12 +538,27 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 	if o.OTLPEndpoint != "" {
 		otlpEndpoint = o.OTLPEndpoint
 	}
+	if strings.TrimSpace(otlpEndpoint) == "" {
+		cfg.DisableHTTPTracing = true
+		cfg.DisableStorageTracing = true
+	}
 	metricsListen := cfg.MetricsListen
 	if o.MetricsSet {
 		metricsListen = o.MetricsListen
 	}
-	if otlpEndpoint != "" || metricsListen != "" {
-		telemetry, err = setupTelemetry(context.Background(), otlpEndpoint, metricsListen, svcfields.WithSubsystem(logger, "observability.telemetry.exporter"))
+	pprofListen := cfg.PprofListen
+	if o.PprofSet {
+		pprofListen = o.PprofListen
+	}
+	profilingMetrics := cfg.EnableProfilingMetrics
+	if o.ProfilingMetricsSet {
+		profilingMetrics = o.ProfilingMetrics
+	}
+	if profilingMetrics && strings.TrimSpace(metricsListen) == "" {
+		return nil, fmt.Errorf("profiling metrics require metrics listen address")
+	}
+	if otlpEndpoint != "" || metricsListen != "" || pprofListen != "" || profilingMetrics {
+		telemetry, err = setupTelemetry(context.Background(), otlpEndpoint, metricsListen, pprofListen, profilingMetrics, svcfields.WithSubsystem(logger, "observability.telemetry.exporter"))
 		if err != nil {
 			return nil, err
 		}
@@ -550,6 +606,9 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 		backend = loggingbackend.Wrap(backend, storageLogger.With("layer", "backend"), "storage.backend.core")
 	}
 	backend = retry.Wrap(backend, storageLogger.With("layer", "retry"), serverClock, retryCfg)
+	if strings.EqualFold(cfg.HAMode, "concurrent") {
+		storageLogger.Info("storage.single_writer.disabled", "mode", "concurrent")
+	}
 	jsonUtil, err := selectJSONUtil(cfg.JSONUtil)
 	if err != nil {
 		if ownedBackend {
@@ -563,13 +622,15 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 		return nil, err
 	}
 	qrfCtrl := qrf.NewController(qrf.Config{
-		Enabled:                     cfg.QRFEnabled,
+		Enabled:                     !cfg.QRFDisabled,
 		QueueSoftLimit:              cfg.QRFQueueSoftLimit,
 		QueueHardLimit:              cfg.QRFQueueHardLimit,
 		QueueConsumerSoftLimit:      cfg.QRFQueueConsumerSoftLimit,
 		QueueConsumerHardLimit:      cfg.QRFQueueConsumerHardLimit,
 		LockSoftLimit:               cfg.QRFLockSoftLimit,
 		LockHardLimit:               cfg.QRFLockHardLimit,
+		QuerySoftLimit:              cfg.QRFQuerySoftLimit,
+		QueryHardLimit:              cfg.QRFQueryHardLimit,
 		MemorySoftLimitBytes:        cfg.QRFMemorySoftLimitBytes,
 		MemoryHardLimitBytes:        cfg.QRFMemoryHardLimitBytes,
 		MemorySoftLimitPercent:      cfg.QRFMemorySoftLimitPercent,
@@ -584,13 +645,14 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 		LoadSoftLimitMultiplier:     cfg.QRFLoadSoftLimitMultiplier,
 		LoadHardLimitMultiplier:     cfg.QRFLoadHardLimitMultiplier,
 		RecoverySamples:             cfg.QRFRecoverySamples,
-		SoftRetryAfter:              cfg.QRFSoftRetryAfter,
-		EngagedRetryAfter:           cfg.QRFEngagedRetryAfter,
-		RecoveryRetryAfter:          cfg.QRFRecoveryRetryAfter,
+		SoftDelay:                   cfg.QRFSoftDelay,
+		EngagedDelay:                cfg.QRFEngagedDelay,
+		RecoveryDelay:               cfg.QRFRecoveryDelay,
+		MaxWait:                     cfg.QRFMaxWait,
 		Logger:                      logger,
 	})
 	var lsfObserver *lsf.Observer
-	if cfg.QRFEnabled {
+	if !cfg.QRFDisabled {
 		lsfObserver = lsf.NewObserver(lsf.Config{
 			Enabled:        true,
 			SampleInterval: cfg.LSFSampleInterval,
@@ -668,11 +730,13 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 		searchAdapter = scanAdapter
 	}
 	var srvRef *Server
-	handler := httpapi.New(httpapi.Config{
+	handler = httpapi.New(httpapi.Config{
 		Store:                      backend,
 		Crypto:                     crypto,
 		Logger:                     logger,
 		Clock:                      serverClock,
+		HAMode:                     cfg.HAMode,
+		HALeaseTTL:                 cfg.HALeaseTTL,
 		SearchAdapter:              searchAdapter,
 		NamespaceConfigs:           namespaceConfigs,
 		DefaultNamespaceConfig:     defaultNamespaceCfg,
@@ -687,6 +751,11 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 		SpoolMemoryThreshold:       cfg.SpoolMemoryThreshold,
 		TxnDecisionRetention:       cfg.TCDecisionRetention,
 		TxnReplayInterval:          cfg.TxnReplayInterval,
+		QueueDecisionCacheTTL:      cfg.QueueDecisionCacheTTL,
+		QueueDecisionMaxApply:      cfg.QueueDecisionMaxApply,
+		QueueDecisionApplyTimeout:  cfg.QueueDecisionApplyTimeout,
+		StateCacheBytes:            cfg.StateCacheBytes,
+		QueryDocPrefetch:           cfg.QueryDocPrefetch,
 		EnforceClientIdentity:      cfg.MTLSEnabled(),
 		MetaWarmupAttempts:         -1,
 		StateWarmupAttempts:        -1,
@@ -694,6 +763,7 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 		QueuePollInterval:          cfg.QueuePollInterval,
 		QueuePollJitter:            cfg.QueuePollJitter,
 		QueueResilientPollInterval: cfg.QueueResilientPollInterval,
+		QueueListPageSize:          cfg.QueueListPageSize,
 		LSFObserver:                lsfObserver,
 		QRFController:              qrfCtrl,
 		TCAuthEnabled:              cfg.MTLSEnabled() && !cfg.TCDisableAuth,
@@ -1432,11 +1502,16 @@ func (s *Server) rmRegisterLoop(ctx context.Context) {
 		logger.Warn("tc.rm.register.client_failed", "error", err)
 		return
 	}
-	ticker := time.NewTicker(rmRegistrationInterval)
+	ticker := time.NewTicker(rmRegistrationPollInterval)
 	defer ticker.Stop()
+	var lastRegister time.Time
 	for {
-		if err := s.registerRMOnce(ctx, client); err != nil {
-			logger.Warn("tc.rm.register.failed", "error", err)
+		if s.rmRegistrationActive() && (lastRegister.IsZero() || time.Since(lastRegister) >= rmRegistrationInterval) {
+			if err := s.registerRMOnce(ctx, client); err != nil {
+				logger.Warn("tc.rm.register.failed", "error", err)
+			} else {
+				lastRegister = time.Now()
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -1456,6 +1531,16 @@ func (s *Server) buildRMRegisterClient() (*http.Client, error) {
 		Timeout:      rmRegistrationTimeout,
 		TrustPEM:     s.tcTrustPEM,
 	})
+}
+
+func (s *Server) rmRegistrationActive() bool {
+	if s == nil {
+		return false
+	}
+	if s.handler == nil {
+		return true
+	}
+	return s.handler.NodeActive()
 }
 
 func (s *Server) registerRMOnce(ctx context.Context, client *http.Client) error {
@@ -1648,6 +1733,16 @@ func (s *Server) ShutdownWithOptions(ctx context.Context, opts ...CloseOption) e
 	if s.indexManager != nil {
 		s.indexManager.Close(ctx)
 	}
+	if s.handler != nil {
+		s.handler.StopHA()
+		releaseCtx := ctx
+		if releaseCtx == nil {
+			releaseCtx = context.Background()
+		}
+		haCtx, cancel := context.WithTimeout(releaseCtx, 2*time.Second)
+		s.handler.ReleaseHA(haCtx)
+		cancel()
+	}
 	if err := s.backend.Close(); err != nil {
 		s.logger.Error("shutdown.backend.close_error", "error", err)
 		return err
@@ -1710,6 +1805,9 @@ func (s *Server) Abort(ctx context.Context) error {
 	s.stopTCClusterLoop()
 	s.stopRMRegistration()
 	s.stopSweeper()
+	if s.handler != nil {
+		s.handler.StopHA()
+	}
 	if s.lsfCancel != nil {
 		s.lsfCancel()
 		s.lsfCancel = nil

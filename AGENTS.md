@@ -75,15 +75,10 @@ Everything in this repo assumes those pieces are stable. New work should build o
 ```yaml
 version: "2"
 linters:
+  disable:
+    - errcheck
   exclusions:
     rules:
-      # errcheck noise we explicitly accept for now
-      - linters: [errcheck]
-        path: ".*_test\\.go"
-      - linters: [errcheck]
-        text: "resp.Body.Close"
-      - linters: [errcheck]
-        text: "fmt.Fprint"
       # staticcheck style nits we don't want to chase
       - linters: [staticcheck]
         text: "QF1003"
@@ -161,5 +156,13 @@ linters:
 - Record big work. Long-running benchmarks or refactors should leave breadcrumbs (PR notes, `docs/performance/`, `BACKLOG.md`).
 - Communicate blockers. If a suite flakes, capture the log (`integration-logs/*.log`) and note it in the issue/PR before retrying.
 - YCSB driver: treat it as a first-class client. Benchmark code lives in its own module so we can add dependencies without polluting the main build.
+
+## YCSB Perf Workflow (keep this for context compaction)
+
+- Rebuild the dev stack before perf runs: `nerdctl compose -f devenv/docker-compose.yaml down` then `nerdctl compose -f devenv/docker-compose.yaml up --build -d`.
+- Disable tracing overhead for perf runs: keep `LOCKD_OTLP_ENDPOINT` empty in `devenv/docker-compose.yaml`.
+- Run the baseline load/run from `ycsb/`: `make lockd-load` then `make lockd-run` (10k records target).
+- Capture pprof while a run is in flight: `curl -s "http://127.0.0.1:6060/debug/pprof/profile?seconds=10" -o /tmp/lockd.pprof` and `go tool pprof -top /tmp/lockd.pprof`.
+- If a perf regression appears, capture heap too: `curl -s "http://127.0.0.1:6060/debug/pprof/heap" -o /tmp/lockd-heap.pprof` then `go tool pprof -top -alloc_space /tmp/lockd-heap.pprof`.
 
 With this playbook, we can confidently evolve lockd (namespaces, query/index, CLI, YCSB) without clinging to outdated guardrails. Finish what you start, lean on tests, and keep shipping.

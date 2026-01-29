@@ -57,6 +57,9 @@ func setupBenchmarkEnv(b *testing.B, withLockd bool) *benchmarkEnv {
 	}
 	benchenv.EnsureMinioBucket(b, cfg)
 	benchenv.EnsureS3StoreReady(b, cfg)
+	b.Cleanup(func() {
+		benchenv.CleanupBenchmarkPrefix(b, cfg)
+	})
 
 	storeResult, err := lockd.BuildGenericS3Config(cfg)
 	if err != nil {

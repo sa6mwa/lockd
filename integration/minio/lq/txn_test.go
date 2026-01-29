@@ -67,6 +67,7 @@ func TestMinioQueueTxnFanoutAcrossNodes(t *testing.T) {
 		PollJitter:        0,
 		ResilientInterval: 500 * time.Millisecond,
 	})
+	cfg.HAMode = "concurrent"
 	bundlePath := cryptotest.SharedTCClientBundlePath(t)
 	if bundlePath == "" {
 		cfg.DisableMTLS = true
@@ -115,6 +116,7 @@ func TestMinioQueueTxnRestartAcrossNodes(t *testing.T) {
 		PollJitter:        0,
 		ResilientInterval: 500 * time.Millisecond,
 	})
+	cfg.HAMode = "concurrent"
 	bundlePath := cryptotest.SharedTCClientBundlePath(t)
 	if bundlePath == "" {
 		cfg.DisableMTLS = true

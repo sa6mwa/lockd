@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"path"
+	"strings"
 )
 
 // defaultStagingBackend reuses the existing Backend surface by storing staged
@@ -27,7 +27,11 @@ func EnsureStaging(b Backend) StagingBackend {
 }
 
 func (d *defaultStagingBackend) stagingKey(key, txnID string) string {
-	return path.Join(key, ".staging", txnID)
+	key = strings.TrimSuffix(key, "/")
+	if key == "" {
+		return ".staging/" + txnID
+	}
+	return key + "/.staging/" + txnID
 }
 
 func (d *defaultStagingBackend) StageState(ctx context.Context, namespace, key, txnID string, body io.Reader, opts PutStateOptions) (*PutStateResult, error) {
@@ -65,7 +69,10 @@ func (d *defaultStagingBackend) DiscardStagedState(ctx context.Context, namespac
 func (d *defaultStagingBackend) ListStagedState(ctx context.Context, namespace string, opts ListStagedOptions) (*ListResult, error) {
 	prefix := ".staging/"
 	if opts.TxnPrefix != "" {
-		prefix = path.Join(prefix, opts.TxnPrefix)
+		trimmed := strings.TrimPrefix(opts.TxnPrefix, "/")
+		if trimmed != "" {
+			prefix += trimmed
+		}
 	}
 	return d.backend.ListObjects(ctx, namespace, ListOptions{Prefix: prefix, StartAfter: opts.StartAfter, Limit: opts.Limit})
 }

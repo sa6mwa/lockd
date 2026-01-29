@@ -32,7 +32,7 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (res *Acquire
 		duration := s.clock.Now().Sub(start)
 		s.leaseMetrics.recordAcquire(ctx, namespaceLabel, kindLabel, duration, err)
 	}()
-	if err := s.maybeThrottleLock(); err != nil {
+	if err := s.maybeThrottleLock(ctx); err != nil {
 		return nil, err
 	}
 	if err := s.applyShutdownGuard("lock_acquire"); err != nil {
@@ -62,6 +62,13 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (res *Acquire
 			return nil, fmt.Errorf("generate key: %w", err)
 		}
 		autoKey = true
+	}
+	key = strings.TrimPrefix(key, "/")
+	if namespace != "" {
+		prefix := namespace + "/"
+		if strings.HasPrefix(key, prefix) {
+			key = strings.TrimPrefix(key, prefix)
+		}
 	}
 	if cmd.Owner == "" {
 		return nil, Failure{Code: "missing_owner", Detail: "owner is required", HTTPStatus: 400}
@@ -119,6 +126,7 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (res *Acquire
 	}
 
 	txnID := strings.TrimSpace(cmd.TxnID)
+	txnExplicit := txnID != ""
 	if txnID != "" {
 		if _, err := xid.FromString(txnID); err != nil {
 			return nil, Failure{Code: "invalid_txn", Detail: "txn_id must be a valid xid", HTTPStatus: http.StatusBadRequest}
@@ -129,11 +137,72 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (res *Acquire
 		txnID = xid.New().String()
 	}
 	backoff := newAcquireBackoff()
+	triedFastCreate := false
 	for {
+		plan := s.newWritePlan(ctx)
+		commitCtx := plan.Context()
 		now := s.clock.Now()
-		meta, metaETag, err := s.ensureMeta(ctx, namespace, storageKey)
+		if !triedFastCreate {
+			triedFastCreate = true
+			fastMeta := &storage.Meta{}
+			if cmd.ForceQueryHidden {
+				fastMeta.SetQueryHidden(true)
+			}
+			newFencing := fastMeta.FencingToken + 1
+			fastMeta.FencingToken = newFencing
+			fastMeta.Lease = &storage.Lease{
+				ID:            leaseID,
+				Owner:         cmd.Owner,
+				ExpiresAtUnix: now.Add(ttl).Unix(),
+				FencingToken:  newFencing,
+				TxnID:         txnID,
+				TxnExplicit:   txnExplicit,
+			}
+			fastMeta.UpdatedAtUnix = now.Unix()
+			newMetaETag, err := s.store.StoreMeta(commitCtx, namespace, keyComponent, fastMeta, "")
+			if err == nil {
+				if waitErr := plan.Wait(nil); waitErr != nil {
+					return nil, waitErr
+				}
+				if err := s.updateLeaseIndex(ctx, namespace, keyComponent, 0, fastMeta.Lease.ExpiresAtUnix); err != nil && s.logger != nil {
+					s.logger.Warn("lease.index.update_failed", "namespace", namespace, "key", keyComponent, "error", err)
+				}
+				res = &AcquireResult{
+					Namespace:     namespace,
+					LeaseID:       leaseID,
+					TxnID:         txnID,
+					Key:           key,
+					Owner:         cmd.Owner,
+					ExpiresAt:     fastMeta.Lease.ExpiresAtUnix,
+					Version:       fastMeta.Version,
+					StateETag:     fastMeta.StateETag,
+					FencingToken:  newFencing,
+					CorrelationID: correlationID,
+					GeneratedKey:  autoKey,
+					MetaETag:      newMetaETag,
+					Meta:          fastMeta,
+				}
+				if s.leaseMetrics != nil {
+					s.leaseMetrics.addActive(kindLabel, 1)
+				}
+				logger.Info("lease.acquire.success",
+					"namespace", namespace,
+					"key", key,
+					"owner", cmd.Owner,
+					"lease_id", leaseID,
+					"txn_id", txnID,
+					"fencing_token", newFencing,
+					"expires_at", fastMeta.Lease.ExpiresAtUnix,
+				)
+				return res, nil
+			}
+			if !errors.Is(err, storage.ErrCASMismatch) {
+				return nil, plan.Wait(fmt.Errorf("store meta: %w", err))
+			}
+		}
+		meta, metaETag, err := s.ensureMeta(commitCtx, namespace, storageKey)
 		if err != nil {
-			return nil, err
+			return nil, plan.Wait(err)
 		}
 		if cmd.ForceQueryHidden && !meta.HasQueryHiddenPreference() {
 			meta.SetQueryHidden(true)
@@ -151,7 +220,7 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (res *Acquire
 		// If the lease is gone but staging remains, roll it back before granting
 		// a new lease to avoid resurfacing stale staged payloads after restarts.
 		if meta.Lease == nil && meta.StagedTxnID != "" {
-			s.discardStagedArtifacts(ctx, namespace, keyComponent, meta)
+			s.discardStagedArtifacts(commitCtx, namespace, keyComponent, meta)
 			clearStagingFields(meta)
 		}
 		if meta.Lease != nil && meta.Lease.ExpiresAtUnix > now.Unix() {
@@ -171,11 +240,17 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (res *Acquire
 					}
 				}
 				sleep := backoff.Next(limit)
+				if waitErr := plan.Wait(nil); waitErr != nil {
+					return nil, waitErr
+				}
 				s.clock.Sleep(sleep)
 				continue
 			}
 			retryDur := maxDuration(time.Until(time.Unix(meta.Lease.ExpiresAtUnix, 0)), 0)
 			retry := maxInt64(int64(math.Ceil(retryDur.Seconds())), 1)
+			if waitErr := plan.Wait(nil); waitErr != nil {
+				return nil, waitErr
+			}
 			return nil, Failure{
 				Code:       "waiting",
 				Detail:     "lease already held",
@@ -195,18 +270,28 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (res *Acquire
 			ExpiresAtUnix: expiresAt,
 			FencingToken:  newFencing,
 			TxnID:         txnID,
+			TxnExplicit:   txnExplicit,
 		}
 		meta.UpdatedAtUnix = now.Unix()
 
-		newMetaETag, err := s.store.StoreMeta(ctx, namespace, keyComponent, meta, metaETag)
+		newMetaETag, err := s.store.StoreMeta(commitCtx, namespace, keyComponent, meta, metaETag)
 		if err != nil {
 			if creationMu != nil {
 				creationMu.Unlock()
 			}
 			if errors.Is(err, storage.ErrCASMismatch) {
+				if waitErr := plan.Wait(nil); waitErr != nil {
+					return nil, waitErr
+				}
 				continue
 			}
-			return nil, fmt.Errorf("store meta: %w", err)
+			return nil, plan.Wait(fmt.Errorf("store meta: %w", err))
+		}
+		if waitErr := plan.Wait(nil); waitErr != nil {
+			if creationMu != nil {
+				creationMu.Unlock()
+			}
+			return nil, waitErr
 		}
 		if err := s.updateLeaseIndex(ctx, namespace, keyComponent, oldExpires, meta.Lease.ExpiresAtUnix); err != nil && s.logger != nil {
 			s.logger.Warn("lease.index.update_failed", "namespace", namespace, "key", keyComponent, "error", err)
@@ -259,7 +344,7 @@ func (s *Service) KeepAlive(ctx context.Context, cmd KeepAliveCommand) (res *Kee
 		duration := s.clock.Now().Sub(start)
 		s.leaseMetrics.recordKeepAlive(ctx, namespaceLabel, kindLabel, duration, err)
 	}()
-	if err := s.maybeThrottleLock(); err != nil {
+	if err := s.maybeThrottleLock(ctx); err != nil {
 		return nil, err
 	}
 	finish := s.beginLockOp()
@@ -296,20 +381,25 @@ func (s *Service) KeepAlive(ctx context.Context, cmd KeepAliveCommand) (res *Kee
 
 	requestTxn := strings.TrimSpace(cmd.TxnID)
 	for {
+		plan := s.newWritePlan(ctx)
+		commitCtx := plan.Context()
 		now := s.clock.Now()
-		meta, metaETag, err := s.loadMetaMaybeCached(ctx, namespace, storageKey, cmd.KnownMeta, cmd.KnownMetaETag)
+		meta, metaETag, err := s.loadMetaMaybeCached(commitCtx, namespace, storageKey, cmd.KnownMeta, cmd.KnownMetaETag)
 		if err != nil {
-			return nil, err
+			return nil, plan.Wait(err)
 		}
 		if meta.Lease != nil && meta.Lease.ExpiresAtUnix <= now.Unix() {
 			leaseErr := validateLease(meta, cmd.LeaseID, cmd.FencingToken, requestTxn, now)
-			if _, _, err := s.clearExpiredLease(ctx, namespace, keyComponent, meta, metaETag, now, sweepModeTransparent, true); err != nil {
+			if _, _, err := s.clearExpiredLease(commitCtx, namespace, keyComponent, meta, metaETag, now, sweepModeTransparent, true); err != nil {
 				if errors.Is(err, storage.ErrCASMismatch) {
+					if waitErr := plan.Wait(nil); waitErr != nil {
+						return nil, waitErr
+					}
 					continue
 				}
-				return nil, err
+				return nil, plan.Wait(err)
 			}
-			return nil, leaseErr
+			return nil, plan.Wait(leaseErr)
 		}
 		metaTxn := ""
 		if meta.Lease != nil {
@@ -322,12 +412,18 @@ func (s *Service) KeepAlive(ctx context.Context, cmd KeepAliveCommand) (res *Kee
 		meta.Lease.ExpiresAtUnix = now.Add(ttl).Unix()
 		meta.UpdatedAtUnix = now.Unix()
 
-		newMetaETag, err := s.store.StoreMeta(ctx, namespace, keyComponent, meta, metaETag)
+		newMetaETag, err := s.store.StoreMeta(commitCtx, namespace, keyComponent, meta, metaETag)
 		if err != nil {
 			if errors.Is(err, storage.ErrCASMismatch) {
+				if waitErr := plan.Wait(nil); waitErr != nil {
+					return nil, waitErr
+				}
 				continue
 			}
-			return nil, fmt.Errorf("store meta: %w", err)
+			return nil, plan.Wait(fmt.Errorf("store meta: %w", err))
+		}
+		if waitErr := plan.Wait(nil); waitErr != nil {
+			return nil, waitErr
 		}
 		logger.Debug("keepalive.success",
 			"namespace", namespace,
@@ -362,7 +458,7 @@ func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (res *Release
 		duration := s.clock.Now().Sub(start)
 		s.leaseMetrics.recordRelease(ctx, namespaceLabel, kindLabel, duration, err)
 	}()
-	if err := s.maybeThrottleLock(); err != nil {
+	if err := s.maybeThrottleLock(ctx); err != nil {
 		return nil, err
 	}
 	finish := s.beginLockOp()
@@ -390,17 +486,25 @@ func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (res *Release
 	kindLabel = leaseKindLabel(keyComponent)
 
 	for {
+		plan := s.newWritePlan(ctx)
+		commitCtx := plan.Context()
 		now := s.clock.Now()
-		meta, metaETag, err := s.loadMetaMaybeCached(ctx, namespace, storageKey, cmd.KnownMeta, cmd.KnownMetaETag)
+		meta, metaETag, err := s.loadMetaMaybeCached(commitCtx, namespace, storageKey, cmd.KnownMeta, cmd.KnownMetaETag)
 		if err != nil {
-			return nil, err
+			return nil, plan.Wait(err)
 		}
 		if meta.Lease != nil && meta.Lease.ExpiresAtUnix <= now.Unix() {
-			if _, _, err := s.clearExpiredLease(ctx, namespace, keyComponent, meta, metaETag, now, sweepModeTransparent, true); err != nil {
+			if _, _, err := s.clearExpiredLease(commitCtx, namespace, keyComponent, meta, metaETag, now, sweepModeTransparent, true); err != nil {
 				if errors.Is(err, storage.ErrCASMismatch) {
+					if waitErr := plan.Wait(nil); waitErr != nil {
+						return nil, waitErr
+					}
 					continue
 				}
-				return nil, err
+				return nil, plan.Wait(err)
+			}
+			if waitErr := plan.Wait(nil); waitErr != nil {
+				return nil, waitErr
 			}
 			return &ReleaseResult{Released: true, MetaCleared: true}, nil
 		}
@@ -410,10 +514,13 @@ func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (res *Release
 			if errors.As(err, &failure) {
 				switch failure.Code {
 				case "lease_required", "lease_expired", "fencing_mismatch":
+					if waitErr := plan.Wait(nil); waitErr != nil {
+						return nil, waitErr
+					}
 					return &ReleaseResult{Released: true, MetaCleared: true}, nil
 				}
 			}
-			return nil, err
+			return nil, plan.Wait(err)
 		}
 
 		if meta.StagedTxnID != "" && meta.StagedTxnID != cmd.TxnID {
@@ -435,6 +542,21 @@ func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (res *Release
 		if !commit {
 			decision = TxnStateRollback
 		}
+		if !txnExplicit(meta) {
+			if err := s.applyTxnDecisionForMeta(commitCtx, namespace, keyComponent, cmd.TxnID, decision == TxnStateCommit, meta, metaETag); err != nil {
+				return nil, plan.Wait(err)
+			}
+			if s.leaseMetrics != nil {
+				s.leaseMetrics.addActive(kindLabel, -1)
+			}
+			if waitErr := plan.Wait(nil); waitErr != nil {
+				return nil, waitErr
+			}
+			return &ReleaseResult{
+				Released:    true,
+				MetaCleared: true,
+			}, nil
+		}
 		if s.tcDecider != nil {
 			rec := TxnRecord{
 				TxnID:         cmd.TxnID,
@@ -449,41 +571,44 @@ func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (res *Release
 			applyCtx := withTxnApplyHint(ctx, namespace, keyComponent, meta, metaETag)
 			state, err := s.tcDecider.Decide(applyCtx, rec)
 			if err != nil {
-				return nil, err
+				return nil, plan.Wait(err)
 			}
 			if state == TxnStatePending {
-				return nil, Failure{Code: "txn_pending", Detail: "transaction decision not recorded", HTTPStatus: http.StatusConflict}
+				return nil, plan.Wait(Failure{Code: "txn_pending", Detail: "transaction decision not recorded", HTTPStatus: http.StatusConflict})
 			}
 			if s.leaseMetrics != nil {
 				s.leaseMetrics.addActive(kindLabel, -1)
+			}
+			if waitErr := plan.Wait(nil); waitErr != nil {
+				return nil, waitErr
 			}
 			return &ReleaseResult{
 				Released:    true,
 				MetaCleared: true,
 			}, nil
 		}
-		if _, _, err := s.registerTxnParticipant(ctx, cmd.TxnID, namespace, keyComponent, meta.Lease.ExpiresAtUnix); err != nil {
-			return nil, fmt.Errorf("register txn participant: %w", err)
+		if _, _, err := s.registerTxnParticipant(commitCtx, cmd.TxnID, namespace, keyComponent, meta.Lease.ExpiresAtUnix); err != nil {
+			return nil, plan.Wait(fmt.Errorf("register txn participant: %w", err))
 		}
-		rec, err := s.decideTxn(ctx, cmd.TxnID, decision)
+		rec, err := s.decideTxn(commitCtx, cmd.TxnID, decision)
 		if err != nil {
-			return nil, fmt.Errorf("txn decide: %w", err)
+			return nil, plan.Wait(fmt.Errorf("txn decide: %w", err))
 		}
 		// Ensure the current participant is recorded even if the txn record pre-existed.
 		currentParticipant := TxnParticipant{Namespace: namespace, Key: keyComponent, BackendHash: s.backendHash}
 		if idx := participantIndex(rec.Participants, currentParticipant); idx == -1 {
 			rec.Participants = append(rec.Participants, currentParticipant)
 			sortParticipants(rec.Participants)
-			_, _ = s.putTxnRecord(ctx, rec, "")
+			_, _ = s.putTxnRecord(commitCtx, rec, "")
 		} else if rec.Participants[idx].BackendHash == "" && s.backendHash != "" {
 			rec.Participants[idx].BackendHash = s.backendHash
 			sortParticipants(rec.Participants)
-			_, _ = s.putTxnRecord(ctx, rec, "")
+			_, _ = s.putTxnRecord(commitCtx, rec, "")
 		}
 		decisionCommit := rec.State == TxnStateCommit
 		// Apply to the current participant using the already loaded meta to avoid extra reads.
-		if err := s.applyTxnDecisionForMeta(ctx, namespace, keyComponent, rec.TxnID, decisionCommit, meta, metaETag); err != nil {
-			return nil, err
+		if err := s.applyTxnDecisionForMeta(commitCtx, namespace, keyComponent, rec.TxnID, decisionCommit, meta, metaETag); err != nil {
+			return nil, plan.Wait(err)
 		}
 		// Fan-out to remaining participants.
 		for _, p := range rec.Participants {
@@ -493,7 +618,7 @@ func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (res *Release
 			if p.Namespace == namespace && p.Key == keyComponent && (p.BackendHash == "" || p.BackendHash == s.backendHash) {
 				continue
 			}
-			if err := s.applyTxnDecisionToKey(ctx, p.Namespace, p.Key, rec.TxnID, decisionCommit); err != nil && s.logger != nil {
+			if err := s.applyTxnDecisionToKey(ctx, p.Namespace, p.Key, rec.TxnID, decisionCommit, false); err != nil && s.logger != nil {
 				s.logger.Warn("txn.apply.failed",
 					"namespace", p.Namespace,
 					"key", p.Key,
@@ -504,6 +629,9 @@ func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (res *Release
 		}
 		if s.leaseMetrics != nil {
 			s.leaseMetrics.addActive(kindLabel, -1)
+		}
+		if waitErr := plan.Wait(nil); waitErr != nil {
+			return nil, waitErr
 		}
 		return &ReleaseResult{
 			Released:    true,
@@ -599,10 +727,6 @@ func (s *Service) creationMutex(key string) *sync.Mutex {
 }
 
 func (s *Service) ensureMeta(ctx context.Context, namespace, key string) (*storage.Meta, string, error) {
-	logger := pslog.LoggerFromContext(ctx)
-	if logger == nil {
-		logger = s.logger
-	}
 	relKey := relativeKey(namespace, key)
 	res, err := s.store.LoadMeta(ctx, namespace, relKey)
 	if err == nil {
@@ -665,44 +789,54 @@ func cloneStagedAttachment(att storage.StagedAttachment) storage.StagedAttachmen
 	return clone
 }
 
-func (s *Service) maybeThrottleLock() error {
+func (s *Service) maybeThrottleLock(ctx context.Context) error {
+	if err := s.ensureNodeActive(); err != nil {
+		return err
+	}
 	if s.qrf == nil {
 		return nil
 	}
-	decision := s.qrf.Decide(qrf.KindLock)
-	if !decision.Throttle {
-		return nil
-	}
-	retry := durationToSeconds(decision.RetryAfter)
-	if retry <= 0 {
-		retry = 1
-	}
-	return Failure{
-		Code:       "throttled",
-		Detail:     "perimeter defence engaged",
-		RetryAfter: retry,
-		HTTPStatus: 429,
-	}
+	return s.qrfThrottleFailure(s.qrf.Wait(ctx, qrf.KindLock))
 }
 
-func (s *Service) maybeThrottleQueue(kind qrf.Kind) error {
+func (s *Service) maybeThrottleQueue(ctx context.Context, kind qrf.Kind) error {
+	if err := s.ensureNodeActive(); err != nil {
+		return err
+	}
 	if s.qrf == nil {
 		return nil
 	}
-	decision := s.qrf.Decide(kind)
-	if !decision.Throttle {
+	return s.qrfThrottleFailure(s.qrf.Wait(ctx, kind))
+}
+
+func (s *Service) maybeThrottleQuery(ctx context.Context) error {
+	if err := s.ensureNodeActive(); err != nil {
+		return err
+	}
+	if s.qrf == nil {
 		return nil
 	}
-	retry := durationToSeconds(decision.RetryAfter)
-	if retry <= 0 {
-		retry = 1
+	return s.qrfThrottleFailure(s.qrf.Wait(ctx, qrf.KindQuery))
+}
+
+func (s *Service) qrfThrottleFailure(err error) error {
+	if err == nil {
+		return nil
 	}
-	return Failure{
-		Code:       "throttled",
-		Detail:     "perimeter defence engaged",
-		RetryAfter: retry,
-		HTTPStatus: 429,
+	var waitErr *qrf.WaitError
+	if errors.As(err, &waitErr) {
+		retry := durationToSeconds(waitErr.Delay)
+		if retry <= 0 {
+			retry = 1
+		}
+		return Failure{
+			Code:       "throttled",
+			Detail:     "perimeter defence engaged",
+			RetryAfter: retry,
+			HTTPStatus: 429,
+		}
 	}
+	return err
 }
 
 func (s *Service) beginLockOp() func() {
@@ -710,6 +844,13 @@ func (s *Service) beginLockOp() func() {
 		return func() {}
 	}
 	return s.lsf.BeginLockOp()
+}
+
+func (s *Service) beginQueryOp() func() {
+	if s.lsf == nil {
+		return func() {}
+	}
+	return s.lsf.BeginQueryOp()
 }
 
 func (s *Service) generateUniqueKey(ctx context.Context, namespace string) (string, error) {

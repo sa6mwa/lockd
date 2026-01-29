@@ -1,12 +1,12 @@
 # TC Leader Election, Membership, and RM Registry (Lockd)
 
-This document is the **normative** design for TC leader election, TC cluster
+This document describes **current behavior** for TC leader election, TC cluster
 membership, and RM registry replication in lockd. It is written to make
-correctness and failure handling explicit so that deviations are easy to spot
-and correct.
+correctness and failure handling explicit so deviations are easy to spot and
+resolve.
 
-If implementation does not match this document, **the implementation should be
-refactored** to match the design (not the other way around).
+If you find drift between this document and the implementation, update the doc
+and the code to bring them back into alignment.
 
 ## Goals
 

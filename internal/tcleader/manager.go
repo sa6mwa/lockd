@@ -52,6 +52,7 @@ type Config struct {
 	ClientBundle string
 	TrustPEM     [][]byte
 	Clock        clock.Clock
+	Eligible     func() bool
 }
 
 // Manager runs a quorum-based TC leader election.
@@ -65,6 +66,7 @@ type Manager struct {
 	clientConfig tcclient.Config
 	logger       pslog.Logger
 	clock        clock.Clock
+	eligible     func() bool
 
 	mu        sync.RWMutex
 	isLeader  bool
@@ -109,6 +111,7 @@ func NewManager(cfg Config) (*Manager, error) {
 			leaseTTL:     leaseTTL,
 			clientConfig: clientConfig,
 			clock:        clk,
+			eligible:     cfg.Eligible,
 		}, nil
 	}
 	selfEndpoint := normalizeEndpoint(cfg.SelfEndpoint)
@@ -143,6 +146,7 @@ func NewManager(cfg Config) (*Manager, error) {
 		clientConfig: clientConfig,
 		clock:        clk,
 		logger:       logger,
+		eligible:     cfg.Eligible,
 	}, nil
 }
 
@@ -355,6 +359,18 @@ func (m *Manager) run(ctx context.Context) {
 		default:
 		}
 		if m.isLeaderState() {
+			if !m.isEligible() {
+				if releaseTerm, ok := m.leaderTermForRelease(); ok {
+					m.releaseAll(ctx, endpoints, releaseTerm)
+				} else {
+					_ = m.releaseLocalLease()
+				}
+				m.stepDown()
+				backoff = defaultElectionBackoff
+				staggered = false
+				m.sleep(ctx, time.Second)
+				continue
+			}
 			if ok := m.renewLeases(ctx, endpoints); !ok {
 				if m.leaseStillValid(m.clockNow()) {
 					retry := m.leaseTTL / 6
@@ -390,6 +406,12 @@ func (m *Manager) run(ctx context.Context) {
 				continue
 			}
 		}
+		if !m.isEligible() {
+			backoff = defaultElectionBackoff
+			staggered = false
+			m.sleep(ctx, time.Second)
+			continue
+		}
 		if !staggered {
 			m.sleep(ctx, m.electionSkew(defaultElectionBackoff, endpoints))
 			staggered = true
@@ -404,6 +426,13 @@ func (m *Manager) run(ctx context.Context) {
 			backoff = minDuration(backoff*2, defaultElectionBackoffMax)
 		}
 	}
+}
+
+func (m *Manager) isEligible() bool {
+	if m == nil || m.eligible == nil {
+		return true
+	}
+	return m.eligible()
 }
 
 func (m *Manager) isLeaderState() bool {

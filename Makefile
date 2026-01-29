@@ -1,16 +1,26 @@
 GO ?= go
+PREFIX ?= /usr/local
+BINDIR ?= $(PREFIX)/bin
+BIN_DIR ?= bin
+TARGET ?= lockd
+BIN_PATH ?= $(BIN_DIR)/$(TARGET)
+CGO_ENABLED = 0
+SUDO ?= sudo
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-integration bench diagrams swagger
+.PHONY: help test test-integration bench diagrams swagger build clean install
 
 help:
 	@echo "Available targets:"
 	@echo "  make test                    # run unit tests"
 	@echo "  make test-integration        # run integration suites (pass SUITES=...)"
-	@echo "  make bench                    # run benchmark suites (pass SUITES=...)"
+	@echo "  make bench                   # run benchmark suites (pass SUITES=...)"
 	@echo "  make swagger                 # regenerate Swagger/OpenAPI artifacts"
 	@echo "  make diagrams                # render PlantUML sequence diagrams to JPEG"
+	@echo "  make build                   # build ./cmd/lockd into $(BIN_PATH)"
+	@echo "  make clean                   # remove $(BIN_DIR)/"
+	@echo "  make install                 # install $(BIN_PATH) into $(BINDIR)"
 
 # Example environment file contents shown when missing
 AWS_ENV_EXAMPLE := AWS_ACCESS_KEY_ID=your-access-key\nAWS_SECRET_ACCESS_KEY=your-secret\nAWS_REGION=us-west-2\nLOCKD_STORE=aws://your-bucket/prefix
@@ -72,3 +82,13 @@ tidy:
 	$(GO) mod tidy
 	cd devenv/assure && $(GO) mod tidy
 	cd ycsb && $(GO) mod tidy
+
+build:
+	@mkdir -p $(BIN_DIR)
+	CGO_ENABLED=$(CGO_ENABLED) $(GO) build -o $(BIN_PATH) -trimpath -ldflags '-s -w' ./cmd/lockd
+
+clean:
+	rm -rf $(BIN_DIR)
+
+install:
+	$(SUDO) install -m 0755 $(BIN_PATH) $(BINDIR)/$(TARGET)

@@ -1176,7 +1176,7 @@ const docTemplate = `{
         },
         "/v1/query": {
             "post": {
-                "description": "Executes a selector-based search within a namespace and returns matching keys plus a cursor for pagination. Example request body: ` + "`" + `{\"namespace\":\"default\",\"selector\":{\"eq\":{\"field\":\"type\",\"value\":\"alpha\"}},\"limit\":25,\"return\":\"keys\"}` + "`" + `",
+                "description": "Executes a selector-based search within a namespace. When return=keys, responds with a JSON envelope containing keys + cursor. When return=documents, streams NDJSON rows (one document per line).",
                 "consumes": [
                     "application/json"
                 ],
@@ -1230,9 +1230,9 @@ const docTemplate = `{
                 ],
                 "responses": {
                     "200": {
-                        "description": "OK",
+                        "description": "NDJSON stream when return=documents",
                         "schema": {
-                            "$ref": "#/definitions/api.QueryResponse"
+                            "type": "string"
                         }
                     },
                     "400": {
@@ -1407,7 +1407,7 @@ const docTemplate = `{
                         "mTLS": []
                     }
                 ],
-                "description": "Dequeues messages and includes their associated state blobs in the multipart response when available. If txn_id is provided, the message and state sidecar are enlisted as transaction participants.",
+                "description": "Dequeues messages and includes their associated state blobs in a multipart/related response when available. If txn_id is provided, the message and state sidecar are enlisted as transaction participants.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1449,7 +1449,7 @@ const docTemplate = `{
                 ],
                 "responses": {
                     "200": {
-                        "description": "Multipart response with message metadata, payload, and state sidecar",
+                        "description": "multipart/related stream: message metadata, payload, optional state sidecar",
                         "schema": {
                             "type": "string"
                         }
@@ -1693,7 +1693,7 @@ const docTemplate = `{
                         "mTLS": []
                     }
                 ],
-                "description": "Opens a long-lived multipart stream of deliveries for the specified queue owner. Each part contains message metadata and payload. If txn_id is provided, each delivery is enlisted as a transaction participant.",
+                "description": "Opens a long-lived multipart/related stream of deliveries for the specified queue owner. Each part contains message metadata and payload. If txn_id is provided, each delivery is enlisted as a transaction participant.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1735,7 +1735,7 @@ const docTemplate = `{
                 ],
                 "responses": {
                     "200": {
-                        "description": "Multipart stream of message deliveries",
+                        "description": "multipart/related stream: message metadata + payload",
                         "schema": {
                             "type": "string"
                         }
@@ -1774,7 +1774,7 @@ const docTemplate = `{
                         "mTLS": []
                     }
                 ],
-                "description": "Opens a long-lived multipart stream where each part contains message metadata, payload, and state snapshot when available. If txn_id is provided, the message and state sidecar are enlisted as transaction participants.",
+                "description": "Opens a long-lived multipart/related stream where each part contains message metadata, payload, and state snapshot when available. If txn_id is provided, the message and state sidecar are enlisted as transaction participants.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1816,7 +1816,7 @@ const docTemplate = `{
                 ],
                 "responses": {
                     "200": {
-                        "description": "Multipart stream of message deliveries",
+                        "description": "multipart/related stream: message metadata, payload, optional state snapshot",
                         "schema": {
                             "type": "string"
                         }

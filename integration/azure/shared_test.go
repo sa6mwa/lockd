@@ -15,6 +15,7 @@ import (
 	lockdclient "pkt.systems/lockd/client"
 	azuretest "pkt.systems/lockd/integration/azuretest"
 	"pkt.systems/lockd/integration/internal/cryptotest"
+	"pkt.systems/lockd/integration/internal/storepath"
 	"pkt.systems/lockd/internal/diagnostics/storagecheck"
 	"pkt.systems/lockd/namespaces"
 	"pkt.systems/pslog"
@@ -33,6 +34,7 @@ func loadAzureConfig(tb testing.TB) lockd.Config {
 	if !strings.HasPrefix(store, "azure://") {
 		tb.Fatalf("LOCKD_STORE must reference an azure:// URI, got %q", store)
 	}
+	store = storepath.Scoped(tb, store, "azure")
 	cfg := lockd.Config{
 		Store:         store,
 		AzureEndpoint: os.Getenv("LOCKD_AZURE_ENDPOINT"),

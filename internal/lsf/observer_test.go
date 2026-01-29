@@ -16,9 +16,9 @@ func newTestObserver() (*Observer, *qrf.Controller) {
 		QueueHardLimit:     20,
 		LockSoftLimit:      10,
 		LockHardLimit:      20,
-		SoftRetryAfter:     50 * time.Millisecond,
-		EngagedRetryAfter:  200 * time.Millisecond,
-		RecoveryRetryAfter: 100 * time.Millisecond,
+		SoftDelay:     50 * time.Millisecond,
+		EngagedDelay:  200 * time.Millisecond,
+		RecoveryDelay: 100 * time.Millisecond,
 		RecoverySamples:    1,
 		Logger:             pslog.NoopLogger(),
 	})
@@ -36,6 +36,7 @@ func TestObserverCounters(t *testing.T) {
 	finishCons := obs.BeginQueueConsumer()
 	finishAck := obs.BeginQueueAck()
 	finishLock := obs.BeginLockOp()
+	finishQuery := obs.BeginQueryOp()
 
 	obs.sample(time.Now())
 	snap := ctrl.Snapshot()
@@ -51,15 +52,19 @@ func TestObserverCounters(t *testing.T) {
 	if snap.LockInflight != 1 {
 		t.Fatalf("expected lock inflight 1, got %d", snap.LockInflight)
 	}
+	if snap.QueryInflight != 1 {
+		t.Fatalf("expected query inflight 1, got %d", snap.QueryInflight)
+	}
 
 	finishProd()
 	finishCons()
 	finishAck()
 	finishLock()
+	finishQuery()
 
 	obs.sample(time.Now())
 	snap = ctrl.Snapshot()
-	if snap.QueueProducerInflight != 0 || snap.QueueConsumerInflight != 0 || snap.QueueAckInflight != 0 || snap.LockInflight != 0 {
+	if snap.QueueProducerInflight != 0 || snap.QueueConsumerInflight != 0 || snap.QueueAckInflight != 0 || snap.LockInflight != 0 || snap.QueryInflight != 0 {
 		t.Fatalf("expected zero inflight counts after closures, got %+v", snap)
 	}
 }
@@ -91,11 +96,13 @@ func TestObserverDisabledCounters(t *testing.T) {
 	cons := obs.BeginQueueConsumer()
 	ack := obs.BeginQueueAck()
 	lockFinish := obs.BeginLockOp()
+	queryFinish := obs.BeginQueryOp()
 
 	prod()
 	cons()
 	ack()
 	lockFinish()
+	queryFinish()
 
 	// With QRF nil and disabled flag, sample should be a no-op but must not panic.
 	obs.sample(time.Now())

@@ -20,6 +20,7 @@ import (
 	api "pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/integration/internal/cryptotest"
+	"pkt.systems/lockd/integration/internal/hatest"
 	shutdowntest "pkt.systems/lockd/integration/internal/shutdowntest"
 	testlog "pkt.systems/lockd/integration/internal/testlog"
 	"pkt.systems/lockd/internal/uuidv7"
@@ -127,6 +128,40 @@ func TestAWSLockLifecycle(t *testing.T) {
 	}
 
 	cleanupS3(t, cfg, key)
+}
+
+func TestAWSAcquireNoWaitReturnsWaiting(t *testing.T) {
+	cfg := loadAWSConfig(t)
+	ensureStoreReady(t, context.Background(), cfg)
+	cli := startLockdServer(t, cfg)
+
+	ctx := context.Background()
+	key := "aws-nowait-" + uuidv7.NewString()
+	t.Cleanup(func() { cleanupS3(t, cfg, key) })
+	lease := acquireWithRetry(t, ctx, cli, key, "holder", 30, lockdclient.BlockWaitForever)
+	t.Cleanup(func() { _ = lease.Release(ctx) })
+
+	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	_, err := cli.Acquire(reqCtx, api.AcquireRequest{
+		Key:        key,
+		Owner:      "no-wait",
+		TTLSeconds: 30,
+		BlockSecs:  lockdclient.BlockNoWait,
+	})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatalf("expected no-wait acquire to fail")
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("expected no-wait acquire within 5s, got %s", elapsed)
+	}
+	var apiErr *lockdclient.APIError
+	if !errors.As(err, &apiErr) || apiErr.Response.ErrorCode != "waiting" {
+		t.Fatalf("expected waiting API error, got %v", err)
+	}
 }
 
 func TestAWSAttachmentsLifecycle(t *testing.T) {
@@ -754,13 +789,14 @@ func TestAWSAcquireForUpdateCallbackFailover(t *testing.T) {
 	key := "aws-forupdate-failover-" + uuidv7.NewString()
 	t.Cleanup(func() { cleanupS3(t, cfg, key) })
 
-	seedClient := backup.Client
-	if seedClient == nil {
-		var err error
-		seedClient, err = backup.NewClient()
-		if err != nil {
-			t.Fatalf("seed client: %v", err)
-		}
+	activeServer, seedClient, err := hatest.FindActiveServer(ctx, primary, backup)
+	if err != nil {
+		t.Fatalf("find active server: %v", err)
+	}
+	t.Cleanup(func() { _ = seedClient.Close() })
+	standbyServer := backup
+	if activeServer == backup {
+		standbyServer = primary
 	}
 
 	seedLease, err := seedClient.Acquire(ctx, api.AcquireRequest{
@@ -782,9 +818,15 @@ func TestAWSAcquireForUpdateCallbackFailover(t *testing.T) {
 		t.Fatalf("seed release: %v", err)
 	}
 
-	if err := primary.Stop(context.Background()); err != nil {
-		t.Fatalf("stop primary: %v", err)
+	if err := activeServer.Stop(context.Background()); err != nil {
+		t.Fatalf("stop active server: %v", err)
 	}
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := hatest.WaitForActive(waitCtx, standbyServer); err != nil {
+		waitCancel()
+		t.Fatalf("standby activation: %v", err)
+	}
+	waitCancel()
 
 	clientLogger, clientLogs := testlog.NewRecorder(t, pslog.TraceLevel)
 	clientOptions := []lockdclient.Option{
@@ -800,7 +842,7 @@ func TestAWSAcquireForUpdateCallbackFailover(t *testing.T) {
 		clientOptions = append(clientOptions, lockdclient.WithHTTPClient(httpClient))
 	}
 	failoverClient, err := lockdclient.NewWithEndpoints(
-		[]string{primary.URL(), backup.URL()},
+		[]string{activeServer.URL(), standbyServer.URL()},
 		clientOptions...,
 	)
 	if err != nil {
@@ -834,14 +876,11 @@ func TestAWSAcquireForUpdateCallbackFailover(t *testing.T) {
 		t.Fatalf("callback was not invoked")
 	}
 
-	verifyClient := backup.Client
-	if verifyClient == nil {
-		var cerr error
-		verifyClient, cerr = backup.NewClient()
-		if cerr != nil {
-			t.Fatalf("verify client: %v", cerr)
-		}
+	verifyClient, err := standbyServer.NewClient()
+	if err != nil {
+		t.Fatalf("verify client: %v", err)
 	}
+	t.Cleanup(func() { _ = verifyClient.Close() })
 	verifier := acquireWithRetry(t, ctx, verifyClient, key, "verifier", 45, lockdclient.BlockWaitForever)
 	finalState, _, _, err := getStateJSON(ctx, verifyClient, key, verifier.LeaseID)
 	if err != nil {
@@ -882,8 +921,8 @@ func TestAWSAcquireForUpdateCallbackFailover(t *testing.T) {
 	if !sawSuccess {
 		t.Fatalf("expected HTTP success after failover; logs:\n%s", clientLogs.Summary())
 	}
-	primaryURL := primary.URL()
-	backupURL := backup.URL()
+	primaryURL := activeServer.URL()
+	backupURL := standbyServer.URL()
 	hasPrimaryError := false
 	for _, ep := range errorEndpoints {
 		if ep == primaryURL {
@@ -992,13 +1031,14 @@ func TestAWSRemoveFailover(t *testing.T) {
 	key := "aws-remove-failover-" + uuidv7.NewString()
 	t.Cleanup(func() { cleanupS3(t, cfg, key) })
 
-	seedClient := backup.Client
-	if seedClient == nil {
-		var err error
-		seedClient, err = backup.NewClient()
-		if err != nil {
-			t.Fatalf("seed client: %v", err)
-		}
+	activeServer, seedClient, err := hatest.FindActiveServer(ctx, primary, backup)
+	if err != nil {
+		t.Fatalf("find active server: %v", err)
+	}
+	t.Cleanup(func() { _ = seedClient.Close() })
+	standby := backup
+	if activeServer == backup {
+		standby = primary
 	}
 
 	seedLease := acquireWithRetry(t, ctx, seedClient, key, "seed", 45, lockdclient.BlockWaitForever)
@@ -1022,7 +1062,7 @@ func TestAWSRemoveFailover(t *testing.T) {
 		clientOptions = append(clientOptions, lockdclient.WithHTTPClient(httpClient))
 	}
 	failoverClient, err := lockdclient.NewWithEndpoints(
-		[]string{primary.URL(), backup.URL()},
+		[]string{activeServer.URL(), standby.URL()},
 		clientOptions...,
 	)
 	if err != nil {
@@ -1032,9 +1072,15 @@ func TestAWSRemoveFailover(t *testing.T) {
 
 	lease := acquireWithRetry(t, ctx, failoverClient, key, "failover-remover", 45, lockdclient.BlockWaitForever)
 
-	if err := primary.Stop(context.Background()); err != nil {
-		t.Fatalf("stop primary: %v", err)
+	if err := activeServer.Stop(context.Background()); err != nil {
+		t.Fatalf("stop active server: %v", err)
 	}
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := hatest.WaitForActive(waitCtx, standby); err != nil {
+		waitCancel()
+		t.Fatalf("standby activation: %v", err)
+	}
+	waitCancel()
 
 	res, err := lease.Remove(ctx)
 	if err != nil {
@@ -1045,14 +1091,11 @@ func TestAWSRemoveFailover(t *testing.T) {
 	}
 	releaseLease(t, ctx, lease)
 
-	verifyClient := backup.Client
-	if verifyClient == nil {
-		var cerr error
-		verifyClient, cerr = backup.NewClient()
-		if cerr != nil {
-			t.Fatalf("verify client: %v", cerr)
-		}
+	verifyClient, err := standby.NewClient()
+	if err != nil {
+		t.Fatalf("verify client: %v", err)
 	}
+	t.Cleanup(func() { _ = verifyClient.Close() })
 	verifyLease := acquireWithRetry(t, ctx, verifyClient, key, "verify", 45, lockdclient.BlockWaitForever)
 	state, _, _, err := getStateJSON(ctx, verifyClient, key, verifyLease.LeaseID)
 	if err != nil {
@@ -1063,7 +1106,7 @@ func TestAWSRemoveFailover(t *testing.T) {
 	}
 	releaseLease(t, ctx, verifyLease)
 
-	assertAWSRemoveFailoverLogs(t, clientLogs, primary.URL(), backup.URL())
+	assertAWSRemoveFailoverLogs(t, clientLogs, activeServer.URL(), standby.URL())
 }
 
 func TestAWSRemoveCASMismatch(t *testing.T) {

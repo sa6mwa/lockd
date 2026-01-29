@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
 
 	"pkt.systems/lockd/internal/storage"
@@ -77,11 +78,7 @@ func TestReleaseNoStagingRollsBackAndKeepsState(t *testing.T) {
 		t.Fatalf("expected no staging after release, got %+v", updated)
 	}
 
-	rec, _, err := svc.loadTxnRecord(ctx, acq.TxnID)
-	if err != nil {
-		t.Fatalf("load txn record: %v", err)
-	}
-	if rec.State != TxnStateRollback {
-		t.Fatalf("expected rollback decision, got %s", rec.State)
+	if _, _, err := svc.loadTxnRecord(ctx, acq.TxnID); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected no txn record for implicit txn, got %v", err)
 	}
 }

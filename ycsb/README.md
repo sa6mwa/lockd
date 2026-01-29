@@ -37,6 +37,9 @@ make etcd-run
 
 Each `make *-load` / `make *-run` appends a summary to `performance.log` with the final YCSB stats.
 Disable logging by setting `PERF_LOG=` (empty) or run the binary with `--perf-log=`.
+For baseline runs, we also store a snapshot under `docs/performance/` so results are tracked alongside other perf notes.
+
+Benchmark methodology, caveats, and results live in [BENCHMARKS.md](BENCHMARKS.md).
 
 Override the workload mix or scale as needed:
 
@@ -62,13 +65,14 @@ All properties use the `lockd.` prefix. Key settings:
 | `lockd.owner_prefix` | `ycsb-worker` | Prefix for generated owner IDs. |
 | `lockd.http_timeout` | `30s` | Per-request timeout. |
 | `lockd.query.engine` | `index` | `auto`, `scan`, or `index` hint for `/v1/query`. |
-| `lockd.query.refresh` | _empty_ | Set to `wait_for` to block until the namespace index flushes. |
+| `lockd.query.refresh` | _empty_ | Set to `wait_for` to block until the namespace index flushes (and have writes wait for query visibility). |
 | `lockd.query.limit` | `100` | Cap on the number of keys fetched per scan call. |
 | `lockd.query.return` | `documents` | `documents` streams NDJSON payloads; set to `keys` to fall back to key-only scans. |
 | `lockd.attach.enable` | `false` | When true, stage a single attachment on each insert/update. |
 | `lockd.attach.bytes` | `1024` | Attachment size in bytes when attachment staging is enabled. |
 | `lockd.attach.read` | `false` | When true, read one attachment per record during reads/scans. |
 | `lockd.txn.explicit` | `false` | When true, the driver supplies an explicit xid `txn_id` on acquire. |
+| `lockd.phase_metrics` | `false` | When true, emit per-phase YCSB metrics for lockd acquire/update/release/remove. |
 
 The driver stores each YCSB record as a JSON document with:
 

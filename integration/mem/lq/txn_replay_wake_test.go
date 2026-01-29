@@ -26,6 +26,7 @@ func runMemQueueTxnReplayWakeAcrossNodes(t *testing.T, mode memQueueMode) {
 
 	backend := memorybackend.New()
 	cfg := buildMemQueueConfig(t, mode.queueWatch)
+	cfg.HAMode = "concurrent"
 	cfg.QueuePollInterval = 5 * time.Second
 	cfg.QueuePollJitter = 0
 	cfg.QueueResilientPollInterval = 5 * time.Second

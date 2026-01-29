@@ -36,8 +36,8 @@ func runDiskQueueTxnRestartAcrossNodes(t *testing.T, notify bool) {
 		if bundlePath == "" {
 			cfg.DisableMTLS = true
 		}
-		serverTC := startDiskQueueServer(t, cfg)
 		serverRM := startDiskQueueServer(t, cfg)
+		serverTC := startDiskQueueServer(t, cfg)
 		restart := func(t testing.TB) *lockd.TestServer {
 			return startDiskQueueServer(t, cfg)
 		}

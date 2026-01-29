@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
+	"strings"
 	"testing"
 
+	"pkt.systems/kryptograf"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/namespaces"
 )
@@ -121,5 +124,54 @@ func TestListObjectsPrefixAndStartAfter(t *testing.T) {
 	}
 	if len(result3.Objects) == 0 || result3.Objects[0].Key != "q/a/msg/001.pb" {
 		t.Fatalf("expected to resume at first queue key, got %#v", result3.Objects)
+	}
+}
+
+func TestMemoryBackendHashEncrypted(t *testing.T) {
+	root := kryptograf.MustGenerateRootKey()
+	kg := kryptograf.New(root)
+	material, err := kg.MintDEK([]byte("mem-backend-hash"))
+	if err != nil {
+		t.Fatalf("mint metadata dek: %v", err)
+	}
+	crypto, err := storage.NewCrypto(storage.CryptoConfig{
+		Enabled:            true,
+		RootKey:            root,
+		MetadataDescriptor: material.Descriptor,
+		MetadataContext:    []byte("mem-backend-hash"),
+	})
+	if err != nil {
+		t.Fatalf("new crypto: %v", err)
+	}
+
+	store := NewWithConfig(Config{QueueWatch: false, Crypto: crypto})
+	ctx := context.Background()
+	hash, err := store.BackendHash(ctx)
+	if err != nil {
+		t.Fatalf("backend hash: %v", err)
+	}
+
+	obj, err := store.GetObject(ctx, ".lockd", "backend-id")
+	if err != nil {
+		t.Fatalf("get backend-id: %v", err)
+	}
+	defer obj.Reader.Close()
+	if obj.Info == nil || obj.Info.ContentType != storage.ContentTypeTextEncrypted {
+		got := ""
+		if obj.Info != nil {
+			got = obj.Info.ContentType
+		}
+		t.Fatalf("content-type = %q want %q", got, storage.ContentTypeTextEncrypted)
+	}
+	cipher, err := io.ReadAll(obj.Reader)
+	if err != nil {
+		t.Fatalf("read backend-id: %v", err)
+	}
+	plain, err := crypto.DecryptMetadata(cipher)
+	if err != nil {
+		t.Fatalf("decrypt backend-id: %v", err)
+	}
+	if strings.TrimSpace(string(plain)) != hash {
+		t.Fatalf("backend-id mismatch")
 	}
 }

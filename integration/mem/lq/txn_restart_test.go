@@ -27,6 +27,7 @@ func runMemQueueTxnRestartAcrossNodes(t *testing.T, mode memQueueMode) {
 	setup := func(t *testing.T) (*lockd.TestServer, *lockd.TestServer, func(testing.TB) *lockd.TestServer, time.Duration) {
 		backend := memorybackend.New()
 		cfg := buildMemQueueConfig(t, mode.queueWatch)
+		cfg.HAMode = "concurrent"
 		bundlePath := cryptotest.SharedMTLSClientBundlePath(t)
 		if bundlePath == "" {
 			cfg.DisableMTLS = true

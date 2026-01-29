@@ -36,6 +36,8 @@ const (
 	DefaultQueuePollJitter = 500 * time.Millisecond
 	// DefaultQueueResilientPollInterval bounds how often watchers fall back to polling to recover missed events.
 	DefaultQueueResilientPollInterval = 5 * time.Minute
+	// DefaultQueueListPageSize caps how many queue metadata entries are fetched per poll.
+	DefaultQueueListPageSize = 128
 )
 
 const (
@@ -48,8 +50,14 @@ const (
 	// DefaultMetricsListen is the default metrics endpoint (Prometheus scrape).
 	// Empty disables metrics unless explicitly configured.
 	DefaultMetricsListen = ""
+	// DefaultPprofListen is the default pprof debug listener (empty disables).
+	DefaultPprofListen = ""
 	// DefaultStore points the server at the in-memory backend when no store is provided.
 	DefaultStore = "mem://"
+	// DefaultHAMode controls multi-node behaviour when multiple servers share a backend.
+	DefaultHAMode = "failover"
+	// DefaultHALeaseTTL controls how long HA failover leases are held in failover mode.
+	DefaultHALeaseTTL = 5 * time.Second
 	// DefaultJSONMaxBytes bounds incoming JSON payloads.
 	DefaultJSONMaxBytes = 100 * 1024 * 1024
 	// DefaultAttachmentMaxBytes bounds attachment payloads when not specified by the caller.
@@ -64,6 +72,12 @@ const (
 	DefaultSweeperInterval = 5 * time.Minute
 	// DefaultTxnReplayInterval throttles transaction replay sweeps on active operations.
 	DefaultTxnReplayInterval = 5 * time.Second
+	// DefaultQueueDecisionCacheTTL bounds how long empty queue decision checks are cached.
+	DefaultQueueDecisionCacheTTL = 60 * time.Second
+	// DefaultQueueDecisionMaxApply caps how many queue decision items are applied per dequeue attempt.
+	DefaultQueueDecisionMaxApply = 50
+	// DefaultQueueDecisionApplyTimeout bounds how long a dequeue spends applying queued decisions.
+	DefaultQueueDecisionApplyTimeout = 2 * time.Second
 	// DefaultIdleSweepGrace controls how long the server must be idle before running maintenance sweeps.
 	DefaultIdleSweepGrace = 5 * time.Minute
 	// DefaultIdleSweepOpDelay pauses between maintenance sweep operations to reduce backend pressure.
@@ -78,8 +92,18 @@ const (
 	DefaultShutdownTimeout = 10 * time.Second
 	// DefaultMaxConcurrentStreams sets the default HTTP/2 MaxConcurrentStreams when not explicitly configured.
 	DefaultMaxConcurrentStreams = 1024
+	// DefaultLogstoreCommitMaxOps caps how many logstore entries are committed per fsync batch.
+	DefaultLogstoreCommitMaxOps = 1024
+	// DefaultLogstoreSegmentSize caps the size of a single logstore segment before rolling.
+	DefaultLogstoreSegmentSize = int64(64 << 20)
+	// DefaultQueryDocPrefetch caps the number of in-flight document fetches for query return=documents.
+	DefaultQueryDocPrefetch = 8
+	// DefaultDiskLockFileCacheSize caps cached lockfile descriptors (disk/NFS).
+	DefaultDiskLockFileCacheSize = 2048
 	// DefaultS3MaxPartSize tunes multipart uploads when writing state to S3-compatible stores.
 	DefaultS3MaxPartSize = 16 * 1024 * 1024
+	// DefaultS3SmallEncryptBufferBudget caps concurrent small-object encryption buffers for S3 backends.
+	DefaultS3SmallEncryptBufferBudget = 64 * 1024 * 1024
 	// DefaultStorageRetryMaxAttempts describes how many transient storage errors are retried.
 	DefaultStorageRetryMaxAttempts = 6
 	// DefaultStorageRetryBaseDelay configures the base delay between storage retries.
@@ -103,12 +127,16 @@ const (
 )
 
 const (
-	// DefaultQRFSoftRetryAfter throttles lightly while the QRF is soft-armed.
-	DefaultQRFSoftRetryAfter = 100 * time.Millisecond
-	// DefaultQRFEngagedRetryAfter throttles aggressively when the QRF is fully engaged.
-	DefaultQRFEngagedRetryAfter = 500 * time.Millisecond
-	// DefaultQRFRecoveryRetryAfter moderates throttling while recovering.
-	DefaultQRFRecoveryRetryAfter = 200 * time.Millisecond
+	// DefaultQRFSoftDelay sets the base delay while the QRF is soft-armed.
+	DefaultQRFSoftDelay = 50 * time.Millisecond
+	// DefaultQRFEngagedDelay sets the base delay when the QRF is fully engaged.
+	DefaultQRFEngagedDelay = 250 * time.Millisecond
+	// DefaultQRFRecoveryDelay sets the base delay while recovering.
+	DefaultQRFRecoveryDelay = 200 * time.Millisecond
+	// DefaultQRFMaxWait caps how long a request will wait under QRF pacing before failing.
+	DefaultQRFMaxWait = 5 * time.Second
+	// DefaultStateCacheBytes caps in-memory cached state payloads for hot reads.
+	DefaultStateCacheBytes = 64 << 20
 	// DefaultTCFanoutTimeout bounds how long the TC waits per RM apply request.
 	DefaultTCFanoutTimeout = 5 * time.Second
 	// DefaultTCFanoutMaxAttempts describes how many times to retry RM apply calls.
@@ -124,15 +152,23 @@ const (
 	// DefaultQRFRecoverySamples controls how many consecutive healthy samples are required before disengaging.
 	DefaultQRFRecoverySamples = 5
 	// DefaultQRFMemorySoftLimitPercent applies a soft guardrail when overall memory usage crosses this percentage.
-	DefaultQRFMemorySoftLimitPercent = 80.0
+	DefaultQRFMemorySoftLimitPercent = 75.0
 	// DefaultQRFMemoryHardLimitPercent applies a hard guardrail when overall memory usage crosses this percentage.
-	DefaultQRFMemoryHardLimitPercent = 90.0
+	DefaultQRFMemoryHardLimitPercent = 85.0
 	// DefaultQRFMemoryStrictHeadroomPercent discounts this much usage when reclaimable cache is unknown.
 	DefaultQRFMemoryStrictHeadroomPercent = 15.0
 	// DefaultQRFMemorySoftLimitBytes is disabled by default; set explicitly to enforce a process RSS cap.
 	DefaultQRFMemorySoftLimitBytes = 0
 	// DefaultQRFMemoryHardLimitBytes is disabled by default; set explicitly to enforce a hard process RSS cap.
 	DefaultQRFMemoryHardLimitBytes = 0
+	// DefaultQRFSwapSoftLimitPercent disables swap-based QRF by default.
+	DefaultQRFSwapSoftLimitPercent = 0.0
+	// DefaultQRFSwapHardLimitPercent disables swap-based QRF by default.
+	DefaultQRFSwapHardLimitPercent = 0.0
+	// DefaultQRFCPUPercentSoftLimit applies a soft guardrail when CPU utilisation crosses this percentage.
+	DefaultQRFCPUPercentSoftLimit = 70.0
+	// DefaultQRFCPUPercentHardLimit applies a hard guardrail when CPU utilisation crosses this percentage.
+	DefaultQRFCPUPercentHardLimit = 85.0
 	// DefaultQRFLoadSoftLimitMultiplier is the baseline load-average multiplier that soft-arms the QRF.
 	DefaultQRFLoadSoftLimitMultiplier = 4.0
 	// DefaultQRFLoadHardLimitMultiplier is the load-average multiplier that fully engages the QRF.
@@ -179,36 +215,50 @@ func isValidJSONUtil(name string) bool {
 
 // Config captures the tunables for a lockd.Server instance.
 type Config struct {
-	Listen                string
-	ListenProto           string
-	MetricsListen         string
-	MetricsListenSet      bool
-	Store                 string
-	DefaultNamespace      string
-	JSONMaxBytes          int64
-	AttachmentMaxBytes    int64
-	JSONUtil              string
-	SpoolMemoryThreshold  int64
-	DiskRetention         time.Duration
-	DiskJanitorInterval   time.Duration
-	DiskQueueWatch        bool
-	DisableMemQueueWatch  bool
-	DefaultTTL            time.Duration
-	MaxTTL                time.Duration
-	AcquireBlock          time.Duration
-	SweeperInterval       time.Duration
-	TxnReplayInterval     time.Duration
-	IdleSweepGrace        time.Duration
-	IdleSweepOpDelay       time.Duration
-	IdleSweepMaxOps        int
-	IdleSweepMaxRuntime    time.Duration
-	DrainGrace            time.Duration
-	DrainGraceSet         bool
-	ShutdownTimeout       time.Duration
-	ShutdownTimeoutSet    bool
-	OTLPEndpoint          string
-	DisableHTTPTracing    bool
-	DisableStorageTracing bool
+	Listen                    string
+	ListenProto               string
+	MetricsListen             string
+	MetricsListenSet          bool
+	PprofListen               string
+	PprofListenSet            bool
+	EnableProfilingMetrics    bool
+	EnableProfilingMetricsSet bool
+	Store                     string
+	HAMode                    string
+	HALeaseTTL                time.Duration
+	DefaultNamespace          string
+	JSONMaxBytes              int64
+	AttachmentMaxBytes        int64
+	JSONUtil                  string
+	SpoolMemoryThreshold      int64
+	DiskRetention             time.Duration
+	DiskJanitorInterval       time.Duration
+	DiskQueueWatch            bool
+	DiskLockFileCacheSize     int
+	LogstoreCommitMaxOps      int
+	LogstoreSegmentSize       int64
+	DisableMemQueueWatch      bool
+	DefaultTTL                time.Duration
+	MaxTTL                    time.Duration
+	AcquireBlock              time.Duration
+	SweeperInterval           time.Duration
+	TxnReplayInterval         time.Duration
+	QueueDecisionCacheTTL     time.Duration
+	QueueDecisionMaxApply     int
+	QueueDecisionApplyTimeout time.Duration
+	StateCacheBytes           int64
+	StateCacheBytesSet        bool
+	IdleSweepGrace            time.Duration
+	IdleSweepOpDelay          time.Duration
+	IdleSweepMaxOps           int
+	IdleSweepMaxRuntime       time.Duration
+	DrainGrace                time.Duration
+	DrainGraceSet             bool
+	ShutdownTimeout           time.Duration
+	ShutdownTimeoutSet        bool
+	OTLPEndpoint              string
+	DisableHTTPTracing        bool
+	DisableStorageTracing     bool
 
 	// mTLS
 	DisableMTLS  bool
@@ -242,14 +292,15 @@ type Config struct {
 	DisableKryptoPool        bool
 
 	// Object-store options.
-	S3SSE             string
-	S3KMSKeyID        string
-	AWSKMSKeyID       string
-	S3MaxPartSize     int64
-	AWSRegion         string
-	S3AccessKeyID     string
-	S3SecretAccessKey string
-	S3SessionToken    string
+	S3SSE                      string
+	S3KMSKeyID                 string
+	AWSKMSKeyID                string
+	S3MaxPartSize              int64
+	S3SmallEncryptBufferBudget int64
+	AWSRegion                  string
+	S3AccessKeyID              string
+	S3SecretAccessKey          string
+	S3SessionToken             string
 
 	// Azure-specific options.
 	AzureAccount    string
@@ -268,21 +319,26 @@ type Config struct {
 	QueuePollInterval          time.Duration
 	QueuePollJitter            time.Duration
 	QueueResilientPollInterval time.Duration
+	QueueListPageSize          int
 
 	// Indexer tuning
 	IndexerFlushDocs        int
 	IndexerFlushInterval    time.Duration
 	IndexerFlushDocsSet     bool
 	IndexerFlushIntervalSet bool
+	// Query tuning
+	QueryDocPrefetch int
 
 	// Quick Reaction Force (perimeter defense) configuration.
-	QRFEnabled                     bool
+	QRFDisabled                    bool
 	QRFQueueSoftLimit              int64
 	QRFQueueHardLimit              int64
 	QRFQueueConsumerSoftLimit      int64
 	QRFQueueConsumerHardLimit      int64
 	QRFLockSoftLimit               int64
 	QRFLockHardLimit               int64
+	QRFQuerySoftLimit              int64
+	QRFQueryHardLimit              int64
 	QRFMemorySoftLimitBytes        uint64
 	QRFMemoryHardLimitBytes        uint64
 	QRFMemorySoftLimitPercent      float64
@@ -294,12 +350,15 @@ type Config struct {
 	QRFSwapHardLimitPercent        float64
 	QRFCPUPercentSoftLimit         float64
 	QRFCPUPercentHardLimit         float64
+	QRFCPUPercentSoftLimitSet      bool
+	QRFCPUPercentHardLimitSet      bool
 	QRFLoadSoftLimitMultiplier     float64
 	QRFLoadHardLimitMultiplier     float64
 	QRFRecoverySamples             int
-	QRFSoftRetryAfter              time.Duration
-	QRFEngagedRetryAfter           time.Duration
-	QRFRecoveryRetryAfter          time.Duration
+	QRFSoftDelay                   time.Duration
+	QRFEngagedDelay                time.Duration
+	QRFRecoveryDelay               time.Duration
+	QRFMaxWait                     time.Duration
 
 	// Local Security Force configuration.
 	LSFSampleInterval time.Duration
@@ -331,8 +390,28 @@ func (c *Config) Validate() error {
 	if !c.MetricsListenSet && c.MetricsListen == "" {
 		c.MetricsListen = DefaultMetricsListen
 	}
+	if !c.PprofListenSet && c.PprofListen == "" {
+		c.PprofListen = DefaultPprofListen
+	}
+	if c.EnableProfilingMetrics && strings.TrimSpace(c.MetricsListen) == "" {
+		return fmt.Errorf("config: profiling metrics require metrics-listen")
+	}
 	if c.Store == "" {
 		return fmt.Errorf("config: store is required")
+	}
+	c.HAMode = strings.ToLower(strings.TrimSpace(c.HAMode))
+	if c.HAMode == "" {
+		c.HAMode = DefaultHAMode
+	}
+	switch c.HAMode {
+	case "concurrent", "failover":
+	default:
+		return fmt.Errorf("config: ha mode must be %q or %q", "concurrent", "failover")
+	}
+	if c.HALeaseTTL == 0 {
+		c.HALeaseTTL = DefaultHALeaseTTL
+	} else if c.HALeaseTTL < 0 {
+		return fmt.Errorf("config: ha lease ttl must be >= 0")
 	}
 	ns, err := NormalizeNamespace(c.DefaultNamespace, DefaultNamespace)
 	if err != nil {
@@ -377,6 +456,28 @@ func (c *Config) Validate() error {
 		if c.SweeperInterval > 0 && c.SweeperInterval < c.TxnReplayInterval {
 			c.TxnReplayInterval = c.SweeperInterval
 		}
+	}
+	if c.QueueDecisionCacheTTL < 0 {
+		return fmt.Errorf("config: queue decision cache ttl must be >= 0")
+	}
+	if c.QueueDecisionCacheTTL == 0 {
+		c.QueueDecisionCacheTTL = DefaultQueueDecisionCacheTTL
+	}
+	if c.QueueDecisionMaxApply <= 0 {
+		c.QueueDecisionMaxApply = DefaultQueueDecisionMaxApply
+	}
+	if c.QueueDecisionApplyTimeout <= 0 {
+		c.QueueDecisionApplyTimeout = DefaultQueueDecisionApplyTimeout
+	}
+	if !c.StateCacheBytesSet {
+		if c.StateCacheBytes < 0 {
+			c.StateCacheBytes = 0
+		} else if c.StateCacheBytes == 0 {
+			c.StateCacheBytes = DefaultStateCacheBytes
+		}
+	}
+	if c.QueryDocPrefetch <= 0 {
+		c.QueryDocPrefetch = DefaultQueryDocPrefetch
 	}
 	if c.IdleSweepGrace <= 0 {
 		c.IdleSweepGrace = DefaultIdleSweepGrace
@@ -428,14 +529,29 @@ func (c *Config) Validate() error {
 			c.DiskJanitorInterval = time.Hour
 		}
 	}
+	if c.DiskLockFileCacheSize == 0 {
+		c.DiskLockFileCacheSize = DefaultDiskLockFileCacheSize
+	}
+	if c.LogstoreCommitMaxOps <= 0 {
+		c.LogstoreCommitMaxOps = DefaultLogstoreCommitMaxOps
+	}
+	if c.LogstoreSegmentSize <= 0 {
+		c.LogstoreSegmentSize = DefaultLogstoreSegmentSize
+	}
 	if c.S3MaxPartSize <= 0 {
 		c.S3MaxPartSize = DefaultS3MaxPartSize
+	}
+	if c.S3SmallEncryptBufferBudget <= 0 {
+		c.S3SmallEncryptBufferBudget = DefaultS3SmallEncryptBufferBudget
 	}
 	if c.QueueMaxConsumers <= 0 {
 		c.QueueMaxConsumers = DefaultQueueMaxConsumers()
 	}
 	if c.QueuePollInterval <= 0 {
 		c.QueuePollInterval = DefaultQueuePollInterval
+	}
+	if c.QueueListPageSize <= 0 {
+		c.QueueListPageSize = DefaultQueueListPageSize
 	}
 	if c.QueuePollJitter < 0 {
 		return fmt.Errorf("config: queue poll jitter must be >= 0")
@@ -576,6 +692,15 @@ func (c *Config) Validate() error {
 	if c.QRFLockHardLimit > 0 && (c.QRFLockSoftLimit == 0 || c.QRFLockSoftLimit > c.QRFLockHardLimit) {
 		c.QRFLockSoftLimit = c.QRFLockHardLimit
 	}
+	if c.QRFQuerySoftLimit < 0 {
+		return fmt.Errorf("config: qrf query soft limit must be >= 0")
+	}
+	if c.QRFQueryHardLimit < 0 {
+		return fmt.Errorf("config: qrf query hard limit must be >= 0")
+	}
+	if c.QRFQueryHardLimit > 0 && (c.QRFQuerySoftLimit == 0 || c.QRFQuerySoftLimit > c.QRFQueryHardLimit) {
+		c.QRFQuerySoftLimit = c.QRFQueryHardLimit
+	}
 	if c.QRFMemoryHardLimitPercent <= 0 {
 		c.QRFMemoryHardLimitPercent = DefaultQRFMemoryHardLimitPercent
 	}
@@ -596,6 +721,12 @@ func (c *Config) Validate() error {
 	}
 	if c.QRFCPUPercentHardLimit < 0 {
 		c.QRFCPUPercentHardLimit = 0
+	}
+	if !c.QRFCPUPercentSoftLimitSet {
+		c.QRFCPUPercentSoftLimit = DefaultQRFCPUPercentSoftLimit
+	}
+	if !c.QRFCPUPercentHardLimitSet {
+		c.QRFCPUPercentHardLimit = DefaultQRFCPUPercentHardLimit
 	}
 	if c.QRFCPUPercentHardLimit > 0 && (c.QRFCPUPercentSoftLimit == 0 || c.QRFCPUPercentSoftLimit > c.QRFCPUPercentHardLimit) {
 		c.QRFCPUPercentSoftLimit = c.QRFCPUPercentHardLimit
@@ -624,14 +755,17 @@ func (c *Config) Validate() error {
 	if c.QRFRecoverySamples <= 0 {
 		c.QRFRecoverySamples = DefaultQRFRecoverySamples
 	}
-	if c.QRFSoftRetryAfter <= 0 {
-		c.QRFSoftRetryAfter = DefaultQRFSoftRetryAfter
+	if c.QRFSoftDelay <= 0 {
+		c.QRFSoftDelay = DefaultQRFSoftDelay
 	}
-	if c.QRFEngagedRetryAfter <= 0 {
-		c.QRFEngagedRetryAfter = DefaultQRFEngagedRetryAfter
+	if c.QRFEngagedDelay <= 0 {
+		c.QRFEngagedDelay = DefaultQRFEngagedDelay
 	}
-	if c.QRFRecoveryRetryAfter <= 0 {
-		c.QRFRecoveryRetryAfter = DefaultQRFRecoveryRetryAfter
+	if c.QRFRecoveryDelay <= 0 {
+		c.QRFRecoveryDelay = DefaultQRFRecoveryDelay
+	}
+	if c.QRFMaxWait <= 0 {
+		c.QRFMaxWait = DefaultQRFMaxWait
 	}
 	requireBundle := c.MTLSEnabled() || c.StorageEncryptionEnabled()
 	if requireBundle {

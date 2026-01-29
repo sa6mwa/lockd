@@ -212,7 +212,7 @@ func syntheticStateRoundTrip(ctx context.Context, backend storage.Backend, crypt
 	}
 	meta.Version++
 	meta.UpdatedAtUnix = time.Now().Unix()
-	if _, err := backend.StoreMeta(ctx, namespace, key, meta, etag); err != nil {
+	if _, err = backend.StoreMeta(ctx, namespace, key, meta, etag); err != nil {
 		return fmt.Errorf("update diagnostics meta %q: %w", joinNamespace(namespace, key), err)
 	}
 	metaLoadedRes, err := backend.LoadMeta(ctx, namespace, key)
@@ -230,7 +230,14 @@ func syntheticStateRoundTrip(ctx context.Context, backend storage.Backend, crypt
 	if metaLoaded.StatePlaintextBytes > 0 {
 		stateCtx = storage.ContextWithStatePlaintextSize(stateCtx, metaLoaded.StatePlaintextBytes)
 	}
-	readRes, err := backend.ReadState(stateCtx, namespace, key)
+	if err := drainDiagnosticsState(stateCtx, namespace, key, metaLoaded.StateDescriptor, backend, crypto); err != nil {
+		return fmt.Errorf("consume diagnostics state %q: %w", joinNamespace(namespace, key), err)
+	}
+	return nil
+}
+
+func drainDiagnosticsState(ctx context.Context, namespace, key string, fallbackDescriptor []byte, backend storage.Backend, crypto *storage.Crypto) error {
+	readRes, err := backend.ReadState(ctx, namespace, key)
 	if err != nil {
 		return fmt.Errorf("read diagnostics state %q: %w", joinNamespace(namespace, key), err)
 	}
@@ -239,8 +246,8 @@ func syntheticStateRoundTrip(ctx context.Context, backend storage.Backend, crypt
 	var descriptor []byte
 	if info != nil && len(info.Descriptor) > 0 {
 		descriptor = append([]byte(nil), info.Descriptor...)
-	} else if len(metaLoaded.StateDescriptor) > 0 {
-		descriptor = append([]byte(nil), metaLoaded.StateDescriptor...)
+	} else if len(fallbackDescriptor) > 0 {
+		descriptor = append([]byte(nil), fallbackDescriptor...)
 	}
 	if crypto != nil && crypto.Enabled() {
 		contextID := storage.StateObjectContext(joinNamespace(namespace, key))
@@ -255,7 +262,10 @@ func syntheticStateRoundTrip(ctx context.Context, backend storage.Backend, crypt
 		_ = reader.Close()
 		return fmt.Errorf("consume diagnostics state %q: %w", joinNamespace(namespace, key), err)
 	}
-	return reader.Close()
+	if err := reader.Close(); err != nil {
+		return fmt.Errorf("close diagnostics state %q: %w", joinNamespace(namespace, key), err)
+	}
+	return nil
 }
 
 func verifyQueueEncryption(ctx context.Context, backend storage.Backend, crypto *storage.Crypto) error {

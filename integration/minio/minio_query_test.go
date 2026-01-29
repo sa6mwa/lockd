@@ -349,6 +349,7 @@ func TestMinioQueryTxnRecoveryRollbackPendingNamespaces(t *testing.T) {
 
 func TestMinioQueryTxnFanoutAcrossNodes(t *testing.T) {
 	cfg := minioQueryConfigWithSweeper(t, 2*time.Second)
+	cfg.HAMode = "concurrent"
 	bundlePath := cryptotest.SharedTCClientBundlePath(t)
 	if bundlePath == "" {
 		cfg.DisableMTLS = true
@@ -457,6 +458,7 @@ func TestMinioQueryTxnFanoutAcrossNodes(t *testing.T) {
 
 func TestMinioQueryTxnFanoutRollbackAcrossNodes(t *testing.T) {
 	cfg := minioQueryConfigWithSweeper(t, 2*time.Second)
+	cfg.HAMode = "concurrent"
 	bundlePath := cryptotest.SharedTCClientBundlePath(t)
 	if bundlePath == "" {
 		cfg.DisableMTLS = true
@@ -558,6 +560,7 @@ func TestMinioQueryTxnFanoutRollbackAcrossNodes(t *testing.T) {
 
 func TestMinioQueryTxnReplayAfterRestartAcrossNodes(t *testing.T) {
 	cfg := minioQueryConfigWithSweeper(t, time.Hour) // disable sweeper; explicit replay after restart
+	cfg.HAMode = "concurrent"
 	tsA := startMinioQueryServerWithConfig(t, cfg)
 	tsB := startMinioQueryServerWithConfig(t, cfg)
 

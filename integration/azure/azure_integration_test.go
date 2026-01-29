@@ -21,6 +21,7 @@ import (
 	lockdclient "pkt.systems/lockd/client"
 	azuretest "pkt.systems/lockd/integration/azuretest"
 	"pkt.systems/lockd/integration/internal/cryptotest"
+	"pkt.systems/lockd/integration/internal/hatest"
 	shutdowntest "pkt.systems/lockd/integration/internal/shutdowntest"
 	testlog "pkt.systems/lockd/integration/internal/testlog"
 	"pkt.systems/lockd/internal/uuidv7"
@@ -121,6 +122,40 @@ func TestAzureLockLifecycle(t *testing.T) {
 	}
 	if !releaseLease(t, ctx, second) {
 		t.Fatalf("expected release success")
+	}
+}
+
+func TestAzureAcquireNoWaitReturnsWaiting(t *testing.T) {
+	cfg := loadAzureConfig(t)
+	ensureAzureStoreReady(t, context.Background(), cfg)
+	ts := startAzureTestServer(t, cfg)
+
+	ctx := context.Background()
+	key := "azure-nowait-" + uuidv7.NewString()
+	t.Cleanup(func() { azuretest.CleanupKey(t, cfg, namespaces.Default, key) })
+	lease := acquireWithRetry(t, ctx, ts.Client, key, "holder", 30, lockdclient.BlockWaitForever)
+	t.Cleanup(func() { _ = lease.Release(ctx) })
+
+	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	_, err := ts.Client.Acquire(reqCtx, api.AcquireRequest{
+		Key:        key,
+		Owner:      "no-wait",
+		TTLSeconds: 30,
+		BlockSecs:  lockdclient.BlockNoWait,
+	})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatalf("expected no-wait acquire to fail")
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("expected no-wait acquire within 5s, got %s", elapsed)
+	}
+	var apiErr *lockdclient.APIError
+	if !errors.As(err, &apiErr) || apiErr.Response.ErrorCode != "waiting" {
+		t.Fatalf("expected waiting API error, got %v", err)
 	}
 }
 
@@ -713,15 +748,15 @@ func TestAzureAcquireForUpdateCallbackFailover(t *testing.T) {
 	key := "azure-forupdate-failover-" + uuidv7.NewString()
 	defer cleanupAzure(t, cfg, key)
 
-	seedClient := backup.Client
-	if seedClient == nil {
-		var err error
-		seedClient, err = backup.NewClient(lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)))
-		if err != nil {
-			t.Fatalf("seed client: %v", err)
-		}
+	activeServer, seedClient, err := hatest.FindActiveServer(ctx, primary, backup)
+	if err != nil {
+		t.Fatalf("find active server: %v", err)
 	}
 	t.Cleanup(func() { _ = seedClient.Close() })
+	standbyServer := backup
+	if activeServer == backup {
+		standbyServer = primary
+	}
 
 	seedLease, err := seedClient.Acquire(ctx, api.AcquireRequest{
 		Key:        key,
@@ -739,9 +774,15 @@ func TestAzureAcquireForUpdateCallbackFailover(t *testing.T) {
 		t.Fatalf("seed release: %v", err)
 	}
 
-	if err := primary.Stop(context.Background()); err != nil {
-		t.Fatalf("stop primary: %v", err)
+	if err := activeServer.Stop(context.Background()); err != nil {
+		t.Fatalf("stop active server: %v", err)
 	}
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := hatest.WaitForActive(waitCtx, standbyServer); err != nil {
+		waitCancel()
+		t.Fatalf("standby activation: %v", err)
+	}
+	waitCancel()
 
 	clientLogger, clientLogs := testlog.NewRecorder(t, pslog.TraceLevel)
 	clientOpts := []lockdclient.Option{
@@ -757,7 +798,7 @@ func TestAzureAcquireForUpdateCallbackFailover(t *testing.T) {
 		clientOpts = append(clientOpts, lockdclient.WithHTTPClient(httpClient))
 	}
 	failoverClient, err := lockdclient.NewWithEndpoints(
-		[]string{primary.URL(), backup.URL()},
+		[]string{activeServer.URL(), standbyServer.URL()},
 		clientOpts...,
 	)
 	if err != nil {
@@ -791,8 +832,13 @@ func TestAzureAcquireForUpdateCallbackFailover(t *testing.T) {
 		t.Fatalf("callback was not invoked")
 	}
 
-	verifier := acquireWithRetry(t, ctx, seedClient, key, "verifier", 45, lockdclient.BlockWaitForever)
-	finalState, _, _, err := getStateJSON(ctx, seedClient, key, verifier.LeaseID)
+	verifyClient, err := standbyServer.NewClient(lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)))
+	if err != nil {
+		t.Fatalf("verify client: %v", err)
+	}
+	t.Cleanup(func() { _ = verifyClient.Close() })
+	verifier := acquireWithRetry(t, ctx, verifyClient, key, "verifier", 45, lockdclient.BlockWaitForever)
+	finalState, _, _, err := getStateJSON(ctx, verifyClient, key, verifier.LeaseID)
 	if err != nil {
 		t.Fatalf("verify get_state: %v", err)
 	}
@@ -811,8 +857,8 @@ func TestAzureAcquireForUpdateCallbackFailover(t *testing.T) {
 
 	var sawError bool
 	var sawSuccess bool
-	primaryURL := primary.URL()
-	backupURL := backup.URL()
+	primaryURL := activeServer.URL()
+	backupURL := standbyServer.URL()
 	for _, entry := range clientLogs.Events() {
 		endpoint := testlog.GetStringField(entry, "endpoint")
 		switch entry.Message {
@@ -900,15 +946,15 @@ func TestAzureRemoveFailover(t *testing.T) {
 	key := "azure-remove-failover-" + uuidv7.NewString()
 	t.Cleanup(func() { cleanupAzure(t, cfg, key) })
 
-	seedClient := backup.Client
-	if seedClient == nil {
-		var err error
-		seedClient, err = backup.NewClient(lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)))
-		if err != nil {
-			t.Fatalf("seed client: %v", err)
-		}
+	activeServer, seedClient, err := hatest.FindActiveServer(ctx, primary, backup)
+	if err != nil {
+		t.Fatalf("find active server: %v", err)
 	}
-	defer seedClient.Close()
+	t.Cleanup(func() { _ = seedClient.Close() })
+	standby := backup
+	if activeServer == backup {
+		standby = primary
+	}
 
 	seedLease := acquireWithRetry(t, ctx, seedClient, key, "seed", 45, lockdclient.BlockWaitForever)
 	if err := seedLease.Save(ctx, map[string]any{"payload": "seed", "count": 1.0}); err != nil {
@@ -931,7 +977,7 @@ func TestAzureRemoveFailover(t *testing.T) {
 		clientOptions = append(clientOptions, lockdclient.WithHTTPClient(httpClient))
 	}
 	failoverClient, err := lockdclient.NewWithEndpoints(
-		[]string{primary.URL(), backup.URL()},
+		[]string{activeServer.URL(), standby.URL()},
 		clientOptions...,
 	)
 	if err != nil {
@@ -941,9 +987,15 @@ func TestAzureRemoveFailover(t *testing.T) {
 
 	lease := acquireWithRetry(t, ctx, failoverClient, key, "failover-remover", 45, lockdclient.BlockWaitForever)
 
-	if err := primary.Stop(context.Background()); err != nil {
-		t.Fatalf("stop primary: %v", err)
+	if err := activeServer.Stop(context.Background()); err != nil {
+		t.Fatalf("stop active server: %v", err)
 	}
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := hatest.WaitForActive(waitCtx, standby); err != nil {
+		waitCancel()
+		t.Fatalf("standby activation: %v", err)
+	}
+	waitCancel()
 
 	res, err := lease.Remove(ctx)
 	if err != nil {
@@ -954,8 +1006,13 @@ func TestAzureRemoveFailover(t *testing.T) {
 	}
 	releaseLease(t, ctx, lease)
 
-	verify := acquireWithRetry(t, ctx, seedClient, key, "failover-verify", 45, lockdclient.BlockWaitForever)
-	state, _, _, err := getStateJSON(ctx, seedClient, key, verify.LeaseID)
+	verifyClient, err := standby.NewClient(lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)))
+	if err != nil {
+		t.Fatalf("verify client: %v", err)
+	}
+	t.Cleanup(func() { _ = verifyClient.Close() })
+	verify := acquireWithRetry(t, ctx, verifyClient, key, "failover-verify", 45, lockdclient.BlockWaitForever)
+	state, _, _, err := getStateJSON(ctx, verifyClient, key, verify.LeaseID)
 	if err != nil {
 		t.Fatalf("verify get: %v", err)
 	}
@@ -964,7 +1021,7 @@ func TestAzureRemoveFailover(t *testing.T) {
 	}
 	releaseLease(t, ctx, verify)
 
-	assertAzureRemoveFailoverLogs(t, clientLogs, primary.URL(), backup.URL())
+	assertAzureRemoveFailoverLogs(t, clientLogs, activeServer.URL(), standby.URL())
 }
 
 func TestAzureRemoveCASMismatch(t *testing.T) {

@@ -2,6 +2,7 @@ package index
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -87,6 +88,17 @@ func (w *Writer) Insert(doc Document) error {
 			w.memtable.Add(field, term, doc.Key)
 		}
 	}
+	if doc.Meta != nil {
+		meta := DocumentMetadata{
+			StateETag:           doc.Meta.StateETag,
+			StatePlaintextBytes: doc.Meta.StatePlaintextBytes,
+			PublishedVersion:    doc.Meta.PublishedVersion,
+		}
+		if len(doc.Meta.StateDescriptor) > 0 {
+			meta.StateDescriptor = append([]byte(nil), doc.Meta.StateDescriptor...)
+		}
+		w.memtable.SetMeta(doc.Key, meta)
+	}
 	after := w.memtable.DocCount()
 	if before == 0 && after > 0 {
 		w.oldestPending.Store(w.clock.Now().UnixNano())
@@ -157,27 +169,46 @@ func (w *Writer) persistSegment(ctx context.Context, segment *Segment) (int64, e
 	if err != nil {
 		return 0, err
 	}
-	manifestRes, err := w.store.LoadManifest(ctx, w.cfg.Namespace)
-	if err != nil {
-		return 0, err
+	var lastErr error
+	for attempt := 0; attempt < manifestSaveMaxRetries; attempt++ {
+		manifestRes, err := w.store.LoadManifest(ctx, w.cfg.Namespace)
+		if err != nil {
+			return 0, err
+		}
+		manifest := manifestRes.Manifest
+		etag := manifestRes.ETag
+		if manifest != nil && manifest.Format == 0 {
+			manifest.Format = IndexFormatVersionV3
+		}
+		if manifest == nil || len(manifest.Shards) == 0 {
+			manifest = NewManifest()
+		}
+		shard := manifest.Shards[0]
+		if shard == nil {
+			shard = &Shard{ID: 0}
+			manifest.Shards[0] = shard
+		}
+		shard.Segments = append([]SegmentRef{{
+			ID:        segment.ID,
+			CreatedAt: segment.CreatedAt,
+			DocCount:  segment.DocCount(),
+		}}, shard.Segments...)
+		manifest.Seq++
+		manifest.UpdatedAt = segment.CreatedAt
+		if _, err = w.store.SaveManifest(ctx, w.cfg.Namespace, manifest, etag); err == nil {
+			lastErr = nil
+			break
+		}
+		lastErr = err
+		if !errors.Is(err, storage.ErrCASMismatch) {
+			return 0, err
+		}
+		if attempt+1 < manifestSaveMaxRetries {
+			w.clock.Sleep(manifestSaveRetryDelay)
+		}
 	}
-	manifest := manifestRes.Manifest
-	etag := manifestRes.ETag
-	shard := manifest.Shards[0]
-	if shard == nil {
-		shard = &Shard{ID: 0}
-		manifest.Shards[0] = shard
-	}
-	shard.Segments = append([]SegmentRef{{
-		ID:        segment.ID,
-		CreatedAt: segment.CreatedAt,
-		DocCount:  segment.DocCount(),
-	}}, shard.Segments...)
-	manifest.Seq++
-	manifest.UpdatedAt = segment.CreatedAt
-	_, err = w.store.SaveManifest(ctx, w.cfg.Namespace, manifest, etag)
-	if err != nil {
-		return 0, err
+	if lastErr != nil {
+		return 0, lastErr
 	}
 	return segmentBytes, nil
 }

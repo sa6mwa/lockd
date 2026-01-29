@@ -10,11 +10,13 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
@@ -115,12 +117,13 @@ func New(cfg Config) (*Store, error) {
 		client *azblob.Client
 		err    error
 	)
+	clientOpts := defaultClientOptions()
 	if cfg.SASToken != "" {
 		endpointWithSAS, serr := appendSASToken(endpoint, cfg.SASToken)
 		if serr != nil {
 			return nil, serr
 		}
-		client, err = azblob.NewClientWithNoCredential(endpointWithSAS, nil)
+		client, err = azblob.NewClientWithNoCredential(endpointWithSAS, clientOpts)
 	} else {
 		if cfg.AccountKey == "" {
 			return nil, fmt.Errorf("azure: account key or SAS token required")
@@ -129,7 +132,7 @@ func New(cfg Config) (*Store, error) {
 		if credErr != nil {
 			return nil, fmt.Errorf("azure: build credentials: %w", credErr)
 		}
-		client, err = azblob.NewClientWithSharedKeyCredential(endpoint, cred, nil)
+		client, err = azblob.NewClientWithSharedKeyCredential(endpoint, cred, clientOpts)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("azure: create client: %w", err)
@@ -151,6 +154,53 @@ func New(cfg Config) (*Store, error) {
 		prefix:    strings.Trim(cfg.Prefix, "/"),
 		crypto:    cfg.Crypto,
 	}, nil
+}
+
+func defaultClientOptions() *azblob.ClientOptions {
+	transport := defaultTransporter()
+	if transport == nil {
+		return nil
+	}
+	return &azblob.ClientOptions{
+		ClientOptions: azcore.ClientOptions{
+			Transport: transport,
+		},
+	}
+}
+
+type transportAdapter struct {
+	rt http.RoundTripper
+}
+
+func (t transportAdapter) Do(req *http.Request) (*http.Response, error) {
+	if t.rt == nil {
+		return http.DefaultTransport.RoundTrip(req)
+	}
+	return t.rt.RoundTrip(req)
+}
+
+func defaultTransporter() policy.Transporter {
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return transportAdapter{rt: http.DefaultTransport}
+	}
+	clone := base.Clone()
+	if clone.MaxIdleConns == 0 {
+		clone.MaxIdleConns = 256
+	}
+	if clone.MaxIdleConnsPerHost == 0 {
+		clone.MaxIdleConnsPerHost = 64
+	}
+	if clone.IdleConnTimeout == 0 {
+		clone.IdleConnTimeout = 90 * time.Second
+	}
+	if clone.TLSHandshakeTimeout == 0 {
+		clone.TLSHandshakeTimeout = 10 * time.Second
+	}
+	if clone.ExpectContinueTimeout == 0 {
+		clone.ExpectContinueTimeout = 1 * time.Second
+	}
+	return transportAdapter{rt: clone}
 }
 
 // Client exposes the underlying Azure Blob client (primarily for diagnostics).
@@ -189,7 +239,7 @@ func (s *Store) BackendHash(ctx context.Context) (string, error) {
 	container := strings.TrimSpace(s.container)
 	prefix := strings.Trim(s.prefix, "/")
 	desc := fmt.Sprintf("azure|endpoint=%s|container=%s|prefix=%s", endpoint, container, prefix)
-	result, err := storage.ResolveBackendHash(ctx, s, desc)
+	result, err := storage.ResolveBackendHash(ctx, s, desc, s.crypto)
 	return result.Hash, err
 }
 
@@ -407,7 +457,7 @@ func (s *Store) ListMetaKeys(ctx context.Context, namespace string) ([]string, e
 				continue
 			}
 			rel := strings.TrimPrefix(*item.Name, prefixValue)
-			if strings.HasPrefix(rel, "tmp/") || rel == "" {
+			if strings.HasPrefix(rel, "inflight/") || rel == "" {
 				continue
 			}
 			if !strings.HasSuffix(rel, ".pb") {
@@ -465,7 +515,8 @@ func (s *Store) ReadState(ctx context.Context, namespace, key string) (storage.R
 	if plain, ok := storage.StatePlaintextSizeFromContext(ctx); ok && plain > 0 {
 		info.Size = plain
 	}
-	objectCtx := storage.StateObjectContext(path.Join(namespace, key))
+	defaultCtx := storage.StateObjectContext(path.Join(namespace, key))
+	objectCtx := storage.StateObjectContextFromContext(ctx, defaultCtx)
 	if encrypted {
 		if len(descriptor) == 0 {
 			resp.Body.Close()
@@ -514,7 +565,8 @@ func (s *Store) WriteState(ctx context.Context, namespace, key string, body io.R
 	var descriptor []byte
 	var plainBytes atomic.Int64
 	var reader io.Reader
-	objectCtx := storage.StateObjectContext(path.Join(namespace, key))
+	defaultCtx := storage.StateObjectContext(path.Join(namespace, key))
+	objectCtx := storage.StateObjectContextFromContext(ctx, defaultCtx)
 	if encrypted {
 		uploadOpts.HTTPHeaders.BlobContentType = to.Ptr(storage.ContentTypeJSONEncrypted)
 		descFromCtx, ok := storage.StateDescriptorFromContext(ctx)
@@ -688,6 +740,54 @@ outer:
 		result.NextStartAfter = lastKey
 	}
 	return result, nil
+}
+
+// ListNamespaces enumerates namespaces stored under the configured prefix.
+func (s *Store) ListNamespaces(ctx context.Context) ([]string, error) {
+	if s == nil || s.client == nil {
+		return nil, storage.ErrNotImplemented
+	}
+	prefix := strings.Trim(s.prefix, "/")
+	if prefix != "" {
+		prefix += "/"
+	}
+	pager := s.client.NewListBlobsFlatPager(s.container, &azblob.ListBlobsFlatOptions{
+		Prefix: &prefix,
+	})
+	set := make(map[string]struct{})
+	for pager.More() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("azure: list namespaces: %w", err)
+		}
+		for _, item := range page.Segment.BlobItems {
+			if item.Name == nil {
+				continue
+			}
+			name := strings.TrimPrefix(*item.Name, prefix)
+			if name == "" {
+				continue
+			}
+			parts := strings.SplitN(name, "/", 2)
+			if len(parts) == 0 {
+				continue
+			}
+			ns := strings.TrimSpace(parts[0])
+			if ns == "" {
+				continue
+			}
+			set[ns] = struct{}{}
+		}
+	}
+	names := make([]string, 0, len(set))
+	for name := range set {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 // GetObject opens the blob referenced by key within the namespace.

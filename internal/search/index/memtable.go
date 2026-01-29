@@ -11,11 +11,16 @@ import (
 type MemTable struct {
 	fields  map[string]map[string][]string
 	docKeys map[string]struct{}
+	docMeta map[string]DocumentMetadata
 }
 
 // NewMemTable returns an empty memtable.
 func NewMemTable() *MemTable {
-	return &MemTable{fields: make(map[string]map[string][]string), docKeys: make(map[string]struct{})}
+	return &MemTable{
+		fields:  make(map[string]map[string][]string),
+		docKeys: make(map[string]struct{}),
+		docMeta: make(map[string]DocumentMetadata),
+	}
 }
 
 // Add records a posting for field/term → key.
@@ -36,6 +41,7 @@ func (m *MemTable) Add(field, term, key string) {
 func (m *MemTable) Reset() {
 	m.fields = make(map[string]map[string][]string)
 	m.docKeys = make(map[string]struct{})
+	m.docMeta = make(map[string]DocumentMetadata)
 }
 
 // Flush converts the current contents into a Segment and resets the memtable.
@@ -49,6 +55,16 @@ func (m *MemTable) Flush(now time.Time) *Segment {
 		}
 		segment.Fields[field] = block
 	}
+	if len(m.docMeta) > 0 {
+		segment.DocMeta = make(map[string]DocumentMetadata, len(m.docMeta))
+		for key, meta := range m.docMeta {
+			cloned := meta
+			if len(meta.StateDescriptor) > 0 {
+				cloned.StateDescriptor = append([]byte(nil), meta.StateDescriptor...)
+			}
+			segment.DocMeta[key] = cloned
+		}
+	}
 	m.Reset()
 	return segment
 }
@@ -56,6 +72,14 @@ func (m *MemTable) Flush(now time.Time) *Segment {
 // DocCount returns the unique document count currently buffered.
 func (m *MemTable) DocCount() uint64 {
 	return uint64(len(m.docKeys))
+}
+
+// SetMeta stores document metadata for the given key.
+func (m *MemTable) SetMeta(key string, meta DocumentMetadata) {
+	if key == "" {
+		return
+	}
+	m.docMeta[key] = meta
 }
 
 func dedupeAndSort(keys []string) []string {

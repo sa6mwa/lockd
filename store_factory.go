@@ -13,6 +13,7 @@ import (
 	minioCredentials "github.com/minio/minio-go/v7/pkg/credentials"
 
 	"pkt.systems/lockd/internal/storage"
+	awsstore "pkt.systems/lockd/internal/storage/aws"
 	azurestore "pkt.systems/lockd/internal/storage/azure"
 	"pkt.systems/lockd/internal/storage/disk"
 	"pkt.systems/lockd/internal/storage/memory"
@@ -29,6 +30,12 @@ type CredentialSummary struct {
 // S3ConfigResult captures S3 configuration and selected credentials.
 type S3ConfigResult struct {
 	Config      s3.Config
+	Credentials CredentialSummary
+}
+
+// AWSConfigResult captures AWS configuration and selected credentials.
+type AWSConfigResult struct {
+	Config      awsstore.Config
 	Credentials CredentialSummary
 }
 
@@ -70,7 +77,7 @@ func openBackend(cfg Config, crypto *storage.Crypto) (storage.Backend, error) {
 			return nil, err
 		}
 		awsResult.Config.Crypto = crypto
-		backend, err := s3.New(awsResult.Config)
+		backend, err := awsstore.New(awsResult.Config)
 		if err != nil {
 			return nil, err
 		}
@@ -102,6 +109,12 @@ func openBackend(cfg Config, crypto *storage.Crypto) (storage.Backend, error) {
 	default:
 		return nil, fmt.Errorf("store scheme %q not supported yet", u.Scheme)
 	}
+}
+
+// OpenBackend constructs a storage backend from the supplied config and crypto.
+// Intended for server-side tooling; callers must Close() the returned backend.
+func OpenBackend(cfg Config, crypto *storage.Crypto) (storage.Backend, error) {
+	return openBackend(cfg, crypto)
 }
 
 // BuildGenericS3Config parses s3:// URLs that target generic S3-compatible services (MinIO, etc.).
@@ -166,32 +179,33 @@ func BuildGenericS3Config(cfg Config) (S3ConfigResult, error) {
 	}
 	return S3ConfigResult{
 		Config: s3.Config{
-			Endpoint:       endpoint,
-			Bucket:         bucket,
-			Prefix:         prefix,
-			Insecure:       !secure,
-			ForcePathStyle: forcePath,
-			PartSize:       cfg.S3MaxPartSize,
-			ServerSideEnc:  cfg.S3SSE,
-			KMSKeyID:       kmsKey,
-			CustomCreds:    cred,
+			Endpoint:                 endpoint,
+			Bucket:                   bucket,
+			Prefix:                   prefix,
+			Insecure:                 !secure,
+			ForcePathStyle:           forcePath,
+			PartSize:                 cfg.S3MaxPartSize,
+			SmallEncryptBufferBudget: cfg.S3SmallEncryptBufferBudget,
+			ServerSideEnc:            cfg.S3SSE,
+			KMSKeyID:                 kmsKey,
+			CustomCreds:              cred,
 		},
 		Credentials: summary,
 	}, nil
 }
 
 // BuildAWSConfig parses aws:// URLs that target AWS S3 with regional configuration.
-func BuildAWSConfig(cfg Config) (S3ConfigResult, error) {
+func BuildAWSConfig(cfg Config) (AWSConfigResult, error) {
 	u, err := url.Parse(cfg.Store)
 	if err != nil {
-		return S3ConfigResult{}, fmt.Errorf("parse store URL: %w", err)
+		return AWSConfigResult{}, fmt.Errorf("parse store URL: %w", err)
 	}
 	if u.Scheme != "aws" {
-		return S3ConfigResult{}, fmt.Errorf("store scheme %q not supported", u.Scheme)
+		return AWSConfigResult{}, fmt.Errorf("store scheme %q not supported", u.Scheme)
 	}
 	bucket := strings.TrimSpace(u.Host)
 	if bucket == "" {
-		return S3ConfigResult{}, fmt.Errorf("aws store missing bucket (expected aws://bucket[/prefix])")
+		return AWSConfigResult{}, fmt.Errorf("aws store missing bucket (expected aws://bucket[/prefix])")
 	}
 	prefix := strings.Trim(strings.TrimPrefix(u.Path, "/"), "/")
 	region := strings.TrimSpace(cfg.AWSRegion)
@@ -200,7 +214,7 @@ func BuildAWSConfig(cfg Config) (S3ConfigResult, error) {
 		region = v
 	}
 	if region == "" {
-		return S3ConfigResult{}, fmt.Errorf("aws store requires region (set --aws-region or LOCKD_AWS_REGION)")
+		return AWSConfigResult{}, fmt.Errorf("aws store requires region (set --aws-region or LOCKD_AWS_REGION)")
 	}
 	secure := true
 	if v := query.Get("insecure"); v != "" {
@@ -219,19 +233,18 @@ func BuildAWSConfig(cfg Config) (S3ConfigResult, error) {
 	if endpoint == "" {
 		endpoint = fmt.Sprintf("s3.%s.amazonaws.com", region)
 	}
-	cred, summary := resolveAWSCredentials()
-	return S3ConfigResult{
-		Config: s3.Config{
-			Endpoint:       endpoint,
-			Region:         region,
-			Bucket:         bucket,
-			Prefix:         prefix,
-			Insecure:       !secure,
-			ForcePathStyle: false,
-			PartSize:       cfg.S3MaxPartSize,
-			ServerSideEnc:  cfg.S3SSE,
-			KMSKeyID:       kmsKey,
-			CustomCreds:    cred,
+	summary := resolveAWSCredentials()
+	return AWSConfigResult{
+		Config: awsstore.Config{
+			Endpoint:                 endpoint,
+			Region:                   region,
+			Bucket:                   bucket,
+			Prefix:                   prefix,
+			Insecure:                 !secure,
+			PartSize:                 cfg.S3MaxPartSize,
+			SmallEncryptBufferBudget: cfg.S3SmallEncryptBufferBudget,
+			ServerSideEnc:            cfg.S3SSE,
+			KMSKeyID:                 kmsKey,
 		},
 		Credentials: summary,
 	}, nil
@@ -271,7 +284,7 @@ func resolveGenericS3Credentials(cfg Config) (*minioCredentials.Credentials, Cre
 	return minioCredentials.NewStaticV4(accessKey, secretKey, sessionToken), summary, nil
 }
 
-func resolveAWSCredentials() (*minioCredentials.Credentials, CredentialSummary) {
+func resolveAWSCredentials() CredentialSummary {
 	summary := CredentialSummary{}
 	if access := strings.TrimSpace(os.Getenv("AWS_ACCESS_KEY_ID")); access != "" {
 		summary.AccessKey = access
@@ -282,23 +295,25 @@ func resolveAWSCredentials() (*minioCredentials.Credentials, CredentialSummary) 
 	} else {
 		summary.Source = "auto"
 	}
-	return nil, summary
+	return summary
 }
 
 func ensureObjectStoreReady(ctx context.Context, backend storage.Backend) error {
-	s3store, ok := backend.(*s3.Store)
+	type bucketChecker interface {
+		BucketExists(ctx context.Context) (bool, error)
+	}
+	checker, ok := backend.(bucketChecker)
 	if !ok {
 		return nil
 	}
-	cfg := s3store.Config()
 	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	exists, err := s3store.Client().BucketExists(timeoutCtx, cfg.Bucket)
+	exists, err := checker.BucketExists(timeoutCtx)
 	if err != nil {
 		return fmt.Errorf("object store connectivity check failed: %w", err)
 	}
 	if !exists {
-		return fmt.Errorf("object store bucket %s does not exist", cfg.Bucket)
+		return fmt.Errorf("object store bucket does not exist")
 	}
 	return nil
 }
@@ -396,10 +411,13 @@ func BuildDiskConfig(cfg Config) (DiskConfigResult, error) {
 	}
 	root := filepath.Clean(pathPart)
 	cfgDisk := disk.Config{
-		Root:            root,
-		Retention:       cfg.DiskRetention,
-		JanitorInterval: cfg.DiskJanitorInterval,
-		QueueWatch:      cfg.DiskQueueWatch,
+		Root:                 root,
+		Retention:            cfg.DiskRetention,
+		JanitorInterval:      cfg.DiskJanitorInterval,
+		QueueWatch:           cfg.DiskQueueWatch,
+		LockFileCacheSize:    cfg.DiskLockFileCacheSize,
+		LogstoreCommitMaxOps: cfg.LogstoreCommitMaxOps,
+		LogstoreSegmentSize:  cfg.LogstoreSegmentSize,
 	}
 	return DiskConfigResult{Config: cfgDisk, Root: root}, nil
 }

@@ -40,7 +40,7 @@ func PayloadCopy(w io.Writer, d *QueueDelivery) error {
 	}
 	buf := payloadCopyBufPool.Get().([]byte)
 	_, err := io.CopyBuffer(w, d.Payload, buf)
-	payloadCopyBufPool.Put(buf)
+	payloadCopyBufPool.Put(buf) //nolint:staticcheck // avoid extra allocation by pooling value slice
 	return err
 }
 

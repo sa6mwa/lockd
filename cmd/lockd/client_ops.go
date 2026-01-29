@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"pkt.systems/lockd/lql"
+	"pkt.systems/lql"
 
 	"gopkg.in/yaml.v2"
 )

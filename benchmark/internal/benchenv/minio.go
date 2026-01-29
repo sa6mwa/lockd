@@ -3,7 +3,6 @@ package benchenv
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -37,6 +36,7 @@ func EnsureMinioCredentials(tb testing.TB) {
 // LoadMinioConfig builds the MinIO config used by benchmarks.
 func LoadMinioConfig(tb testing.TB) lockd.Config {
 	tb.Helper()
+	LoadEnvFile(tb, ".env.minio")
 	EnsureMinioCredentials(tb)
 	store := strings.TrimSpace(os.Getenv("LOCKD_STORE"))
 	if store == "" {
@@ -57,21 +57,7 @@ func LoadMinioConfig(tb testing.TB) lockd.Config {
 
 func withBenchmarkPrefix(tb testing.TB, store string) string {
 	tb.Helper()
-	u, err := url.Parse(store)
-	if err != nil {
-		tb.Fatalf("parse LOCKD_STORE: %v", err)
-	}
-	path := strings.Trim(strings.TrimPrefix(u.Path, "/"), "/")
-	if path == "" {
-		return store
-	}
-	parts := strings.SplitN(path, "/", 2)
-	if len(parts) == 2 && strings.TrimSpace(parts[1]) != "" {
-		return store
-	}
-	prefix := fmt.Sprintf("bench-%d", time.Now().UnixNano())
-	u.Path = "/" + parts[0] + "/" + prefix
-	return u.String()
+	return ensureBenchmarkPrefix(tb, store)
 }
 
 // EnsureMinioBucket makes sure the configured bucket exists.

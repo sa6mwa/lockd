@@ -38,16 +38,15 @@ func runDiskQueueTxnReplayWakeAcrossNodes(t *testing.T, notify bool) {
 		cfg.DisableMTLS = true
 	}
 
-	serverTC := startDiskQueueServer(t, cfg)
-	serverRM := startDiskQueueServer(t, cfg)
+	server := startDiskQueueServer(t, cfg)
 	restart := func(t testing.TB) *lockd.TestServer {
 		return startDiskQueueServer(t, cfg)
 	}
 
 	queuetestutil.RunQueueTxnDecisionReplayWakeScenario(
 		t,
-		serverTC,
-		serverRM,
+		server,
+		server,
 		restart,
 		queuetestutil.ReplayDeadlineForStore(cfg.Store),
 		2*time.Second,

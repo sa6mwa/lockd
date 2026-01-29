@@ -1,0 +1,19 @@
+# full baseline (disk, ha failover), excluding mixed
+
+go run ./cmd/lockd-bench -mode load -backend disk --ha failover --log-level error
+
+go run ./cmd/lockd-bench -mode update -backend disk --ha failover --log-level error
+
+go run ./cmd/lockd-bench -mode acquire -backend disk --ha failover --log-level error
+
+go run ./cmd/lockd-bench -workload lock -backend disk --ha failover --log-level error
+
+go run ./cmd/lockd-bench -workload attachments -backend disk --ha failover --log-level error
+
+go run ./cmd/lockd-bench -workload queue -backend disk --ha failover --log-level error
+
+go run ./cmd/lockd-bench -workload public-read -backend disk --ha failover --log-level error
+
+go run ./cmd/lockd-bench -workload query-index -backend disk --ha failover --log-level error
+
+go run ./cmd/lockd-bench -workload query-scan -backend disk --ha failover --log-level error

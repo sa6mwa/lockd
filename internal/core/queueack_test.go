@@ -7,8 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rs/xid"
 	"pkt.systems/lockd/internal/clock"
 	"pkt.systems/lockd/internal/queue"
+	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/memory"
 	"pkt.systems/pslog"
 )
@@ -111,6 +113,115 @@ func TestQueueAckReleasesLease(t *testing.T) {
 	}
 	if meta.Lease != nil {
 		t.Fatalf("expected lease cleared after ack")
+	}
+}
+
+func TestQueueAckAllowsDocLeaseWhenMetaMissing(t *testing.T) {
+	ctx := context.Background()
+	coreSvc, qsvc := newQueueCoreForTest(t)
+
+	msg, err := qsvc.Enqueue(ctx, "default", "q0", strings.NewReader("hi"), queue.EnqueueOptions{})
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	docRes, err := qsvc.GetMessage(ctx, "default", "q0", msg.ID)
+	if err != nil {
+		t.Fatalf("get message: %v", err)
+	}
+	doc := docRes.Document
+	metaETag := docRes.ETag
+	leaseID := xid.New().String()
+	txnID := xid.New().String()
+	doc.LeaseID = leaseID
+	doc.LeaseFencingToken = 1
+	doc.LeaseTxnID = txnID
+	metaETag, err = qsvc.SaveMessageDocument(ctx, "default", "q0", doc.ID, doc, metaETag)
+	if err != nil {
+		t.Fatalf("save message: %v", err)
+	}
+
+	res, err := coreSvc.Ack(ctx, QueueAckCommand{
+		Namespace:    "default",
+		Queue:        "q0",
+		MessageID:    msg.ID,
+		MetaETag:     metaETag,
+		LeaseID:      leaseID,
+		TxnID:        txnID,
+		FencingToken: doc.LeaseFencingToken,
+		Stateful:     false,
+	})
+	if err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+	if !res.Acked {
+		t.Fatalf("expected acked")
+	}
+	if _, err := qsvc.GetMessage(ctx, "default", "q0", msg.ID); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected message removed, got %v", err)
+	}
+	relKey := relativeKey("default", msgLeaseKey(t, "default", "q0", doc.ID))
+	if _, err := coreSvc.store.LoadMeta(ctx, "default", relKey); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected no lease meta, got %v", err)
+	}
+}
+
+func TestQueueAckRetriesOnCASMismatch(t *testing.T) {
+	ctx := context.Background()
+	coreSvc, qsvc := newQueueCoreForTest(t)
+
+	msg, err := qsvc.Enqueue(ctx, "default", "q-retry", strings.NewReader("hello"), queue.EnqueueOptions{})
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	acq, err := coreSvc.Acquire(ctx, AcquireCommand{
+		Namespace:    "default",
+		Key:          relativeKey("default", msgLeaseKey(t, "default", "q-retry", msg.ID)),
+		Owner:        "worker",
+		TTLSeconds:   30,
+		BlockSeconds: apiBlockNoWait,
+	})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	docRes, err := qsvc.GetMessage(ctx, "default", "q-retry", msg.ID)
+	if err != nil {
+		t.Fatalf("get message: %v", err)
+	}
+	doc := docRes.Document
+	metaETag := docRes.ETag
+	doc.LeaseID = acq.LeaseID
+	doc.LeaseFencingToken = acq.FencingToken
+	doc.LeaseTxnID = acq.TxnID
+	doc.NotVisibleUntil = time.Now().UTC().Add(30 * time.Second)
+	metaETag, err = qsvc.SaveMessageDocument(ctx, "default", "q-retry", doc.ID, doc, metaETag)
+	if err != nil {
+		t.Fatalf("save message: %v", err)
+	}
+	staleMetaETag := metaETag
+	doc.Attributes = map[string]any{"retry": true}
+	_, err = qsvc.SaveMessageDocument(ctx, "default", "q-retry", doc.ID, doc, metaETag)
+	if err != nil {
+		t.Fatalf("save message retry: %v", err)
+	}
+
+	res, err := coreSvc.Ack(ctx, QueueAckCommand{
+		Namespace:    "default",
+		Queue:        "q-retry",
+		MessageID:    msg.ID,
+		MetaETag:     staleMetaETag,
+		LeaseID:      acq.LeaseID,
+		TxnID:        acq.TxnID,
+		FencingToken: acq.FencingToken,
+		Stateful:     false,
+	})
+	if err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+	if !res.Acked {
+		t.Fatalf("expected acked after cas retry")
+	}
+	if _, err := qsvc.GetMessage(ctx, "default", "q-retry", msg.ID); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected message removed after ack, got %v", err)
 	}
 }
 
@@ -285,12 +396,14 @@ func TestQueueAckUsesTCDecider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
+	txnID := xid.New().String()
 	acq, err := coreSvc.Acquire(ctx, AcquireCommand{
 		Namespace:    "default",
 		Key:          relativeKey("default", msgLeaseKey(t, "default", "q7", msg.ID)),
 		Owner:        "worker",
 		TTLSeconds:   30,
 		BlockSeconds: apiBlockNoWait,
+		TxnID:        txnID,
 	})
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
@@ -320,7 +433,7 @@ func TestQueueAckUsesTCDecider(t *testing.T) {
 		MessageID:    msg.ID,
 		MetaETag:     metaETag,
 		LeaseID:      acq.LeaseID,
-		TxnID:        acq.TxnID,
+		TxnID:        txnID,
 		FencingToken: acq.FencingToken,
 		Stateful:     false,
 	})
@@ -357,12 +470,14 @@ func TestQueueNackUsesTCDecider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
+	txnID := xid.New().String()
 	acq, err := coreSvc.Acquire(ctx, AcquireCommand{
 		Namespace:    "default",
 		Key:          relativeKey("default", msgLeaseKey(t, "default", "q8", msg.ID)),
 		Owner:        "worker",
 		TTLSeconds:   30,
 		BlockSeconds: apiBlockNoWait,
+		TxnID:        txnID,
 	})
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
@@ -392,7 +507,7 @@ func TestQueueNackUsesTCDecider(t *testing.T) {
 		MessageID:    msg.ID,
 		MetaETag:     metaETag,
 		LeaseID:      acq.LeaseID,
-		TxnID:        acq.TxnID,
+		TxnID:        txnID,
 		FencingToken: acq.FencingToken,
 		Delay:        0,
 	})

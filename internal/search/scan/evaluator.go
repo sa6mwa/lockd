@@ -25,14 +25,6 @@ func (e evaluator) matches(doc map[string]any) bool {
 }
 
 func matchSelector(sel api.Selector, doc map[string]any) bool {
-	if len(sel.Or) > 0 {
-		for _, branch := range sel.Or {
-			if matchSelector(branch, doc) {
-				return true
-			}
-		}
-		return false
-	}
 	if sel.Not != nil && matchSelector(*sel.Not, doc) {
 		return false
 	}
@@ -56,7 +48,15 @@ func matchSelector(sel api.Selector, doc map[string]any) bool {
 			return false
 		}
 	}
-	return true
+	if len(sel.Or) == 0 {
+		return true
+	}
+	for _, branch := range sel.Or {
+		if matchSelector(branch, doc) {
+			return true
+		}
+	}
+	return false
 }
 
 func matchEq(term *api.Term, doc map[string]any) bool {

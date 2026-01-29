@@ -27,6 +27,7 @@ func runMemQueueTxnFanoutAcrossNodes(t *testing.T, mode memQueueMode) {
 
 	backend := memorybackend.New()
 	cfg := buildMemQueueConfig(t, mode.queueWatch)
+	cfg.HAMode = "concurrent"
 	bundlePath := cryptotest.SharedTCClientBundlePath(t)
 	if bundlePath == "" {
 		cfg.DisableMTLS = true

@@ -1,6 +1,8 @@
 package qrf
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -17,9 +19,9 @@ func TestControllerEngageAndRecover(t *testing.T) {
 		MemorySoftLimitBytes: 1 << 62,
 		MemoryHardLimitBytes: 1 << 63,
 		RecoverySamples:      2,
-		SoftRetryAfter:       50 * time.Millisecond,
-		EngagedRetryAfter:    200 * time.Millisecond,
-		RecoveryRetryAfter:   100 * time.Millisecond,
+		SoftDelay:            50 * time.Millisecond,
+		EngagedDelay:         200 * time.Millisecond,
+		RecoveryDelay:        100 * time.Millisecond,
 		Logger:               pslog.NoopLogger(),
 	})
 
@@ -84,15 +86,68 @@ func TestControllerEngageAndRecover(t *testing.T) {
 	}
 }
 
+func TestWaitHonorsMaxWait(t *testing.T) {
+	ctrl := NewController(Config{
+		Enabled:             true,
+		CPUPercentSoftLimit: 80,
+		CPUPercentHardLimit: 90,
+		EngagedDelay:        50 * time.Millisecond,
+		SoftDelay:           10 * time.Millisecond,
+		RecoveryDelay:       10 * time.Millisecond,
+		MaxWait:             5 * time.Millisecond,
+		Logger:              pslog.NoopLogger(),
+	})
+	ctrl.Observe(Snapshot{
+		SystemCPUPercent: 95,
+		CollectedAt:      time.Now(),
+	})
+	start := time.Now()
+	err := ctrl.Wait(context.Background(), KindLock)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected wait error")
+	}
+	var waitErr *WaitError
+	if !errors.As(err, &waitErr) {
+		t.Fatalf("expected WaitError, got %T", err)
+	}
+	if elapsed < 4*time.Millisecond {
+		t.Fatalf("expected wait to last at least max wait, got %s", elapsed)
+	}
+}
+
+func TestWaitRespectsContextDeadline(t *testing.T) {
+	ctrl := NewController(Config{
+		Enabled:             true,
+		CPUPercentSoftLimit: 80,
+		CPUPercentHardLimit: 90,
+		EngagedDelay:        50 * time.Millisecond,
+		SoftDelay:           10 * time.Millisecond,
+		RecoveryDelay:       10 * time.Millisecond,
+		MaxWait:             20 * time.Millisecond,
+		Logger:              pslog.NoopLogger(),
+	})
+	ctrl.Observe(Snapshot{
+		SystemCPUPercent: 95,
+		CollectedAt:      time.Now(),
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Millisecond)
+	defer cancel()
+	err := ctrl.Wait(ctx, KindQuery)
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context deadline exceeded, got %v", err)
+	}
+}
+
 func TestConsumerLimitThrottlingBehaviour(t *testing.T) {
 	ctrl := NewController(Config{
 		Enabled:                true,
 		QueueConsumerSoftLimit: 10,
 		QueueConsumerHardLimit: 12,
 		RecoverySamples:        1,
-		SoftRetryAfter:         25 * time.Millisecond,
-		EngagedRetryAfter:      150 * time.Millisecond,
-		RecoveryRetryAfter:     75 * time.Millisecond,
+		SoftDelay:              25 * time.Millisecond,
+		EngagedDelay:           150 * time.Millisecond,
+		RecoveryDelay:          75 * time.Millisecond,
 		Logger:                 pslog.NoopLogger(),
 	})
 
@@ -144,9 +199,9 @@ func TestControllerDisengageStopsQueueThrottling(t *testing.T) {
 		QueueSoftLimit:          4,
 		QueueHardLimit:          8,
 		RecoverySamples:         2,
-		SoftRetryAfter:          50 * time.Millisecond,
-		EngagedRetryAfter:       200 * time.Millisecond,
-		RecoveryRetryAfter:      100 * time.Millisecond,
+		SoftDelay:               50 * time.Millisecond,
+		EngagedDelay:            200 * time.Millisecond,
+		RecoveryDelay:           100 * time.Millisecond,
 		Logger:                  pslog.NoopLogger(),
 		LoadSoftLimitMultiplier: 0,
 		LoadHardLimitMultiplier: 0,
@@ -174,7 +229,7 @@ func TestControllerDisengageStopsQueueThrottling(t *testing.T) {
 	if got := ctrl.State(); got != StateEngaged {
 		t.Fatalf("expected engaged state after hard breach, got %s", got)
 	}
-	if dec := ctrl.Decide(KindQueueProducer); !dec.Throttle || dec.State != StateEngaged || dec.RetryAfter <= 0 {
+	if dec := ctrl.Decide(KindQueueProducer); !dec.Throttle || dec.State != StateEngaged || dec.Delay <= 0 {
 		t.Fatalf("expected producers to be throttled aggressively while engaged, got %+v", dec)
 	}
 
@@ -193,8 +248,8 @@ func TestControllerDisengageStopsQueueThrottling(t *testing.T) {
 	if got := ctrl.State(); got != StateRecovery {
 		t.Fatalf("expected transition to recovery after healthy samples, got %s", got)
 	}
-	if dec := ctrl.Decide(KindQueueProducer); !dec.Throttle || dec.State != StateRecovery {
-		t.Fatalf("expected producers to remain throttled during recovery, got %+v", dec)
+	if dec := ctrl.Decide(KindQueueProducer); dec.Throttle {
+		t.Fatalf("expected producers to proceed during recovery once queue pressure clears, got %+v", dec)
 	}
 
 	// Step 4: continue observing healthy metrics until fully disengaged.
@@ -218,6 +273,8 @@ func TestControllerSoftArm(t *testing.T) {
 		QueueHardLimit:       10,
 		LockSoftLimit:        4,
 		LockHardLimit:        10,
+		QuerySoftLimit:       4,
+		QueryHardLimit:       10,
 		MemorySoftLimitBytes: 1 << 62,
 		MemoryHardLimitBytes: 1 << 63,
 		RecoverySamples:      1,
@@ -249,16 +306,82 @@ func TestControllerSoftArm(t *testing.T) {
 	}
 }
 
+func TestQueryThrottlingPrecision(t *testing.T) {
+	ctrl := NewController(Config{
+		Enabled:         true,
+		QuerySoftLimit:  4,
+		QueryHardLimit:  8,
+		LockSoftLimit:   4,
+		LockHardLimit:   8,
+		RecoverySamples: 1,
+		Logger:          pslog.NoopLogger(),
+	})
+
+	ctrl.Observe(Snapshot{
+		QueryInflight:   4,
+		LockInflight:    1,
+		CollectedAt:     time.Now(),
+		RSSBytes:        1 << 40,
+		SystemLoad1:     0.1,
+		Load1Baseline:   0.1,
+		Load1Multiplier: 1,
+	})
+
+	if got := ctrl.State(); got != StateSoftArm {
+		t.Fatalf("expected soft arm on query inflight, got %s", got)
+	}
+	if dec := ctrl.Decide(KindQuery); !dec.Throttle || dec.State != StateSoftArm {
+		t.Fatalf("expected query to be throttled while soft-armed, got %+v", dec)
+	}
+	if dec := ctrl.Decide(KindLock); dec.Throttle {
+		t.Fatalf("expected lock to pass while query inflight is the only breach, got %+v", dec)
+	}
+}
+
+func TestGlobalPressureTargetsDominantKind(t *testing.T) {
+	ctrl := NewController(Config{
+		Enabled:                 true,
+		MemorySoftLimitBytes:    1024,
+		MemoryHardLimitBytes:    2048,
+		RecoverySamples:         1,
+		SoftDelay:               50 * time.Millisecond,
+		EngagedDelay:            200 * time.Millisecond,
+		RecoveryDelay:           100 * time.Millisecond,
+		Logger:                  pslog.NoopLogger(),
+		LoadSoftLimitMultiplier: 0,
+		LoadHardLimitMultiplier: 0,
+	})
+
+	ctrl.Observe(Snapshot{
+		QueryInflight:   12,
+		LockInflight:    2,
+		RSSBytes:        4096,
+		CollectedAt:     time.Now(),
+		Load1Baseline:   0.1,
+		Load1Multiplier: 1,
+	})
+
+	if got := ctrl.State(); got != StateSoftArm && got != StateEngaged {
+		t.Fatalf("expected armed state under memory pressure, got %s", got)
+	}
+	if dec := ctrl.Decide(KindQuery); !dec.Throttle {
+		t.Fatalf("expected dominant query to be throttled under global pressure, got %+v", dec)
+	}
+	if dec := ctrl.Decide(KindLock); dec.Throttle {
+		t.Fatalf("expected lock to pass when queries dominate global pressure, got %+v", dec)
+	}
+}
+
 func TestConsumerBiasDuringEngaged(t *testing.T) {
 	ctrl := NewController(Config{
-		Enabled:            true,
-		QueueSoftLimit:     8,
-		QueueHardLimit:     12,
-		RecoverySamples:    1,
-		SoftRetryAfter:     50 * time.Millisecond,
-		EngagedRetryAfter:  200 * time.Millisecond,
-		RecoveryRetryAfter: 100 * time.Millisecond,
-		Logger:             pslog.NoopLogger(),
+		Enabled:         true,
+		QueueSoftLimit:  8,
+		QueueHardLimit:  12,
+		RecoverySamples: 1,
+		SoftDelay:       50 * time.Millisecond,
+		EngagedDelay:    200 * time.Millisecond,
+		RecoveryDelay:   100 * time.Millisecond,
+		Logger:          pslog.NoopLogger(),
 	})
 
 	ctrl.Observe(Snapshot{

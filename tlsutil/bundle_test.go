@@ -95,7 +95,7 @@ func TestLoadBundle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load bundle: %v", err)
 	}
-	if loaded.CAPool == nil || len(loaded.CAPool.Subjects()) == 0 {
+	if loaded.CAPool == nil || len(loaded.CAPool.Subjects()) == 0 { //nolint:staticcheck // Subjects is deprecated but sufficient for test signal.
 		t.Fatal("expected CA pool populated")
 	}
 	if len(loaded.ServerCertificate.Certificate) == 0 {

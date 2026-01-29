@@ -23,6 +23,7 @@ import (
 	"pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/integration/internal/cryptotest"
+	"pkt.systems/lockd/integration/internal/hatest"
 	shutdowntest "pkt.systems/lockd/integration/internal/shutdowntest"
 	testlog "pkt.systems/lockd/integration/internal/testlog"
 	memorybackend "pkt.systems/lockd/internal/storage/memory"
@@ -67,6 +68,38 @@ func TestMemLockLifecycle(t *testing.T) {
 	ctx := context.Background()
 	key := "mem-lifecycle-" + uuidv7.NewString()
 	runLifecycleTest(t, ctx, cli, key, "mem-worker")
+}
+
+func TestMemAcquireNoWaitReturnsWaiting(t *testing.T) {
+	cfg := buildMemConfig(t)
+	cli := startMemServer(t, cfg)
+
+	ctx := context.Background()
+	key := "mem-nowait-" + uuidv7.NewString()
+	lease := acquireWithRetry(t, ctx, cli, key, "holder", 30, lockdclient.BlockWaitForever)
+	t.Cleanup(func() { _ = releaseLease(t, ctx, lease) })
+
+	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	_, err := cli.Acquire(reqCtx, api.AcquireRequest{
+		Key:        key,
+		Owner:      "no-wait",
+		TTLSeconds: 30,
+		BlockSecs:  lockdclient.BlockNoWait,
+	})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatalf("expected no-wait acquire to fail")
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("expected no-wait acquire within 5s, got %s", elapsed)
+	}
+	var apiErr *lockdclient.APIError
+	if !errors.As(err, &apiErr) || apiErr.Response.ErrorCode != "waiting" {
+		t.Fatalf("expected waiting API error, got %v", err)
+	}
 }
 
 func TestMemAttachmentsLifecycle(t *testing.T) {
@@ -473,6 +506,7 @@ func TestMemRemoveMultiServer(t *testing.T) {
 
 	backend := memorybackend.New()
 	cfg := buildMemConfig(t)
+	cfg.HAMode = "concurrent"
 
 	primary := startMemTestServerWithBackend(t, cfg, backend)
 	secondary := startMemTestServerWithBackend(t, cfg, backend)
@@ -629,7 +663,14 @@ func TestMemRemoveFailoverMultiServer(t *testing.T) {
 
 	key := "mem-remove-failover-" + uuidv7.NewString()
 
-	seed := directMemClient(t, primary)
+	activeServer, seed, err := hatest.FindActiveServer(ctx, primary, secondary)
+	if err != nil {
+		t.Fatalf("find active server: %v", err)
+	}
+	standbyServer := secondary
+	if activeServer == secondary {
+		standbyServer = primary
+	}
 	t.Cleanup(func() { _ = seed.Close() })
 
 	seedLease, err := seed.Acquire(ctx, api.AcquireRequest{
@@ -659,15 +700,21 @@ func TestMemRemoveFailoverMultiServer(t *testing.T) {
 		httpClient := cryptotest.RequireMTLSHTTPClient(t, sharedCreds)
 		clientOptions = append(clientOptions, lockdclient.WithHTTPClient(httpClient))
 	}
-	failoverCli, err := lockdclient.NewWithEndpoints([]string{primary.URL(), secondary.URL()}, clientOptions...)
+	failoverCli, err := lockdclient.NewWithEndpoints([]string{activeServer.URL(), standbyServer.URL()}, clientOptions...)
 	if err != nil {
 		t.Fatalf("failover client: %v", err)
 	}
 	t.Cleanup(func() { _ = failoverCli.Close() })
 
-	if err := primary.Server.Shutdown(context.Background()); err != nil {
-		t.Fatalf("shutdown primary: %v", err)
+	if err := activeServer.Server.Shutdown(context.Background()); err != nil {
+		t.Fatalf("shutdown active server: %v", err)
 	}
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 12*time.Second)
+	if err := hatest.WaitForActive(waitCtx, standbyServer); err != nil {
+		waitCancel()
+		t.Fatalf("standby activation: %v", err)
+	}
+	waitCancel()
 
 	err = failoverCli.AcquireForUpdate(ctx, api.AcquireRequest{
 		Key:        key,
@@ -682,7 +729,7 @@ func TestMemRemoveFailoverMultiServer(t *testing.T) {
 		t.Fatalf("failover remove: %v", err)
 	}
 
-	assertRemoveFailoverLogs(t, recorder, primary.URL(), secondary.URL())
+	assertRemoveFailoverLogs(t, recorder, activeServer.URL(), standbyServer.URL())
 }
 
 func TestMemAutoKeyAcquireForUpdate(t *testing.T) {
@@ -871,6 +918,7 @@ func TestMemAcquireForUpdateCallbackFailoverMultiServer(t *testing.T) {
 func TestMemMultiReplica(t *testing.T) {
 	backend := memorybackend.New()
 	cfg := buildMemConfig(t)
+	cfg.HAMode = "concurrent"
 
 	primary := startMemTestServerWithBackend(t, cfg, backend)
 	secondary := startMemTestServerWithBackend(t, cfg, backend)
@@ -961,7 +1009,14 @@ func runMemAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase failo
 	failoverBlob := strings.Repeat("mem-failover-", 32768)
 	key := fmt.Sprintf("mem-multi-%s-%s", phase.String(), uuidv7.NewString())
 
-	seedCli := directMemClient(t, backup)
+	activeServer, seedCli, err := hatest.FindActiveServer(ctx, primary, backup)
+	if err != nil {
+		t.Fatalf("find active server: %v", err)
+	}
+	standbyServer := backup
+	if activeServer == backup {
+		standbyServer = primary
+	}
 	t.Cleanup(func() { _ = seedCli.Close() })
 
 	seedLease, err := seedCli.Acquire(ctx, api.AcquireRequest{
@@ -996,7 +1051,7 @@ func runMemAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase failo
 		failoverOptions = append(failoverOptions, lockdclient.WithHTTPClient(httpClient))
 	}
 	failoverClient, err := lockdclient.NewWithEndpoints(
-		[]string{primary.URL(), backup.URL()},
+		[]string{activeServer.URL(), standbyServer.URL()},
 		failoverOptions...,
 	)
 	if err != nil {
@@ -1004,14 +1059,27 @@ func runMemAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase failo
 	}
 	t.Cleanup(func() { _ = failoverClient.Close() })
 
-	var shutdownOnce sync.Once
-	var shutdownErr error
+	var (
+		shutdownOnce   sync.Once
+		shutdownErr    error
+		shutdownCtx    context.Context
+		shutdownCancel context.CancelFunc
+	)
 	triggerFailover := func() error {
 		shutdownOnce.Do(func() {
-			shutdownErr = primary.Server.Shutdown(context.Background())
+			shutdownCtx, shutdownCancel = context.WithTimeout(context.Background(), 12*time.Second)
+			shutdownErr = activeServer.Server.ShutdownWithOptions(shutdownCtx,
+				lockd.WithDrainLeases(8*time.Second),
+				lockd.WithShutdownTimeout(10*time.Second),
+			)
 		})
 		return shutdownErr
 	}
+	t.Cleanup(func() {
+		if shutdownCancel != nil {
+			shutdownCancel()
+		}
+	})
 
 	handlerCalled := false
 	err = failoverClient.AcquireForUpdate(ctx, api.AcquireRequest{
@@ -1068,9 +1136,9 @@ func runMemAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase failo
 		t.Fatalf("handler never called")
 	}
 
-	result := recordFailoverLogs(t, clientLogs, primary.URL(), backup.URL())
-	if result.AlternateEndpoint != backup.URL() {
-		t.Fatalf("expected failover to backup %q, got %+v", backup.URL(), result)
+	result := recordFailoverLogs(t, clientLogs, activeServer.URL(), standbyServer.URL())
+	if result.AlternateEndpoint != standbyServer.URL() {
+		t.Fatalf("expected failover to standby %q, got %+v", standbyServer.URL(), result)
 	}
 	if conflictObserved {
 		if result.AlternateStatus != http.StatusConflict {
@@ -1091,6 +1159,7 @@ func buildMemConfig(tb testing.TB) lockd.Config {
 		MaxTTL:          2 * time.Minute,
 		AcquireBlock:    10 * time.Second,
 		SweeperInterval: 2 * time.Second,
+		HAMode:          "failover",
 	}
 	cfg.DisableMemQueueWatch = false
 	cryptotest.MaybeEnableStorageEncryption(tb, &cfg)
@@ -1442,22 +1511,32 @@ func recordFailoverLogs(t testing.TB, rec *testlog.Recorder, primary, backup str
 		t.Fatalf("expected HTTP error against primary %q; logs:\n%s", primary, rec.Summary())
 	}
 
-	successEntry, ok := rec.FirstAfter(errorEntry.Timestamp, func(e testlog.Entry) bool {
-		if e.Message != successMsg {
-			return false
+	var status int
+	var seen []int
+	found := false
+	for _, entry := range rec.Events() {
+		if entry.Timestamp.Before(errorEntry.Timestamp) {
+			continue
 		}
-		return testlog.GetStringField(e, "endpoint") == backup
-	})
-	if !ok {
-		t.Fatalf("expected HTTP success against backup %q; logs:\n%s", backup, rec.Summary())
+		if entry.Message != successMsg {
+			continue
+		}
+		if testlog.GetStringField(entry, "endpoint") != backup {
+			continue
+		}
+		entryStatus, ok := testlog.GetIntField(entry, "status")
+		if !ok {
+			continue
+		}
+		seen = append(seen, entryStatus)
+		if entryStatus == http.StatusOK || entryStatus == http.StatusConflict {
+			status = entryStatus
+			found = true
+			break
+		}
 	}
-
-	status, ok := testlog.GetIntField(successEntry, "status")
-	if !ok {
-		t.Fatalf("%s missing status; logs:\n%s", successMsg, rec.Summary())
-	}
-	if status != http.StatusOK && status != http.StatusConflict {
-		t.Fatalf("unexpected status %d on backup %q; logs:\n%s", status, backup, rec.Summary())
+	if !found {
+		t.Fatalf("expected HTTP 200/409 against backup %q; observed %v\nlogs:\n%s", backup, seen, rec.Summary())
 	}
 
 	return failoverLogResult{

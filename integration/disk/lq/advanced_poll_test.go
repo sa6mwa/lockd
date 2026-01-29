@@ -16,6 +16,7 @@ import (
 	"pkt.systems/lockd"
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/integration/internal/cryptotest"
+	"pkt.systems/lockd/integration/internal/hatest"
 	queuetestutil "pkt.systems/lockd/integration/queue/testutil"
 	"pkt.systems/lockd/internal/qrf"
 	"pkt.systems/pslog"
@@ -240,10 +241,18 @@ func runDiskQueueMultiServerRouting(t *testing.T) {
 	queue := queuetestutil.QueueName("disk-routing")
 	payload := []byte("shared-disk-backend")
 
-	queuetestutil.MustEnqueueBytes(t, serverA.Client, queue, payload)
+	activeCtx, cancelActive := context.WithTimeout(context.Background(), 5*time.Second)
+	_, activeClient, err := hatest.FindActiveServer(activeCtx, serverA, serverB)
+	cancelActive()
+	if err != nil {
+		t.Fatalf("find active server: %v", err)
+	}
+	t.Cleanup(func() { _ = activeClient.Close() })
+
+	queuetestutil.MustEnqueueBytes(t, activeClient, queue, payload)
 
 	owner := queuetestutil.QueueOwner("consumer-b")
-	msg := queuetestutil.MustDequeueMessage(t, serverB.Client, queue, owner, 1, 4*time.Second)
+	msg := queuetestutil.MustDequeueMessage(t, activeClient, queue, owner, 1, 4*time.Second)
 	body := queuetestutil.ReadMessagePayload(t, msg)
 	if !bytes.Equal(body, payload) {
 		t.Fatalf("unexpected payload: got %q want %q", string(body), string(payload))
@@ -255,7 +264,7 @@ func runDiskQueueMultiServerRouting(t *testing.T) {
 	}
 	ackCancel()
 
-	queuetestutil.EnsureQueueEmpty(t, serverA.Client, queue)
+	queuetestutil.EnsureQueueEmpty(t, activeClient, queue)
 }
 
 func runDiskQueueMultiServerFailoverClient(t *testing.T) {
@@ -277,9 +286,25 @@ func runDiskQueueMultiServerFailoverClient(t *testing.T) {
 	serverB := startDiskQueueServer(t, cfg, cryptotest.SharedMTLSOptions(t)...)
 
 	queue := queuetestutil.QueueName("disk-failover")
-	queuetestutil.MustEnqueueBytes(t, serverA.Client, queue, []byte("failover-payload"))
+	activeCtx, cancelActive := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelActive()
+	activeServer, activeClient, err := hatest.FindActiveServer(activeCtx, serverA, serverB)
+	if err != nil {
+		t.Fatalf("find active server: %v", err)
+	}
+	t.Cleanup(func() { _ = activeClient.Close() })
+	standbyServer := serverB
+	if activeServer == serverB {
+		standbyServer = serverA
+	}
+	standbyClient, err := standbyServer.NewClient()
+	if err != nil {
+		t.Fatalf("standby client: %v", err)
+	}
+	t.Cleanup(func() { _ = standbyClient.Close() })
 
-	endpoints := []string{serverA.URL(), serverB.URL()}
+	queuetestutil.MustEnqueueBytes(t, activeClient, queue, []byte("failover-payload"))
+
 	capture := queuetestutil.NewLogCapture(t)
 	clientOptions := []lockdclient.Option{
 		lockdclient.WithEndpointShuffle(false),
@@ -289,18 +314,24 @@ func runDiskQueueMultiServerFailoverClient(t *testing.T) {
 		httpClient := cryptotest.RequireMTLSHTTPClient(t, sharedCreds)
 		clientOptions = append(clientOptions, lockdclient.WithHTTPClient(httpClient))
 	}
-	failoverClient, err := lockdclient.NewWithEndpoints(endpoints, clientOptions...)
+	failoverClient, err := lockdclient.NewWithEndpoints([]string{activeServer.URL(), standbyServer.URL()}, clientOptions...)
 	if err != nil {
 		t.Fatalf("new failover client: %v", err)
 	}
 	t.Cleanup(func() { _ = failoverClient.Close() })
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	if err := serverA.Stop(shutdownCtx); err != nil {
+	if err := activeServer.Stop(shutdownCtx); err != nil {
 		shutdownCancel()
 		t.Fatalf("stop serverA: %v", err)
 	}
 	shutdownCancel()
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 12*time.Second)
+	if err := hatest.WaitForActive(waitCtx, standbyServer); err != nil {
+		waitCancel()
+		t.Fatalf("standby activation: %v", err)
+	}
+	waitCancel()
 
 	owner := queuetestutil.QueueOwner("failover-consumer")
 	dequeueCtx, dequeueCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -324,7 +355,7 @@ func runDiskQueueMultiServerFailoverClient(t *testing.T) {
 	}
 	ackCancel()
 
-	queuetestutil.EnsureQueueEmpty(t, serverB.Client, queue)
+	queuetestutil.EnsureQueueEmpty(t, standbyClient, queue)
 }
 
 func runDiskQueueHighFanInFanOutSingleServer(t *testing.T) {
@@ -346,10 +377,10 @@ func runDiskQueueHighFanInFanOutSingleServer(t *testing.T) {
 		ResilientInterval: 250 * time.Millisecond,
 	})
 
-	logToTesting := false
+	logToTesting := true
 	capture := queuetestutil.NewLogCaptureWithOptions(t, queuetestutil.LogCaptureOptions{
-		MaxEntries:   2000,
-		Prefixes:     []string{"lockd.qrf", "lockd.lsf"},
+		MaxEntries:   5000,
+		Prefixes:     []string{"lockd.qrf", "lockd.lsf", "queue.ack.error"},
 		LogLevel:     pslog.InfoLevel,
 		LogToTesting: &logToTesting,
 	})

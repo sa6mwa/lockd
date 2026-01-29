@@ -1,11 +1,13 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"path"
 	"time"
 
 	"pkt.systems/lockd/internal/storage"
@@ -13,6 +15,9 @@ import (
 
 // Describe returns metadata for a key.
 func (s *Service) Describe(ctx context.Context, cmd DescribeCommand) (*DescribeResult, error) {
+	if err := s.ensureNodeActive(); err != nil {
+		return nil, err
+	}
 	namespace, err := s.resolveNamespace(cmd.Namespace)
 	if err != nil {
 		return nil, Failure{Code: "invalid_namespace", Detail: err.Error(), HTTPStatus: http.StatusBadRequest}
@@ -48,13 +53,15 @@ func (s *Service) Describe(ctx context.Context, cmd DescribeCommand) (*DescribeR
 
 // Get streams state for a key. Public reads skip lease validation but require published state.
 func (s *Service) Get(ctx context.Context, cmd GetCommand) (*GetResult, error) {
-	if err := s.maybeThrottleLock(); err != nil {
+	if err := s.maybeThrottleLock(ctx); err != nil {
 		return nil, err
 	}
 	finish := s.beginLockOp()
 	defer finish()
 
-	s.maybeReplayTxnRecords(ctx)
+	if !s.maybeReplayTxnRecordsInline(ctx) {
+		s.maybeReplayTxnRecords(ctx)
+	}
 
 	namespace, err := s.resolveNamespace(cmd.Namespace)
 	if err != nil {
@@ -121,7 +128,13 @@ func (s *Service) Get(ctx context.Context, cmd GetCommand) (*GetResult, error) {
 		if s.staging == nil {
 			return nil, Failure{Code: "staging_unavailable", Detail: "staging backend missing", HTTPStatus: http.StatusServiceUnavailable}
 		}
-		stateRes, err := s.staging.LoadStagedState(ctx, namespace, relKey, meta.StagedTxnID)
+		stagedCtx := ctx
+		if s.crypto == nil || !s.crypto.Enabled() || len(meta.StagedStateDescriptor) == 0 {
+			stagedCtx = storage.ContextWithStateObjectContext(ctx, storage.StateObjectContext(path.Join(namespace, relKey)))
+		} else if _, err := s.crypto.MaterialFromDescriptor(storage.StateObjectContext(path.Join(namespace, relKey)), meta.StagedStateDescriptor); err == nil {
+			stagedCtx = storage.ContextWithStateObjectContext(ctx, storage.StateObjectContext(path.Join(namespace, relKey)))
+		}
+		stateRes, err := s.staging.LoadStagedState(stagedCtx, namespace, relKey, meta.StagedTxnID)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
 				return nil, Failure{Code: "staged_state_missing", Detail: "staged state missing", HTTPStatus: http.StatusNotFound}
@@ -161,7 +174,7 @@ func (s *Service) Get(ctx context.Context, cmd GetCommand) (*GetResult, error) {
 	if meta.StatePlaintextBytes > 0 {
 		stateCtx = storage.ContextWithStatePlaintextSize(stateCtx, meta.StatePlaintextBytes)
 	}
-	reader, info, err := s.readStateWithWarmup(stateCtx, namespace, storageKey, expectState)
+	reader, info, err := s.readStateWithWarmup(stateCtx, namespace, storageKey, meta.StateETag, meta.StatePlaintextBytes, expectState)
 	if errors.Is(err, storage.ErrNotFound) {
 		return &GetResult{NoContent: true, Public: publicRead, Meta: meta, PublishedVersion: publishedVersion}, nil
 	}
@@ -177,13 +190,24 @@ func (s *Service) Get(ctx context.Context, cmd GetCommand) (*GetResult, error) {
 	}, nil
 }
 
-func (s *Service) readStateWithWarmup(ctx context.Context, namespace, key string, expectState bool) (io.ReadCloser, *storage.StateInfo, error) {
+func (s *Service) readStateWithWarmup(ctx context.Context, namespace, key string, stateETag string, stateSize int64, expectState bool) (io.ReadCloser, *storage.StateInfo, error) {
 	relKey := relativeKey(namespace, key)
+	cacheKey := ""
+	if s.stateCache != nil && stateETag != "" {
+		cacheKey = namespace + "|" + relKey + "|" + stateETag
+		if data, ok := s.stateCache.get(cacheKey); ok {
+			info := &storage.StateInfo{
+				Size: int64(len(data)),
+				ETag: stateETag,
+			}
+			return io.NopCloser(bytes.NewReader(data)), info, nil
+		}
+	}
 	result, err := s.store.ReadState(ctx, namespace, relKey)
 	reader := result.Reader
 	info := result.Info
 	if err == nil || !expectState || !errors.Is(err, storage.ErrNotFound) {
-		return reader, info, err
+		return s.maybeCacheState(reader, info, cacheKey, stateETag, stateSize, err)
 	}
 	attemptLimit := s.stateWarmup.Attempts
 	delay := s.stateWarmup.Initial
@@ -199,10 +223,37 @@ func (s *Service) readStateWithWarmup(ctx context.Context, namespace, key string
 		reader = result.Reader
 		info = result.Info
 		if err == nil || !errors.Is(err, storage.ErrNotFound) {
-			return reader, info, err
+			return s.maybeCacheState(reader, info, cacheKey, stateETag, stateSize, err)
 		}
 	}
 	return reader, info, err
+}
+
+func (s *Service) maybeCacheState(reader io.ReadCloser, info *storage.StateInfo, cacheKey, stateETag string, stateSize int64, err error) (io.ReadCloser, *storage.StateInfo, error) {
+	if err != nil || reader == nil || s.stateCache == nil || cacheKey == "" {
+		return reader, info, err
+	}
+	size := stateSize
+	if size <= 0 && info != nil {
+		size = info.Size
+	}
+	if size <= 0 || size > s.stateCache.maxBytes {
+		return reader, info, err
+	}
+	data, readErr := io.ReadAll(reader)
+	reader.Close()
+	if readErr != nil {
+		return nil, nil, readErr
+	}
+	s.stateCache.put(cacheKey, data)
+	outInfo := &storage.StateInfo{Size: int64(len(data)), ETag: stateETag}
+	if info != nil {
+		cloned := *info
+		cloned.Size = int64(len(data))
+		cloned.ETag = stateETag
+		outInfo = &cloned
+	}
+	return io.NopCloser(bytes.NewReader(data)), outInfo, nil
 }
 
 func (s *Service) waitWithContext(ctx context.Context, delay time.Duration) error {

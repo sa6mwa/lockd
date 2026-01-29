@@ -220,7 +220,7 @@ func (c *Coordinator) Decide(ctx context.Context, rec core.TxnRecord) (core.TxnS
 		return state, fanoutErr
 	}
 	if c.logger != nil {
-		c.logger.Info("txn.tc.fanout.complete",
+		c.logger.Debug("txn.tc.fanout.complete",
 			"txn_id", decided.TxnID,
 			"state", state,
 			"backend_groups", len(groups),
@@ -326,6 +326,10 @@ func (c *Coordinator) applyWithRetry(ctx context.Context, endpoint, txnID string
 			c.metrics.recordFanoutAttempt(ctx, state, backendHash)
 		}
 		err := c.applyOnce(ctx, endpoint, txnID, state, term, backendHash, participants, expiresAt)
+		var conflict *txnConflictError
+		if errors.As(err, &conflict) {
+			return nil
+		}
 		if err == nil {
 			return nil
 		}
@@ -419,6 +423,9 @@ func (c *Coordinator) applyOnce(ctx context.Context, endpoint, txnID string, sta
 		if errResp.ErrorCode == "txn_backend_mismatch" {
 			return &backendMismatchError{Endpoint: endpoint, TargetBackendHash: backendHash}
 		}
+		if errResp.ErrorCode == "txn_conflict" {
+			return &txnConflictError{Endpoint: endpoint}
+		}
 		return fmt.Errorf("status %d: %s", resp.StatusCode, errResp.ErrorCode)
 	}
 	return fmt.Errorf("status %d", resp.StatusCode)
@@ -461,6 +468,17 @@ func (e *backendMismatchError) Error() string {
 		return fmt.Sprintf("backend mismatch for %s", e.TargetBackendHash)
 	}
 	return fmt.Sprintf("backend mismatch for %s on %s", e.TargetBackendHash, e.Endpoint)
+}
+
+type txnConflictError struct {
+	Endpoint string
+}
+
+func (e *txnConflictError) Error() string {
+	if e == nil || e.Endpoint == "" {
+		return "transaction conflict"
+	}
+	return "transaction conflict: " + e.Endpoint
 }
 
 func toAPIParticipants(list []core.TxnParticipant) []api.TxnParticipant {

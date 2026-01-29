@@ -69,7 +69,7 @@ func (p *payloadSpool) Write(data []byte) (int, error) {
 		}
 	}
 	if p.pooled && p.buf != nil {
-		payloadBufferPool.Put(p.buf[:0])
+		payloadBufferPool.Put(p.buf[:0]) //nolint:staticcheck // avoid extra allocation by pooling value slice
 		p.pooled = false
 	}
 	n, err := f.Write(data)
@@ -107,7 +107,7 @@ func (p *payloadSpool) Close() error {
 		return err
 	}
 	if p.pooled && p.buf != nil {
-		payloadBufferPool.Put(p.buf[:0])
+		payloadBufferPool.Put(p.buf[:0]) //nolint:staticcheck // avoid extra allocation by pooling value slice
 		p.pooled = false
 	}
 	p.buf = nil

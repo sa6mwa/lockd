@@ -19,6 +19,7 @@ func TestAWSQueueTxnDecision(t *testing.T) {
 		PollJitter:        0,
 		ResilientInterval: 500 * time.Millisecond,
 	})
+	cfg.HAMode = "concurrent"
 	ts := startAWSQueueServer(t, cfg)
 
 	t.Run("Commit", func(t *testing.T) {
@@ -68,6 +69,7 @@ func TestAWSQueueTxnFanoutAcrossNodes(t *testing.T) {
 		PollJitter:        0,
 		ResilientInterval: 500 * time.Millisecond,
 	})
+	cfg.HAMode = "concurrent"
 	bundlePath := cryptotest.SharedTCClientBundlePath(t)
 	if bundlePath == "" {
 		cfg.DisableMTLS = true
@@ -116,6 +118,7 @@ func TestAWSQueueTxnRestartAcrossNodes(t *testing.T) {
 		PollJitter:        0,
 		ResilientInterval: 500 * time.Millisecond,
 	})
+	cfg.HAMode = "concurrent"
 	bundlePath := cryptotest.SharedTCClientBundlePath(t)
 	if bundlePath == "" {
 		cfg.DisableMTLS = true

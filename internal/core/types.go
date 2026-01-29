@@ -298,6 +298,25 @@ type QueryResult struct {
 	Cursor    string
 	IndexSeq  uint64
 	Metadata  map[string]string
+	DocMeta   map[string]search.DocMetadata
+}
+
+// IndexRebuildOptions controls index rebuild behavior.
+type IndexRebuildOptions struct {
+	Reset        bool
+	Cleanup      bool
+	CleanupDelay time.Duration
+	Mode         string // "async" or "wait"
+}
+
+// IndexRebuildResult reports the outcome of an index rebuild request.
+type IndexRebuildResult struct {
+	Namespace string
+	Mode      string
+	Accepted  bool
+	Rebuilt   bool
+	Pending   bool
+	IndexSeq  uint64
 }
 
 // DocumentSink receives streaming documents for query return=documents.

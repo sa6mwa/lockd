@@ -14,6 +14,7 @@ import (
 	"time"
 
 	lockdclient "pkt.systems/lockd/client"
+	"pkt.systems/lockd/integration/internal/hatest"
 	queuetestutil "pkt.systems/lockd/integration/queue/testutil"
 	"pkt.systems/lockd/internal/qrf"
 	"pkt.systems/pslog"
@@ -38,6 +39,7 @@ func runAWSQueueMultiConsumerContention(t *testing.T) {
 		ResilientInterval: 1500 * time.Millisecond,
 		SweeperInterval:   5 * time.Minute,
 	})
+	cfg.HAMode = "concurrent"
 
 	ts := startAWSQueueServer(t, cfg)
 	cli := ts.Client
@@ -294,10 +296,10 @@ func runAWSQueueMultiServerRouting(t *testing.T) {
 		ResilientInterval: 1500 * time.Millisecond,
 		SweeperInterval:   5 * time.Minute,
 	})
+	cfg.HAMode = "concurrent"
 
 	serverA := startAWSQueueServer(t, cfg)
 	serverB := startAWSQueueServer(t, cfg)
-	ensureAWSQueueWritableOrSkip(t, serverA.Client)
 
 	queue := queuetestutil.QueueName("aws-routing")
 	payload := []byte("shared-aws-backend")
@@ -334,16 +336,33 @@ func runAWSQueueMultiServerFailoverClient(t *testing.T) {
 	ensureAWSQueueWritableOrSkip(t, serverA.Client)
 
 	queue := queuetestutil.QueueName("aws-failover")
-	queuetestutil.MustEnqueueBytes(t, serverA.Client, queue, []byte("failover-payload"))
+	activeCtx, cancelActive := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelActive()
+	activeServer, activeClient, err := hatest.FindActiveServer(activeCtx, serverA, serverB)
+	if err != nil {
+		t.Fatalf("find active server: %v", err)
+	}
+	t.Cleanup(func() { _ = activeClient.Close() })
+	ensureAWSQueueWritableOrSkip(t, activeClient)
+	standbyServer := serverB
+	if activeServer == serverB {
+		standbyServer = serverA
+	}
+	standbyClient, err := standbyServer.NewClient()
+	if err != nil {
+		t.Fatalf("standby client: %v", err)
+	}
+	t.Cleanup(func() { _ = standbyClient.Close() })
 
-	endpoints := []string{serverA.URL(), serverB.URL()}
+	queuetestutil.MustEnqueueBytes(t, activeClient, queue, []byte("failover-payload"))
+
 	capture := queuetestutil.NewLogCapture(t)
 	clientOptions := []lockdclient.Option{
 		lockdclient.WithEndpointShuffle(false),
 		lockdclient.WithLogger(capture.Logger()),
 	}
-	if serverA.Config.MTLSEnabled() {
-		creds := serverA.TestMTLSCredentials()
+	if activeServer.Config.MTLSEnabled() {
+		creds := activeServer.TestMTLSCredentials()
 		if !creds.Valid() {
 			t.Fatalf("aws failover: serverA missing MTLS credentials")
 		}
@@ -353,18 +372,24 @@ func runAWSQueueMultiServerFailoverClient(t *testing.T) {
 		}
 		clientOptions = append(clientOptions, lockdclient.WithHTTPClient(httpClient))
 	}
-	failoverClient, err := lockdclient.NewWithEndpoints(endpoints, clientOptions...)
+	failoverClient, err := lockdclient.NewWithEndpoints([]string{activeServer.URL(), standbyServer.URL()}, clientOptions...)
 	if err != nil {
 		t.Fatalf("new failover client: %v", err)
 	}
 	t.Cleanup(func() { _ = failoverClient.Close() })
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	if err := serverA.Stop(shutdownCtx); err != nil {
+	if err := activeServer.Stop(shutdownCtx); err != nil {
 		shutdownCancel()
 		t.Fatalf("stop serverA: %v", err)
 	}
 	shutdownCancel()
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := hatest.WaitForActive(waitCtx, standbyServer); err != nil {
+		waitCancel()
+		t.Fatalf("standby activation: %v", err)
+	}
+	waitCancel()
 
 	owner := queuetestutil.QueueOwner("failover-consumer")
 	dequeueCtx, dequeueCancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -388,14 +413,14 @@ func runAWSQueueMultiServerFailoverClient(t *testing.T) {
 	}
 	ackCancel()
 
-	queuetestutil.EnsureQueueEmpty(t, serverB.Client, queue)
+	queuetestutil.EnsureQueueEmpty(t, standbyClient, queue)
 }
 
 func runAWSQueueQRFThrottling(t *testing.T) {
 	queuetestutil.InstallWatchdog(t, "aws-qrf-throttling", 120*time.Second)
 
 	cfg := prepareAWSQueueConfig(t, awsQueueOptions{})
-	cfg.QRFEnabled = true
+	cfg.QRFDisabled = false
 	cfg.QRFQueueSoftLimit = 10
 	cfg.QRFQueueHardLimit = 20
 	cfg.QRFLockSoftLimit = 5
@@ -406,10 +431,11 @@ func runAWSQueueQRFThrottling(t *testing.T) {
 	cfg.QRFMemoryHardLimitBytes = 0
 	cfg.QRFLoadSoftLimitMultiplier = 3
 	cfg.QRFLoadHardLimitMultiplier = 6
-	cfg.QRFSoftRetryAfter = 70 * time.Millisecond
-	cfg.QRFEngagedRetryAfter = 220 * time.Millisecond
-	cfg.QRFRecoveryRetryAfter = 150 * time.Millisecond
+	cfg.QRFSoftDelay = 70 * time.Millisecond
+	cfg.QRFEngagedDelay = 220 * time.Millisecond
+	cfg.QRFRecoveryDelay = 150 * time.Millisecond
 	cfg.QRFRecoverySamples = 1
+	cfg.QRFMaxWait = time.Millisecond
 	ts, capture := startAWSQueueServerWithCapture(t, cfg)
 	cli := ts.Client
 	ensureAWSQueueWritableOrSkip(t, cli)

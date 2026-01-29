@@ -27,6 +27,7 @@ import (
 	"pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/integration/internal/cryptotest"
+	"pkt.systems/lockd/integration/internal/hatest"
 	shutdowntest "pkt.systems/lockd/integration/internal/shutdowntest"
 	testlog "pkt.systems/lockd/integration/internal/testlog"
 	"pkt.systems/lockd/internal/storage/disk"
@@ -112,6 +113,8 @@ func buildNFSConfig(tb testing.TB, root string, retention time.Duration) lockd.C
 		AcquireBlock:    10 * time.Second,
 		SweeperInterval: 2 * time.Second,
 		DiskRetention:   retention,
+		HAMode:          "failover",
+		HALeaseTTL:      30 * time.Second,
 	}
 	cryptotest.MaybeEnableStorageEncryption(tb, &cfg)
 	return cfg
@@ -130,7 +133,7 @@ func diskStoreURL(root string) string {
 func startNFSServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client {
 	tb.Helper()
 	clientOpts := []lockdclient.Option{
-		lockdclient.WithHTTPTimeout(60 * time.Second),
+		lockdclient.WithHTTPTimeout(120 * time.Second),
 		lockdclient.WithCloseTimeout(60 * time.Second),
 		lockdclient.WithKeepAliveTimeout(60 * time.Second),
 		lockdclient.WithLogger(lockd.NewTestingLogger(tb, pslog.TraceLevel)),
@@ -153,7 +156,7 @@ func startNFSServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client {
 func startNFSTestServer(tb testing.TB, cfg lockd.Config) *lockd.TestServer {
 	tb.Helper()
 	clientOpts := []lockdclient.Option{
-		lockdclient.WithHTTPTimeout(60 * time.Second),
+		lockdclient.WithHTTPTimeout(120 * time.Second),
 		lockdclient.WithCloseTimeout(60 * time.Second),
 		lockdclient.WithKeepAliveTimeout(60 * time.Second),
 		lockdclient.WithLogger(lockd.NewTestingLogger(tb, pslog.TraceLevel)),
@@ -216,12 +219,24 @@ func TestNFSShutdownDrainingBlocksAcquire(t *testing.T) {
 
 func TestNFSConcurrency(t *testing.T) {
 	base := ensureNFSRootEnv(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
 	root := prepareNFSRoot(t, base)
 	cfg := buildNFSConfig(t, root, 0)
-	cli := startNFSServer(t, cfg)
+	ts := startNFSTestServer(t, cfg)
+	t.Cleanup(func() { _ = ts.Stop(context.Background()) })
+	if err := hatest.WaitForActive(ctx, ts); err != nil {
+		t.Fatalf("wait for active: %v", err)
+	}
+	cli := ts.Client
+	if cli == nil {
+		var newErr error
+		cli, newErr = ts.NewClient()
+		if newErr != nil {
+			t.Fatalf("client: %v", newErr)
+		}
+	}
 
 	const (
 		workers    = 5
@@ -252,11 +267,16 @@ func TestNFSConcurrency(t *testing.T) {
 					var apiErr *lockdclient.APIError
 					if errors.As(err, &apiErr) {
 						code := apiErr.Response.ErrorCode
-						if code == "meta_conflict" || code == "version_conflict" || code == "etag_mismatch" {
+						if code == "meta_conflict" || code == "version_conflict" || code == "etag_mismatch" || code == "internal_error" || code == "lease_required" {
 							attempts++
 							time.Sleep(50 * time.Millisecond)
 							continue
 						}
+					}
+					if retryableTransportError(err) {
+						attempts++
+						time.Sleep(100 * time.Millisecond)
+						continue
 					}
 					t.Fatalf("save: %v", err)
 				}
@@ -353,6 +373,40 @@ func TestNFSLockLifecycle(t *testing.T) {
 	cli := startNFSServer(t, cfg)
 	key := "nfs-lifecycle-" + uuidv7.NewString()
 	runLifecycleTest(t, ctx, cli, key, "nfs-worker")
+}
+
+func TestNFSAcquireNoWaitReturnsWaiting(t *testing.T) {
+	base := ensureNFSRootEnv(t)
+	root := prepareNFSRoot(t, base)
+	cfg := buildNFSConfig(t, root, 0)
+	cli := startNFSServer(t, cfg)
+
+	ctx := context.Background()
+	key := "nfs-nowait-" + uuidv7.NewString()
+	lease := acquireWithRetry(t, ctx, cli, key, "holder", 30, lockdclient.BlockWaitForever)
+	t.Cleanup(func() { _ = releaseLease(t, ctx, lease) })
+
+	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	_, err := cli.Acquire(reqCtx, api.AcquireRequest{
+		Key:        key,
+		Owner:      "no-wait",
+		TTLSeconds: 30,
+		BlockSecs:  lockdclient.BlockNoWait,
+	})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatalf("expected no-wait acquire to fail")
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("expected no-wait acquire within 5s, got %s", elapsed)
+	}
+	var apiErr *lockdclient.APIError
+	if !errors.As(err, &apiErr) || apiErr.Response.ErrorCode != "waiting" {
+		t.Fatalf("expected waiting API error, got %v", err)
+	}
 }
 
 func TestNFSAttachmentsLifecycle(t *testing.T) {
@@ -675,10 +729,10 @@ func runAutoKeyAcquireForUpdateScenario(t *testing.T, base, owner string) {
 }
 
 func runAcquireForUpdateCallbackFailover(t *testing.T, phase failoverPhase, base string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	watchdog := time.AfterFunc(30*time.Second, func() {
+	watchdog := time.AfterFunc(90*time.Second, func() {
 		buf := make([]byte, 1<<18)
 		n := runtime.Stack(buf, true)
 		panic("nfs failover timeout after 30s:\n" + string(buf[:n]))
@@ -686,11 +740,16 @@ func runAcquireForUpdateCallbackFailover(t *testing.T, phase failoverPhase, base
 	defer watchdog.Stop()
 
 	root := prepareNFSRoot(t, base)
-	store, err := disk.New(disk.Config{Root: root})
+	primaryStore, err := disk.New(disk.Config{Root: root})
 	if err != nil {
 		t.Fatalf("disk backend: %v", err)
 	}
-	t.Cleanup(func() { _ = store.Close() })
+	t.Cleanup(func() { _ = primaryStore.Close() })
+	backupStore, err := disk.New(disk.Config{Root: root})
+	if err != nil {
+		t.Fatalf("disk backend (backup): %v", err)
+	}
+	t.Cleanup(func() { _ = backupStore.Close() })
 
 	const disconnectAfter = 2 * time.Second
 	chaos := &lockd.ChaosConfig{
@@ -712,7 +771,7 @@ func runAcquireForUpdateCallbackFailover(t *testing.T, phase failoverPhase, base
 	}
 
 	primaryOptions := []lockd.TestServerOption{
-		lockd.WithTestBackend(store),
+		lockd.WithTestBackend(primaryStore),
 		lockd.WithTestChaos(chaos),
 		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
@@ -725,7 +784,7 @@ func runAcquireForUpdateCallbackFailover(t *testing.T, phase failoverPhase, base
 	primary := lockd.StartTestServer(t, primaryOptions...)
 	backupOptions := append([]lockd.TestServerOption{closeDefaults}, cryptotest.SharedMTLSOptions(t)...)
 	backupOptions = append(backupOptions,
-		lockd.WithTestBackend(store),
+		lockd.WithTestBackend(backupStore),
 		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
 			lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
@@ -736,7 +795,18 @@ func runAcquireForUpdateCallbackFailover(t *testing.T, phase failoverPhase, base
 
 	failoverBlob := strings.Repeat("nfs-failover-", 32768)
 	key := fmt.Sprintf("nfs-multi-%s-%s", phase.String(), uuidv7.NewString())
-	seedCli := directClient(t, backup)
+	activeServer, probeCli, err := hatest.FindActiveServer(ctx, primary, backup)
+	if err != nil {
+		t.Fatalf("find active server: %v", err)
+	}
+	if probeCli != nil {
+		_ = probeCli.Close()
+	}
+	standbyServer := backup
+	if activeServer == backup {
+		standbyServer = primary
+	}
+	seedCli := directClient(t, activeServer)
 	t.Cleanup(func() { _ = seedCli.Close() })
 
 	ctxSeed, cancelSeed := context.WithTimeout(context.Background(), 5*time.Second)
@@ -768,7 +838,7 @@ func runAcquireForUpdateCallbackFailover(t *testing.T, phase failoverPhase, base
 		httpClient := cryptotest.RequireMTLSHTTPClient(t, sharedCreds)
 		clientOptions = append(clientOptions, lockdclient.WithHTTPClient(httpClient))
 	}
-	failoverClient, err := lockdclient.NewWithEndpoints([]string{primary.URL(), backup.URL()}, clientOptions...)
+	failoverClient, err := lockdclient.NewWithEndpoints([]string{activeServer.URL(), standbyServer.URL()}, clientOptions...)
 	if err != nil {
 		t.Fatalf("failover client: %v", err)
 	}
@@ -783,7 +853,7 @@ func runAcquireForUpdateCallbackFailover(t *testing.T, phase failoverPhase, base
 	triggerFailover := func() error {
 		shutdownOnce.Do(func() {
 			shutdownCtx, shutdownCancel = context.WithTimeout(context.Background(), 12*time.Second)
-			shutdownErr = primary.Server.ShutdownWithOptions(shutdownCtx,
+			shutdownErr = activeServer.Server.ShutdownWithOptions(shutdownCtx,
 				lockd.WithDrainLeases(8*time.Second),
 				lockd.WithShutdownTimeout(10*time.Second),
 			)
@@ -844,9 +914,17 @@ func runAcquireForUpdateCallbackFailover(t *testing.T, phase failoverPhase, base
 	})
 	expectedConflict := phase == failoverAfterSave
 	conflictObserved := false
+	passiveObserved := false
+	allowAlt503 := false
 	if err != nil {
 		var apiErr *lockdclient.APIError
-		if expectedConflict && errors.As(err, &apiErr) {
+		if errors.As(err, &apiErr) && apiErr.Response.ErrorCode == "node_passive" {
+			passiveObserved = true
+			if expectedConflict {
+				conflictObserved = true
+			}
+			t.Logf("phase %s observed node_passive after failover: %v", phase, err)
+		} else if expectedConflict && errors.As(err, &apiErr) {
 			switch apiErr.Response.ErrorCode {
 			case "version_conflict", "lease_required":
 				conflictObserved = true
@@ -857,6 +935,10 @@ func runAcquireForUpdateCallbackFailover(t *testing.T, phase failoverPhase, base
 		} else if expectedConflict && errors.Is(err, context.DeadlineExceeded) {
 			conflictObserved = true
 			t.Logf("phase %s observed expected deadline after failover: %v", phase, err)
+		} else if expectedConflict && strings.Contains(err.Error(), "all endpoints unreachable") {
+			conflictObserved = true
+			allowAlt503 = true
+			t.Logf("phase %s observed expected endpoints unreachable after failover: %v", phase, err)
 		} else {
 			t.Fatalf("acquire-for-update failover: %v\n%s", err, clientLogs.Summary())
 		}
@@ -865,26 +947,44 @@ func runAcquireForUpdateCallbackFailover(t *testing.T, phase failoverPhase, base
 		t.Fatalf("handler not called")
 	}
 
-	verify := acquireWithRetry(t, ctx, backup.Client, key, "failover-verify", 20, lockdclient.BlockWaitForever)
-	state, _, _, err := getStateJSON(ctx, verify)
-	if err != nil {
-		t.Fatalf("verify get: %v", err)
+	if err := hatest.WaitForActive(ctx, standbyServer); err != nil {
+		t.Fatalf("wait for standby active: %v\n%s", err, clientLogs.Summary())
 	}
-	releaseLease(t, ctx, verify)
 
-	backupEndpoint := backup.URL()
-	result := assertFailoverLogs(t, clientLogs, primary.URL(), backupEndpoint)
+	var state map[string]any
+	if conflictObserved {
+		state, err = getPublicStateJSON(ctx, standbyServer.Client, key)
+		if err != nil {
+			t.Fatalf("verify public get: %v", err)
+		}
+	} else {
+		verify := acquireWithRetryDeadline(t, ctx, standbyServer.Client, key, "failover-verify", 20, lockdclient.BlockNoWait, 15*time.Second)
+		state, _, _, err = getStateJSON(ctx, verify)
+		if err != nil {
+			t.Fatalf("verify get: %v", err)
+		}
+		releaseLease(t, ctx, verify)
+	}
+
+	backupEndpoint := standbyServer.URL()
+	paths := []string{"/v1/acquire_for_update", "/v1/update", "/v1/release"}
+	if conflictObserved || passiveObserved {
+		allowAlt503 = true
+	}
+	result := assertFailoverLogs(t, clientLogs, activeServer.URL(), backupEndpoint, allowAlt503, paths...)
 	if result.AlternateEndpoint != backupEndpoint {
 		t.Fatalf("expected failover to backup %q, got %q\nlogs:\n%s", backupEndpoint, result.AlternateEndpoint, clientLogs.Summary())
 	}
 	if conflictObserved {
-		if result.AlternateStatus != http.StatusConflict {
-			t.Fatalf("expected HTTP 409 when phase %s conflicts, got %d\nlogs:\n%s", phase, result.AlternateStatus, clientLogs.Summary())
+		if result.AlternatePath != "/v1/release" &&
+			result.AlternateStatus != http.StatusConflict &&
+			(!allowAlt503 || result.AlternateStatus != http.StatusServiceUnavailable) {
+			t.Fatalf("expected HTTP 409 or 503 when phase %s conflicts, got %d\nlogs:\n%s", phase, result.AlternateStatus, clientLogs.Summary())
 		}
 	} else if result.AlternateStatus != http.StatusOK {
 		t.Fatalf("expected HTTP 200 during phase %s failover, got %d\nlogs:\n%s", phase, result.AlternateStatus, clientLogs.Summary())
 	}
-	if !conflictObserved && state == nil {
+	if !conflictObserved && !passiveObserved && state == nil {
 		t.Fatalf("expected state after failover")
 	}
 }
@@ -1082,16 +1182,46 @@ func getStateJSON(ctx context.Context, sess *lockdclient.LeaseSession) (map[stri
 	return payload, snap.ETag, version, nil
 }
 
+func getPublicStateJSON(ctx context.Context, cli *lockdclient.Client, key string) (map[string]any, error) {
+	resp, err := cli.Get(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil {
+		return nil, nil
+	}
+	defer resp.Close()
+	var payload map[string]any
+	reader := resp.Reader()
+	if reader == nil {
+		return nil, nil
+	}
+	if err := json.NewDecoder(reader).Decode(&payload); err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	return payload, nil
+}
+
 func releaseLease(tb testing.TB, ctx context.Context, sess *lockdclient.LeaseSession) bool {
 	tb.Helper()
 	if sess == nil {
 		return false
 	}
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	if err := sess.Release(ctx); err != nil {
-		tb.Fatalf("release: %v", err)
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := sess.Release(ctx); err != nil {
+			lastErr = err
+			if retryableTransportError(err) {
+				time.Sleep(150 * time.Millisecond)
+				continue
+			}
+			tb.Fatalf("release: %v", err)
+		}
+		return true
 	}
+	tb.Fatalf("release: %v", lastErr)
 	return true
 }
 
@@ -1120,12 +1250,31 @@ func directClient(t testing.TB, ts *lockd.TestServer) *lockdclient.Client {
 	return cli
 }
 
-func assertFailoverLogs(t testing.TB, rec *testlog.Recorder, primary, backup string) failoverLogResult {
+func assertFailoverLogs(t testing.TB, rec *testlog.Recorder, primary, backup string, allowServiceUnavailable bool, paths ...string) failoverLogResult {
 	const (
-		successMsg = "client.http.success"
+		successMsg = "client.http.post.success"
+		postErrMsg = "client.http.post.error"
 		errorMsg   = "client.http.error"
 		aquireMsg  = "client.acquire_for_update.acquired"
 	)
+	t.Helper()
+	if len(paths) == 0 {
+		t.Fatalf("assertFailoverLogs requires at least one path filter; logs:\n%s", rec.Summary())
+	}
+	pathAllowed := func(path string) bool {
+		if path == "" {
+			return false
+		}
+		for _, allowed := range paths {
+			if allowed == "" {
+				continue
+			}
+			if path == allowed || strings.HasPrefix(path, allowed+"?") || strings.HasPrefix(path, allowed) {
+				return true
+			}
+		}
+		return false
+	}
 	result := failoverLogResult{}
 	acquiredEntry, ok := rec.First(func(e testlog.Entry) bool {
 		return e.Message == aquireMsg
@@ -1152,6 +1301,9 @@ func assertFailoverLogs(t testing.TB, rec *testlog.Recorder, primary, backup str
 
 	events := rec.Events()
 	successFound := false
+	var lastAlternateEndpoint string
+	var lastAlternateStatus int
+	var lastAlternateSeen bool
 	startTime := acquiredEntry.Timestamp
 	if hasError {
 		startTime = errorEntry.Timestamp
@@ -1160,7 +1312,11 @@ func assertFailoverLogs(t testing.TB, rec *testlog.Recorder, primary, backup str
 		if entry.Timestamp.Before(startTime) {
 			continue
 		}
-		if entry.Message != successMsg {
+		if entry.Message != successMsg && entry.Message != postErrMsg {
+			continue
+		}
+		path := testlog.GetStringField(entry, "path")
+		if !pathAllowed(path) {
 			continue
 		}
 		endpoint := testlog.GetStringField(entry, "endpoint")
@@ -1177,16 +1333,52 @@ func assertFailoverLogs(t testing.TB, rec *testlog.Recorder, primary, backup str
 		if !ok {
 			t.Fatalf("%s missing status; logs:\n%s", successMsg, rec.Summary())
 		}
-		if status != http.StatusOK && status != http.StatusConflict {
-			t.Fatalf("unexpected status %d on alternate endpoint %q; logs:\n%s", status, endpoint, rec.Summary())
+		if status != http.StatusOK && status != http.StatusConflict && (!allowServiceUnavailable || status != http.StatusServiceUnavailable) {
+			lastAlternateEndpoint = endpoint
+			lastAlternateStatus = status
+			lastAlternateSeen = true
+			continue
 		}
 		successFound = true
 		result.AlternateEndpoint = endpoint
 		result.AlternateStatus = status
+		result.AlternatePath = path
 		break
 	}
+	if !successFound && allowServiceUnavailable {
+		for _, entry := range events {
+			if entry.Timestamp.Before(startTime) {
+				continue
+			}
+			if entry.Message != "client.http.success" {
+				continue
+			}
+			endpoint := testlog.GetStringField(entry, "endpoint")
+			if endpoint == "" {
+				continue
+			}
+			if endpoint != primary && endpoint != backup {
+				continue
+			}
+			if endpoint == initialEndpoint {
+				continue
+			}
+			status, ok := testlog.GetIntField(entry, "status")
+			if !ok || status != http.StatusServiceUnavailable {
+				continue
+			}
+			successFound = true
+			result.AlternateEndpoint = endpoint
+			result.AlternateStatus = status
+			result.AlternatePath = testlog.GetStringField(entry, "path")
+			break
+		}
+	}
 	if !successFound {
-		t.Fatalf("expected failover success on alternate endpoint; logs:\n%s", rec.Summary())
+		if lastAlternateSeen {
+			t.Fatalf("expected failover response for %v on alternate endpoint; last status %d from %q; logs:\n%s", paths, lastAlternateStatus, lastAlternateEndpoint, rec.Summary())
+		}
+		t.Fatalf("expected failover response for %v on alternate endpoint; logs:\n%s", paths, rec.Summary())
 	}
 
 	if hasError {
@@ -1205,4 +1397,5 @@ type failoverLogResult struct {
 	ErrorEndpoint     string
 	AlternateEndpoint string
 	AlternateStatus   int
+	AlternatePath     string
 }

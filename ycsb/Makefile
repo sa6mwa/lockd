@@ -10,6 +10,12 @@ OPERATIONCOUNT ?= 100000
 THREADS ?= 8
 TARGET ?= 0
 PERF_LOG ?= performance.log
+WARMUP_OPS ?= 2000
+WARMUP_MIN_WINDOWS ?= 2
+WARMUP_MAX_WINDOWS ?= 3
+WARMUP_STABLE_PERCENT ?= 7.5
+WARMUP_STABLE_COUNT ?= 2
+WARMUP_COOLDOWN ?= 10s
 
 LOCKD_ENDPOINTS ?=
 LOCKD_ENDPOINTS := $(if $(strip $(LOCKD_ENDPOINTS)),$(LOCKD_ENDPOINTS),https://127.0.0.1:9341)
@@ -27,6 +33,8 @@ LOCKD_QUERYSYNC_PROPS := workloads/lockd.querysync.properties
 LOCKD_EXTRA_PROPS ?=
 
 COMMON_ARGS := -P $(WORKLOAD_FILE) -p recordcount=$(RECORDCOUNT) -p operationcount=$(OPERATIONCOUNT) -p threadcount=$(THREADS) -p target=$(TARGET)
+COMMON_ARGS += --warmup-ops=$(WARMUP_OPS) --warmup-min-windows=$(WARMUP_MIN_WINDOWS) --warmup-max-windows=$(WARMUP_MAX_WINDOWS)
+COMMON_ARGS += --warmup-stable-percent=$(WARMUP_STABLE_PERCENT) --warmup-stable-count=$(WARMUP_STABLE_COUNT) --warmup-cooldown=$(WARMUP_COOLDOWN)
 LOCKD_ARGS := -P $(LOCKD_PROPS) $(foreach p,$(LOCKD_EXTRA_PROPS),-P $(p)) -p lockd.endpoints=$(LOCKD_ENDPOINTS) -p lockd.bundle=$(LOCKD_BUNDLE)
 ETCD_ARGS := -P $(ETCD_PROPS) -p etcd.endpoints=$(ETCD_ENDPOINTS)
 
@@ -58,6 +66,12 @@ help:
 	@echo "  ETCD_ENDPOINTS=127.0.0.1:2379"
 	@echo "  LOCKD_EXTRA_PROPS=\"workloads/lockd.attach.properties\""
 	@echo "  PERF_LOG=performance.log        # set empty to disable perf logging"
+	@echo "  WARMUP_OPS=2000                 # warmup ops per window (0 disables)"
+	@echo "  WARMUP_MIN_WINDOWS=2            # minimum warmup windows"
+	@echo "  WARMUP_MAX_WINDOWS=3            # maximum warmup windows"
+	@echo "  WARMUP_STABLE_PERCENT=7.5       # percent spread to consider warm"
+	@echo "  WARMUP_STABLE_COUNT=2           # windows used for stability check"
+	@echo "  WARMUP_COOLDOWN=10s             # cooldown after warmup"
 
 build:
 	@go build -o $(RUNNER) ./cmd/lockd-ycsb

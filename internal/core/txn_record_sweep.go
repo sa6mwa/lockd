@@ -169,18 +169,70 @@ func (s *Service) maybeReplayTxnRecords(ctx context.Context) {
 	s.txnReplayLast.Store(now.UnixNano())
 	go func(start time.Time) {
 		defer s.txnReplayRunning.Store(false)
-		sweepCtx, cancel := context.WithTimeout(context.Background(), txnReplayMaxRuntime)
+		maxRuntime := txnReplayMaxRuntime
+		sweepCtx, cancel := context.WithTimeout(context.Background(), maxRuntime)
 		defer cancel()
-
-		budget := newSweepBudget(s.clock, IdleSweepOptions{
-			Now:        start,
-			MaxOps:     txnReplayMaxOps,
-			MaxRuntime: txnReplayMaxRuntime,
-		})
-		if err := s.sweepTxnRecordsPartial(sweepCtx, budget, sweepModeReplay); err != nil && s.logger != nil {
-			if !errors.Is(err, storage.ErrNotImplemented) {
-				s.logger.Warn("txn.replay.sweep_failed", "error", err)
-			}
-		}
+		s.replayTxnRecords(sweepCtx, start, maxRuntime)
 	}(now)
+}
+
+func (s *Service) maybeReplayTxnRecordsInline(ctx context.Context) bool {
+	if s == nil {
+		return false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return false
+	}
+	interval := s.txnReplayInterval
+	if interval <= 0 {
+		return false
+	}
+	now := s.clock.Now()
+	last := s.txnReplayLast.Load()
+	if last == 0 && interval > txnReplayImmediateThreshold {
+		s.txnReplayLast.Store(now.UnixNano())
+		return false
+	}
+	if last > 0 && now.Sub(time.Unix(0, last)) < interval {
+		return false
+	}
+	if !s.txnReplayRunning.CompareAndSwap(false, true) {
+		return false
+	}
+	s.txnReplayLast.Store(now.UnixNano())
+	defer s.txnReplayRunning.Store(false)
+
+	maxRuntime := txnReplayMaxRuntime
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return false
+		}
+		if remaining < maxRuntime {
+			maxRuntime = remaining
+		}
+	}
+	if maxRuntime <= 0 {
+		return false
+	}
+	sweepCtx, cancel := context.WithTimeout(ctx, maxRuntime)
+	defer cancel()
+	s.replayTxnRecords(sweepCtx, now, maxRuntime)
+	return true
+}
+
+func (s *Service) replayTxnRecords(ctx context.Context, start time.Time, maxRuntime time.Duration) {
+	budget := newSweepBudget(s.clock, IdleSweepOptions{
+		Now:        start,
+		MaxOps:     txnReplayMaxOps,
+		MaxRuntime: maxRuntime,
+	})
+	if err := s.sweepTxnRecordsPartial(ctx, budget, sweepModeReplay); err != nil && s.logger != nil {
+		if !errors.Is(err, storage.ErrNotImplemented) {
+			s.logger.Warn("txn.replay.sweep_failed", "error", err)
+		}
+	}
 }

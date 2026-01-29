@@ -20,6 +20,7 @@ import (
 func TestMemArchipelagoLeaderFailover(t *testing.T) {
 	leaseTTL := 10 * time.Second
 	baseCfg := buildMemConfig(t)
+	baseCfg.HAMode = "concurrent"
 	cryptotest.ConfigureTCAuth(t, &baseCfg)
 	baseCfg.TCClientBundlePath = cryptotest.SharedTCClientBundlePath(t)
 
@@ -131,6 +132,7 @@ func TestMemArchipelagoFanoutPressure(t *testing.T) {
 
 	leaseTTL := 10 * time.Second
 	baseCfg := buildMemConfig(t)
+	baseCfg.HAMode = "concurrent"
 	cryptotest.ConfigureTCAuth(t, &baseCfg)
 	baseCfg.TCClientBundlePath = cryptotest.SharedTCClientBundlePath(t)
 

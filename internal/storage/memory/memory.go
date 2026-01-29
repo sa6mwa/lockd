@@ -126,7 +126,7 @@ func (s *Store) Close() error {
 
 // BackendHash returns the stable identity hash for this backend.
 func (s *Store) BackendHash(ctx context.Context) (string, error) {
-	result, err := storage.ResolveBackendHash(ctx, s, "")
+	result, err := storage.ResolveBackendHash(ctx, s, "", s.crypto)
 	return result.Hash, err
 }
 
@@ -228,6 +228,45 @@ func (s *Store) ListMetaKeys(_ context.Context, namespace string) ([]string, err
 	return keys, nil
 }
 
+// ListNamespaces enumerates namespaces present in memory.
+func (s *Store) ListNamespaces(ctx context.Context) ([]string, error) {
+	if s == nil {
+		return nil, storage.ErrNotImplemented
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	set := make(map[string]struct{})
+	addKey := func(storageKey string) {
+		parts := strings.SplitN(storageKey, "/", 2)
+		if len(parts) == 0 {
+			return
+		}
+		ns := strings.TrimSpace(parts[0])
+		if ns == "" {
+			return
+		}
+		set[ns] = struct{}{}
+	}
+	s.mu.RLock()
+	for key := range s.metas {
+		addKey(key)
+	}
+	for key := range s.state {
+		addKey(key)
+	}
+	for key := range s.objs {
+		addKey(key)
+	}
+	s.mu.RUnlock()
+	names := make([]string, 0, len(set))
+	for name := range set {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
 // ReadState returns a streaming reader for the stored state blob.
 func (s *Store) ReadState(ctx context.Context, namespace, key string) (storage.ReadStateResult, error) {
 	storageKey, err := canonicalKey(namespace, key)
@@ -265,7 +304,8 @@ func (s *Store) ReadState(ctx context.Context, namespace, key string) (storage.R
 		if len(descriptor) == 0 {
 			return storage.ReadStateResult{}, fmt.Errorf("memory: missing state descriptor for %q", key)
 		}
-		mat, err := s.crypto.MaterialFromDescriptor(storage.StateObjectContext(storageKey), descriptor)
+		objectCtx := storage.StateObjectContextFromContext(ctx, storage.StateObjectContext(storageKey))
+		mat, err := s.crypto.MaterialFromDescriptor(objectCtx, descriptor)
 		if err != nil {
 			return storage.ReadStateResult{}, err
 		}
@@ -324,13 +364,15 @@ func (s *Store) WriteState(ctx context.Context, namespace, key string, body io.R
 		var mat kryptograf.Material
 		if ok && len(descFromCtx) > 0 {
 			descriptor = append([]byte(nil), descFromCtx...)
-			mat, err = s.crypto.MaterialFromDescriptor(storage.StateObjectContext(storageKey), descriptor)
+			objectCtx := storage.StateObjectContextFromContext(ctx, storage.StateObjectContext(storageKey))
+			mat, err = s.crypto.MaterialFromDescriptor(objectCtx, descriptor)
 			if err != nil {
 				return nil, err
 			}
 		} else {
 			var minted storage.MaterialResult
-			minted, err = s.crypto.MintMaterial(storage.StateObjectContext(storageKey))
+			objectCtx := storage.StateObjectContextFromContext(ctx, storage.StateObjectContext(storageKey))
+			minted, err = s.crypto.MintMaterial(objectCtx)
 			if err != nil {
 				return nil, err
 			}
@@ -412,12 +454,15 @@ func (s *Store) ListObjects(_ context.Context, namespace string, opts storage.Li
 		sort.Strings(s.sortedKeys)
 		s.keysDirty = false
 	}
-	keys := append([]string(nil), s.sortedKeys...)
 	s.mu.Unlock()
 
 	result := &storage.ListResult{}
+	if opts.Limit > 0 {
+		result.Objects = make([]storage.ObjectInfo, 0, opts.Limit)
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	keys := s.sortedKeys
 	count := 0
 	startAfter := ""
 	if opts.StartAfter != "" {

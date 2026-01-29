@@ -10,8 +10,11 @@ services:
       LOCKD_STORE: disk:///storage
       LOCKD_OTLP_ENDPOINT: otel-collector:4317
       LOCKD_METRICS_LISTEN: 0.0.0.0:9464
+      LOCKD_ENABLE_PROFILING_METRICS: "true"
+      LOCKD_PPROF_LISTEN: 0.0.0.0:6060
     ports:
       - "9341:9341"
+      - "6060:6060"
     expose:
       - "9464"                         # Prometheus scrape (internal only)
     volumes:

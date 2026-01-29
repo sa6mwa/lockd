@@ -12,6 +12,7 @@ import (
 	"pkt.systems/lockd"
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/integration/internal/cryptotest"
+	"pkt.systems/lockd/integration/internal/hatest"
 	"pkt.systems/lockd/internal/archipelagotest"
 	"pkt.systems/pslog"
 )
@@ -24,6 +25,8 @@ func TestNFSArchipelagoLeaderFailover(t *testing.T) {
 
 	cfgA := buildNFSConfig(t, rootA, 0)
 	cfgB := buildNFSConfig(t, rootB, 0)
+	cfgA.HAMode = "concurrent"
+	cfgB.HAMode = "concurrent"
 	cryptotest.ConfigureTCAuth(t, &cfgA)
 	cryptotest.ConfigureTCAuth(t, &cfgB)
 	bundlePath := cryptotest.SharedTCClientBundlePath(t)
@@ -116,18 +119,30 @@ func TestNFSArchipelagoLeaderFailover(t *testing.T) {
 	}
 	archipelagotest.JoinCluster(t, tcs, endpoints, tcHTTP, 20*time.Second)
 
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	activeA, _, err := hatest.FindActiveServer(ctx, tcA1, tcA2)
+	if err != nil {
+		t.Fatalf("find active A: %v", err)
+	}
+	activeB, _, err := hatest.FindActiveServer(ctx, tcB1, tcB2)
+	if err != nil {
+		t.Fatalf("find active B: %v", err)
+	}
+	attachHAClient(t, activeA, tcA1, tcA2)
+	attachHAClient(t, activeB, tcB1, tcB2)
+	islands := []*lockd.TestServer{activeA, activeB}
+
 	cryptotest.RegisterRM(t, tcA1, tcA1)
 	cryptotest.RegisterRM(t, tcA1, tcA2)
 	cryptotest.RegisterRM(t, tcA1, tcB1)
 	cryptotest.RegisterRM(t, tcA1, tcB2)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	hashA, err := tcA1.Backend().BackendHash(ctx)
+	hashA, err := activeA.Backend().BackendHash(ctx)
 	if err != nil {
 		t.Fatalf("hash A: %v", err)
 	}
-	hashB, err := tcB1.Backend().BackendHash(ctx)
+	hashB, err := activeB.Backend().BackendHash(ctx)
 	if err != nil {
 		t.Fatalf("hash B: %v", err)
 	}
@@ -140,14 +155,14 @@ func TestNFSArchipelagoLeaderFailover(t *testing.T) {
 		return cryptotest.RequireTCClient(t, ts, lockdclient.WithEndpointShuffle(false))
 	}
 
-	archipelagotest.RunLeaderDecisionFanoutInterruptedScenario(t, tcs, []*lockd.TestServer{tcA1, tcB1}, tcHTTP, tcClient, fanoutGate, restartMap)
-	archipelagotest.RunQuorumLossDuringRenewScenario(t, tcs, []*lockd.TestServer{tcA1, tcB1}, restartSpecs, tcHTTP, tcClient)
-	archipelagotest.RunLeaderFailoverScenario(t, tcs, tcA1, tcB1, tcHTTP, rmHTTP, tcClient, restartMap)
+	archipelagotest.RunLeaderDecisionFanoutInterruptedScenario(t, tcs, islands, tcHTTP, tcClient, fanoutGate, restartMap)
+	archipelagotest.RunQuorumLossDuringRenewScenario(t, tcs, islands, restartSpecs, tcHTTP, tcClient)
+	archipelagotest.RunLeaderFailoverScenario(t, tcs, islands[0], islands[1], tcHTTP, rmHTTP, tcClient, restartMap)
 	archipelagotest.RunRMRegistryReplicationScenario(t, tcs, tcHTTP, rmHTTP, restartMap)
-	archipelagotest.RunRMApplyTermFencingScenario(t, tcs, []*lockd.TestServer{tcA1, tcB1}, tcHTTP, restartMap)
-	archipelagotest.RunQueueStateFailoverScenario(t, tcs, []*lockd.TestServer{tcA1, tcB1}, tcHTTP, tcClient, restartMap)
+	archipelagotest.RunRMApplyTermFencingScenario(t, tcs, islands, tcHTTP, restartMap)
+	archipelagotest.RunQueueStateFailoverScenario(t, tcs, islands, tcHTTP, tcClient, restartMap)
 	archipelagotest.RunTCMembershipChurnScenario(t, tcs, tcHTTP)
-	archipelagotest.RunNonLeaderForwardUnavailableScenario(t, tcs, []*lockd.TestServer{tcA1, tcB1}, tcHTTP, tcClient)
+	archipelagotest.RunNonLeaderForwardUnavailableScenario(t, tcs, islands, tcHTTP, tcClient)
 }
 
 func startNFSArchipelagoNode(tb testing.TB, base lockd.Config, addr, scheme string, leaseTTL time.Duration, gate *archipelagotest.FanoutGate, creds ...lockd.TestMTLSCredentials) *lockd.TestServer {
@@ -179,4 +194,36 @@ func startNFSArchipelagoNode(tb testing.TB, base lockd.Config, addr, scheme stri
 		options = append(options, cryptotest.SharedMTLSOptions(tb)...)
 	}
 	return lockd.StartTestServer(tb, options...)
+}
+
+func attachHAClient(t testing.TB, active *lockd.TestServer, servers ...*lockd.TestServer) *lockdclient.Client {
+	t.Helper()
+	if len(servers) == 0 {
+		t.Fatalf("ha client: servers required")
+	}
+	primary := active
+	if primary == nil {
+		primary = servers[0]
+	}
+	if primary == nil {
+		t.Fatalf("ha client: primary server missing")
+	}
+	endpoints := make([]string, 0, len(servers))
+	endpoints = append(endpoints, primary.URL())
+	for _, ts := range servers {
+		if ts == nil || ts == primary {
+			continue
+		}
+		endpoints = append(endpoints, ts.URL())
+	}
+	cli, err := primary.NewEndpointsClient(endpoints, lockdclient.WithEndpointShuffle(false))
+	if err != nil {
+		t.Fatalf("ha client: %v", err)
+	}
+	for _, ts := range servers {
+		if ts != nil {
+			ts.Client = cli
+		}
+	}
+	return cli
 }

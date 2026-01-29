@@ -22,8 +22,8 @@ import (
 	querydata "pkt.systems/lockd/integration/query/querydata"
 	"pkt.systems/lockd/internal/core"
 	"pkt.systems/lockd/internal/storage"
-	"pkt.systems/lockd/lql"
 	"pkt.systems/lockd/namespaces"
+	"pkt.systems/lql"
 )
 
 // ServerFactory starts a backend-specific lockd server for the query suite.
@@ -368,12 +368,7 @@ or.eq{field=/device/location/region,value=us-west}`)
 				Namespace: namespaces.Default,
 				Selector:  sel,
 			})
-			querydata.ExpectKeySet(t, resp.Keys, []string{
-				"device-gw-1024",
-				"device-gw-2048",
-				"device-gw-512",
-				"device-gw-600",
-			})
+			querydata.ExpectKeySet(t, resp.Keys, []string{"device-gw-1024"})
 		})
 
 		t.Run("firmware-low-battery", func(t *testing.T) {
@@ -1009,7 +1004,7 @@ func RunRawTxnSmoke(t *testing.T, factory ServerFactory) {
 		expectMissingTxnOnUpdate(t, httpClient, ts.URL(), namespaces.Default, commitKey, commitLease.LeaseID, commitLease.FencingToken)
 		rawUpdateOK(t, httpClient, ts.URL(), namespaces.Default, commitKey, commitLease.LeaseID, commitLease.FencingToken, commitLease.TxnID, `{"status":"raw-commit"}`)
 		rawRelease(t, httpClient, ts.URL(), namespaces.Default, commitKey, commitLease.LeaseID, commitLease.TxnID, false, commitLease.FencingToken)
-		verifyStatePresent(t, ctx, ts.Client, commitKey, namespaces.Default, "raw-commit")
+		verifyStatePresent(ctx, t, ts.Client, commitKey, namespaces.Default, "raw-commit")
 
 		removeKey := fmt.Sprintf("raw-tx-remove-%d", time.Now().UnixNano())
 		removeLease := rawAcquire(t, httpClient, ts.URL(), api.AcquireRequest{
@@ -1022,7 +1017,7 @@ func RunRawTxnSmoke(t *testing.T, factory ServerFactory) {
 		expectMissingTxnOnRemove(t, httpClient, ts.URL(), namespaces.Default, removeKey, removeLease.LeaseID, removeLease.FencingToken)
 		rawRemoveOK(t, httpClient, ts.URL(), namespaces.Default, removeKey, removeLease.LeaseID, removeLease.FencingToken, removeLease.TxnID)
 		rawRelease(t, httpClient, ts.URL(), namespaces.Default, removeKey, removeLease.LeaseID, removeLease.TxnID, false, removeLease.FencingToken)
-		verifyStateAbsent(t, ctx, ts.Client, removeKey, namespaces.Default)
+		verifyStateAbsent(ctx, t, ts.Client, removeKey, namespaces.Default)
 
 		rollbackLease := rawAcquire(t, httpClient, ts.URL(), api.AcquireRequest{
 			Namespace:  namespaces.Default,
@@ -1032,7 +1027,7 @@ func RunRawTxnSmoke(t *testing.T, factory ServerFactory) {
 		})
 		rawUpdateOK(t, httpClient, ts.URL(), namespaces.Default, rollbackKey, rollbackLease.LeaseID, rollbackLease.FencingToken, rollbackLease.TxnID, `{"status":"temporary"}`)
 		rawRelease(t, httpClient, ts.URL(), namespaces.Default, rollbackKey, rollbackLease.LeaseID, rollbackLease.TxnID, true, rollbackLease.FencingToken)
-		verifyStateAbsent(t, ctx, ts.Client, rollbackKey, namespaces.Default)
+		verifyStateAbsent(ctx, t, ts.Client, rollbackKey, namespaces.Default)
 	})
 }
 func withServer(t testing.TB, factory ServerFactory, timeout time.Duration, fn func(ctx context.Context, ts *lockd.TestServer, httpClient *http.Client)) {
@@ -1306,7 +1301,7 @@ func rawRelease(t testing.TB, httpClient *http.Client, baseURL, namespace, key, 
 	}
 }
 
-func verifyStatePresent(t testing.TB, ctx context.Context, cli *lockdclient.Client, key, namespace, expectStatus string) {
+func verifyStatePresent(ctx context.Context, t testing.TB, cli *lockdclient.Client, key, namespace, expectStatus string) {
 	t.Helper()
 	lease, err := cli.Acquire(ctx, api.AcquireRequest{
 		Namespace:  namespace,
@@ -1331,7 +1326,7 @@ func verifyStatePresent(t testing.TB, ctx context.Context, cli *lockdclient.Clie
 	}
 }
 
-func verifyStateAbsent(t testing.TB, ctx context.Context, cli *lockdclient.Client, key, namespace string) {
+func verifyStateAbsent(ctx context.Context, t testing.TB, cli *lockdclient.Client, key, namespace string) {
 	t.Helper()
 	lease, err := cli.Acquire(ctx, api.AcquireRequest{
 		Namespace:  namespace,

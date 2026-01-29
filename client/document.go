@@ -7,7 +7,7 @@ import (
 	"io"
 	"time"
 
-	"pkt.systems/lockd/lql"
+	"pkt.systems/lql"
 )
 
 // Document models a lockd state document with helper methods for JSON-pointer

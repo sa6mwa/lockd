@@ -599,6 +599,7 @@ func TestAzureQueryTxnDecisionEndpoints(t *testing.T) {
 
 func TestAzureQueryTxnFanoutAcrossNodes(t *testing.T) {
 	cfg := azureQueryConfigWithSweeper(t, 2*time.Second)
+	cfg.HAMode = "concurrent"
 	bundlePath := cryptotest.SharedTCClientBundlePath(t)
 	if bundlePath == "" {
 		cfg.DisableMTLS = true
@@ -707,6 +708,7 @@ func TestAzureQueryTxnFanoutAcrossNodes(t *testing.T) {
 
 func TestAzureQueryTxnFanoutRollbackAcrossNodes(t *testing.T) {
 	cfg := azureQueryConfigWithSweeper(t, 2*time.Second)
+	cfg.HAMode = "concurrent"
 	bundlePath := cryptotest.SharedTCClientBundlePath(t)
 	if bundlePath == "" {
 		cfg.DisableMTLS = true
@@ -808,6 +810,7 @@ func TestAzureQueryTxnFanoutRollbackAcrossNodes(t *testing.T) {
 
 func TestAzureQueryTxnReplayAfterRestartAcrossNodes(t *testing.T) {
 	cfg := azureQueryConfigWithSweeper(t, time.Hour) // disable sweeper; explicit replay after restart
+	cfg.HAMode = "concurrent"
 	tsA := startAzureQueryServerWithConfig(t, cfg)
 	tsB := startAzureQueryServerWithConfig(t, cfg)
 

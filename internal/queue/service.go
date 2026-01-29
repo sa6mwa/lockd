@@ -32,6 +32,7 @@ type Config struct {
 	DefaultVisibilityTimeout time.Duration
 	DefaultMaxAttempts       int
 	DefaultTTL               time.Duration
+	QueuePollInterval        time.Duration
 	Crypto                   *storage.Crypto
 }
 
@@ -42,6 +43,9 @@ type Service struct {
 	cfg    Config
 	ready  sync.Map // map[string]*readyCache
 	crypto *storage.Crypto
+
+	payloadDeleteOnce sync.Once
+	payloadDeleteCh   chan payloadDeleteRequest
 }
 
 // New constructs a queue Service.
@@ -58,12 +62,41 @@ func New(store storage.Backend, clk clock.Clock, cfg Config) (*Service, error) {
 	if cfg.DefaultMaxAttempts <= 0 {
 		cfg.DefaultMaxAttempts = 5
 	}
+	if cfg.QueuePollInterval <= 0 {
+		cfg.QueuePollInterval = 3 * time.Second
+	}
 	return &Service{
 		store:  store,
 		clk:    clk,
 		cfg:    cfg,
 		crypto: cfg.Crypto,
 	}, nil
+}
+
+type payloadDeleteRequest struct {
+	namespace string
+	key       string
+}
+
+func (s *Service) startPayloadDeleteWorker() {
+	s.payloadDeleteOnce.Do(func() {
+		s.payloadDeleteCh = make(chan payloadDeleteRequest, 1024)
+		go func(ch <-chan payloadDeleteRequest) {
+			for req := range ch {
+				_ = s.store.DeleteObject(context.Background(), req.namespace, req.key, storage.DeleteObjectOptions{IgnoreNotFound: true})
+			}
+		}(s.payloadDeleteCh)
+	})
+}
+
+func (s *Service) enqueuePayloadDelete(namespace, key string) bool {
+	s.startPayloadDeleteWorker()
+	select {
+	case s.payloadDeleteCh <- payloadDeleteRequest{namespace: namespace, key: key}:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Service) readyCacheForQueue(namespace, queue string) *readyCache {
@@ -82,8 +115,45 @@ func (s *Service) readyCacheForQueue(namespace, queue string) *readyCache {
 func (s *Service) notifyCacheUpdate(namespace, queue string, desc MessageDescriptor) {
 	key := readyCacheKey(namespace, queue)
 	if value, ok := s.ready.Load(key); ok {
-		value.(*readyCache).upsert(desc)
+		cache := value.(*readyCache)
+		if desc.Document.LeaseID == "" && desc.Document.LeaseFencingToken == 0 && desc.Document.LeaseTxnID == "" {
+			cache.clearInflight(desc.Document.ID)
+		}
+		cache.upsert(desc)
 	}
+}
+
+// UpdateReadyCache seeds the ready cache with a fresh descriptor.
+func (s *Service) UpdateReadyCache(namespace, queue string, doc *MessageDocument, etag string) {
+	if s == nil || doc == nil || etag == "" {
+		return
+	}
+	name, err := sanitizeQueueName(queue)
+	if err != nil {
+		return
+	}
+	ns, err := sanitizeNamespace(namespace)
+	if err != nil {
+		return
+	}
+	if doc.Queue == "" {
+		doc.Queue = name
+	}
+	if doc.ID == "" {
+		return
+	}
+	desc := MessageDescriptor{
+		Namespace:    ns,
+		ID:           doc.ID,
+		MetadataKey:  messageMetaPath(name, doc.ID),
+		MetadataETag: etag,
+		Document:     *doc,
+	}
+	cache := s.readyCacheForQueue(ns, name)
+	if desc.Document.LeaseID == "" && desc.Document.LeaseFencingToken == 0 && desc.Document.LeaseTxnID == "" {
+		cache.clearInflight(desc.Document.ID)
+	}
+	cache.upsert(desc)
 }
 
 func (s *Service) removeFromReadyCache(namespace, queue, id string) {
@@ -870,7 +940,9 @@ func (s *Service) deleteMessageInternal(ctx context.Context, namespace, queue, i
 		return err
 	}
 	payloadKey := messagePayloadPath(name, id)
-	_ = s.store.DeleteObject(ctx, ns, payloadKey, storage.DeleteObjectOptions{IgnoreNotFound: true})
+	if !s.enqueuePayloadDelete(ns, payloadKey) {
+		_ = s.store.DeleteObject(ctx, ns, payloadKey, storage.DeleteObjectOptions{IgnoreNotFound: true})
+	}
 	if notify {
 		s.removeFromReadyCache(ns, name, id)
 	}
@@ -894,7 +966,7 @@ func (s *Service) IncrementAttempts(ctx context.Context, namespace, queue string
 	doc.VisibilityTimeout = int64(visibility / time.Second)
 	doc.UpdatedAt = now
 	doc.LastError = nil
-	if doc != nil && doc.Namespace == "" {
+	if doc.Namespace == "" {
 		doc.Namespace = namespace
 	}
 	return s.SaveMessageDocument(ctx, namespace, queue, doc.ID, doc, expectedETag)
@@ -921,7 +993,7 @@ func (s *Service) Reschedule(ctx context.Context, namespace, queue string, doc *
 	doc.NotVisibleUntil = now.Add(delay)
 	doc.UpdatedAt = now
 	clearMessageLease(doc)
-	if doc != nil && doc.Namespace == "" {
+	if doc.Namespace == "" {
 		doc.Namespace = namespace
 	}
 	return s.SaveMessageDocument(ctx, namespace, queue, doc.ID, doc, expectedETag)
@@ -942,7 +1014,7 @@ func (s *Service) ExtendVisibility(ctx context.Context, namespace, queue string,
 	doc.NotVisibleUntil = now.Add(extension)
 	doc.VisibilityTimeout = int64(extension / time.Second)
 	doc.UpdatedAt = now
-	if doc != nil && doc.Namespace == "" {
+	if doc.Namespace == "" {
 		doc.Namespace = namespace
 	}
 	return s.SaveMessageDocument(ctx, namespace, queue, doc.ID, doc, expectedETag)
@@ -1314,7 +1386,7 @@ func (s *Service) Nack(ctx context.Context, namespace, queue string, doc *messag
 		doc.VisibilityTimeout = seconds
 	}
 	doc.UpdatedAt = now
-	if doc != nil && doc.Namespace == "" {
+	if doc.Namespace == "" {
 		doc.Namespace = namespace
 	}
 	doc.LastError = lastErr
@@ -1324,9 +1396,11 @@ func (s *Service) Nack(ctx context.Context, namespace, queue string, doc *messag
 
 // Ack removes state (if present) and message metadata/payload.
 func (s *Service) Ack(ctx context.Context, namespace, queue, id string, metaETag string, stateETag string, stateRequired bool) error {
-	if err := s.DeleteState(ctx, namespace, queue, id, stateETag); err != nil {
-		if stateRequired || (!errors.Is(err, storage.ErrNotFound) && stateETag != "") {
-			return err
+	if stateRequired || stateETag != "" {
+		if err := s.DeleteState(ctx, namespace, queue, id, stateETag); err != nil {
+			if stateRequired || (!errors.Is(err, storage.ErrNotFound) && stateETag != "") {
+				return err
+			}
 		}
 	}
 	return s.DeleteMessage(ctx, namespace, queue, id, metaETag)

@@ -76,6 +76,7 @@ func setupDiskBenchmarkEnv(b *testing.B, root string, withLockd bool) *diskBench
 
 func prepareDiskRoot(tb testing.TB, base string) string {
 	tb.Helper()
+	benchenv.LoadEnvFile(tb, ".env.disk")
 	var root string
 	if base != "" {
 		if info, err := os.Stat(base); err != nil || !info.IsDir() {

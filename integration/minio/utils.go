@@ -67,6 +67,12 @@ func ResetMinioBucketForCrypto(tb testing.TB, cfg lockd.Config) {
 		if listPrefix != "" {
 			logicalKey = strings.TrimPrefix(logicalKey, listPrefix+"/")
 		}
+		if logicalKey == ".lockd/backend-id" {
+			if err := client.RemoveObject(ctx, minioCfg.Bucket, obj.Key, minio.RemoveObjectOptions{}); err != nil {
+				tb.Logf("minio cleanup remove backend-id %q: %v", obj.Key, err)
+			}
+			continue
+		}
 		if !shouldCleanupMinioObject(logicalKey) {
 			continue
 		}
@@ -112,8 +118,15 @@ func CleanupNamespaces(tb testing.TB, cfg lockd.Config, namespaces ...string) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
+	seenHA := false
 	for _, ns := range namespaces {
+		if ns == ".ha" {
+			seenHA = true
+		}
 		cleanupMinioNamespace(tb, store, ctx, ns)
+	}
+	if !seenHA {
+		cleanupMinioNamespace(tb, store, ctx, ".ha")
 	}
 }
 
@@ -181,6 +194,9 @@ func shouldCleanupMinioObject(key string) bool {
 	key = strings.TrimPrefix(key, "/")
 	if key == "" {
 		return false
+	}
+	if strings.HasPrefix(key, "lockd-diagnostics/") || strings.Contains(key, "/lockd-diagnostics/") {
+		return true
 	}
 
 	namespaceAwarePrefixes := []string{

@@ -151,8 +151,8 @@ func TestDiskRetentionSweep(t *testing.T) {
 		t.Fatalf("expected state cleanup, got %v", err)
 	}
 
-	if _, err := os.Stat(filepath.Join(root, testNamespace, "state")); err != nil {
-		t.Fatalf("state dir: %v", err)
+	if _, err := os.Stat(filepath.Join(root, testNamespace, "logstore")); err != nil {
+		t.Fatalf("logstore dir: %v", err)
 	}
 }
 

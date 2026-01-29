@@ -70,6 +70,7 @@ type Dispatcher struct {
 	pollInterval time.Duration
 	pollJitter   time.Duration
 	maxConsumers int
+	pageSize     int
 
 	mu             sync.Mutex
 	totalConsumers int
@@ -109,6 +110,15 @@ func WithMaxConsumers(n int) DispatcherOption {
 	return func(disp *Dispatcher) {
 		if n > 0 {
 			disp.maxConsumers = n
+		}
+	}
+}
+
+// WithQueuePageSize overrides the default queue list page size per poll.
+func WithQueuePageSize(size int) DispatcherOption {
+	return func(disp *Dispatcher) {
+		if size > 0 {
+			disp.pageSize = size
 		}
 	}
 }
@@ -173,6 +183,7 @@ func NewDispatcher(svc candidateProvider, opts ...DispatcherOption) *Dispatcher 
 		pollInterval:          3 * time.Second,
 		pollJitter:            500 * time.Millisecond,
 		maxConsumers:          1000,
+		pageSize:              defaultQueuePageSize,
 		queues:                make(map[string]*queueState),
 		wake:                  make(chan struct{}, 1),
 		resilientPollInterval: 5 * time.Minute,
@@ -370,7 +381,7 @@ func (d *Dispatcher) queueState(namespace, queue string) (*queueState, error) {
 		dispatcher:       d,
 		namespace:        ns,
 		name:             name,
-		pageSize:         defaultQueuePageSize,
+		pageSize:         d.pageSize,
 		logger:           d.logger.With("namespace", ns, "queue", name),
 		needsPoll:        true,
 		fallbackInterval: d.resilientPollInterval,

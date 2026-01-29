@@ -54,8 +54,9 @@ func buildDiskQueueConfig(t testing.TB, root string, opts diskQueueOptions) lock
 		SweeperInterval: 2 * time.Second,
 		DiskRetention:   0,
 		DiskQueueWatch:  opts.EnableWatch,
+		HAMode:          "failover",
 	}
-	cfg.QRFEnabled = true
+	cfg.QRFDisabled = false
 	cfg.QRFQueueSoftLimit = 6
 	cfg.QRFQueueHardLimit = 12
 	cfg.QRFLockSoftLimit = 4
@@ -71,9 +72,9 @@ func buildDiskQueueConfig(t testing.TB, root string, opts diskQueueOptions) lock
 	cfg.QRFLoadSoftLimitMultiplier = 3
 	cfg.QRFLoadHardLimitMultiplier = 6
 	cfg.QRFRecoverySamples = 1
-	cfg.QRFSoftRetryAfter = 50 * time.Millisecond
-	cfg.QRFEngagedRetryAfter = 200 * time.Millisecond
-	cfg.QRFRecoveryRetryAfter = 100 * time.Millisecond
+	cfg.QRFSoftDelay = 50 * time.Millisecond
+	cfg.QRFEngagedDelay = 200 * time.Millisecond
+	cfg.QRFRecoveryDelay = 100 * time.Millisecond
 	if opts.PollInterval > 0 {
 		cfg.QueuePollInterval = opts.PollInterval
 	}

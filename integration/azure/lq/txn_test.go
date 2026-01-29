@@ -19,6 +19,7 @@ func TestAzureQueueTxnDecision(t *testing.T) {
 		PollJitter:        0,
 		ResilientInterval: 1 * time.Second,
 	})
+	cfg.HAMode = "concurrent"
 	ts := startAzureQueueServer(t, cfg)
 
 	t.Run("Commit", func(t *testing.T) {
@@ -68,6 +69,7 @@ func TestAzureQueueTxnFanoutAcrossNodes(t *testing.T) {
 		PollJitter:        0,
 		ResilientInterval: 1 * time.Second,
 	})
+	cfg.HAMode = "concurrent"
 	bundlePath := cryptotest.SharedTCClientBundlePath(t)
 	if bundlePath == "" {
 		cfg.DisableMTLS = true
@@ -116,6 +118,7 @@ func TestAzureQueueTxnRestartAcrossNodes(t *testing.T) {
 		PollJitter:        0,
 		ResilientInterval: 1 * time.Second,
 	})
+	cfg.HAMode = "concurrent"
 	bundlePath := cryptotest.SharedTCClientBundlePath(t)
 	if bundlePath == "" {
 		cfg.DisableMTLS = true

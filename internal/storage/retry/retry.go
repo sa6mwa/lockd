@@ -156,6 +156,19 @@ func (b *backend) BackendHash(ctx context.Context) (string, error) {
 	return b.inner.BackendHash(ctx)
 }
 
+func (b *backend) SetSingleWriter(enabled bool) {
+	if inner, ok := b.inner.(storage.SingleWriterControl); ok {
+		inner.SetSingleWriter(enabled)
+	}
+}
+
+func (b *backend) SupportsConcurrentWrites() bool {
+	if inner, ok := b.inner.(storage.ConcurrentWriteSupport); ok {
+		return inner.SupportsConcurrentWrites()
+	}
+	return true
+}
+
 func (b *backend) Close() error {
 	return b.inner.Close()
 }
@@ -165,6 +178,13 @@ func (b *backend) DefaultNamespaceConfig() namespaces.Config {
 		return provider.DefaultNamespaceConfig()
 	}
 	return namespaces.DefaultConfig()
+}
+
+func (b *backend) ListNamespaces(ctx context.Context) ([]string, error) {
+	if lister, ok := b.inner.(storage.NamespaceLister); ok {
+		return lister.ListNamespaces(ctx)
+	}
+	return nil, storage.ErrNotImplemented
 }
 
 func (b *backend) SubscribeQueueChanges(namespace, queue string) (storage.QueueChangeSubscription, error) {

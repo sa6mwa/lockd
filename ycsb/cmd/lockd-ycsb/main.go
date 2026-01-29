@@ -54,24 +54,34 @@ var (
 	globalProps    *properties.Properties
 )
 
-func initialGlobal(dbName string, onProperties func()) {
-	globalProps = properties.NewProperties()
+func initialGlobal(dbName string, onProperties func(*properties.Properties)) {
+	props := buildProperties(onProperties)
+	setupGlobal(dbName, props)
+}
+
+func buildProperties(onProperties func(*properties.Properties)) *properties.Properties {
+	props := properties.NewProperties()
 	if len(propertyFiles) > 0 {
-		globalProps = properties.MustLoadFiles(propertyFiles, properties.UTF8, false)
+		props = properties.MustLoadFiles(propertyFiles, properties.UTF8, false)
 	}
 
-	for _, prop := range propertyValues {
-		seps := strings.SplitN(prop, "=", 2)
+	for _, propValue := range propertyValues {
+		seps := strings.SplitN(propValue, "=", 2)
 		if len(seps) != 2 {
-			log.Fatalf("bad property: `%s`, expected format `name=value`", prop)
+			log.Fatalf("bad property: `%s`, expected format `name=value`", propValue)
 		}
-		globalProps.Set(seps[0], seps[1])
+		props.Set(seps[0], seps[1])
 	}
 
 	if onProperties != nil {
-		onProperties()
+		onProperties(props)
 	}
 
+	return props
+}
+
+func setupGlobal(dbName string, props *properties.Properties) {
+	globalProps = props
 	addr := globalProps.GetString(prop.DebugPprof, prop.DebugPprofDefault)
 	go func() {
 		http.ListenAndServe(addr, nil)
@@ -83,22 +93,31 @@ func initialGlobal(dbName string, onProperties func()) {
 		tableName = globalProps.GetString(prop.TableName, prop.TableNameDefault)
 	}
 
-	workloadName := globalProps.GetString(prop.Workload, "core")
-	workloadCreator := ycsb.GetWorkloadCreator(workloadName)
+	workload, db, err := buildContext(dbName, globalProps)
+	if err != nil {
+		util.Fatalf("create workload/db failed %v", err)
+	}
+	globalWorkload = workload
+	globalDB = client.DbWrapper{db}
+}
 
-	var err error
-	if globalWorkload, err = workloadCreator.Create(globalProps); err != nil {
-		util.Fatalf("create workload %s failed %v", workloadName, err)
+func buildContext(dbName string, props *properties.Properties) (ycsb.Workload, ycsb.DB, error) {
+	workloadName := props.GetString(prop.Workload, "core")
+	workloadCreator := ycsb.GetWorkloadCreator(workloadName)
+	workload, err := workloadCreator.Create(props)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	dbCreator := ycsb.GetDBCreator(dbName)
 	if dbCreator == nil {
-		util.Fatalf("%s is not registered", dbName)
+		return nil, nil, fmt.Errorf("%s is not registered", dbName)
 	}
-	if globalDB, err = dbCreator.Create(globalProps); err != nil {
-		util.Fatalf("create db %s failed %v", dbName, err)
+	db, err := dbCreator.Create(props)
+	if err != nil {
+		return nil, nil, err
 	}
-	globalDB = client.DbWrapper{globalDB}
+	return workload, client.DbWrapper{db}, nil
 }
 
 func main() {

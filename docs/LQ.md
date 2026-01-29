@@ -147,13 +147,13 @@ client Dequeue --> HTTP handler --> dispatcher.Wait(queue)
    - Call `consumeQueue`, which delegates to the dispatcher and then to
      `prepareQueueDelivery`.
 
-2. `consumeQueue`
+3. `consumeQueue`
    - Repeatedly calls `dispatcher.Wait()` until it either gets a candidate or
      times out. If `prepareQueueDelivery` returns a retryable condition (lease
      conflict, metadata CAS mismatch, payload missing), the dispatcher is nudged
      and the loop continues.
 
-3. `prepareQueueDelivery`
+4. `prepareQueueDelivery`
    - Acquires a lease for the message key (`q/<queue>/msg/<id>`).
    - Calls `queue.Service.IncrementAttempts` to CAS-update attempts and
      `not_visible_until`.
@@ -164,7 +164,7 @@ client Dequeue --> HTTP handler --> dispatcher.Wait(queue)
      companion lease (`q/<queue>/state/<id>`).
    - Returns the assembled delivery (metadata + reader) to the handler.
 
-4. `/v1/queue/ack`, `/v1/queue/nack`, `/v1/queue/extend`
+5. `/v1/queue/ack`, `/v1/queue/nack`, `/v1/queue/extend`
    - Validate lease ownership using meta CAS.
    - Validate the message metadata fence (`lease_id`, `lease_txn_id`, `lease_fencing_token`); stale leases return `409 queue_message_lease_mismatch`.
    - Call `queue.Service` helpers to update metadata or remove payload/state.
@@ -187,9 +187,10 @@ integration:
   `storage.ErrNotImplemented` (unsupported platform), the dispatcher falls back
   to polling and marks the queue as “watch disabled”.
 
-When watch is available, storage polling is avoided entirely; candidates are
-fetched only in response to a signal or when consumers first arrive. For other
-backends (S3/Azure/minio/disk without watch), regular polling remains in place.
+When watch is available, polling is reduced but not eliminated: the dispatcher
+still runs a safety poll on `queue-resilient-poll-interval` to recover from
+missed events. For other backends (S3/Azure/minio/disk without watch), regular
+polling remains in place.
 
 ## Configuration Knobs
 
@@ -198,6 +199,7 @@ backends (S3/Azure/minio/disk without watch), regular polling remains in place.
 | `QueueMaxConsumers` (`--queue-max-consumers`) | Caps concurrent dispatcher waiters per server to avoid resource pressure. | Auto (≈64 × CPUs, clamped between 128–4096) |
 | `QueuePollInterval` (`--queue-poll-interval`) | Base interval between storage scans when no watcher events fire. | 3s |
 | `QueuePollJitter` (`--queue-poll-jitter`) | Random spread added to the interval to desynchronise multiple servers. Set to 0 to disable. | 500ms |
+| `QueueResilientPollInterval` (`--queue-resilient-poll-interval`) | Safety poll interval when watchers are active. Set to 0 to disable. | 5m |
 | `DiskQueueWatch` (`--disk-queue-watch`) | Enables inotify watcher on Linux disk backend. Automatically ignored on unsupported filesystems (e.g. NFS). | true |
 | `DisableMemQueueWatch` (`--disable-mem-queue-watch`) | Disables in-process notifications for the memory backend. Set to true to force pure polling (useful for regression tests). | false |
 

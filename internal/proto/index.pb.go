@@ -26,6 +26,7 @@ type IndexManifest struct {
 	Seq           uint64                 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
 	UpdatedAtUnix int64                  `protobuf:"varint,2,opt,name=updated_at_unix,json=updatedAtUnix,proto3" json:"updated_at_unix,omitempty"`
 	Shards        []*IndexShard          `protobuf:"bytes,3,rep,name=shards,proto3" json:"shards,omitempty"`
+	FormatVersion uint32                 `protobuf:"varint,4,opt,name=format_version,json=formatVersion,proto3" json:"format_version,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -79,6 +80,13 @@ func (x *IndexManifest) GetShards() []*IndexShard {
 		return x.Shards
 	}
 	return nil
+}
+
+func (x *IndexManifest) GetFormatVersion() uint32 {
+	if x != nil {
+		return x.FormatVersion
+	}
+	return 0
 }
 
 type IndexShard struct {
@@ -198,6 +206,8 @@ type IndexSegment struct {
 	SegmentId     string                 `protobuf:"bytes,1,opt,name=segment_id,json=segmentId,proto3" json:"segment_id,omitempty"`
 	CreatedAtUnix int64                  `protobuf:"varint,2,opt,name=created_at_unix,json=createdAtUnix,proto3" json:"created_at_unix,omitempty"`
 	Fields        []*FieldBlock          `protobuf:"bytes,3,rep,name=fields,proto3" json:"fields,omitempty"`
+	DocMeta       []*DocumentMeta        `protobuf:"bytes,4,rep,name=doc_meta,json=docMeta,proto3" json:"doc_meta,omitempty"`
+	FormatVersion uint32                 `protobuf:"varint,5,opt,name=format_version,json=formatVersion,proto3" json:"format_version,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -251,6 +261,20 @@ func (x *IndexSegment) GetFields() []*FieldBlock {
 		return x.Fields
 	}
 	return nil
+}
+
+func (x *IndexSegment) GetDocMeta() []*DocumentMeta {
+	if x != nil {
+		return x.DocMeta
+	}
+	return nil
+}
+
+func (x *IndexSegment) GetFormatVersion() uint32 {
+	if x != nil {
+		return x.FormatVersion
+	}
+	return 0
 }
 
 type FieldBlock struct {
@@ -357,15 +381,100 @@ func (x *TermPosting) GetKeys() []string {
 	return nil
 }
 
+type DocumentMeta struct {
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	Key                 string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
+	StateEtag           string                 `protobuf:"bytes,2,opt,name=state_etag,json=stateEtag,proto3" json:"state_etag,omitempty"`
+	StatePlaintextBytes int64                  `protobuf:"varint,3,opt,name=state_plaintext_bytes,json=statePlaintextBytes,proto3" json:"state_plaintext_bytes,omitempty"`
+	StateDescriptor     []byte                 `protobuf:"bytes,4,opt,name=state_descriptor,json=stateDescriptor,proto3" json:"state_descriptor,omitempty"`
+	PublishedVersion    int64                  `protobuf:"varint,5,opt,name=published_version,json=publishedVersion,proto3" json:"published_version,omitempty"`
+	QueryExcluded       bool                   `protobuf:"varint,6,opt,name=query_excluded,json=queryExcluded,proto3" json:"query_excluded,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
+}
+
+func (x *DocumentMeta) Reset() {
+	*x = DocumentMeta{}
+	mi := &file_index_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DocumentMeta) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DocumentMeta) ProtoMessage() {}
+
+func (x *DocumentMeta) ProtoReflect() protoreflect.Message {
+	mi := &file_index_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DocumentMeta.ProtoReflect.Descriptor instead.
+func (*DocumentMeta) Descriptor() ([]byte, []int) {
+	return file_index_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *DocumentMeta) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
+func (x *DocumentMeta) GetStateEtag() string {
+	if x != nil {
+		return x.StateEtag
+	}
+	return ""
+}
+
+func (x *DocumentMeta) GetStatePlaintextBytes() int64 {
+	if x != nil {
+		return x.StatePlaintextBytes
+	}
+	return 0
+}
+
+func (x *DocumentMeta) GetStateDescriptor() []byte {
+	if x != nil {
+		return x.StateDescriptor
+	}
+	return nil
+}
+
+func (x *DocumentMeta) GetPublishedVersion() int64 {
+	if x != nil {
+		return x.PublishedVersion
+	}
+	return 0
+}
+
+func (x *DocumentMeta) GetQueryExcluded() bool {
+	if x != nil {
+		return x.QueryExcluded
+	}
+	return false
+}
+
 var File_index_proto protoreflect.FileDescriptor
 
 const file_index_proto_rawDesc = "" +
 	"\n" +
-	"\vindex.proto\x12\x0elockd.internal\"}\n" +
+	"\vindex.proto\x12\x0elockd.internal\"\xa4\x01\n" +
 	"\rIndexManifest\x12\x10\n" +
 	"\x03seq\x18\x01 \x01(\x04R\x03seq\x12&\n" +
 	"\x0fupdated_at_unix\x18\x02 \x01(\x03R\rupdatedAtUnix\x122\n" +
-	"\x06shards\x18\x03 \x03(\v2\x1a.lockd.internal.IndexShardR\x06shards\"d\n" +
+	"\x06shards\x18\x03 \x03(\v2\x1a.lockd.internal.IndexShardR\x06shards\x12%\n" +
+	"\x0eformat_version\x18\x04 \x01(\rR\rformatVersion\"d\n" +
 	"\n" +
 	"IndexShard\x12\x19\n" +
 	"\bshard_id\x18\x01 \x01(\rR\ashardId\x12;\n" +
@@ -374,19 +483,29 @@ const file_index_proto_rawDesc = "" +
 	"\n" +
 	"segment_id\x18\x01 \x01(\tR\tsegmentId\x12&\n" +
 	"\x0fcreated_at_unix\x18\x02 \x01(\x03R\rcreatedAtUnix\x12\x1b\n" +
-	"\tdoc_count\x18\x03 \x01(\x04R\bdocCount\"\x89\x01\n" +
+	"\tdoc_count\x18\x03 \x01(\x04R\bdocCount\"\xe9\x01\n" +
 	"\fIndexSegment\x12\x1d\n" +
 	"\n" +
 	"segment_id\x18\x01 \x01(\tR\tsegmentId\x12&\n" +
 	"\x0fcreated_at_unix\x18\x02 \x01(\x03R\rcreatedAtUnix\x122\n" +
-	"\x06fields\x18\x03 \x03(\v2\x1a.lockd.internal.FieldBlockR\x06fields\"Y\n" +
+	"\x06fields\x18\x03 \x03(\v2\x1a.lockd.internal.FieldBlockR\x06fields\x127\n" +
+	"\bdoc_meta\x18\x04 \x03(\v2\x1c.lockd.internal.DocumentMetaR\adocMeta\x12%\n" +
+	"\x0eformat_version\x18\x05 \x01(\rR\rformatVersion\"Y\n" +
 	"\n" +
 	"FieldBlock\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x127\n" +
 	"\bpostings\x18\x02 \x03(\v2\x1b.lockd.internal.TermPostingR\bpostings\"5\n" +
 	"\vTermPosting\x12\x12\n" +
 	"\x04term\x18\x01 \x01(\tR\x04term\x12\x12\n" +
-	"\x04keys\x18\x02 \x03(\tR\x04keysB(Z&pkt.systems/lockd/internal/proto;protob\x06proto3"
+	"\x04keys\x18\x02 \x03(\tR\x04keys\"\xf2\x01\n" +
+	"\fDocumentMeta\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x1d\n" +
+	"\n" +
+	"state_etag\x18\x02 \x01(\tR\tstateEtag\x122\n" +
+	"\x15state_plaintext_bytes\x18\x03 \x01(\x03R\x13statePlaintextBytes\x12)\n" +
+	"\x10state_descriptor\x18\x04 \x01(\fR\x0fstateDescriptor\x12+\n" +
+	"\x11published_version\x18\x05 \x01(\x03R\x10publishedVersion\x12%\n" +
+	"\x0equery_excluded\x18\x06 \x01(\bR\rqueryExcludedB(Z&pkt.systems/lockd/internal/proto;protob\x06proto3"
 
 var (
 	file_index_proto_rawDescOnce sync.Once
@@ -400,7 +519,7 @@ func file_index_proto_rawDescGZIP() []byte {
 	return file_index_proto_rawDescData
 }
 
-var file_index_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_index_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_index_proto_goTypes = []any{
 	(*IndexManifest)(nil),   // 0: lockd.internal.IndexManifest
 	(*IndexShard)(nil),      // 1: lockd.internal.IndexShard
@@ -408,17 +527,19 @@ var file_index_proto_goTypes = []any{
 	(*IndexSegment)(nil),    // 3: lockd.internal.IndexSegment
 	(*FieldBlock)(nil),      // 4: lockd.internal.FieldBlock
 	(*TermPosting)(nil),     // 5: lockd.internal.TermPosting
+	(*DocumentMeta)(nil),    // 6: lockd.internal.DocumentMeta
 }
 var file_index_proto_depIdxs = []int32{
 	1, // 0: lockd.internal.IndexManifest.shards:type_name -> lockd.internal.IndexShard
 	2, // 1: lockd.internal.IndexShard.segments:type_name -> lockd.internal.IndexSegmentRef
 	4, // 2: lockd.internal.IndexSegment.fields:type_name -> lockd.internal.FieldBlock
-	5, // 3: lockd.internal.FieldBlock.postings:type_name -> lockd.internal.TermPosting
-	4, // [4:4] is the sub-list for method output_type
-	4, // [4:4] is the sub-list for method input_type
-	4, // [4:4] is the sub-list for extension type_name
-	4, // [4:4] is the sub-list for extension extendee
-	0, // [0:4] is the sub-list for field type_name
+	6, // 3: lockd.internal.IndexSegment.doc_meta:type_name -> lockd.internal.DocumentMeta
+	5, // 4: lockd.internal.FieldBlock.postings:type_name -> lockd.internal.TermPosting
+	5, // [5:5] is the sub-list for method output_type
+	5, // [5:5] is the sub-list for method input_type
+	5, // [5:5] is the sub-list for extension type_name
+	5, // [5:5] is the sub-list for extension extendee
+	0, // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_index_proto_init() }
@@ -432,7 +553,7 @@ func file_index_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_index_proto_rawDesc), len(file_index_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   6,
+			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

@@ -32,6 +32,48 @@
 //	    }
 //	}()
 //
+// Disk/NFS backends use a log-structured store with durable group commit.
+// Batching is driven by natural backpressure: fsync occurs for each batch and
+// the queue builds only while prior fsyncs are in-flight. LogstoreCommitMaxOps
+// caps batch size. LogstoreSegmentSize controls when segment files roll.
+// DiskLockFileCacheSize caps cached lockfile descriptors for disk/NFS (default
+// 2048; set negative to disable caching).
+// Hot state reads can be cached in-process via StateCacheBytes (default 64 MiB;
+// set 0 to disable).
+// QueryDocPrefetch controls parallel fetch depth for query return=documents
+// (default 8; set 1 to disable).
+// In HA concurrent mode, single-writer optimizations are disabled.
+//
+//	cfg := lockd.Config{
+//	    Store:      "disk:///var/lib/lockd-data",
+//	    LogstoreCommitMaxOps:   128,                // disk/NFS only
+//	    LogstoreSegmentSize:    64 << 20,           // disk/NFS only (bytes)
+//	    DiskLockFileCacheSize:  2048,               // disk/NFS only
+//	    StateCacheBytes:        64 << 20,           // cache hot state payloads
+//	    QueryDocPrefetch:       8,                  // return=documents prefetch depth
+//	}
+//
+// The CLI mirrors this with `--logstore-commit-max-ops`,
+// `--logstore-segment-size`, `--disk-lock-file-cache-size`,
+// `--state-cache-bytes`, and `--query-doc-prefetch`.
+//
+// # HA modes (concurrent vs failover)
+//
+// When multiple lockd servers share the same backend, `HAMode` controls
+// concurrent vs failover behaviour. `HAMode="failover"` (default) uses a
+// lease stored under the internal `.ha/activelease` key to elect a single
+// active writer; passive nodes return HTTP 503 so clients can retry another
+// endpoint. `HAMode="concurrent"` enables multi-writer semantics. `HALeaseTTL`
+// controls the lease duration and renewal cadence.
+//
+//	cfg := lockd.Config{
+//	    Store:      "disk:///var/lib/lockd-data",
+//	    HAMode:     "failover",
+//	    HALeaseTTL: 5 * time.Second,
+//	}
+//
+// The CLI mirrors this with `--ha` and `--ha-lease-ttl`.
+//
 // Namespaces partition keys and metadata. When callers omit the namespace, the
 // server falls back to `Config.DefaultNamespace` (default "default"). Setting
 // the field on `Config`, providing `Namespace` in `api.AcquireRequest`, or
@@ -133,6 +175,26 @@
 // To disable the idle sweeper entirely, set `SweeperInterval <= 0` (replay
 // throttling is independent and controlled by `TxnReplayInterval`).
 //
+// Queue transactions use a dedicated worklist to avoid list scans when a
+// queue message is enlisted in a transaction decision. When a commit/rollback
+// includes a queue message participant, the TC records a small per-queue
+// decision list under `.txn-queue-decisions`. Dequeue checks that worklist at
+// most once per cache window (no background sweeps) and applies up to a capped
+// number of items, making rollback-visible messages reappear after restarts
+// without scanning the queue. Non-transactional queues do not write these
+// markers, so they incur no extra IO beyond the cached check.
+//
+// Configure the worklist behavior with:
+//
+//	cfg := lockd.Config{
+//	    QueueDecisionCacheTTL: 60 * time.Second, // cache empty worklist checks
+//	    QueueDecisionMaxApply: 50,               // max items applied per dequeue
+//	    QueueDecisionApplyTimeout: 2 * time.Second, // time budget per dequeue apply
+//	}
+//
+// The CLI mirrors these as `--queue-decision-cache-ttl`,
+// `--queue-decision-max-apply`, and `--queue-decision-apply-timeout`.
+//
 // The Go client and CLI are drain-aware by default: when the server emits the
 // `Shutdown-Imminent` header, the SDK auto-releases leases once in-flight work
 // is done. Opt out by using `client.WithDrainAwareShutdown(false)` or passing
@@ -232,28 +294,34 @@
 // Each server embeds a **Local Security Force (LSF)** observer that samples
 // host metrics (memory, swap, load averages, CPU) plus per-endpoint inflight
 // counters, and a **Quick Reaction Force (QRF)** controller that applies
-// adaptive back-pressure. When the QRF soft-arms or engages, lockd responds
-// with HTTP 429, surfaces a `Retry-After` hint, and tags the response with
-// `X-Lockd-QRF-State`. The Go client honours these signals automatically; other
-// clients should do the same to keep queues draining while the perimeter
+// adaptive back-pressure. When the QRF soft-arms or engages, lockd paces
+// requests server-side by waiting for a computed delay before continuing.
+// Only if the delay exceeds the configured max wait does lockd respond with
+// HTTP 429, surface a `Retry-After` hint, and tag the response with
+// `X-Lockd-QRF-State`. The Go client honours these signals automatically;
+// other clients should do the same to keep queues draining while the perimeter
 // defence recovers. Configuration knobs and workflow details live in
 // docs/QRF.md. By default the controller leans on host-wide memory budgets
 // (80 % soft / 90 % hard) and load-average multipliers derived from the LSF
-// baseline (4×/8×) while queue/lock inflight guards remain disabled unless
-// configured explicitly.
+// baseline (4×/8×) while queue/lock/query inflight guards remain disabled
+// unless configured explicitly.
 //
 // # Telemetry
 //
 // Traces are exported over OTLP when `Config.OTLPEndpoint` is set (gRPC by
 // default; use `grpc://`, `grpcs://`, `http://`, or `https://` to force a
 // transport). Metrics are exposed via a Prometheus scrape endpoint when
-// `Config.MetricsListen` is non-empty (for example `:9464`). Both can be
-// enabled together or independently:
+// `Config.MetricsListen` is non-empty (for example `:9464`). Runtime profiling
+// metrics (goroutines, heap, scheduler latency) are opt-in via
+// `Config.EnableProfilingMetrics`. A pprof debug listener can be exposed with
+// `Config.PprofListen`. All three can be enabled together or independently:
 //
 //	cfg := lockd.Config{
 //	    Store:         "disk:///var/lib/lockd",
 //	    OTLPEndpoint:  "localhost:4317",
 //	    MetricsListen: ":9464",
+//	    EnableProfilingMetrics: true,
+//	    PprofListen:            ":6060",
 //	}
 //	srv, err := lockd.NewServer(cfg)
 //	if err != nil { log.Fatal(err) }
@@ -296,7 +364,7 @@
 // # LQL query & mutation language
 //
 // Both the CLI and HTTP APIs share a common selector/mutation DSL implemented
-// by `pkt.systems/lockd/lql`. Selectors accept JSON Pointer field paths
+// by `pkt.systems/lql`. Selectors accept JSON Pointer field paths
 // (`and.eq{field=/status,value=open}`, `or.1.range{field=/progress/percent,gte=50}`),
 // while mutations cover assignments, arithmetic (`++`, `--`, `=+5`), removals
 // (`rm:`/`delete:`), `time:` aliases for RFC3339 timestamps, and brace

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"path"
 	"strings"
 	"time"
 
@@ -14,11 +13,14 @@ import (
 const leaseIndexPrefix = ".lease-index"
 
 func leaseIndexBucketsKey() string {
-	return path.Join(leaseIndexPrefix, "buckets.json")
+	return leaseIndexPrefix + "/buckets.json"
 }
 
 func leaseIndexKey(bucket, key string) string {
-	return path.Join(leaseIndexPrefix, bucket, key)
+	if bucket == "" {
+		return leaseIndexPrefix + "/" + key
+	}
+	return leaseIndexPrefix + "/" + bucket + "/" + key
 }
 
 func (s *Service) updateLeaseIndex(ctx context.Context, namespace, key string, oldExpires, newExpires int64) error {

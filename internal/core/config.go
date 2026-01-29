@@ -21,6 +21,8 @@ type Config struct {
 	Store                  storage.Backend
 	BackendHash            string
 	Crypto                 *storage.Crypto
+	HAMode                 string
+	HALeaseTTL             time.Duration
 	QueueService           QueueProvider
 	QueueDispatcher        QueueDispatcher
 	SearchAdapter          search.Adapter
@@ -31,22 +33,27 @@ type Config struct {
 	Logger                 pslog.Logger
 	Clock                  clock.Clock
 
-	DefaultTTL           time.Duration
-	MaxTTL               time.Duration
-	AcquireBlock         time.Duration
-	JSONMaxBytes         int64
-	AttachmentMaxBytes   int64
-	SpoolThreshold       int64
-	TxnDecisionRetention time.Duration
-	TxnReplayInterval    time.Duration
-	EnforceIdentity      bool
-	MetaWarmup           WarmupConfig
-	StateWarmup          WarmupConfig
-	LSFObserver          *lsf.Observer
-	QRFController        *qrf.Controller
-	ShutdownState        func() ShutdownState
-	NamespaceTracker     *NamespaceTracker
-	TCDecider            TCDecider
+	DefaultTTL                time.Duration
+	MaxTTL                    time.Duration
+	AcquireBlock              time.Duration
+	JSONMaxBytes              int64
+	AttachmentMaxBytes        int64
+	SpoolThreshold            int64
+	TxnDecisionRetention      time.Duration
+	TxnReplayInterval         time.Duration
+	QueueDecisionCacheTTL     time.Duration
+	QueueDecisionMaxApply     int
+	QueueDecisionApplyTimeout time.Duration
+	StateCacheBytes           int64
+	QueryDocPrefetch          int
+	EnforceIdentity           bool
+	MetaWarmup                WarmupConfig
+	StateWarmup               WarmupConfig
+	LSFObserver               *lsf.Observer
+	QRFController             *qrf.Controller
+	ShutdownState             func() ShutdownState
+	NamespaceTracker          *NamespaceTracker
+	TCDecider                 TCDecider
 }
 
 // WarmupConfig governs backend warmup retries for meta/state.

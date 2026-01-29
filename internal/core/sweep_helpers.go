@@ -24,6 +24,7 @@ const (
 	sweepModeManual      sweepMode = "manual"
 )
 
+// IdleSweepOptions controls limits and pacing for idle sweeps.
 type IdleSweepOptions struct {
 	Now        time.Time
 	MaxOps     int
@@ -33,13 +34,13 @@ type IdleSweepOptions struct {
 }
 
 type sweepBudget struct {
-	clock       clockSource
-	start       time.Time
-	maxOps      int
-	maxRuntime  time.Duration
-	opDelay     time.Duration
-	ops         int
-	shouldStop  func() bool
+	clock      clockSource
+	start      time.Time
+	maxOps     int
+	maxRuntime time.Duration
+	opDelay    time.Duration
+	ops        int
+	shouldStop func() bool
 	stopReason string
 }
 

@@ -371,7 +371,7 @@ func newAuthRevokeClientCommand() *cobra.Command {
 	var bundlePath string
 	var out string
 	var force bool
-	var propagate bool = true
+	propagate := true
 
 	cmd := &cobra.Command{
 		Use:   "revoke client SERIAL [SERIAL...]",

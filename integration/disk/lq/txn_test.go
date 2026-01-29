@@ -3,6 +3,7 @@
 package disklq
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -48,6 +49,10 @@ func runDiskQueueTxnDecision(t *testing.T) {
 		queuetestutil.InstallWatchdog(t, "disk-txn-mixed-rollback", 15*time.Second)
 		queuetestutil.RunQueueTxnMixedKeyScenario(t, ts, false)
 	})
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	_ = ts.Stop(stopCtx)
+	stopCancel()
 
 	t.Run("ReplayCommit", func(t *testing.T) {
 		queuetestutil.InstallWatchdog(t, "disk-txn-replay-commit", 15*time.Second)

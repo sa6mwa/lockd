@@ -13,6 +13,7 @@ type Manifest struct {
 	Seq       uint64
 	UpdatedAt time.Time
 	Shards    map[uint32]*Shard
+	Format    uint32
 }
 
 // Shard holds the ordered list of segments covering a shard.
@@ -30,7 +31,7 @@ type SegmentRef struct {
 
 // NewManifest returns an initial manifest.
 func NewManifest() *Manifest {
-	return &Manifest{Shards: make(map[uint32]*Shard)}
+	return &Manifest{Shards: make(map[uint32]*Shard), Format: IndexFormatVersionV3}
 }
 
 // Clone creates a deep copy of the manifest.
@@ -42,6 +43,7 @@ func (m *Manifest) Clone() *Manifest {
 		Seq:       m.Seq,
 		UpdatedAt: m.UpdatedAt,
 		Shards:    make(map[uint32]*Shard, len(m.Shards)),
+		Format:    m.Format,
 	}
 	for id, shard := range m.Shards {
 		if shard == nil {
@@ -58,6 +60,9 @@ func (m *Manifest) Clone() *Manifest {
 func (m *Manifest) Validate() error {
 	if m == nil {
 		return fmt.Errorf("manifest nil")
+	}
+	if m.Format == 0 {
+		return fmt.Errorf("manifest format required")
 	}
 	for id, shard := range m.Shards {
 		if shard == nil {
@@ -84,6 +89,7 @@ func (m *Manifest) ToProto() *indexproto.IndexManifest {
 		Seq:           m.Seq,
 		UpdatedAtUnix: m.UpdatedAt.Unix(),
 		Shards:        make([]*indexproto.IndexShard, 0, len(m.Shards)),
+		FormatVersion: m.Format,
 	}
 	ids := make([]int, 0, len(m.Shards))
 	for id := range m.Shards {
@@ -114,10 +120,15 @@ func ManifestFromProto(msg *indexproto.IndexManifest) *Manifest {
 	if msg == nil {
 		return NewManifest()
 	}
+	format := msg.GetFormatVersion()
+	if format == 0 {
+		format = IndexFormatVersionLegacy
+	}
 	manifest := &Manifest{
 		Seq:       msg.GetSeq(),
 		UpdatedAt: time.Unix(msg.GetUpdatedAtUnix(), 0).UTC(),
 		Shards:    make(map[uint32]*Shard, len(msg.GetShards())),
+		Format:    format,
 	}
 	for _, shard := range msg.GetShards() {
 		if shard == nil {

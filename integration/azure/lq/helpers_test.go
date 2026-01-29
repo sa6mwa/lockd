@@ -15,8 +15,10 @@ import (
 	lockdclient "pkt.systems/lockd/client"
 	azuretest "pkt.systems/lockd/integration/azuretest"
 	"pkt.systems/lockd/integration/internal/cryptotest"
+	"pkt.systems/lockd/integration/internal/storepath"
 	queuetestutil "pkt.systems/lockd/integration/queue/testutil"
 	"pkt.systems/lockd/internal/diagnostics/storagecheck"
+	"pkt.systems/lockd/internal/uuidv7"
 	"pkt.systems/lockd/namespaces"
 	"pkt.systems/pslog"
 )
@@ -34,6 +36,8 @@ var (
 
 func prepareAzureQueueConfig(t testing.TB, opts azureQueueOptions) lockd.Config {
 	cfg := loadAzureQueueConfig(t)
+	cfg.Store = withQueueTestPrefix(t, cfg.Store)
+	cfg.HAMode = "failover"
 	ensureAzureStoreReady(t, context.Background(), cfg)
 
 	if opts.PollInterval > 0 {
@@ -51,7 +55,7 @@ func prepareAzureQueueConfig(t testing.TB, opts azureQueueOptions) lockd.Config 
 		cfg.QueueResilientPollInterval = 250 * time.Millisecond
 	}
 
-	cfg.QRFEnabled = false
+	cfg.QRFDisabled = true
 
 	cfg.ListenProto = "tcp"
 	cfg.Listen = "127.0.0.1:0"
@@ -63,6 +67,12 @@ func prepareAzureQueueConfig(t testing.TB, opts azureQueueOptions) lockd.Config 
 	return cfg
 }
 
+func withQueueTestPrefix(t testing.TB, store string) string {
+	t.Helper()
+	suffix := "lq-" + uuidv7.NewString()
+	return storepath.Append(t, store, suffix)
+}
+
 func loadAzureQueueConfig(t testing.TB) lockd.Config {
 	store := strings.TrimSpace(os.Getenv("LOCKD_STORE"))
 	if store == "" {
@@ -71,6 +81,7 @@ func loadAzureQueueConfig(t testing.TB) lockd.Config {
 	if !strings.HasPrefix(store, "azure://") {
 		t.Fatalf("LOCKD_STORE must reference an azure:// URI, got %q", store)
 	}
+	store = storepath.Scoped(t, store, "azure")
 	cfg := lockd.Config{
 		Store:           store,
 		AzureEndpoint:   os.Getenv("LOCKD_AZURE_ENDPOINT"),

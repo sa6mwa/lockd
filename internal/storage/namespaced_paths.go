@@ -88,26 +88,14 @@ func NamespacedStateObject(namespace, key string) (string, error) {
 	return path.Join(append([]string{ns, "state"}, segments...)...) + ".json", nil
 }
 
-// NamespacedMetaTemp returns the temp metadata object key for the namespace.
-func NamespacedMetaTemp(namespace, token string) (string, error) {
+// NamespacedInflightObject returns the inflight object key for the namespace.
+func NamespacedInflightObject(namespace, token string) (string, error) {
 	ns, err := validateNamespace(namespace)
 	if err != nil {
 		return "", err
 	}
 	if token == "" {
-		return "", fmt.Errorf("storage: temp token required")
+		return "", fmt.Errorf("storage: inflight token required")
 	}
-	return path.Join(ns, "meta", "tmp", token+".pb"), nil
-}
-
-// NamespacedStateTemp returns the temp state object key for the namespace.
-func NamespacedStateTemp(namespace, token string) (string, error) {
-	ns, err := validateNamespace(namespace)
-	if err != nil {
-		return "", err
-	}
-	if token == "" {
-		return "", fmt.Errorf("storage: temp token required")
-	}
-	return path.Join(ns, "state", "tmp", token+".json"), nil
+	return path.Join(ns, "inflight", token), nil
 }

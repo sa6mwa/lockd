@@ -20,7 +20,7 @@ func TestManifestRoundTrip(t *testing.T) {
 	m.Shards[0] = &Shard{ID: 0, Segments: []SegmentRef{{ID: "seg-1", CreatedAt: m.UpdatedAt, DocCount: 5}}}
 	msg := m.ToProto()
 	clone := ManifestFromProto(msg)
-	if clone.Seq != m.Seq || len(clone.Shards) != len(m.Shards) {
+	if clone.Seq != m.Seq || len(clone.Shards) != len(m.Shards) || clone.Format != m.Format {
 		t.Fatalf("manifest mismatch: %#v != %#v", clone, m)
 	}
 }
@@ -28,12 +28,18 @@ func TestManifestRoundTrip(t *testing.T) {
 func TestSegmentRoundTrip(t *testing.T) {
 	seg := NewSegment("seg-1", time.Unix(1_700_000_010, 0))
 	seg.Fields["status"] = FieldBlock{Postings: map[string][]string{"open": {"a", "b"}}}
+	seg.DocMeta["a"] = DocumentMetadata{
+		StateETag:           "etag-a",
+		StatePlaintextBytes: 42,
+		PublishedVersion:    2,
+		StateDescriptor:     []byte("desc-a"),
+	}
 	if err := seg.Validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
 	msg := seg.ToProto()
 	loaded := SegmentFromProto(msg)
-	if loaded.ID != seg.ID || loaded.DocCount() != seg.DocCount() {
+	if loaded.ID != seg.ID || loaded.DocCount() != seg.DocCount() || len(loaded.DocMeta) != 1 {
 		t.Fatalf("segment mismatch: %+v vs %+v", loaded, seg)
 	}
 }
@@ -77,6 +83,54 @@ func TestStoreSegmentLifecycle(t *testing.T) {
 	}
 	if err := idxStore.DeleteSegment(ctx, "default", seg.ID); err != nil {
 		t.Fatalf("delete segment: %v", err)
+	}
+}
+
+func TestVisibilityManifestLifecycle(t *testing.T) {
+	store := memory.New()
+	idxStore := NewStore(store, nil)
+	ctx := context.Background()
+	manifest := NewVisibilityManifest()
+	manifest.Seq = 1
+	manifest.UpdatedAt = time.Now().UTC()
+	manifest.Segments = []VisibilitySegmentRef{{ID: "vis-1", CreatedAt: manifest.UpdatedAt, Entries: 2}}
+	if _, err := idxStore.SaveVisibilityManifest(ctx, "default", manifest, ""); err != nil {
+		t.Fatalf("save visibility manifest: %v", err)
+	}
+	manifestRes, err := idxStore.LoadVisibilityManifest(ctx, "default")
+	if err != nil {
+		t.Fatalf("load visibility manifest: %v", err)
+	}
+	loaded := manifestRes.Manifest
+	if manifestRes.ETag == "" || loaded.Seq != manifest.Seq || len(loaded.Segments) != 1 {
+		t.Fatalf("unexpected visibility manifest: %+v etag=%q", loaded, manifestRes.ETag)
+	}
+}
+
+func TestVisibilitySegmentLifecycle(t *testing.T) {
+	store := memory.New()
+	idxStore := NewStore(store, nil)
+	ctx := context.Background()
+	segment := &VisibilitySegment{
+		ID:        "vis-seed",
+		CreatedAt: time.Now(),
+		Entries: []VisibilityEntry{
+			{Key: "alpha", Visible: true},
+			{Key: "beta", Visible: false},
+		},
+	}
+	if _, _, err := idxStore.WriteVisibilitySegment(ctx, "default", segment); err != nil {
+		t.Fatalf("write visibility segment: %v", err)
+	}
+	loaded, err := idxStore.LoadVisibilitySegment(ctx, "default", segment.ID)
+	if err != nil {
+		t.Fatalf("load visibility segment: %v", err)
+	}
+	if loaded == nil || len(loaded.Entries) != 2 {
+		t.Fatalf("unexpected visibility entries: %+v", loaded)
+	}
+	if err := idxStore.DeleteVisibilitySegment(ctx, "default", segment.ID); err != nil {
+		t.Fatalf("delete visibility segment: %v", err)
 	}
 }
 
@@ -200,6 +254,232 @@ func TestIndexAdapterQuery(t *testing.T) {
 	}
 	if len(page2.Keys) != 1 || page2.Keys[0] != "orders-open-3" || page2.Cursor != "" {
 		t.Fatalf("unexpected page2 %+v", page2)
+	}
+}
+
+func TestIndexAdapterDocMeta(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	store := NewStore(mem, nil)
+	segment := NewSegment("seg-meta", time.Unix(1_700_000_060, 0))
+	segment.Fields["status"] = FieldBlock{Postings: map[string][]string{
+		"open": {"doc-1"},
+	}}
+	segment.DocMeta["doc-1"] = DocumentMetadata{
+		StateETag:           "etag-doc-1",
+		StatePlaintextBytes: 128,
+		PublishedVersion:    3,
+		StateDescriptor:     []byte("desc-1"),
+	}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+	manifest := NewManifest()
+	manifest.Seq = 1
+	manifest.UpdatedAt = segment.CreatedAt
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{{
+			ID:        segment.ID,
+			CreatedAt: segment.CreatedAt,
+			DocCount:  segment.DocCount(),
+		}},
+	}
+	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+	meta := &storage.Meta{
+		Version:          3,
+		PublishedVersion: 3,
+		StateETag:        "etag-doc-1",
+	}
+	if _, err := mem.StoreMeta(ctx, namespaces.Default, "doc-1", meta, ""); err != nil {
+		t.Fatalf("store meta: %v", err)
+	}
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	resp, err := adapter.Query(ctx, search.Request{
+		Namespace:      namespaces.Default,
+		Selector:       api.Selector{Eq: &api.Term{Field: "status", Value: "open"}},
+		Limit:          1,
+		Engine:         search.EngineIndex,
+		IncludeDocMeta: true,
+	})
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(resp.DocMeta) != 1 {
+		t.Fatalf("expected doc meta, got %+v", resp.DocMeta)
+	}
+	if meta := resp.DocMeta["doc-1"]; meta.StateETag != "etag-doc-1" || meta.PublishedVersion != 3 {
+		t.Fatalf("unexpected doc meta: %+v", meta)
+	}
+}
+
+func TestIndexAdapterDocMetaPrefersNewestSegment(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	store := NewStore(mem, nil)
+
+	oldSeg := NewSegment("seg-old", time.Unix(1_700_000_000, 0))
+	oldSeg.Fields["status"] = FieldBlock{Postings: map[string][]string{
+		"open": {"doc-1"},
+	}}
+	oldSeg.DocMeta["doc-1"] = DocumentMetadata{
+		StateETag:           "etag-old",
+		StatePlaintextBytes: 64,
+		PublishedVersion:    1,
+	}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, oldSeg); err != nil {
+		t.Fatalf("write old segment: %v", err)
+	}
+
+	newSeg := NewSegment("seg-new", time.Unix(1_700_000_120, 0))
+	newSeg.Fields["status"] = FieldBlock{Postings: map[string][]string{
+		"open": {"doc-1"},
+	}}
+	newSeg.DocMeta["doc-1"] = DocumentMetadata{
+		StateETag:           "etag-new",
+		StatePlaintextBytes: 128,
+		PublishedVersion:    2,
+	}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, newSeg); err != nil {
+		t.Fatalf("write new segment: %v", err)
+	}
+
+	manifest := NewManifest()
+	manifest.Seq = 2
+	manifest.UpdatedAt = newSeg.CreatedAt
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{
+			{
+				ID:        newSeg.ID,
+				CreatedAt: newSeg.CreatedAt,
+				DocCount:  newSeg.DocCount(),
+			},
+			{
+				ID:        oldSeg.ID,
+				CreatedAt: oldSeg.CreatedAt,
+				DocCount:  oldSeg.DocCount(),
+			},
+		},
+	}
+	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+
+	meta := &storage.Meta{
+		Version:          2,
+		PublishedVersion: 2,
+		StateETag:        "etag-new",
+	}
+	if _, err := mem.StoreMeta(ctx, namespaces.Default, "doc-1", meta, ""); err != nil {
+		t.Fatalf("store meta: %v", err)
+	}
+
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	resp, err := adapter.Query(ctx, search.Request{
+		Namespace:      namespaces.Default,
+		Selector:       api.Selector{Eq: &api.Term{Field: "status", Value: "open"}},
+		Limit:          1,
+		Engine:         search.EngineIndex,
+		IncludeDocMeta: true,
+	})
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if meta := resp.DocMeta["doc-1"]; meta.StateETag != "etag-new" || meta.PublishedVersion != 2 {
+		t.Fatalf("expected newest doc meta, got %+v", meta)
+	}
+}
+
+func TestIndexAdapterRespectsVisibilityLedger(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	store := NewStore(mem, nil)
+	segment := NewSegment("seg-vis", time.Unix(1_700_000_040, 0))
+	segment.Fields["status"] = FieldBlock{Postings: map[string][]string{
+		"open": {"orders-open-1", "orders-open-2", "orders-open-3"},
+	}}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+	manifest := NewManifest()
+	manifest.Seq = 1
+	manifest.UpdatedAt = segment.CreatedAt
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{{
+			ID:        segment.ID,
+			CreatedAt: segment.CreatedAt,
+			DocCount:  segment.DocCount(),
+		}},
+	}
+	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+
+	// All meta are published and not hidden.
+	for _, key := range []string{"orders-open-1", "orders-open-2", "orders-open-3"} {
+		meta := &storage.Meta{
+			Version:          1,
+			PublishedVersion: 1,
+			StateETag:        "etag-" + key,
+		}
+		if _, err := mem.StoreMeta(ctx, namespaces.Default, key, meta, ""); err != nil {
+			t.Fatalf("store meta %s: %v", key, err)
+		}
+	}
+
+	// Visibility ledger hides orders-open-2.
+	visSegment := &VisibilitySegment{
+		ID:        "vis-1",
+		CreatedAt: time.Now(),
+		Entries: []VisibilityEntry{
+			{Key: "orders-open-1", Visible: true},
+			{Key: "orders-open-2", Visible: false},
+			{Key: "orders-open-3", Visible: true},
+		},
+	}
+	if _, _, err := store.WriteVisibilitySegment(ctx, namespaces.Default, visSegment); err != nil {
+		t.Fatalf("write visibility segment: %v", err)
+	}
+	visManifest := NewVisibilityManifest()
+	visManifest.Seq = 1
+	visManifest.UpdatedAt = visSegment.CreatedAt
+	visManifest.Segments = []VisibilitySegmentRef{{
+		ID:        visSegment.ID,
+		CreatedAt: visSegment.CreatedAt,
+		Entries:   uint64(len(visSegment.Entries)),
+	}}
+	if _, err := store.SaveVisibilityManifest(ctx, namespaces.Default, visManifest, ""); err != nil {
+		t.Fatalf("save visibility manifest: %v", err)
+	}
+
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	resp, err := adapter.Query(ctx, search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			Eq: &api.Term{Field: "status", Value: "open"},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	})
+	if err != nil {
+		t.Fatalf("query eq: %v", err)
+	}
+	want := []string{"orders-open-1", "orders-open-3"}
+	if !slices.Equal(resp.Keys, want) {
+		t.Fatalf("unexpected eq keys %v", resp.Keys)
 	}
 }
 

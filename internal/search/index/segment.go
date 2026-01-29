@@ -13,6 +13,8 @@ type Segment struct {
 	ID        string
 	CreatedAt time.Time
 	Fields    map[string]FieldBlock
+	DocMeta   map[string]DocumentMetadata
+	Format    uint32
 }
 
 // FieldBlock holds postings per term.
@@ -26,6 +28,8 @@ func NewSegment(id string, created time.Time) *Segment {
 		ID:        id,
 		CreatedAt: created,
 		Fields:    make(map[string]FieldBlock),
+		DocMeta:   make(map[string]DocumentMetadata),
+		Format:    IndexFormatVersionV3,
 	}
 }
 
@@ -36,6 +40,9 @@ func (s *Segment) Validate() error {
 	}
 	if s.ID == "" {
 		return fmt.Errorf("segment id required")
+	}
+	if s.Format == 0 {
+		return fmt.Errorf("segment %s format required", s.ID)
 	}
 	for field, block := range s.Fields {
 		if field == "" {
@@ -48,6 +55,11 @@ func (s *Segment) Validate() error {
 			if len(keys) == 0 {
 				return fmt.Errorf("segment %s field %s term %s has no keys", s.ID, field, term)
 			}
+		}
+	}
+	for key := range s.DocMeta {
+		if key == "" {
+			return fmt.Errorf("segment %s contains empty doc meta key", s.ID)
 		}
 	}
 	return nil
@@ -78,6 +90,8 @@ func (s *Segment) ToProto() *indexproto.IndexSegment {
 		SegmentId:     s.ID,
 		CreatedAtUnix: s.CreatedAt.Unix(),
 		Fields:        make([]*indexproto.FieldBlock, 0, len(s.Fields)),
+		DocMeta:       make([]*indexproto.DocumentMeta, 0, len(s.DocMeta)),
+		FormatVersion: s.Format,
 	}
 	fields := make([]string, 0, len(s.Fields))
 	for name := range s.Fields {
@@ -98,6 +112,27 @@ func (s *Segment) ToProto() *indexproto.IndexSegment {
 		}
 		msg.Fields = append(msg.Fields, protoBlock)
 	}
+	if len(s.DocMeta) > 0 {
+		keys := make([]string, 0, len(s.DocMeta))
+		for key := range s.DocMeta {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			meta := s.DocMeta[key]
+			entry := &indexproto.DocumentMeta{
+				Key:                 key,
+				StateEtag:           meta.StateETag,
+				StatePlaintextBytes: meta.StatePlaintextBytes,
+				PublishedVersion:    meta.PublishedVersion,
+				QueryExcluded:       meta.QueryExcluded,
+			}
+			if len(meta.StateDescriptor) > 0 {
+				entry.StateDescriptor = append([]byte(nil), meta.StateDescriptor...)
+			}
+			msg.DocMeta = append(msg.DocMeta, entry)
+		}
+	}
 	return msg
 }
 
@@ -110,6 +145,11 @@ func SegmentFromProto(msg *indexproto.IndexSegment) *Segment {
 		ID:        msg.GetSegmentId(),
 		CreatedAt: time.Unix(msg.GetCreatedAtUnix(), 0).UTC(),
 		Fields:    make(map[string]FieldBlock, len(msg.GetFields())),
+		DocMeta:   make(map[string]DocumentMetadata, len(msg.GetDocMeta())),
+		Format:    msg.GetFormatVersion(),
+	}
+	if segment.Format == 0 {
+		segment.Format = IndexFormatVersionLegacy
 	}
 	for _, block := range msg.GetFields() {
 		if block == nil {
@@ -123,6 +163,23 @@ func SegmentFromProto(msg *indexproto.IndexSegment) *Segment {
 			fb.Postings[posting.GetTerm()] = append([]string(nil), posting.GetKeys()...)
 		}
 		segment.Fields[block.GetName()] = fb
+	}
+	for _, entry := range msg.GetDocMeta() {
+		if entry == nil {
+			continue
+		}
+		meta := DocumentMetadata{
+			StateETag:           entry.GetStateEtag(),
+			StatePlaintextBytes: entry.GetStatePlaintextBytes(),
+			PublishedVersion:    entry.GetPublishedVersion(),
+			QueryExcluded:       entry.GetQueryExcluded(),
+		}
+		if len(entry.GetStateDescriptor()) > 0 {
+			meta.StateDescriptor = append([]byte(nil), entry.GetStateDescriptor()...)
+		}
+		if key := entry.GetKey(); key != "" {
+			segment.DocMeta[key] = meta
+		}
 	}
 	return segment
 }

@@ -25,8 +25,8 @@ import (
 
 	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/internal/svcfields"
-	"pkt.systems/lockd/lql"
 	"pkt.systems/lockd/namespaces"
+	"pkt.systems/lql"
 	"pkt.systems/pslog"
 )
 
@@ -1440,7 +1440,7 @@ func (s *LeaseSession) applyUpdate(ctx context.Context, body io.Reader, opts Upd
 	if opts.TxnID == "" {
 		opts.TxnID = s.TxnID
 	}
-	res, err := s.client.Update(ctx, s.Key, s.LeaseID, body, opts)
+	res, err := s.client.updateWithPreferred(ctx, s.Key, s.LeaseID, body, opts, s.endpoint)
 	if err != nil {
 		return nil, err
 	}
@@ -1630,7 +1630,7 @@ func (s *LeaseSession) UpdateMetadata(ctx context.Context, meta MetadataOptions)
 		opts.IfVersion = strconv.FormatInt(s.Version, 10)
 	}
 	opts.FencingToken = s.fencing()
-	return s.client.UpdateMetadata(ctx, s.Key, s.LeaseID, opts)
+	return s.client.updateMetadataWithPreferred(ctx, s.Key, s.LeaseID, opts, s.endpoint)
 }
 
 // KeepAlive extends the lease TTL without altering the stored state.
@@ -2737,6 +2737,25 @@ func (c *Client) attemptEndpoints(builder endpointRequestBuilder, preferred stri
 		successKV = append(successKV, "status", resp.StatusCode, "duration", time.Since(start))
 		c.logTraceCtx(req.Context(), "client.http.success", successKV...)
 		c.lastEndpoint = base
+		if resp.StatusCode == http.StatusServiceUnavailable && attempt < len(order)-1 {
+			data, readErr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if readErr == nil {
+				apiErr := c.decodeErrorWithBody(resp, data)
+				if isNodePassiveError(apiErr) || len(data) == 0 {
+					if cancel != nil {
+						cancel()
+					}
+					continue
+				}
+				resp.Body = io.NopCloser(bytes.NewReader(data))
+			} else {
+				if cancel != nil {
+					cancel()
+				}
+				continue
+			}
+		}
 		return resp, cancel, base, nil
 	}
 	orderStr := strings.Join(order, ",")
@@ -2751,6 +2770,35 @@ func (c *Client) attemptEndpoints(builder endpointRequestBuilder, preferred stri
 	}
 	c.logDebug("client.http.unreachable", debugKV...)
 	return nil, nil, "", lastErr
+}
+
+func isNodePassiveError(err error) bool {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.Response.ErrorCode == "node_passive"
+	}
+	return false
+}
+
+func isTransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	return true
 }
 
 func (c *Client) forUpdateContext(parent context.Context) (context.Context, context.CancelFunc) {
@@ -3415,11 +3463,55 @@ func (c *Client) AcquireForUpdate(ctx context.Context, req api.AcquireRequest, h
 		}
 
 		releaseErr := sess.Release(ctx)
+		keepRetryable := keepErr == nil || isNodePassiveError(keepErr) || isTransportError(keepErr)
+		if releaseErr != nil && isNodePassiveError(releaseErr) && handlerErr == nil && keepRetryable {
+			retryCount := 0
+			delay := cfg.BaseDelay
+			if delay <= 0 {
+				delay = 10 * time.Millisecond
+			}
+			for {
+				retryCount++
+				if cfg.FailureRetries >= 0 && retryCount > cfg.FailureRetries {
+					break
+				}
+				sleep := acquireRetryDelay(delay, cfg)
+				if sleep <= 0 {
+					sleep = 10 * time.Millisecond
+				}
+				if retryHint := retryAfterFromError(releaseErr); retryHint > sleep {
+					sleep = retryHint
+				}
+				delay = sleep
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(sleep):
+				}
+				nextErr := sess.Release(ctx)
+				if nextErr == nil || isLeaseRequiredError(nextErr) {
+					releaseErr = nil
+					if keepErr != nil && (isNodePassiveError(keepErr) || isTransportError(keepErr)) {
+						keepErr = nil
+					}
+					break
+				}
+				if !isNodePassiveError(nextErr) {
+					releaseErr = nextErr
+					break
+				}
+				releaseErr = nextErr
+			}
+		}
 		resultErr := errors.Join(handlerErr, keepErr)
 		if releaseErr != nil && !isLeaseRequiredError(releaseErr) {
 			resultErr = errors.Join(resultErr, releaseErr)
 		}
 		if resultErr != nil {
+			if isNodePassiveError(resultErr) {
+				c.logWarnCtx(ctx, "client.acquire_for_update.node_passive", "key", keyForLog, "lease_id", sess.LeaseID, "txn_id", sess.TxnID, "error", resultErr)
+				return resultErr
+			}
 			if shouldRetryForUpdate(resultErr) {
 				retryCount++
 				if cfg.FailureRetries >= 0 && retryCount > cfg.FailureRetries {
@@ -3478,9 +3570,6 @@ func shouldRetryForUpdate(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, context.Canceled) {
-		return false
-	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
@@ -3499,6 +3588,9 @@ func shouldRetryForUpdate(err error) bool {
 	var netErr net.Error
 	if errors.As(err, &netErr) {
 		return netErr.Timeout()
+	}
+	if errors.Is(err, context.Canceled) {
+		return false
 	}
 	return false
 }
@@ -4325,6 +4417,10 @@ func (c *Client) Save(ctx context.Context, sess *LeaseSession, v any) error {
 
 // Update uploads new JSON state from the provided reader.
 func (c *Client) Update(ctx context.Context, key, leaseID string, body io.Reader, opts UpdateOptions) (*UpdateResult, error) {
+	return c.updateWithPreferred(ctx, key, leaseID, body, opts, "")
+}
+
+func (c *Client) updateWithPreferred(ctx context.Context, key, leaseID string, body io.Reader, opts UpdateOptions, preferred string) (*UpdateResult, error) {
 	namespace, err := c.namespaceFor(opts.Namespace)
 	if err != nil {
 		return nil, err
@@ -4372,26 +4468,91 @@ func (c *Client) Update(ctx context.Context, key, leaseID string, body io.Reader
 		c.applyCorrelationHeader(ctx, req, "")
 		return req, cancel, nil
 	}
-	resp, cancel, endpoint, err := c.attemptEndpoints(builder, "")
-	if err != nil {
-		c.logErrorCtx(ctx, "client.update.transport_error", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", endpoint, "fencing_token", token, "error", err)
-		return nil, err
+	retries := c.failureRetries
+	delay := 10 * time.Millisecond
+	maxRetryDelay := 500 * time.Millisecond
+	for {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		resp, cancel, endpoint, err := c.attemptEndpoints(builder, preferred)
+		if err != nil {
+			if cancel != nil {
+				cancel()
+			}
+			c.logErrorCtx(ctx, "client.update.transport_error", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", endpoint, "fencing_token", token, "error", err)
+			if retries == 0 || !isTransportError(err) {
+				return nil, err
+			}
+			if retries > 0 {
+				retries--
+			}
+			sleep := delay
+			if sleep > maxRetryDelay {
+				sleep = maxRetryDelay
+			}
+			if sleep > 0 {
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(sleep):
+				}
+			}
+			if delay < time.Second {
+				delay *= 2
+			}
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			c.logWarnCtx(ctx, "client.update.error", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", endpoint, "fencing_token", token, "status", resp.StatusCode)
+			err := c.decodeError(resp)
+			resp.Body.Close()
+			if cancel != nil {
+				cancel()
+			}
+			if retries == 0 || !isNodePassiveError(err) {
+				return nil, err
+			}
+			if retries > 0 {
+				retries--
+			}
+			sleep := delay
+			if retryHint := retryAfterFromError(err); retryHint > sleep {
+				sleep = retryHint
+			}
+			if sleep > maxRetryDelay {
+				sleep = maxRetryDelay
+			}
+			if sleep > 0 {
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(sleep):
+				}
+			}
+			if delay < time.Second {
+				delay *= 2
+			}
+			continue
+		}
+		var result UpdateResult
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			resp.Body.Close()
+			if cancel != nil {
+				cancel()
+			}
+			return nil, err
+		}
+		resp.Body.Close()
+		if cancel != nil {
+			cancel()
+		}
+		c.logTraceCtx(ctx, "client.update.success", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", endpoint, "fencing_token", token, "new_version", result.NewVersion, "new_etag", result.NewStateETag)
+		if newToken := resp.Header.Get(headerFencingToken); newToken != "" {
+			c.RegisterLeaseToken(leaseID, newToken)
+		}
+		return &result, nil
 	}
-	defer cancel()
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		c.logWarnCtx(ctx, "client.update.error", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", endpoint, "fencing_token", token, "status", resp.StatusCode)
-		return nil, c.decodeError(resp)
-	}
-	var result UpdateResult
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
-	}
-	c.logTraceCtx(ctx, "client.update.success", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", endpoint, "fencing_token", token, "new_version", result.NewVersion, "new_etag", result.NewStateETag)
-	if newToken := resp.Header.Get(headerFencingToken); newToken != "" {
-		c.RegisterLeaseToken(leaseID, newToken)
-	}
-	return &result, nil
 }
 
 // UpdateBytes uploads new JSON state from the provided byte slice.
@@ -4401,6 +4562,10 @@ func (c *Client) UpdateBytes(ctx context.Context, key, leaseID string, body []by
 
 // UpdateMetadata mutates lock metadata without modifying the JSON state.
 func (c *Client) UpdateMetadata(ctx context.Context, key, leaseID string, opts UpdateOptions) (*MetadataResult, error) {
+	return c.updateMetadataWithPreferred(ctx, key, leaseID, opts, "")
+}
+
+func (c *Client) updateMetadataWithPreferred(ctx context.Context, key, leaseID string, opts UpdateOptions, preferred string) (*MetadataResult, error) {
 	if opts.Metadata.empty() {
 		return nil, fmt.Errorf("lockd: metadata options required")
 	}
@@ -4446,7 +4611,7 @@ func (c *Client) UpdateMetadata(ctx context.Context, key, leaseID string, opts U
 		c.applyCorrelationHeader(ctx, req, "")
 		return req, cancel, nil
 	}
-	resp, cancel, endpoint, err := c.attemptEndpoints(builder, "")
+	resp, cancel, endpoint, err := c.attemptEndpoints(builder, preferred)
 	if err != nil {
 		c.logErrorCtx(ctx, "client.metadata.transport_error", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "namespace", namespace, "endpoint", endpoint, "error", err)
 		return nil, err
@@ -4666,6 +4831,10 @@ func (c *Client) decodeError(resp *http.Response) error {
 	if err != nil {
 		return err
 	}
+	return c.decodeErrorWithBody(resp, data)
+}
+
+func (c *Client) decodeErrorWithBody(resp *http.Response, data []byte) error {
 	var errResp api.ErrorResponse
 	if len(data) > 0 {
 		if err := json.Unmarshal(data, &errResp); err != nil {

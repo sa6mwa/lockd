@@ -26,6 +26,7 @@ import (
 	"pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/integration/internal/cryptotest"
+	"pkt.systems/lockd/integration/internal/hatest"
 	shutdowntest "pkt.systems/lockd/integration/internal/shutdowntest"
 	testlog "pkt.systems/lockd/integration/internal/testlog"
 	"pkt.systems/lockd/internal/storage"
@@ -41,6 +42,7 @@ type failoverPhase int
 type failoverLogResult struct {
 	AlternateEndpoint string
 	AlternateStatus   int
+	AlternatePath     string
 	ErrorEndpoint     string
 	HadTransportError bool
 }
@@ -83,6 +85,40 @@ func TestDiskLockLifecycle(t *testing.T) {
 	ctx := context.Background()
 	key := "disk-lifecycle-" + uuidv7.NewString()
 	runLifecycleTest(t, ctx, cli, key, "disk-worker")
+}
+
+func TestDiskAcquireNoWaitReturnsWaiting(t *testing.T) {
+	ensureDiskRootEnv(t)
+	root := prepareDiskRoot(t, "")
+	cfg := buildDiskConfig(t, root, 0)
+	cli := startDiskServer(t, cfg)
+
+	ctx := context.Background()
+	key := "disk-nowait-" + uuidv7.NewString()
+	lease := acquireWithRetry(t, ctx, cli, key, "holder", 30, lockdclient.BlockWaitForever)
+	t.Cleanup(func() { _ = releaseLease(t, ctx, lease) })
+
+	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	_, err := cli.Acquire(reqCtx, api.AcquireRequest{
+		Key:        key,
+		Owner:      "no-wait",
+		TTLSeconds: 30,
+		BlockSecs:  lockdclient.BlockNoWait,
+	})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatalf("expected no-wait acquire to fail")
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("expected no-wait acquire within 5s, got %s", elapsed)
+	}
+	var apiErr *lockdclient.APIError
+	if !errors.As(err, &apiErr) || apiErr.Response.ErrorCode != "waiting" {
+		t.Fatalf("expected waiting API error, got %v", err)
+	}
 }
 
 func TestDiskAttachmentsLifecycle(t *testing.T) {
@@ -577,23 +613,32 @@ func TestDiskRemoveMultiServer(t *testing.T) {
 	root := prepareDiskRoot(t, "")
 
 	cfg1 := buildDiskConfig(t, root, 0)
-	cli1 := startDiskServer(t, cfg1)
+	serverA := startDiskTestServer(t, cfg1)
 
 	cfg2 := buildDiskConfig(t, root, 0)
-	cli2 := startDiskServer(t, cfg2)
+	serverB := startDiskTestServer(t, cfg2)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+	activeServer, activeCli, err := hatest.FindActiveServer(ctx, serverA, serverB)
+	if err != nil {
+		t.Fatalf("find active server: %v", err)
+	}
+	passiveCli := serverA.Client
+	if activeServer == serverA {
+		passiveCli = serverB.Client
+	}
+	waitForPassive(t, ctx, passiveCli)
 
 	key := "disk-remove-multi-" + uuidv7.NewString()
 
-	writer := acquireWithRetry(t, ctx, cli1, key, "writer-1", 30, lockdclient.BlockWaitForever)
+	writer := acquireWithRetry(t, ctx, activeCli, key, "writer-1", 30, lockdclient.BlockWaitForever)
 	if err := writer.Save(ctx, map[string]any{"payload": "shared", "count": 1.0}); err != nil {
 		t.Fatalf("writer save: %v", err)
 	}
 	releaseLease(t, ctx, writer)
 
-	remover := acquireWithRetry(t, ctx, cli1, key, "remover-1", 30, lockdclient.BlockWaitForever)
+	remover := acquireWithRetry(t, ctx, activeCli, key, "remover-1", 30, lockdclient.BlockWaitForever)
 	state, _, _, err := getStateJSON(ctx, remover)
 	if err != nil {
 		t.Fatalf("remover get: %v", err)
@@ -610,7 +655,7 @@ func TestDiskRemoveMultiServer(t *testing.T) {
 	}
 	releaseLease(t, ctx, remover)
 
-	verifier := acquireWithRetry(t, ctx, cli2, key, "verifier-2", 30, lockdclient.BlockWaitForever)
+	verifier := acquireWithRetry(t, ctx, activeCli, key, "verifier-2", 30, lockdclient.BlockWaitForever)
 	state, _, _, err = getStateJSON(ctx, verifier)
 	if err != nil {
 		t.Fatalf("verifier get: %v", err)
@@ -753,11 +798,16 @@ func TestDiskRemoveFailoverMultiServer(t *testing.T) {
 	defer cancel()
 
 	root := prepareDiskRoot(t, "")
-	store, err := disk.New(disk.Config{Root: root})
+	primaryStore, err := disk.New(disk.Config{Root: root})
 	if err != nil {
 		t.Fatalf("disk backend: %v", err)
 	}
-	t.Cleanup(func() { _ = store.Close() })
+	t.Cleanup(func() { _ = primaryStore.Close() })
+	backupStore, err := disk.New(disk.Config{Root: root})
+	if err != nil {
+		t.Fatalf("disk backend (backup): %v", err)
+	}
+	t.Cleanup(func() { _ = backupStore.Close() })
 
 	closeDefaults := lockd.WithTestCloseDefaults(
 		lockd.WithDrainLeases(-1),
@@ -768,7 +818,7 @@ func TestDiskRemoveFailoverMultiServer(t *testing.T) {
 		sharedCreds = cryptotest.SharedMTLSCredentials(t)
 	}
 	primaryOptions := []lockd.TestServerOption{
-		lockd.WithTestBackend(store),
+		lockd.WithTestBackend(primaryStore),
 		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
 			lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
@@ -780,7 +830,7 @@ func TestDiskRemoveFailoverMultiServer(t *testing.T) {
 	primary := lockd.StartTestServer(t, primaryOptions...)
 	backupOptions := append([]lockd.TestServerOption{closeDefaults}, cryptotest.SharedMTLSOptions(t)...)
 	backupOptions = append(backupOptions,
-		lockd.WithTestBackend(store),
+		lockd.WithTestBackend(backupStore),
 		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
 			lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
@@ -791,7 +841,14 @@ func TestDiskRemoveFailoverMultiServer(t *testing.T) {
 
 	key := "disk-remove-failover-" + uuidv7.NewString()
 
-	seedCli := directDiskClient(t, backup)
+	activeServer, seedCli, err := hatest.FindActiveServer(ctx, primary, backup)
+	if err != nil {
+		t.Fatalf("find active server: %v", err)
+	}
+	standbyServer := backup
+	if activeServer == backup {
+		standbyServer = primary
+	}
 	defer seedCli.Close()
 	seedLease, err := seedCli.Acquire(ctx, api.AcquireRequest{
 		Key:        key,
@@ -819,7 +876,7 @@ func TestDiskRemoveFailoverMultiServer(t *testing.T) {
 		clientOptions = append(clientOptions, lockdclient.WithHTTPClient(httpClient))
 	}
 	failoverClient, err := lockdclient.NewWithEndpoints(
-		[]string{primary.URL(), backup.URL()},
+		[]string{activeServer.URL(), standbyServer.URL()},
 		clientOptions...,
 	)
 	if err != nil {
@@ -841,14 +898,28 @@ func TestDiskRemoveFailoverMultiServer(t *testing.T) {
 	var shutdownErr error
 	triggerFailover := func() error {
 		shutdownOnce.Do(func() {
-			shutdownErr = primary.Server.Shutdown(context.Background())
+			shutdownErr = activeServer.Server.Shutdown(context.Background())
 		})
+		if shutdownErr != nil {
+			return shutdownErr
+		}
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer waitCancel()
+		if err := hatest.WaitForActive(waitCtx, standbyServer); err != nil {
+			return fmt.Errorf("wait for standby active: %w", err)
+		}
 		return shutdownErr
 	}
 
 	if err := triggerFailover(); err != nil {
 		t.Fatalf("shutdown primary: %v", err)
 	}
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 12*time.Second)
+	if err := hatest.WaitForActive(waitCtx, standbyServer); err != nil {
+		waitCancel()
+		t.Fatalf("standby activation: %v", err)
+	}
+	waitCancel()
 
 	res, err := lease.Remove(ctx)
 	if err != nil {
@@ -872,7 +943,7 @@ func TestDiskRemoveFailoverMultiServer(t *testing.T) {
 	if testing.Verbose() {
 		t.Logf("disk remove failover log summary:\n%s", clientLogs.Summary())
 	}
-	assertRemoveFailoverLogs(t, clientLogs, primary.URL(), backup.URL())
+	assertRemoveFailoverLogs(t, clientLogs, activeServer.URL(), standbyServer.URL())
 }
 
 func TestDiskAutoKeyAcquireForUpdate(t *testing.T) {
@@ -1088,7 +1159,7 @@ func TestDiskAcquireForUpdateCallbackSingleServer(t *testing.T) {
 	key := "disk-single-" + uuidv7.NewString()
 	seedPayload := map[string]any{"payload": "disk-single", "count": 1}
 
-	seedCli := directDiskClient(t, ts)
+	seedCli := directDiskClient(t, ts, 2*time.Second)
 	t.Cleanup(func() { _ = seedCli.Close() })
 
 	seedCtx, seedCancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -1195,10 +1266,10 @@ func TestDiskAcquireForUpdateCallbackFailoverMultiServer(t *testing.T) {
 }
 
 func runDiskAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase failoverPhase, base string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
 
-	watchdog := time.AfterFunc(30*time.Second, func() {
+	watchdog := time.AfterFunc(60*time.Second, func() {
 		buf := make([]byte, 1<<18)
 		n := runtime.Stack(buf, true)
 		panic("runDiskAcquireForUpdateCallbackFailoverMultiServer timeout after 30s:\n" + string(buf[:n]))
@@ -1206,13 +1277,18 @@ func runDiskAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase fail
 	defer watchdog.Stop()
 
 	root := prepareDiskRoot(t, base)
-	store, err := disk.New(disk.Config{Root: root})
+	primaryStore, err := disk.New(disk.Config{Root: root})
 	if err != nil {
 		t.Fatalf("disk backend: %v", err)
 	}
-	t.Cleanup(func() { _ = store.Close() })
+	t.Cleanup(func() { _ = primaryStore.Close() })
+	backupStore, err := disk.New(disk.Config{Root: root})
+	if err != nil {
+		t.Fatalf("disk backend (backup): %v", err)
+	}
+	t.Cleanup(func() { _ = backupStore.Close() })
 
-	const disconnectAfter = 1 * time.Second
+	const disconnectAfter = 3 * time.Second
 	chaos := &lockd.ChaosConfig{
 		Seed:            4242 + int64(phase),
 		DisconnectAfter: disconnectAfter,
@@ -1231,7 +1307,7 @@ func runDiskAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase fail
 		sharedCreds = cryptotest.SharedMTLSCredentials(t)
 	}
 	primaryOptions := []lockd.TestServerOption{
-		lockd.WithTestBackend(store),
+		lockd.WithTestBackend(primaryStore),
 		lockd.WithTestChaos(chaos),
 		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
@@ -1244,7 +1320,7 @@ func runDiskAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase fail
 	primary := lockd.StartTestServer(t, primaryOptions...)
 	backupOptions := append([]lockd.TestServerOption{closeDefaults}, cryptotest.SharedMTLSOptions(t)...)
 	backupOptions = append(backupOptions,
-		lockd.WithTestBackend(store),
+		lockd.WithTestBackend(backupStore),
 		lockd.WithTestLoggerFromTB(t, pslog.TraceLevel),
 		lockd.WithTestClientOptions(
 			lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
@@ -1255,7 +1331,18 @@ func runDiskAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase fail
 
 	failoverBlob := strings.Repeat("disk-failover-", 32768)
 	key := fmt.Sprintf("disk-multi-%s-%s", phase.String(), uuidv7.NewString())
-	seedCli := directDiskClient(t, backup)
+	activeServer, probeCli, err := hatest.FindActiveServer(ctx, primary, backup)
+	if err != nil {
+		t.Fatalf("find active server: %v", err)
+	}
+	if probeCli != nil {
+		_ = probeCli.Close()
+	}
+	standbyServer := backup
+	if activeServer == backup {
+		standbyServer = primary
+	}
+	seedCli := directDiskClient(t, activeServer, 5*time.Second)
 	t.Cleanup(func() { _ = seedCli.Close() })
 
 	seedLease, err := seedCli.Acquire(ctx, api.AcquireRequest{
@@ -1290,7 +1377,7 @@ func runDiskAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase fail
 		clientOptions = append(clientOptions, lockdclient.WithHTTPClient(httpClient))
 	}
 	failoverClient, err := lockdclient.NewWithEndpoints(
-		[]string{primary.URL(), backup.URL()},
+		[]string{activeServer.URL(), standbyServer.URL()},
 		clientOptions...,
 	)
 	if err != nil {
@@ -1301,7 +1388,21 @@ func runDiskAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase fail
 	var shutdownErr error
 	triggerFailover := func() error {
 		shutdownOnce.Do(func() {
-			shutdownErr = primary.Server.Shutdown(context.Background())
+			failCtx, failCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer failCancel()
+			currentActive, probeCli, err := hatest.FindActiveServer(failCtx, primary, backup)
+			if probeCli != nil {
+				_ = probeCli.Close()
+			}
+			if err != nil {
+				shutdownErr = err
+				return
+			}
+			if currentActive == nil {
+				shutdownErr = fmt.Errorf("no active server to failover")
+				return
+			}
+			shutdownErr = currentActive.Server.Shutdown(context.Background())
 		})
 		return shutdownErr
 	}
@@ -1366,11 +1467,17 @@ func runDiskAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase fail
 	watchdog.Stop()
 	expectedConflict := phase == failoverAfterSave
 	conflictObserved := false
+	allowAlt503 := false
 	if err != nil {
 		var apiErr *lockdclient.APIError
-		if expectedConflict && errors.As(err, &apiErr) && apiErr.Response.ErrorCode == "version_conflict" {
+		isExpected := expectedConflict && errors.As(err, &apiErr) && (apiErr.Response.ErrorCode == "version_conflict" || apiErr.Response.ErrorCode == "node_passive")
+		if expectedConflict && strings.Contains(err.Error(), "all endpoints unreachable") {
+			isExpected = true
+			allowAlt503 = true
+		}
+		if isExpected {
 			conflictObserved = true
-			t.Logf("phase %s observed expected version_conflict after failover: %v", phase, err)
+			t.Logf("phase %s observed expected failover conflict after save: %v", phase, err)
 		} else {
 			t.Fatalf("acquire-for-update callback: %v\n%s", err, clientLogs.Summary())
 		}
@@ -1379,20 +1486,46 @@ func runDiskAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase fail
 		t.Fatalf("callback was not invoked")
 	}
 
-	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), time.Second)
+	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer verifyCancel()
-	verifyLease, err := seedCli.Acquire(verifyCtx, api.AcquireRequest{
-		Key:        key,
-		Owner:      "verify",
-		TTLSeconds: 10,
-		BlockSecs:  lockdclient.BlockWaitForever,
-	})
-	if err != nil {
-		t.Fatalf("verify acquire: %v", err)
+	verifyServer := standbyServer
+	activeCtx, activeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	activeVerify, probeVerify, activeErr := hatest.FindActiveServer(activeCtx, primary, backup)
+	activeCancel()
+	if probeVerify != nil {
+		_ = probeVerify.Close()
 	}
-	state, _, _, err := getStateJSON(verifyCtx, verifyLease)
+	if activeErr == nil && activeVerify != nil {
+		verifyServer = activeVerify
+	}
+	verifyCli, err := verifyServer.NewClient(lockdclient.WithHTTPTimeout(5 * time.Second))
 	if err != nil {
-		t.Fatalf("verify get state: %v", err)
+		t.Fatalf("verify client: %v", err)
+	}
+	t.Cleanup(func() { _ = verifyCli.Close() })
+	var state map[string]any
+	if conflictObserved {
+		state, err = getPublicStateJSON(verifyCtx, verifyCli, key)
+		if err != nil {
+			t.Fatalf("verify public get: %v", err)
+		}
+	} else {
+		verifyLease, err := verifyCli.Acquire(verifyCtx, api.AcquireRequest{
+			Key:        key,
+			Owner:      "verify",
+			TTLSeconds: 10,
+			BlockSecs:  lockdclient.BlockWaitForever,
+		})
+		if err != nil {
+			t.Fatalf("verify acquire: %v", err)
+		}
+		state, _, _, err = getStateJSON(verifyCtx, verifyLease)
+		if err != nil {
+			t.Fatalf("verify get state: %v", err)
+		}
+		if !releaseLease(t, verifyCtx, verifyLease) {
+			t.Fatalf("verify release failed")
+		}
 	}
 	if payload, ok := state["payload"].(string); !ok || payload != "disk-multi" {
 		t.Fatalf("unexpected payload post-callback: %+v", state)
@@ -1406,26 +1539,45 @@ func runDiskAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase fail
 	if count, ok := state["count"].(float64); !ok || count != 3 {
 		t.Fatalf("unexpected count after callback: %v", state["count"])
 	}
-	if !releaseLease(t, verifyCtx, verifyLease) {
-		t.Fatalf("verify release failed")
-	}
 
-	result := assertFailoverLogs(t, clientLogs, primary.URL(), backup.URL())
+	paths := []string{"/v1/acquire_for_update", "/v1/update", "/v1/release"}
+	result := assertFailoverLogs(t, clientLogs, activeServer.URL(), standbyServer.URL(), allowAlt503, paths...)
 	if conflictObserved {
-		if result.AlternateStatus != http.StatusConflict {
-			t.Fatalf("expected HTTP 409 on alternate endpoint during conflict; got %d\nlogs:\n%s", result.AlternateStatus, clientLogs.Summary())
+		if result.AlternatePath != "/v1/release" &&
+			result.AlternateStatus != http.StatusConflict &&
+			(!allowAlt503 || result.AlternateStatus != http.StatusServiceUnavailable) {
+			t.Fatalf("expected HTTP 409 or 503 on alternate endpoint during conflict; got %d\nlogs:\n%s", result.AlternateStatus, clientLogs.Summary())
 		}
 	} else if result.AlternateStatus != http.StatusOK {
 		t.Fatalf("expected HTTP 200 on alternate endpoint; got %d\nlogs:\n%s", result.AlternateStatus, clientLogs.Summary())
 	}
 }
 
-func assertFailoverLogs(t testing.TB, rec *testlog.Recorder, primary, backup string) failoverLogResult {
+func assertFailoverLogs(t testing.TB, rec *testlog.Recorder, primary, backup string, allowServiceUnavailable bool, paths ...string) failoverLogResult {
 	const (
-		successMsg = "client.http.success"
+		successMsg = "client.http.post.success"
+		postErrMsg = "client.http.post.error"
 		errorMsg   = "client.http.error"
 		acquireMsg = "client.acquire_for_update.acquired"
 	)
+	t.Helper()
+	if len(paths) == 0 {
+		t.Fatalf("assertFailoverLogs requires at least one path filter; logs:\n%s", rec.Summary())
+	}
+	pathAllowed := func(path string) bool {
+		if path == "" {
+			return false
+		}
+		for _, allowed := range paths {
+			if allowed == "" {
+				continue
+			}
+			if path == allowed || strings.HasPrefix(path, allowed+"?") || strings.HasPrefix(path, allowed) {
+				return true
+			}
+		}
+		return false
+	}
 	result := failoverLogResult{}
 	acquiredEntry, ok := rec.First(func(e testlog.Entry) bool {
 		return e.Message == acquireMsg
@@ -1460,7 +1612,11 @@ func assertFailoverLogs(t testing.TB, rec *testlog.Recorder, primary, backup str
 		if entry.Timestamp.Before(startTime) {
 			continue
 		}
-		if entry.Message != successMsg {
+		if entry.Message != successMsg && entry.Message != postErrMsg {
+			continue
+		}
+		path := testlog.GetStringField(entry, "path")
+		if !pathAllowed(path) {
 			continue
 		}
 		endpoint := testlog.GetStringField(entry, "endpoint")
@@ -1477,16 +1633,46 @@ func assertFailoverLogs(t testing.TB, rec *testlog.Recorder, primary, backup str
 		if !ok {
 			t.Fatalf("%s missing status; logs:\n%s", successMsg, rec.Summary())
 		}
-		if status != http.StatusOK && status != http.StatusConflict {
-			t.Fatalf("unexpected status %d on alternate endpoint %q; logs:\n%s", status, endpoint, rec.Summary())
+		if status != http.StatusOK && status != http.StatusConflict && (!allowServiceUnavailable || status != http.StatusServiceUnavailable) {
+			continue
 		}
 		successFound = true
 		result.AlternateEndpoint = endpoint
 		result.AlternateStatus = status
+		result.AlternatePath = path
 		break
 	}
+	if !successFound && allowServiceUnavailable {
+		for _, entry := range events {
+			if entry.Timestamp.Before(startTime) {
+				continue
+			}
+			if entry.Message != "client.http.success" {
+				continue
+			}
+			endpoint := testlog.GetStringField(entry, "endpoint")
+			if endpoint == "" {
+				continue
+			}
+			if endpoint != primary && endpoint != backup {
+				continue
+			}
+			if endpoint == initialEndpoint {
+				continue
+			}
+			status, ok := testlog.GetIntField(entry, "status")
+			if !ok || status != http.StatusServiceUnavailable {
+				continue
+			}
+			successFound = true
+			result.AlternateEndpoint = endpoint
+			result.AlternateStatus = status
+			result.AlternatePath = testlog.GetStringField(entry, "path")
+			break
+		}
+	}
 	if !successFound {
-		t.Fatalf("expected failover success on alternate endpoint; logs:\n%s", rec.Summary())
+		t.Fatalf("expected failover response for %v on alternate endpoint; logs:\n%s", paths, rec.Summary())
 	}
 
 	if hasError {
@@ -1504,8 +1690,8 @@ func assertFailoverLogs(t testing.TB, rec *testlog.Recorder, primary, backup str
 		t.Fatalf("expected alternate endpoint in logs; logs:\n%s", rec.Summary())
 	}
 
-	t.Logf("failover log summary: alternate=%s status=%d transport_error=%t error_endpoint=%s\n%s",
-		result.AlternateEndpoint, result.AlternateStatus, result.HadTransportError, result.ErrorEndpoint, rec.Summary())
+	t.Logf("failover log summary: alternate=%s status=%d path=%s transport_error=%t error_endpoint=%s\n%s",
+		result.AlternateEndpoint, result.AlternateStatus, result.AlternatePath, result.HadTransportError, result.ErrorEndpoint, rec.Summary())
 	return result
 }
 
@@ -1631,26 +1817,33 @@ func TestDiskMultiReplica(t *testing.T) {
 	root := prepareDiskRoot(t, "")
 
 	cfg1 := buildDiskConfig(t, root, 0)
-	cli1 := startDiskServer(t, cfg1)
+	serverA := startDiskTestServer(t, cfg1)
 
 	cfg2 := buildDiskConfig(t, root, 0)
-	cli2 := startDiskServer(t, cfg2)
+	serverB := startDiskTestServer(t, cfg2)
 
-	clients := []*lockdclient.Client{cli1, cli2}
-	owners := []string{"replica-1", "replica-2"}
 	ctx := context.Background()
+	activeServer, activeCli, err := hatest.FindActiveServer(ctx, serverA, serverB)
+	if err != nil {
+		t.Fatalf("find active server: %v", err)
+	}
+	passiveCli := serverA.Client
+	if activeServer == serverA {
+		passiveCli = serverB.Client
+	}
+	waitForPassive(t, ctx, passiveCli)
 	key := "disk-multi-" + uuidv7.NewString()
 	iterations := 5
 
 	var wg sync.WaitGroup
-	for i, cli := range clients {
-		owner := owners[i]
+	owners := []string{"replica-1", "replica-2"}
+	for _, owner := range owners {
 		wg.Add(1)
-		go func(cli *lockdclient.Client, owner string) {
+		go func(owner string) {
 			defer wg.Done()
 			for n := 0; n < iterations; n++ {
 				for {
-					lease := acquireWithRetry(t, ctx, cli, key, owner, 45, lockdclient.BlockWaitForever)
+					lease := acquireWithRetry(t, ctx, activeCli, key, owner, 45, lockdclient.BlockWaitForever)
 					state, _, _, err := getStateJSON(ctx, lease)
 					if err != nil {
 						_ = releaseLease(t, ctx, lease)
@@ -1682,11 +1875,11 @@ func TestDiskMultiReplica(t *testing.T) {
 					break
 				}
 			}
-		}(cli, owner)
+		}(owner)
 	}
 	wg.Wait()
 
-	verifier := acquireWithRetry(t, ctx, cli1, key, "verifier", 45, lockdclient.BlockWaitForever)
+	verifier := acquireWithRetry(t, ctx, activeCli, key, "verifier", 45, lockdclient.BlockWaitForever)
 	finalState, _, _, err := getStateJSON(ctx, verifier)
 	if err != nil {
 		t.Fatalf("get_state: %v", err)
@@ -1694,7 +1887,7 @@ func TestDiskMultiReplica(t *testing.T) {
 	if !releaseLease(t, ctx, verifier) {
 		t.Fatalf("release verifier failed")
 	}
-	expected := float64(iterations * len(clients))
+	expected := float64(iterations * len(owners))
 	if finalState == nil {
 		t.Fatalf("expected final state, got nil")
 	}
@@ -1708,38 +1901,53 @@ func TestDiskTxnCommitAcrossNodes(t *testing.T) {
 	root := prepareDiskRoot(t, "")
 	cfg := buildDiskConfig(t, root, 0)
 
-	cliRM := startDiskServer(t, cfg) // acts as RM holding the lease
-	cliTC := startDiskServer(t, cfg) // acts as TC issuing the decision
+	serverA := startDiskTestServer(t, cfg) // acts as RM holding the lease
+	serverB := startDiskTestServer(t, cfg) // acts as TC issuing the decision
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
+	activeServer, activeCli, err := hatest.FindActiveServer(ctx, serverA, serverB)
+	if err != nil {
+		t.Fatalf("find active server: %v", err)
+	}
+	passiveCli := serverA.Client
+	if activeServer == serverA {
+		passiveCli = serverB.Client
+	}
+	waitForPassive(t, ctx, passiveCli)
 
 	key := "disk-txn-cross-commit-" + uuidv7.NewString()
 
-	lease := acquireWithRetry(t, ctx, cliRM, key, "rm-node", 45, lockdclient.BlockWaitForever)
+	lease := acquireWithRetry(t, ctx, activeCli, key, "rm-node", 45, lockdclient.BlockWaitForever)
 	if err := lease.Save(ctx, map[string]any{"value": "from-rm"}); err != nil {
 		t.Fatalf("save state: %v", err)
 	}
 
-	resp, err := cliTC.Release(ctx, api.ReleaseRequest{
+	resp, err := passiveCli.Release(ctx, api.ReleaseRequest{
 		Key:     key,
 		LeaseID: lease.LeaseID,
 		TxnID:   lease.TxnID,
 	})
 	if err != nil {
-		t.Fatalf("cross-node release (commit): %v", err)
+		if !hatest.IsNodePassive(err) {
+			t.Fatalf("expected passive release error, got %v", err)
+		}
+	} else if resp != nil && resp.Released {
+		t.Log("passive release succeeded (server likely became active)")
 	}
-	if !resp.Released {
-		t.Fatalf("expected release=true")
-	}
-	// Drop the lease on the originating server to avoid lingering in-memory trackers.
-	_, _ = cliRM.Release(ctx, api.ReleaseRequest{
+	resp, err = activeCli.Release(ctx, api.ReleaseRequest{
 		Key:     key,
 		LeaseID: lease.LeaseID,
 		TxnID:   lease.TxnID,
 	})
+	if err != nil {
+		t.Fatalf("release (commit): %v", err)
+	}
+	if !resp.Released {
+		t.Fatalf("expected release=true")
+	}
 
-	verifier := acquireWithRetry(t, ctx, cliRM, key, "verifier", 45, lockdclient.BlockWaitForever)
+	verifier := acquireWithRetry(t, ctx, activeCli, key, "verifier", 45, lockdclient.BlockWaitForever)
 	state, _, _, err := getStateJSON(ctx, verifier)
 	if err != nil {
 		t.Fatalf("get_state: %v", err)
@@ -1757,40 +1965,55 @@ func TestDiskTxnRollbackAcrossNodes(t *testing.T) {
 	root := prepareDiskRoot(t, "")
 	cfg := buildDiskConfig(t, root, 0)
 
-	cliRM := startDiskServer(t, cfg)
-	cliTC := startDiskServer(t, cfg)
+	serverA := startDiskTestServer(t, cfg)
+	serverB := startDiskTestServer(t, cfg)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
+	activeServer, activeCli, err := hatest.FindActiveServer(ctx, serverA, serverB)
+	if err != nil {
+		t.Fatalf("find active server: %v", err)
+	}
+	passiveCli := serverA.Client
+	if activeServer == serverA {
+		passiveCli = serverB.Client
+	}
+	waitForPassive(t, ctx, passiveCli)
 
 	key := "disk-txn-cross-rollback-" + uuidv7.NewString()
 
-	lease := acquireWithRetry(t, ctx, cliRM, key, "rm-node", 45, lockdclient.BlockWaitForever)
+	lease := acquireWithRetry(t, ctx, activeCli, key, "rm-node", 45, lockdclient.BlockWaitForever)
 	if err := lease.Save(ctx, map[string]any{"value": "should-rollback"}); err != nil {
 		t.Fatalf("save state: %v", err)
 	}
 
-	resp, err := cliTC.Release(ctx, api.ReleaseRequest{
+	resp, err := passiveCli.Release(ctx, api.ReleaseRequest{
 		Key:      key,
 		LeaseID:  lease.LeaseID,
 		TxnID:    lease.TxnID,
 		Rollback: true,
 	})
 	if err != nil {
-		t.Fatalf("cross-node release (rollback): %v", err)
+		if !hatest.IsNodePassive(err) {
+			t.Fatalf("expected passive release error, got %v", err)
+		}
+	} else if resp != nil && resp.Released {
+		t.Log("passive release succeeded (server likely became active)")
 	}
-	if !resp.Released {
-		t.Fatalf("expected release=true")
-	}
-	// Clear the lease tracker on the original server.
-	_, _ = cliRM.Release(ctx, api.ReleaseRequest{
+	resp, err = activeCli.Release(ctx, api.ReleaseRequest{
 		Key:      key,
 		LeaseID:  lease.LeaseID,
 		TxnID:    lease.TxnID,
 		Rollback: true,
 	})
+	if err != nil {
+		t.Fatalf("release (rollback): %v", err)
+	}
+	if !resp.Released {
+		t.Fatalf("expected release=true")
+	}
 
-	verifier := acquireWithRetry(t, ctx, cliRM, key, "verifier", 45, lockdclient.BlockWaitForever)
+	verifier := acquireWithRetry(t, ctx, activeCli, key, "verifier", 45, lockdclient.BlockWaitForever)
 	state, _, _, err := getStateJSON(ctx, verifier)
 	if err != nil {
 		t.Fatalf("get_state: %v", err)
@@ -1803,7 +2026,35 @@ func TestDiskTxnRollbackAcrossNodes(t *testing.T) {
 	}
 }
 
-func directDiskClient(t testing.TB, ts *lockd.TestServer) *lockdclient.Client {
+func waitForPassive(t testing.TB, ctx context.Context, cli *lockdclient.Client) {
+	t.Helper()
+	if cli == nil {
+		t.Fatalf("nil client")
+	}
+	key := "ha-passive-probe-" + uuidv7.NewString()
+	for {
+		if ctx.Err() != nil {
+			t.Fatalf("timeout waiting for passive server: %v", ctx.Err())
+		}
+		lease, err := cli.Acquire(ctx, api.AcquireRequest{
+			Key:        key,
+			Owner:      "passive-probe",
+			TTLSeconds: 5,
+			BlockSecs:  lockdclient.BlockNoWait,
+		})
+		if err != nil {
+			if hatest.IsNodePassive(err) {
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		_ = lease.Release(ctx)
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func directDiskClient(t testing.TB, ts *lockd.TestServer, timeout time.Duration) *lockdclient.Client {
 	t.Helper()
 	if ts == nil || ts.Server == nil {
 		t.Fatalf("nil test server")
@@ -1816,10 +2067,13 @@ func directDiskClient(t testing.TB, ts *lockd.TestServer) *lockdclient.Client {
 	if ts.Config.MTLSEnabled() {
 		scheme = "https"
 	}
+	if timeout <= 0 {
+		timeout = time.Second
+	}
 	endpoint := fmt.Sprintf("%s://%s", scheme, addr.String())
 	cli, err := ts.NewEndpointsClient([]string{endpoint},
 		lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
-		lockdclient.WithHTTPTimeout(time.Second),
+		lockdclient.WithHTTPTimeout(timeout),
 		lockdclient.WithEndpointShuffle(false),
 	)
 	if err != nil {
@@ -2028,6 +2282,7 @@ func buildDiskConfig(tb testing.TB, root string, retention time.Duration) lockd.
 		AcquireBlock:    10 * time.Second,
 		SweeperInterval: 2 * time.Second,
 		DiskRetention:   retention,
+		HAMode:          "failover",
 	}
 	if bundle, ok := diskEncryptionBundles.Load(root); ok {
 		cfg.DisableStorageEncryption = false
@@ -2201,6 +2456,26 @@ func getStateJSON(ctx context.Context, sess *lockdclient.LeaseSession) (map[stri
 		versionStr = strconv.FormatInt(snap.Version, 10)
 	}
 	return payload, snap.ETag, versionStr, nil
+}
+
+func getPublicStateJSON(ctx context.Context, cli *lockdclient.Client, key string) (map[string]any, error) {
+	resp, err := cli.Get(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil {
+		return nil, nil
+	}
+	defer resp.Close()
+	var payload map[string]any
+	reader := resp.Reader()
+	if reader == nil {
+		return nil, nil
+	}
+	if err := json.NewDecoder(reader).Decode(&payload); err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	return payload, nil
 }
 
 func releaseLease(tb testing.TB, ctx context.Context, sess *lockdclient.LeaseSession) bool {

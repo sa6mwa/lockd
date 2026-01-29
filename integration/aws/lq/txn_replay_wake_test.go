@@ -19,6 +19,7 @@ func TestAWSQueueTxnReplayWakeAcrossNodes(t *testing.T) {
 		ResilientInterval: 5 * time.Second,
 		SweeperInterval:   time.Minute,
 	})
+	cfg.HAMode = "concurrent"
 
 	serverTC := startAWSQueueServer(t, cfg)
 	serverRM := startAWSQueueServer(t, cfg)

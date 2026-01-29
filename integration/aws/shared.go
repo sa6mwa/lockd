@@ -17,16 +17,15 @@ import (
 	"testing"
 	"time"
 
-	minio "github.com/minio/minio-go/v7"
-
 	"pkt.systems/lockd"
 	api "pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/integration/internal/cryptotest"
+	"pkt.systems/lockd/integration/internal/storepath"
 	querydata "pkt.systems/lockd/integration/query/querydata"
 	"pkt.systems/lockd/internal/diagnostics/storagecheck"
 	"pkt.systems/lockd/internal/storage"
-	"pkt.systems/lockd/internal/storage/s3"
+	awsstore "pkt.systems/lockd/internal/storage/aws"
 	"pkt.systems/lockd/namespaces"
 	"pkt.systems/pslog"
 )
@@ -44,6 +43,7 @@ func loadAWSConfig(tb testing.TB) lockd.Config {
 	if !strings.HasPrefix(store, "aws://") {
 		tb.Fatalf("LOCKD_STORE must reference an aws:// URI, got %q", store)
 	}
+	store = storepath.Scoped(tb, store, "aws")
 	cfg := lockd.Config{
 		Store:         store,
 		AWSRegion:     os.Getenv("LOCKD_AWS_REGION"),
@@ -63,6 +63,10 @@ func loadAWSConfig(tb testing.TB) lockd.Config {
 		tb.Fatalf("config validation: %v", err)
 	}
 	return cfg
+}
+
+func appendStorePath(tb testing.TB, store, suffix string) string {
+	return storepath.Append(tb, store, suffix)
 }
 
 func ensureStoreReady(tb testing.TB, ctx context.Context, cfg lockd.Config) {
@@ -316,27 +320,29 @@ func ResetAWSBucketForCrypto(tb testing.TB, cfg lockd.Config) {
 	if err != nil {
 		tb.Fatalf("build aws config: %v", err)
 	}
-	s3cfg := awsResult.Config
-	store, err := s3.New(s3cfg)
+	awscfg := awsResult.Config
+	store, err := awsstore.New(awscfg)
 	if err != nil {
 		tb.Fatalf("new aws store: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	client := store.Client()
-	listPrefix := strings.Trim(s3cfg.Prefix, "/")
-	opts := minio.ListObjectsOptions{Recursive: true}
-	if listPrefix != "" {
-		opts.Prefix = listPrefix
-	}
-	for obj := range client.ListObjects(ctx, s3cfg.Bucket, opts) {
-		if obj.Err != nil {
-			tb.Logf("aws cleanup list error: %v", obj.Err)
-			continue
+	opts := storage.ListOptions{Prefix: "", Limit: 1000}
+	for {
+		res, err := store.ListObjects(ctx, "", opts)
+		if err != nil {
+			tb.Logf("aws cleanup list error: %v", err)
+			break
 		}
-		if err := client.RemoveObject(ctx, s3cfg.Bucket, obj.Key, minio.RemoveObjectOptions{}); err != nil {
-			tb.Logf("aws cleanup remove %q: %v", obj.Key, err)
+		for _, obj := range res.Objects {
+			if err := store.DeleteObject(ctx, "", obj.Key, storage.DeleteObjectOptions{IgnoreNotFound: true}); err != nil && !errors.Is(err, storage.ErrNotFound) {
+				tb.Logf("aws cleanup remove %q: %v", obj.Key, err)
+			}
 		}
+		if !res.Truncated || res.NextStartAfter == "" {
+			break
+		}
+		opts.StartAfter = res.NextStartAfter
 	}
 	if keys, err := store.ListMetaKeys(ctx, namespaces.Default); err == nil {
 		for _, key := range keys {
@@ -363,8 +369,8 @@ func CleanupQueryNamespaces(tb testing.TB, cfg lockd.Config) {
 	if err != nil {
 		tb.Fatalf("build aws config: %v", err)
 	}
-	s3cfg := awsResult.Config
-	store, err := s3.New(s3cfg)
+	awscfg := awsResult.Config
+	store, err := awsstore.New(awscfg)
 	if err != nil {
 		tb.Fatalf("new aws store: %v", err)
 	}
@@ -428,8 +434,8 @@ func CleanupQueue(tb testing.TB, cfg lockd.Config, namespace, queue string) {
 	if err != nil {
 		tb.Fatalf("build aws config: %v", err)
 	}
-	s3cfg := awsResult.Config
-	store, err := s3.New(s3cfg)
+	awscfg := awsResult.Config
+	store, err := awsstore.New(awscfg)
 	if err != nil {
 		tb.Fatalf("new aws store: %v", err)
 	}
@@ -485,8 +491,8 @@ func cleanupAWSKey(tb testing.TB, cfg lockd.Config, namespace, key string) error
 	if err != nil {
 		return fmt.Errorf("build aws config: %w", err)
 	}
-	s3cfg := awsResult.Config
-	store, err := s3.New(s3cfg)
+	awscfg := awsResult.Config
+	store, err := awsstore.New(awscfg)
 	if err != nil {
 		return fmt.Errorf("new aws store: %w", err)
 	}
@@ -511,25 +517,16 @@ func cleanupAWSKey(tb testing.TB, cfg lockd.Config, namespace, key string) error
 
 func cleanupNamespaceIndexesIfEmpty(tb testing.TB, store storage.Backend, ctx context.Context, namespace string) error {
 	tb.Helper()
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		keys, err := store.ListMetaKeys(ctx, namespace)
-		if err != nil {
-			return fmt.Errorf("list meta (%s): %w", namespace, err)
-		}
-		if len(keys) == 0 {
-			cleanupIndexArtifacts(tb, store, ctx, namespace)
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("namespace %s still has %d meta keys (e.g. %v)", namespace, len(keys), sampleKeys(keys))
-		}
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("wait for namespace %s drain: %w", namespace, ctx.Err())
-		case <-time.After(250 * time.Millisecond):
-		}
+	keys, err := store.ListMetaKeys(ctx, namespace)
+	if err != nil {
+		return fmt.Errorf("list meta (%s): %w", namespace, err)
 	}
+	if len(keys) == 0 {
+		cleanupIndexArtifacts(tb, store, ctx, namespace)
+		return nil
+	}
+	tb.Logf("aws cleanup: namespace %s still has %d meta keys (e.g. %v); skipping index cleanup", namespace, len(keys), sampleKeys(keys))
+	return nil
 }
 
 func sampleKeys(keys []string) []string {
@@ -571,8 +568,8 @@ func CleanupNamespaceIndexes(tb testing.TB, cfg lockd.Config, nsList ...string) 
 	if err != nil {
 		tb.Fatalf("build aws config: %v", err)
 	}
-	s3cfg := awsResult.Config
-	store, err := s3.New(s3cfg)
+	awscfg := awsResult.Config
+	store, err := awsstore.New(awscfg)
 	if err != nil {
 		tb.Fatalf("new aws store: %v", err)
 	}

@@ -18,6 +18,8 @@ type Request struct {
 	Cursor    string
 	Fields    map[string]any
 	Engine    EngineHint
+	// IncludeDocMeta asks adapters to return document metadata for matched keys.
+	IncludeDocMeta bool
 }
 
 // Result surfaces the adapter response.
@@ -26,6 +28,16 @@ type Result struct {
 	Cursor   string
 	IndexSeq uint64
 	Metadata map[string]string
+	DocMeta  map[string]DocMetadata
+	Format   uint32
+}
+
+// DocMetadata carries index-provided document metadata for streaming reads.
+type DocMetadata struct {
+	StateETag           string
+	StatePlaintextBytes int64
+	StateDescriptor     []byte
+	PublishedVersion    int64
 }
 
 // Adapter executes namespace-scoped queries.

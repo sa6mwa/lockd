@@ -18,6 +18,7 @@ func TestAzureQueueTxnReplayWakeAcrossNodes(t *testing.T) {
 		PollJitter:        0,
 		ResilientInterval: 5 * time.Second,
 	})
+	cfg.HAMode = "concurrent"
 	cfg.SweeperInterval = time.Minute
 
 	serverTC := startAzureQueueServer(t, cfg)

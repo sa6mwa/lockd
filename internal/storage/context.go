@@ -9,6 +9,8 @@ const (
 	objectDescriptorKey    contextKey = "storage.object_descriptor"
 	statePlaintextSizeKey  contextKey = "storage.state_plaintext_size"
 	objectPlaintextSizeKey contextKey = "storage.object_plaintext_size"
+	stateObjectContextKey  contextKey = "storage.state_object_context"
+	noSyncKey              contextKey = "storage.no_sync"
 )
 
 // ContextWithStateDescriptor attaches a state descriptor to ctx for use by storage backends.
@@ -84,6 +86,27 @@ func ContextWithStatePlaintextSize(ctx context.Context, size int64) context.Cont
 	return context.WithValue(ctx, statePlaintextSizeKey, size)
 }
 
+// ContextWithStateObjectContext overrides the crypto context used for state encryption/decryption.
+func ContextWithStateObjectContext(ctx context.Context, objectCtx string) context.Context {
+	if objectCtx == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, stateObjectContextKey, objectCtx)
+}
+
+// StateObjectContextFromContext returns an override context, falling back to defaultCtx.
+func StateObjectContextFromContext(ctx context.Context, defaultCtx string) string {
+	value := ctx.Value(stateObjectContextKey)
+	if value == nil {
+		return defaultCtx
+	}
+	overridden, ok := value.(string)
+	if !ok || overridden == "" {
+		return defaultCtx
+	}
+	return overridden
+}
+
 // StatePlaintextSizeFromContext retrieves a previously attached plaintext size.
 func StatePlaintextSizeFromContext(ctx context.Context) (int64, bool) {
 	value := ctx.Value(statePlaintextSizeKey)
@@ -95,4 +118,22 @@ func StatePlaintextSizeFromContext(ctx context.Context) (int64, bool) {
 		return 0, false
 	}
 	return size, true
+}
+
+// ContextWithNoSync marks storage writes as best-effort (no fsync) for disk/NFS.
+func ContextWithNoSync(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, noSyncKey, true)
+}
+
+// NoSyncFromContext reports whether the storage write should skip fsync.
+func NoSyncFromContext(ctx context.Context) bool {
+	value := ctx.Value(noSyncKey)
+	if value == nil {
+		return false
+	}
+	enabled, ok := value.(bool)
+	return ok && enabled
 }

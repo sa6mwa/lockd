@@ -1120,6 +1120,49 @@ func (t *acquireForUpdateAcquireErrorTransport) RoundTrip(req *http.Request) (*h
 	}
 }
 
+type acquireForUpdatePassiveReleaseTransport struct {
+	mu           sync.Mutex
+	acquireCalls int
+	getCalls     int
+	updateCalls  int
+	releaseCalls int
+}
+
+func (t *acquireForUpdatePassiveReleaseTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	switch req.URL.Path {
+	case "/v1/acquire":
+		t.acquireCalls++
+		leaseID := fmt.Sprintf("L-passive-%d", t.acquireCalls)
+		body := fmt.Sprintf(`{"lease_id":"%s","key":"orders","owner":"reader","expires_at_unix":%d,"version":1,"fencing_token":%d}`,
+			leaseID, time.Now().Add(time.Minute).Unix(), 90+t.acquireCalls)
+		resp := newJSONResponse(req, http.StatusOK, body)
+		resp.Header.Set("X-Correlation-Id", fmt.Sprintf("cid-passive-%d", t.acquireCalls))
+		return resp, nil
+	case "/v1/get":
+		t.getCalls++
+		resp := newJSONResponse(req, http.StatusOK, `{"value":1}`)
+		resp.Header.Set("ETag", "etag-passive")
+		resp.Header.Set("X-Key-Version", "1")
+		resp.Header.Set("X-Fencing-Token", "90")
+		resp.Header.Set("Content-Length", strconv.Itoa(len(`{"value":1}`)))
+		return resp, nil
+	case "/v1/update":
+		t.updateCalls++
+		return newJSONResponse(req, http.StatusOK, `{"new_version":2,"new_state_etag":"etag-passive-updated","bytes":9}`), nil
+	case "/v1/release":
+		t.releaseCalls++
+		if t.releaseCalls == 1 {
+			return newJSONResponse(req, http.StatusServiceUnavailable, `{"error":"node_passive","detail":"server is passive","retry_after_seconds":1}`), nil
+		}
+		return newJSONResponse(req, http.StatusOK, `{"released":true}`), nil
+	default:
+		return newJSONResponse(req, http.StatusNotFound, `{"error":"not_found"}`), nil
+	}
+}
+
 func TestAcquireForUpdateRetriesOnLeaseRequired(t *testing.T) {
 	transport := &acquireForUpdateRetryTransport{}
 	httpClient := &http.Client{Transport: transport}
@@ -1180,6 +1223,37 @@ func TestAcquireForUpdateRetriesOnLeaseRequired(t *testing.T) {
 	}
 	if releaseCalls == 0 {
 		t.Fatal("expected release to be invoked")
+	}
+}
+
+func TestAcquireForUpdateRetriesReleaseOnNodePassive(t *testing.T) {
+	transport := &acquireForUpdatePassiveReleaseTransport{}
+	httpClient := &http.Client{Transport: transport}
+	cli, err := client.NewWithEndpoints([]string{"http://hosta:9341"},
+		client.WithDisableMTLS(true),
+		client.WithHTTPClient(httpClient),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	err = cli.AcquireForUpdate(ctx, api.AcquireRequest{
+		Key:        "orders",
+		Owner:      "reader",
+		TTLSeconds: 5,
+	}, func(handlerCtx context.Context, af *client.AcquireForUpdateContext) error {
+		return af.Save(handlerCtx, map[string]any{"value": 2})
+	}, client.WithAcquireFailureRetries(3))
+	if err != nil {
+		t.Fatalf("acquire-for-update: %v", err)
+	}
+	transport.mu.Lock()
+	releaseCalls := transport.releaseCalls
+	transport.mu.Unlock()
+	if releaseCalls < 2 {
+		t.Fatalf("expected release retry after node_passive, got %d calls", releaseCalls)
 	}
 }
 

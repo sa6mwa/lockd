@@ -20,6 +20,8 @@ import (
 	"pkt.systems/lockd"
 	"pkt.systems/lockd/benchmark/internal/benchenv"
 	lockdclient "pkt.systems/lockd/client"
+	coreinternal "pkt.systems/lockd/internal/core"
+	queueinternal "pkt.systems/lockd/internal/queue"
 	memorybackend "pkt.systems/lockd/internal/storage/memory"
 	"pkt.systems/pslog"
 )
@@ -48,15 +50,22 @@ type queueBenchmarkScenario struct {
 }
 
 type benchMetrics struct {
-	dequeueNanos atomic.Int64
-	ackNanos     atomic.Int64
-	dequeueCount atomic.Int64
-	ackCount     atomic.Int64
-	ackLeaseMiss atomic.Int64
-	waitingCount atomic.Int64
-	batchCalls   atomic.Int64
-	batchTotal   atomic.Int64
-	maxGapNanos  atomic.Int64
+	dequeueNanos         atomic.Int64
+	ackNanos             atomic.Int64
+	dequeueCount         atomic.Int64
+	ackCount             atomic.Int64
+	ackLeaseMiss         atomic.Int64
+	ackLeaseMissMissing  atomic.Int64
+	ackLeaseMissMismatch atomic.Int64
+	enqueueRetries       atomic.Int64
+	dequeueRetries       atomic.Int64
+	subscribeRetries     atomic.Int64
+	ackRetries           atomic.Int64
+	benchErrors          atomic.Int64
+	waitingCount         atomic.Int64
+	batchCalls           atomic.Int64
+	batchTotal           atomic.Int64
+	maxGapNanos          atomic.Int64
 }
 
 var debugDeliveries atomic.Int64
@@ -100,6 +109,31 @@ func BenchmarkMemQueueThroughput(b *testing.B) {
 			useSubscribe:   true,
 		},
 		{
+			name:           "double_server_subscribe_100p_1c",
+			servers:        2,
+			producers:      100,
+			consumers:      1,
+			totalMessages:  200,
+			prefill:        true,
+			measureEnqueue: false,
+			measureDequeue: true,
+			prefetch:       16,
+			blockSeconds:   30,
+			useSubscribe:   true,
+		},
+		{
+			name:           "double_server_dequeue_100p_1c",
+			servers:        2,
+			producers:      100,
+			consumers:      1,
+			totalMessages:  200,
+			prefill:        true,
+			measureEnqueue: false,
+			measureDequeue: true,
+			prefetch:       16,
+			blockSeconds:   lockdclient.BlockNoWait,
+		},
+		{
 			name:           "single_server_dequeue_guard",
 			servers:        1,
 			producers:      1,
@@ -133,6 +167,11 @@ func BenchmarkMemQueueThroughput(b *testing.B) {
 func runMemQueueBenchmark(b *testing.B, scenario queueBenchmarkScenario, payload []byte) {
 	b.Helper()
 	debugDeliveries.Store(0)
+	queueinternal.EnableReadyCacheStats()
+	queueinternal.ResetReadyCacheStats()
+	coreinternal.EnableQueueDeliveryStats()
+	coreinternal.ResetQueueDeliveryStats()
+	coreinternal.ResetQueueLeaseStats()
 
 	if override := os.Getenv("MEM_LQ_BENCH_PRODUCERS"); override != "" {
 		if v, err := strconv.Atoi(override); err == nil && v >= 0 {
@@ -205,6 +244,9 @@ func runMemQueueBenchmark(b *testing.B, scenario queueBenchmarkScenario, payload
 
 	for i := 0; i < scenario.servers; i++ {
 		cfg := buildMemQueueConfig(b)
+		if scenario.servers > 1 {
+			cfg.HAMode = "concurrent"
+		}
 		var logger pslog.Logger
 		if logLevel == pslog.NoLevel {
 			logger = pslog.NoopLogger()
@@ -307,6 +349,7 @@ func runMemQueueBenchmark(b *testing.B, scenario queueBenchmarkScenario, payload
 		}
 		errOnce.Do(func() {
 			errRecorded.Store(true)
+			metrics.benchErrors.Add(1)
 			if benchDebug {
 				var apiErr *lockdclient.APIError
 				if errors.As(err, &apiErr) && apiErr != nil && apiErr.Response.ErrorCode != "" {
@@ -354,6 +397,7 @@ func runMemQueueBenchmark(b *testing.B, scenario queueBenchmarkScenario, payload
 						cancel()
 						if err != nil {
 							if retryQueueError(err) {
+								metrics.enqueueRetries.Add(1)
 								continue
 							}
 							recordErr(fmt.Errorf("enqueue (producer %d): %w", worker, err))
@@ -483,6 +527,12 @@ func runMemQueueBenchmark(b *testing.B, scenario queueBenchmarkScenario, payload
 										apiErr.Response.ErrorCode == "queue_message_lease_mismatch") {
 									if apiErr.Response.ErrorCode == "queue_message_lease_mismatch" {
 										metrics.ackLeaseMiss.Add(1)
+										detail := strings.ToLower(apiErr.Response.Detail)
+										if strings.Contains(detail, "missing") {
+											metrics.ackLeaseMissMissing.Add(1)
+										} else {
+											metrics.ackLeaseMissMismatch.Add(1)
+										}
 									}
 									if debug {
 										fmt.Fprintf(os.Stderr, "[%s] ack.idempotent mid=%s lease=%s err=%v\n",
@@ -501,6 +551,7 @@ func runMemQueueBenchmark(b *testing.B, scenario queueBenchmarkScenario, payload
 									return nil
 								}
 								if retryQueueError(ackErr) {
+									metrics.ackRetries.Add(1)
 									if debug {
 										fmt.Fprintf(os.Stderr, "[%s] ack.retry mid=%s err=%v\n",
 											time.Now().Format(time.RFC3339Nano),
@@ -534,10 +585,20 @@ func runMemQueueBenchmark(b *testing.B, scenario queueBenchmarkScenario, payload
 							return nil
 						})
 						consumerCancel()
-						if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errBenchmarkComplete) {
+						if err == nil {
+							if atomic.LoadInt64(&totalConsumed) >= targetMessages {
+								return
+							}
+							continue
+						}
+						if errors.Is(err, errBenchmarkComplete) {
+							return
+						}
+						if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 							return
 						}
 						if retryQueueError(err) {
+							metrics.subscribeRetries.Add(1)
 							time.Sleep(10 * time.Millisecond)
 							continue
 						}
@@ -573,6 +634,7 @@ func runMemQueueBenchmark(b *testing.B, scenario queueBenchmarkScenario, payload
 							continue
 						}
 						if retryQueueError(err) {
+							metrics.dequeueRetries.Add(1)
 							continue
 						}
 						recordErr(fmt.Errorf("dequeue (consumer %d): %w", worker, err))
@@ -594,6 +656,12 @@ func runMemQueueBenchmark(b *testing.B, scenario queueBenchmarkScenario, payload
 							var apiErr *lockdclient.APIError
 							if errors.As(ackErr, &apiErr) && apiErr.Response.ErrorCode == "queue_message_lease_mismatch" {
 								metrics.ackLeaseMiss.Add(1)
+								detail := strings.ToLower(apiErr.Response.Detail)
+								if strings.Contains(detail, "missing") {
+									metrics.ackLeaseMissMissing.Add(1)
+								} else {
+									metrics.ackLeaseMissMismatch.Add(1)
+								}
 								metrics.ackNanos.Add(time.Since(ackStart).Nanoseconds())
 								metrics.ackCount.Add(1)
 								total := atomic.AddInt64(&totalConsumed, 1)
@@ -603,6 +671,7 @@ func runMemQueueBenchmark(b *testing.B, scenario queueBenchmarkScenario, payload
 								continue
 							}
 							if retryQueueError(ackErr) {
+								metrics.ackRetries.Add(1)
 								continue
 							}
 							recordErr(fmt.Errorf("ack (consumer %d): %w", worker, ackErr))
@@ -655,6 +724,75 @@ func runMemQueueBenchmark(b *testing.B, scenario queueBenchmarkScenario, payload
 	}
 	if count := metrics.ackLeaseMiss.Load(); count > 0 {
 		b.ReportMetric(float64(count), "ack_lease_mismatch_total")
+	}
+	if count := metrics.ackLeaseMissMissing.Load(); count > 0 {
+		b.ReportMetric(float64(count), "ack_lease_missing_total")
+	}
+	if count := metrics.ackLeaseMissMismatch.Load(); count > 0 {
+		b.ReportMetric(float64(count), "ack_lease_id_mismatch_total")
+	}
+	b.ReportMetric(float64(metrics.enqueueRetries.Load()), "enqueue_retry_total")
+	b.ReportMetric(float64(metrics.dequeueRetries.Load()), "dequeue_retry_total")
+	b.ReportMetric(float64(metrics.subscribeRetries.Load()), "subscribe_retry_total")
+	b.ReportMetric(float64(metrics.ackRetries.Load()), "ack_retry_total")
+	b.ReportMetric(float64(metrics.benchErrors.Load()), "bench_errors_total")
+	if stats := queueinternal.ReadyCacheStatsSnapshot(); stats.InflightSkips > 0 {
+		if stats.InflightSkips > 0 {
+			b.ReportMetric(float64(stats.InflightSkips), "ready_cache_inflight_skips")
+		}
+		if stats.CursorResets > 0 {
+			b.ReportMetric(float64(stats.CursorResets), "ready_cache_cursor_resets")
+		}
+		if stats.InflightClears > 0 {
+			b.ReportMetric(float64(stats.InflightClears), "ready_cache_inflight_clears")
+		}
+	}
+	if stats := coreinternal.QueueLeaseStatsSnapshot(); stats.MissingLease > 0 || stats.LeaseMismatch > 0 || stats.TxnMismatch > 0 || stats.VisibilityExpired > 0 {
+		if stats.MissingLease > 0 {
+			b.ReportMetric(float64(stats.MissingLease), "queue_lease_missing")
+		}
+		if stats.LeaseMismatch > 0 {
+			b.ReportMetric(float64(stats.LeaseMismatch), "queue_lease_mismatch")
+		}
+		if stats.TxnMismatch > 0 {
+			b.ReportMetric(float64(stats.TxnMismatch), "queue_lease_txn_mismatch")
+		}
+		if stats.VisibilityExpired > 0 {
+			b.ReportMetric(float64(stats.VisibilityExpired), "queue_lease_visibility_expired")
+		}
+		if stats.AckNoRecord > 0 {
+			b.ReportMetric(float64(stats.AckNoRecord), "queue_lease_ack_no_record")
+		}
+		if stats.AckRecordMatch > 0 {
+			b.ReportMetric(float64(stats.AckRecordMatch), "queue_lease_ack_record_match")
+		}
+		if stats.AckRecordMismatch > 0 {
+			b.ReportMetric(float64(stats.AckRecordMismatch), "queue_lease_ack_record_mismatch")
+		}
+		if stats.AckMetaMismatch > 0 {
+			b.ReportMetric(float64(stats.AckMetaMismatch), "queue_lease_ack_meta_mismatch")
+		}
+		if stats.RedeliveredInflight > 0 {
+			b.ReportMetric(float64(stats.RedeliveredInflight), "queue_lease_redelivered_inflight")
+		}
+	}
+	if stats := coreinternal.QueueDeliveryStatsSnapshot(); stats.AcquireCount > 0 || stats.AckCount > 0 || stats.PayloadCount > 0 || stats.IncrementCount > 0 {
+		if stats.AcquireCount > 0 {
+			avgMs := float64(stats.AcquireNanos) / float64(stats.AcquireCount) / 1e6
+			b.ReportMetric(avgMs, "queue_delivery_acquire_avg_ms")
+		}
+		if stats.IncrementCount > 0 {
+			avgMs := float64(stats.IncrementNanos) / float64(stats.IncrementCount) / 1e6
+			b.ReportMetric(avgMs, "queue_delivery_increment_avg_ms")
+		}
+		if stats.PayloadCount > 0 {
+			avgMs := float64(stats.PayloadNanos) / float64(stats.PayloadCount) / 1e6
+			b.ReportMetric(avgMs, "queue_delivery_payload_avg_ms")
+		}
+		if stats.AckCount > 0 {
+			avgMs := float64(stats.AckNanos) / float64(stats.AckCount) / 1e6
+			b.ReportMetric(avgMs, "queue_ack_avg_ms")
+		}
 	}
 
 	if benchErr != nil {
@@ -713,7 +851,7 @@ func buildMemQueueConfig(tb testing.TB) lockd.Config {
 		DisableStorageTracing:      true,
 	}
 	cfg.DisableMemQueueWatch = false
-	cfg.QRFEnabled = false
+	cfg.QRFDisabled = true
 	benchenv.MaybeEnableStorageEncryption(tb, &cfg)
 	if err := cfg.Validate(); err != nil {
 		tb.Fatalf("config validation failed: %v", err)

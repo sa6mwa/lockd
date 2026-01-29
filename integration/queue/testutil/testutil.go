@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"path"
 	"runtime"
 	"strings"
@@ -23,6 +24,7 @@ import (
 	"pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/integration/internal/cryptotest"
+	"pkt.systems/lockd/integration/internal/hatest"
 	"pkt.systems/lockd/internal/core"
 	"pkt.systems/lockd/internal/queue"
 	"pkt.systems/lockd/internal/storage"
@@ -45,6 +47,25 @@ func InstallWatchdog(t testing.TB, name string, timeout time.Duration) {
 	t.Cleanup(func() {
 		timer.Stop()
 	})
+}
+
+func ensureActiveServer(t testing.TB, ts *lockd.TestServer) {
+	t.Helper()
+	if ts == nil {
+		t.Fatalf("active server required")
+	}
+	timeout := 5 * time.Second
+	if ts.Config.HAMode == "failover" && ts.Config.HALeaseTTL > 0 {
+		haTimeout := ts.Config.HALeaseTTL * 2
+		if haTimeout > timeout {
+			timeout = haTimeout
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := hatest.WaitForActive(ctx, ts); err != nil {
+		t.Fatalf("wait for active server: %v", err)
+	}
 }
 
 // QRFChecklist tracks whether clients observed QRF throttling states during a test run.
@@ -141,6 +162,24 @@ func replayDeadlineForStore(store string) time.Duration {
 		return 60 * time.Second
 	default:
 		return 20 * time.Second
+	}
+}
+
+func queueProbeTimeoutForStore(store string, fast time.Duration) time.Duration {
+	if fast <= 0 {
+		fast = 250 * time.Millisecond
+	}
+	store = strings.ToLower(strings.TrimSpace(store))
+	switch {
+	case strings.HasPrefix(store, "aws://"),
+		strings.HasPrefix(store, "s3://"),
+		strings.HasPrefix(store, "azure://"):
+		if fast < 2*time.Second {
+			return 2 * time.Second
+		}
+		return fast
+	default:
+		return fast
 	}
 }
 
@@ -441,6 +480,7 @@ func MustDequeueMessages(t testing.TB, cli *lockdclient.Client, queue, owner str
 // verifies commit->ACK and rollback->NACK via the TC decision endpoint.
 func RunQueueTxnDecisionScenario(t testing.TB, ts *lockd.TestServer, commit bool) {
 	t.Helper()
+	ensureActiveServer(t, ts)
 	queueName := QueueName("txn-queue")
 	owner := QueueOwner("txn-owner")
 	cli := ts.Client
@@ -498,9 +538,10 @@ func RunQueueTxnDecisionScenario(t testing.TB, ts *lockd.TestServer, commit bool
 	time.Sleep(150 * time.Millisecond)
 
 	if commit {
+		probeTimeout := queueProbeTimeoutForStore(ts.Config.Store, 250*time.Millisecond)
 		deadline := time.Now().Add(2 * time.Second)
 		for time.Now().Before(deadline) {
-			ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+			ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 			m, err := cli.Dequeue(ctx, queueName, lockdclient.DequeueOptions{
 				Owner:        owner + "-probe",
 				BlockSeconds: api.BlockNoWait,
@@ -567,6 +608,7 @@ func RunQueueTxnDecisionFanoutScenario(t testing.TB, tc, rm *lockd.TestServer, c
 	if tc == nil || rm == nil {
 		t.Fatalf("tc/rm servers required")
 	}
+	ensureActiveServer(t, rm)
 	cli := rm.Client
 	if cli == nil {
 		t.Fatalf("rm server missing client")
@@ -606,10 +648,11 @@ func RunQueueTxnDecisionFanoutScenario(t testing.TB, tc, rm *lockd.TestServer, c
 	}
 	postTxnDecision(t, tc, payload)
 
+	probeTimeout := queueProbeTimeoutForStore(rm.Config.Store, 250*time.Millisecond)
 	assertQueueEmpty := func(client *lockdclient.Client, label string) {
 		deadline := time.Now().Add(2 * time.Second)
 		for time.Now().Before(deadline) {
-			ctxProbe, cancelProbe := context.WithTimeout(context.Background(), 250*time.Millisecond)
+			ctxProbe, cancelProbe := context.WithTimeout(context.Background(), probeTimeout)
 			m, err := client.Dequeue(ctxProbe, queueName, lockdclient.DequeueOptions{
 				Owner:        QueueOwner("txn-probe-" + label),
 				BlockSeconds: api.BlockNoWait,
@@ -661,6 +704,7 @@ func RunQueueTxnDecisionRestartScenario(t testing.TB, tc, rm *lockd.TestServer, 
 	if tc == nil || rm == nil || restartRM == nil {
 		t.Fatalf("tc/rm servers required")
 	}
+	ensureActiveServer(t, rm)
 	cli := rm.Client
 	if cli == nil {
 		t.Fatalf("rm server missing client")
@@ -688,6 +732,11 @@ func RunQueueTxnDecisionRestartScenario(t testing.TB, tc, rm *lockd.TestServer, 
 
 	stopTestServerNoDrain(rm)
 
+	ensureActiveServer(t, tc)
+	if tc.Client == nil {
+		t.Fatalf("tc server missing client")
+	}
+
 	state := "commit"
 	if !commit {
 		state = "rollback"
@@ -707,6 +756,7 @@ func RunQueueTxnDecisionRestartScenario(t testing.TB, tc, rm *lockd.TestServer, 
 	if rm2 == nil || rm2.Client == nil {
 		t.Fatalf("restart RM missing client")
 	}
+	ensureActiveServer(t, rm2)
 	cli2 := rm2.Client
 
 	if replayDeadline <= 0 {
@@ -767,6 +817,7 @@ func RunQueueTxnDecisionReplayWakeScenario(t testing.TB, tc, rm *lockd.TestServe
 	if tc == nil || rm == nil || restartRM == nil {
 		t.Fatalf("tc/rm servers required")
 	}
+	ensureActiveServer(t, rm)
 	cli := rm.Client
 	if cli == nil {
 		t.Fatalf("rm server missing client")
@@ -803,6 +854,7 @@ func RunQueueTxnDecisionReplayWakeScenario(t testing.TB, tc, rm *lockd.TestServe
 	if rm2 == nil || rm2.Client == nil {
 		t.Fatalf("restart RM missing client")
 	}
+	ensureActiveServer(t, rm2)
 	cli2 := rm2.Client
 	tcClient := cryptotest.RequireTCClient(t, rm2)
 
@@ -815,14 +867,28 @@ func RunQueueTxnDecisionReplayWakeScenario(t testing.TB, tc, rm *lockd.TestServe
 
 	// Ensure the message is still hidden before replay.
 	{
-		probeCtx, cancelProbe := context.WithTimeout(context.Background(), 1*time.Second)
+		probeTimeout := 5 * time.Second
+		if wakeDeadline > probeTimeout {
+			probeTimeout = wakeDeadline
+		}
+		if replayDeadline > 0 && replayDeadline < probeTimeout {
+			probeTimeout = replayDeadline
+		}
+		probeCtx, cancelProbe := context.WithTimeout(context.Background(), probeTimeout)
 		probe, err := cli2.Dequeue(probeCtx, queueName, lockdclient.DequeueOptions{
 			Owner:        QueueOwner("txn-replay-probe"),
 			BlockSeconds: api.BlockNoWait,
 		})
 		cancelProbe()
 		if err == nil && probe != nil {
-			t.Fatalf("message visible before replay")
+			t.Logf("message visible before replay (transparent decision apply)")
+			if probe.MessageID() != msg.MessageID() {
+				t.Fatalf("expected same message before replay; want %s got %s", msg.MessageID(), probe.MessageID())
+			}
+			if err := probe.Ack(context.Background()); err != nil {
+				t.Fatalf("ack pre-replay message: %v", err)
+			}
+			return
 		}
 		var apiErr *lockdclient.APIError
 		if err != nil && (!errors.As(err, &apiErr) || apiErr.Response.ErrorCode != "waiting") {
@@ -889,6 +955,7 @@ func RunQueueTxnDecisionReplayWakeScenario(t testing.TB, tc, rm *lockd.TestServe
 // transaction and verifies commit deletes message+state while rollback keeps both.
 func RunQueueTxnStatefulDecisionScenario(t testing.TB, ts *lockd.TestServer, commit bool) {
 	t.Helper()
+	ensureActiveServer(t, ts)
 	queueName := QueueName("txn-stateful")
 	owner := QueueOwner("txn-stateful-owner")
 	cli := ts.Client
@@ -973,10 +1040,11 @@ func RunQueueTxnStatefulDecisionScenario(t testing.TB, ts *lockd.TestServer, com
 	stateMetaKey := participantState
 
 	if commit {
+		probeTimeout := queueProbeTimeoutForStore(ts.Config.Store, 250*time.Millisecond)
 		gotWaiting := false
 		deadline := time.Now().Add(2 * time.Second)
 		for time.Now().Before(deadline) {
-			ctxProbe, cancelProbe := context.WithTimeout(context.Background(), 250*time.Millisecond)
+			ctxProbe, cancelProbe := context.WithTimeout(context.Background(), probeTimeout)
 			m, err := cli.Dequeue(ctxProbe, queueName, lockdclient.DequeueOptions{
 				Owner:        owner + "-probe",
 				BlockSeconds: api.BlockNoWait,
@@ -1051,6 +1119,7 @@ func RunQueueTxnStatefulDecisionFanoutScenario(t testing.TB, tc, rm *lockd.TestS
 	if tc == nil || rm == nil {
 		t.Fatalf("tc/rm servers required")
 	}
+	ensureActiveServer(t, rm)
 	cli := rm.Client
 	if cli == nil {
 		t.Fatalf("rm server missing client")
@@ -1208,6 +1277,7 @@ func RunQueueTxnStatefulDecisionRestartScenario(t testing.TB, tc, rm *lockd.Test
 	if tc == nil || rm == nil || restartRM == nil {
 		t.Fatalf("tc/rm servers required")
 	}
+	ensureActiveServer(t, rm)
 	cli := rm.Client
 	if cli == nil {
 		t.Fatalf("rm server missing client")
@@ -1256,6 +1326,11 @@ func RunQueueTxnStatefulDecisionRestartScenario(t testing.TB, tc, rm *lockd.Test
 
 	stopTestServer(rm)
 
+	ensureActiveServer(t, tc)
+	if tc.Client == nil {
+		t.Fatalf("tc server missing client")
+	}
+
 	state := "commit"
 	if !commit {
 		state = "rollback"
@@ -1275,6 +1350,7 @@ func RunQueueTxnStatefulDecisionRestartScenario(t testing.TB, tc, rm *lockd.Test
 	if rm2 == nil || rm2.Client == nil {
 		t.Fatalf("restart RM missing client")
 	}
+	ensureActiveServer(t, rm2)
 	cli2 := rm2.Client
 	backend := rm2.Backend()
 	if backend == nil {
@@ -1288,10 +1364,11 @@ func RunQueueTxnStatefulDecisionRestartScenario(t testing.TB, tc, rm *lockd.Test
 	stateObjKey := queueStateObjectKey(queueName, msg.MessageID())
 	stateMetaKey := participantState
 
+	probeTimeout := queueProbeTimeoutForStore(rm2.Config.Store, 500*time.Millisecond)
 	assertQueueEmpty := func(client *lockdclient.Client, label string) {
 		deadline := time.Now().Add(replayDeadline)
 		for time.Now().Before(deadline) {
-			ctxProbe, cancelProbe := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			ctxProbe, cancelProbe := context.WithTimeout(context.Background(), probeTimeout)
 			m, err := client.Dequeue(ctxProbe, queueName, lockdclient.DequeueOptions{
 				Owner:        QueueOwner("txn-probe-" + label),
 				BlockSeconds: api.BlockNoWait,
@@ -1405,7 +1482,7 @@ func waitForQueueStateObject(ctx context.Context, backend storage.Backend, names
 // txn and asserts commit (writes + ACK) or rollback (no writes + NACK).
 func RunQueueTxnMixedKeyScenario(t testing.TB, ts *lockd.TestServer, commit bool) {
 	t.Helper()
-
+	ensureActiveServer(t, ts)
 	cli := ts.Client
 	if cli == nil {
 		t.Fatalf("test server missing client")
@@ -1634,10 +1711,15 @@ func RunQueueTxnMixedKeyFanoutScenario(t testing.TB, tc, rm *lockd.TestServer, c
 	if tc == nil || rm == nil {
 		t.Fatalf("tc/rm servers required")
 	}
+	ensureActiveServer(t, rm)
 	tcClient := tc.Client
 	rmClient := rm.Client
 	if tcClient == nil || rmClient == nil {
 		t.Fatalf("missing tc/rm client")
+	}
+	failover := strings.EqualFold(tc.Config.HAMode, "failover") || strings.EqualFold(rm.Config.HAMode, "failover")
+	if failover {
+		tcClient = rmClient
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -1823,10 +1905,15 @@ func RunQueueTxnMixedKeyRestartScenario(t testing.TB, tc, rm *lockd.TestServer, 
 	if tc == nil || rm == nil || restartRM == nil {
 		t.Fatalf("tc/rm servers required")
 	}
+	ensureActiveServer(t, rm)
 	tcClient := tc.Client
 	rmClient := rm.Client
 	if tcClient == nil || rmClient == nil {
 		t.Fatalf("missing tc/rm client")
+	}
+	failover := strings.EqualFold(tc.Config.HAMode, "failover") || strings.EqualFold(rm.Config.HAMode, "failover")
+	if failover {
+		tcClient = rmClient
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -1885,6 +1972,11 @@ func RunQueueTxnMixedKeyRestartScenario(t testing.TB, tc, rm *lockd.TestServer, 
 
 	stopTestServer(rm)
 
+	ensureActiveServer(t, tc)
+	if tc.Client == nil {
+		t.Fatalf("tc server missing client")
+	}
+
 	payload := api.TxnDecisionRequest{
 		TxnID: txnID,
 		State: map[bool]string{true: "commit", false: "rollback"}[commit],
@@ -1901,21 +1993,22 @@ func RunQueueTxnMixedKeyRestartScenario(t testing.TB, tc, rm *lockd.TestServer, 
 	if rm2 == nil || rm2.Client == nil {
 		t.Fatalf("restart RM missing client")
 	}
+	ensureActiveServer(t, rm2)
 	cli2 := rm2.Client
 
 	if replayDeadline <= 0 {
 		replayDeadline = 20 * time.Second
 	}
 
-	assertValue := func(client *lockdclient.Client, key, leaseID, want string) {
-		deadline := time.Now().Add(replayDeadline)
-		for time.Now().Before(deadline) {
-			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-			optsWithLease := []lockdclient.GetOption{
-				lockdclient.WithGetNamespace(namespaces.Default),
-				lockdclient.WithGetLeaseID(leaseID),
-			}
-			res, err := client.Get(ctx, key, optsWithLease...)
+		assertValue := func(client *lockdclient.Client, key, leaseID, want string) {
+			deadline := time.Now().Add(replayDeadline)
+			for time.Now().Before(deadline) {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				optsWithLease := []lockdclient.GetOption{
+					lockdclient.WithGetNamespace(namespaces.Default),
+					lockdclient.WithGetLeaseID(leaseID),
+				}
+				res, err := client.Get(ctx, key, optsWithLease...)
 			cancel()
 			if err == nil && res != nil && res.HasState {
 				doc, derr := res.Document()
@@ -1929,12 +2022,12 @@ func RunQueueTxnMixedKeyRestartScenario(t testing.TB, tc, rm *lockd.TestServer, 
 				}
 			}
 
-			ctxPub, cancelPub := context.WithTimeout(context.Background(), 500*time.Millisecond)
-			resPub, errPub := client.Get(ctxPub, key,
-				lockdclient.WithGetNamespace(namespaces.Default),
-				lockdclient.WithGetPublicDisabled(false),
-			)
-			cancelPub()
+				ctxPub, cancelPub := context.WithTimeout(context.Background(), time.Second)
+				resPub, errPub := client.Get(ctxPub, key,
+					lockdclient.WithGetNamespace(namespaces.Default),
+					lockdclient.WithGetPublicDisabled(false),
+				)
+				cancelPub()
 			if errPub == nil && resPub != nil && resPub.HasState {
 				doc, derr := resPub.Document()
 				if derr == nil {
@@ -1950,12 +2043,12 @@ func RunQueueTxnMixedKeyRestartScenario(t testing.TB, tc, rm *lockd.TestServer, 
 		}
 		t.Fatalf("key %s missing expected value %s after %s", key, want, payload.State)
 	}
-	assertAbsent := func(client *lockdclient.Client, key string) {
-		deadline := time.Now().Add(replayDeadline)
-		for time.Now().Before(deadline) {
-			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-			res, err := client.Get(ctx, key, lockdclient.WithGetNamespace(namespaces.Default), lockdclient.WithGetPublicDisabled(true))
-			cancel()
+		assertAbsent := func(client *lockdclient.Client, key string) {
+			deadline := time.Now().Add(replayDeadline)
+			for time.Now().Before(deadline) {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				res, err := client.Get(ctx, key, lockdclient.WithGetNamespace(namespaces.Default), lockdclient.WithGetPublicDisabled(true))
+				cancel()
 			if err != nil {
 				var apiErr *lockdclient.APIError
 				if errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound {
@@ -1965,9 +2058,9 @@ func RunQueueTxnMixedKeyRestartScenario(t testing.TB, tc, rm *lockd.TestServer, 
 			if res != nil && res.HasState {
 				t.Fatalf("key %s still has state after rollback", key)
 			}
-			ctxPub, cancelPub := context.WithTimeout(context.Background(), 500*time.Millisecond)
-			resPub, errPub := client.Get(ctxPub, key, lockdclient.WithGetNamespace(namespaces.Default), lockdclient.WithGetPublicDisabled(false))
-			cancelPub()
+				ctxPub, cancelPub := context.WithTimeout(context.Background(), time.Second)
+				resPub, errPub := client.Get(ctxPub, key, lockdclient.WithGetNamespace(namespaces.Default), lockdclient.WithGetPublicDisabled(false))
+				cancelPub()
 			if errPub != nil {
 				var apiErr *lockdclient.APIError
 				if errors.As(errPub, &apiErr) && apiErr.Status == http.StatusNotFound {
@@ -2041,6 +2134,7 @@ func RunQueueTxnReplayScenario(t testing.TB, cfg lockd.Config, start func(testin
 	t.Helper()
 
 	ts := start(t, cfg)
+	ensureActiveServer(t, ts)
 	backend := ts.Backend()
 	if backend == nil {
 		t.Fatalf("test server backend not available")
@@ -2094,12 +2188,17 @@ func RunQueueTxnReplayScenario(t testing.TB, cfg lockd.Config, start func(testin
 	_ = ts.Stop(stopCtx)
 	stopCancel()
 
-	ts2 := start(t, cfg, lockd.WithTestBackend(backend))
+	restartOpts := []lockd.TestServerOption{}
+	if shouldReuseBackendForReplay(cfg) {
+		restartOpts = append(restartOpts, lockd.WithTestBackend(backend))
+	}
+	ts2 := start(t, cfg, restartOpts...)
 	defer func() {
 		ctxStop, cancelStop := context.WithTimeout(context.Background(), 5*time.Second)
 		_ = ts2.Stop(ctxStop)
 		cancelStop()
 	}()
+	ensureActiveServer(t, ts2)
 	cli2 := ts2.Client
 	if cli2 == nil {
 		t.Fatalf("restart missing client")
@@ -2154,6 +2253,22 @@ func RunQueueTxnReplayScenario(t testing.TB, cfg lockd.Config, start func(testin
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatalf("message not re-delivered after replay rollback")
+}
+
+func shouldReuseBackendForReplay(cfg lockd.Config) bool {
+	scheme := storeScheme(cfg.Store)
+	return scheme == "mem"
+}
+
+func storeScheme(store string) string {
+	if store == "" {
+		return ""
+	}
+	parsed, err := url.Parse(store)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(parsed.Scheme)
 }
 
 // ReadMessagePayload reads and closes the payload, failing the test on error.

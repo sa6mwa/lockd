@@ -1,0 +1,337 @@
+File: lockd
+Build ID: f69983d50bc7ff2c5876752c21abc6eccb11141d
+Type: cpu
+Time: 2026-01-28 09:39:00 CET
+Duration: 5.11s, Total samples = 12.60s (246.47%)
+Showing nodes accounting for 8.39s, 66.59% of 12.60s total
+Dropped 770 nodes (cum <= 0.06s)
+      flat  flat%   sum%        cum   cum%
+     1.76s 13.97% 13.97%      1.76s 13.97%  internal/runtime/syscall.Syscall6
+     0.45s  3.57% 17.54%      0.48s  3.81%  runtime.findObject
+     0.45s  3.57% 21.11%      0.45s  3.57%  runtime.futex
+     0.30s  2.38% 23.49%      0.30s  2.38%  runtime.usleep
+     0.29s  2.30% 25.79%      0.29s  2.30%  runtime.memclrNoHeapPointers
+     0.28s  2.22% 28.02%      0.28s  2.22%  runtime.nextFreeFast (inline)
+     0.26s  2.06% 30.08%      0.26s  2.06%  runtime.procyield
+     0.22s  1.75% 31.83%      0.22s  1.75%  runtime.(*mspan).base (inline)
+     0.19s  1.51% 33.33%      0.19s  1.51%  runtime.(*gcBits).bitp (inline)
+     0.17s  1.35% 34.68%      1.32s 10.48%  runtime.scanobject
+     0.17s  1.35% 36.03%      0.48s  3.81%  runtime.selectgo
+     0.14s  1.11% 37.14%      0.14s  1.11%  runtime.(*mspan).heapBitsSmallForAddr
+     0.14s  1.11% 38.25%      0.14s  1.11%  runtime.memmove
+     0.13s  1.03% 39.29%      0.53s  4.21%  runtime.stealWork
+     0.12s  0.95% 40.24%      0.13s  1.03%  runtime.step
+     0.11s  0.87% 41.11%      0.11s  0.87%  aeshashbody
+     0.11s  0.87% 41.98%      0.11s  0.87%  runtime.findfunc
+     0.11s  0.87% 42.86%      0.18s  1.43%  runtime.lock2
+     0.10s  0.79% 43.65%      0.11s  0.87%  runtime.unlock2
+     0.10s  0.79% 44.44%      0.22s  1.75%  sync.(*Pool).Get
+     0.09s  0.71% 45.16%      0.35s  2.78%  internal/sync.(*Mutex).Lock (inline)
+     0.08s  0.63% 45.79%      0.12s  0.95%  context.value
+     0.08s  0.63% 46.43%      0.25s  1.98%  runtime.pcvalue
+     0.07s  0.56% 46.98%      0.07s  0.56%  crypto/internal/fips140/aes/gcm.gcmAesDec
+     0.07s  0.56% 47.54%      0.36s  2.86%  golang.org/x/net/http2.(*responseWriterState).writeChunk
+     0.07s  0.56% 48.10%      0.07s  0.56%  internal/runtime/maps.ctrlGroup.matchH2 (inline)
+     0.07s  0.56% 48.65%      0.28s  2.22%  runtime.adjustframe
+     0.07s  0.56% 49.21%      0.07s  0.56%  runtime.duffzero
+     0.06s  0.48% 49.68%      0.09s  0.71%  runtime.(*spanSet).push
+     0.06s  0.48% 50.16%      1.23s  9.76%  runtime.findRunnable
+     0.05s   0.4% 50.56%      0.87s  6.90%  pkt.systems/lockd/internal/storage/disk.(*logNamespace).appendRecord
+     0.05s   0.4% 50.95%      0.63s  5.00%  runtime.mallocgcSmallScanNoHeader
+     0.05s   0.4% 51.35%      0.20s  1.59%  runtime.mapassign_faststr
+     0.05s   0.4% 51.75%      0.14s  1.11%  runtime.sellock
+     0.04s  0.32% 52.06%      0.07s  0.56%  crypto/internal/fips140/hmac.New[go.shape.interface { BlockSize int; Reset; Size int; Sum []uint8; Write  }]
+     0.04s  0.32% 52.38%      0.08s  0.63%  internal/runtime/maps.(*Map).getWithoutKeySmallFastStr
+     0.04s  0.32% 52.70%      0.08s  0.63%  runtime.chanrecv
+     0.04s  0.32% 53.02%      0.25s  1.98%  runtime.makeslice
+     0.04s  0.32% 53.33%      0.12s  0.95%  runtime.mapaccess1_faststr
+     0.04s  0.32% 53.65%      0.61s  4.84%  runtime.newobject
+     0.04s  0.32% 53.97%      0.34s  2.70%  runtime.runqgrab
+     0.03s  0.24% 54.21%      0.61s  4.84%  crypto/tls.(*Conn).writeRecordLocked
+     0.03s  0.24% 54.44%      0.35s  2.78%  crypto/tls.(*atLeastReader).Read
+     0.03s  0.24% 54.68%      0.45s  3.57%  golang.org/x/net/http2.(*serverConn).processFrame
+     0.03s  0.24% 54.92%      0.85s  6.75%  golang.org/x/net/http2.(*serverConn).serve
+     0.03s  0.24% 55.16%      0.08s  0.63%  golang.org/x/net/http2.(*serverConn).writeFrame
+     0.03s  0.24% 55.40%      0.10s  0.79%  internal/sync.(*Mutex).Unlock (inline)
+     0.03s  0.24% 55.63%      0.64s  5.08%  io.ReadAtLeast
+     0.03s  0.24% 55.87%      5.50s 43.65%  pkt.systems/lockd/internal/httpapi.(*Handler).wrap.func1
+     0.03s  0.24% 56.11%      0.14s  1.11%  pkt.systems/lockd/internal/jsonutil.CompactWriter
+     0.03s  0.24% 56.35%      0.07s  0.56%  runtime.(*mheap).initSpan
+     0.03s  0.24% 56.59%      0.15s  1.19%  runtime.(*stkframe).getStackMap
+     0.03s  0.24% 56.83%      0.07s  0.56%  runtime.casgstatus
+     0.03s  0.24% 57.06%      1.36s 10.79%  runtime.gcDrain
+     0.03s  0.24% 57.30%      0.16s  1.27%  runtime.growslice
+     0.03s  0.24% 57.54%      1.09s  8.65%  runtime.mallocgc
+     0.03s  0.24% 57.78%      0.34s  2.70%  runtime.mallocgcSmallNoscan
+     0.02s  0.16% 57.94%      1.08s  8.57%  bufio.(*Writer).Flush
+     0.02s  0.16% 58.10%      0.13s  1.03%  context.(*valueCtx).Value
+     0.02s  0.16% 58.25%      0.07s  0.56%  crypto/internal/fips140/sha256.(*Digest).Write
+     0.02s  0.16% 58.41%      0.20s  1.59%  encoding/json.(*decodeState).object
+     0.02s  0.16% 58.57%      0.11s  0.87%  golang.org/x/net/http2.(*Framer).readMetaFrame
+     0.02s  0.16% 58.73%      6.11s 48.49%  golang.org/x/net/http2.(*serverConn).runHandler
+     0.02s  0.16% 58.89%      0.11s  0.87%  golang.org/x/net/http2.(*serverConn).scheduleFrameWrite
+     0.02s  0.16% 59.05%      0.32s  2.54%  net.(*conn).Read
+     0.02s  0.16% 59.21%      0.13s  1.03%  pkt.systems/lockd/internal/httpapi.(*Handler).writeJSON
+     0.02s  0.16% 59.37%      0.19s  1.51%  pkt.systems/lockd/internal/httpapi.clientIdentityFromRequest
+     0.02s  0.16% 59.52%      0.32s  2.54%  pkt.systems/lockd/internal/qrf.(*Controller).Wait
+     0.02s  0.16% 59.68%      0.30s  2.38%  pkt.systems/lockd/internal/qrf.(*qrfMetrics).recordDecision
+     0.02s  0.16% 59.84%      0.43s  3.41%  pkt.systems/lockd/internal/storage/disk.(*Store).ReadState
+     0.02s  0.16% 60.00%      0.84s  6.67%  pkt.systems/lockd/internal/storage/disk.(*Store).StoreMeta
+     0.02s  0.16% 60.16%      0.21s  1.67%  pkt.systems/lockd/internal/storage/disk.(*logNamespace).appendInline
+     0.02s  0.16% 60.32%      0.08s  0.63%  pkt.systems/lockd/internal/storage/disk.(*logNamespace).queuePendingLocked
+     0.02s  0.16% 60.48%      0.30s  2.38%  pkt.systems/pslog.(*jsonPlainLogger).rebuildBasePayload
+     0.02s  0.16% 60.63%      0.28s  2.22%  pkt.systems/pslog.encodeBaseJSONPlain
+     0.02s  0.16% 60.79%      0.28s  2.22%  runtime.(*mcache).refill
+     0.02s  0.16% 60.95%      0.24s  1.90%  runtime.futexsleep
+     0.02s  0.16% 61.11%      0.48s  3.81%  runtime.greyobject
+     0.02s  0.16% 61.27%      0.09s  0.71%  runtime.mapaccess2_faststr
+     0.02s  0.16% 61.43%      1.35s 10.71%  runtime.park_m
+     0.02s  0.16% 61.59%      0.31s  2.46%  runtime.wakep
+     0.02s  0.16% 61.75%      0.08s  0.63%  time.Now
+     0.01s 0.079% 61.83%      0.08s  0.63%  crypto/hmac.New
+     0.01s 0.079% 61.90%      0.08s  0.63%  crypto/internal/fips140/aes/gcm.open
+     0.01s 0.079% 61.98%      0.07s  0.56%  encoding/json.(*decodeState).objectInterface
+     0.01s 0.079% 62.06%      0.27s  2.14%  go.opentelemetry.io/otel/attribute.NewSetWithFiltered
+     0.01s 0.079% 62.14%      0.43s  3.41%  golang.org/x/net/http2.(*Framer).ReadFrameHeader
+     0.01s 0.079% 62.22%      0.70s  5.56%  golang.org/x/net/http2.(*bufferedWriterTimeoutWriter).Write
+     0.01s 0.079% 62.30%      0.37s  2.94%  golang.org/x/net/http2.(*responseWriter).FlushError
+     0.01s 0.079% 62.38%      0.38s  3.02%  golang.org/x/net/http2.(*responseWriter).handlerDone
+     0.01s 0.079% 62.46%      0.19s  1.51%  golang.org/x/net/http2.(*serverConn).newWriterAndRequest
+     0.01s 0.079% 62.54%      0.33s  2.62%  golang.org/x/net/http2.(*serverConn).processHeaders
+     0.01s 0.079% 62.62%      0.65s  5.16%  golang.org/x/net/http2.(*serverConn).readFrames
+     0.01s 0.079% 62.70%      0.11s  0.87%  golang.org/x/net/http2.(*serverConn).writeDataFromHandler
+     0.01s 0.079% 62.78%      0.11s  0.87%  golang.org/x/net/http2.(*serverConn).writeHeaders
+     0.01s 0.079% 62.86%      0.33s  2.62%  internal/poll.(*FD).Read
+     0.01s 0.079% 62.94%      0.26s  2.06%  internal/sync.(*Mutex).lockSlow
+     0.01s 0.079% 63.02%      0.07s  0.56%  internal/sync.(*Mutex).unlockSlow
+     0.01s 0.079% 63.10%      0.15s  1.19%  io.(*LimitedReader).Read
+     0.01s 0.079% 63.17%      0.13s  1.03%  io.(*SectionReader).Read
+     0.01s 0.079% 63.25%      0.30s  2.38%  net.(*netFD).Read
+     0.01s 0.079% 63.33%      0.56s  4.44%  net.(*netFD).Write
+     0.01s 0.079% 63.41%      0.13s  1.03%  net/http.(*ServeMux).findHandler
+     0.01s 0.079% 63.49%      5.65s 44.84%  net/http.initALPNRequest.ServeHTTP
+     0.01s 0.079% 63.57%      5.64s 44.76%  net/http.serverHandler.ServeHTTP
+     0.01s 0.079% 63.65%      0.08s  0.63%  os.(*File).readdir
+     0.01s 0.079% 63.73%      0.14s  1.11%  os.openFileNolog
+     0.01s 0.079% 63.81%      0.10s  0.79%  os.openFileNolog.func1 (inline)
+     0.01s 0.079% 63.89%      0.09s  0.71%  pkt.systems/kryptograf/stream.(*writer).Close
+     0.01s 0.079% 63.97%      0.08s  0.63%  pkt.systems/kryptograf/stream.releaseBuffers
+     0.01s 0.079% 64.05%      2.71s 21.51%  pkt.systems/lockd/internal/core.(*Service).Release
+     0.01s 0.079% 64.13%      1.70s 13.49%  pkt.systems/lockd/internal/core.(*Service).applyTxnDecisionForMeta
+     0.01s 0.079% 64.21%      0.13s  1.03%  pkt.systems/lockd/internal/core.(*Service).loadMetaMaybeCached
+     0.01s 0.079% 64.29%      0.36s  2.86%  pkt.systems/lockd/internal/core.(*Service).maybeThrottleLock
+     0.01s 0.079% 64.37%      0.74s  5.87%  pkt.systems/lockd/internal/core.(*writePlan).Wait
+     0.01s 0.079% 64.44%      0.07s  0.56%  pkt.systems/lockd/internal/core.recursiveIndex
+     0.01s 0.079% 64.52%      0.94s  7.46%  pkt.systems/lockd/internal/httpapi.(*Handler).handleAcquire
+     0.01s 0.079% 64.60%      0.97s  7.70%  pkt.systems/lockd/internal/httpapi.(*Handler).handleUpdate
+     0.01s 0.079% 64.68%      1.12s  8.89%  pkt.systems/lockd/internal/storage.(*defaultStagingBackend).PromoteStagedState
+     0.01s 0.079% 64.76%      0.96s  7.62%  pkt.systems/lockd/internal/storage/disk.(*Store).WriteState
+     0.01s 0.079% 64.84%      0.71s  5.63%  pkt.systems/lockd/internal/storage/disk.(*logNamespace).appendLoop
+     0.01s 0.079% 64.92%      0.07s  0.56%  pkt.systems/lockd/internal/storage/disk.(*logNamespace).appendRecord.func2
+     0.01s 0.079% 65.00%      0.10s  0.79%  pkt.systems/lockd/internal/storage/disk.(*logNamespace).applyPendingLocked
+     0.01s 0.079% 65.08%      0.69s  5.48%  pkt.systems/lockd/internal/storage/disk.(*logNamespace).flushAppends
+     0.01s 0.079% 65.16%      0.44s  3.49%  pkt.systems/lockd/internal/storage/retry.(*backend).ReadState.func1
+     0.01s 0.079% 65.24%      0.85s  6.75%  pkt.systems/lockd/internal/storage/retry.(*backend).StoreMeta
+     0.01s 0.079% 65.32%      0.07s  0.56%  pkt.systems/pslog.releaseLineWriter
+     0.01s 0.079% 65.40%      0.31s  2.46%  runtime.(*mcache).nextFree
+     0.01s 0.079% 65.48%      0.15s  1.19%  runtime.(*mcentral).cacheSpan
+     0.01s 0.079% 65.56%      0.10s  0.79%  runtime.(*mcentral).uncacheSpan
+     0.01s 0.079% 65.63%      0.12s  0.95%  runtime.(*mheap).alloc.func1
+     0.01s 0.079% 65.71%      0.14s  1.11%  runtime.(*unwinder).resolveInternal
+     0.01s 0.079% 65.79%      0.07s  0.56%  runtime.gdestroy
+     0.01s 0.079% 65.87%      0.07s  0.56%  runtime.heapSetTypeNoHeader (inline)
+     0.01s 0.079% 65.95%      0.18s  1.43%  runtime.netpoll
+     0.01s 0.079% 66.03%      0.25s  1.98%  runtime.notesleep
+     0.01s 0.079% 66.11%      0.35s  2.78%  runtime.runqsteal
+     0.01s 0.079% 66.19%      1.47s 11.67%  runtime.schedule
+     0.01s 0.079% 66.27%      0.11s  0.87%  runtime.send
+     0.01s 0.079% 66.35%      1.79s 14.21%  runtime.systemstack
+     0.01s 0.079% 66.43%      0.11s  0.87%  sync.(*Mutex).Unlock
+     0.01s 0.079% 66.51%      0.55s  4.37%  syscall.Write (inline)
+     0.01s 0.079% 66.59%      0.35s  2.78%  syscall.pwrite
+         0     0% 66.59%      0.47s  3.73%  bytes.(*Buffer).ReadFrom
+         0     0% 66.59%      0.08s  0.63%  crypto/internal/fips140/aes/gcm.(*GCM).Open
+         0     0% 66.59%      0.08s  0.63%  crypto/tls.(*Conn).Handshake (inline)
+         0     0% 66.59%      0.14s  1.11%  crypto/tls.(*Conn).HandshakeContext (inline)
+         0     0% 66.59%      0.41s  3.25%  crypto/tls.(*Conn).Read
+         0     0% 66.59%      0.69s  5.48%  crypto/tls.(*Conn).Write
+         0     0% 66.59%      0.14s  1.11%  crypto/tls.(*Conn).handshakeContext
+         0     0% 66.59%      0.35s  2.78%  crypto/tls.(*Conn).readFromUntil
+         0     0% 66.59%      0.40s  3.17%  crypto/tls.(*Conn).readRecord (inline)
+         0     0% 66.59%      0.40s  3.17%  crypto/tls.(*Conn).readRecordOrCCS
+         0     0% 66.59%      0.56s  4.44%  crypto/tls.(*Conn).write
+         0     0% 66.59%      0.16s  1.27%  crypto/x509/pkix.Name.String
+         0     0% 66.59%      0.11s  0.87%  crypto/x509/pkix.Name.ToRDNSequence
+         0     0% 66.59%      0.11s  0.87%  crypto/x509/pkix.Name.appendRDNs
+         0     0% 66.59%      0.37s  2.94%  encoding/json.(*Decoder).Decode
+         0     0% 66.59%      0.17s  1.35%  encoding/json.(*Decoder).readValue
+         0     0% 66.59%      0.10s  0.79%  encoding/json.(*Decoder).refill
+         0     0% 66.59%      0.20s  1.59%  encoding/json.(*decodeState).unmarshal
+         0     0% 66.59%      0.20s  1.59%  encoding/json.(*decodeState).value
+         0     0% 66.59%      0.27s  2.14%  go.opentelemetry.io/otel/attribute.NewSet (inline)
+         0     0% 66.59%      0.25s  1.98%  go.opentelemetry.io/otel/attribute.newSet
+         0     0% 66.59%      0.29s  2.30%  go.opentelemetry.io/otel/metric.WithAttributes
+         0     0% 66.59%      0.07s  0.56%  golang.org/x/crypto/hkdf.Extract
+         0     0% 66.59%      0.08s  0.63%  golang.org/x/crypto/hkdf.New
+         0     0% 66.59%      0.57s  4.52%  golang.org/x/net/http2.(*Framer).ReadFrame
+         0     0% 66.59%      0.14s  1.11%  golang.org/x/net/http2.(*Framer).ReadFrameForHeader
+         0     0% 66.59%      0.85s  6.75%  golang.org/x/net/http2.(*Server).ServeConn (inline)
+         0     0% 66.59%      0.85s  6.75%  golang.org/x/net/http2.(*Server).serveConn
+         0     0% 66.59%      0.73s  5.79%  golang.org/x/net/http2.(*bufferedWriter).Flush
+         0     0% 66.59%      0.08s  0.63%  golang.org/x/net/http2.(*pipe).Write
+         0     0% 66.59%      0.37s  2.94%  golang.org/x/net/http2.(*responseWriter).Flush (inline)
+         0     0% 66.59%      0.73s  5.79%  golang.org/x/net/http2.(*serverConn).Flush
+         0     0% 66.59%      0.09s  0.71%  golang.org/x/net/http2.(*serverConn).processData
+         0     0% 66.59%      0.45s  3.57%  golang.org/x/net/http2.(*serverConn).processFrameFromReader
+         0     0% 66.59%      0.40s  3.17%  golang.org/x/net/http2.(*serverConn).runHandler.func1
+         0     0% 66.59%      0.10s  0.79%  golang.org/x/net/http2.(*serverConn).startFrameWrite
+         0     0% 66.59%      1.06s  8.41%  golang.org/x/net/http2.(*serverConn).writeFrameAsync
+         0     0% 66.59%      0.07s  0.56%  golang.org/x/net/http2.(*serverConn).writeFrameFromHandler
+         0     0% 66.59%      0.09s  0.71%  golang.org/x/net/http2.(*serverConn).wroteFrame
+         0     0% 66.59%      0.29s  2.30%  golang.org/x/net/http2.(*writeResHeaders).writeFrame
+         0     0% 66.59%      0.85s  6.75%  golang.org/x/net/http2.ConfigureServer.func2
+         0     0% 66.59%      0.85s  6.75%  golang.org/x/net/http2.ConfigureServer.func3
+         0     0% 66.59%      0.36s  2.86%  golang.org/x/net/http2.chunkWriter.Write
+         0     0% 66.59%      0.20s  1.59%  golang.org/x/net/http2.encKV
+         0     0% 66.59%      0.23s  1.83%  golang.org/x/net/http2.encodeHeaders
+         0     0% 66.59%      0.73s  5.79%  golang.org/x/net/http2.flushFrameWriter.writeFrame
+         0     0% 66.59%      0.42s  3.33%  golang.org/x/net/http2.readFrameHeader
+         0     0% 66.59%      0.69s  5.48%  golang.org/x/net/http2.writeWithByteTimeout
+         0     0% 66.59%      0.08s  0.63%  golang.org/x/net/http2/hpack.(*Decoder).Write
+         0     0% 66.59%      0.08s  0.63%  golang.org/x/net/http2/hpack.(*Decoder).parseHeaderFieldRepr
+         0     0% 66.59%      0.20s  1.59%  golang.org/x/net/http2/hpack.(*Encoder).WriteField
+         0     0% 66.59%      0.18s  1.43%  golang.org/x/net/http2/hpack.(*Encoder).searchTable
+         0     0% 66.59%      0.18s  1.43%  golang.org/x/net/http2/hpack.(*headerFieldTable).search
+         0     0% 66.59%      0.08s  0.63%  google.golang.org/protobuf/proto.Marshal
+         0     0% 66.59%      0.08s  0.63%  google.golang.org/protobuf/proto.MarshalOptions.marshal
+         0     0% 66.59%      0.21s  1.67%  internal/poll.(*FD).Pread
+         0     0% 66.59%      0.20s  1.59%  internal/poll.(*FD).Pread.func1 (inline)
+         0     0% 66.59%      0.35s  2.78%  internal/poll.(*FD).Pwrite
+         0     0% 66.59%      0.55s  4.37%  internal/poll.(*FD).Write
+         0     0% 66.59%      0.20s  1.59%  internal/poll.ignoringEINTR2[go.shape.int] (inline)
+         0     0% 66.59%      0.92s  7.30%  internal/poll.ignoringEINTRIO (inline)
+         0     0% 66.59%      0.07s  0.56%  internal/runtime/maps.newGroups (inline)
+         0     0% 66.59%      0.07s  0.56%  internal/runtime/maps.newarray
+         0     0% 66.59%      0.17s  1.35%  internal/runtime/syscall.EpollWait
+         0     0% 66.59%      0.19s  1.51%  internal/sync.runtime_doSpin
+         0     0% 66.59%      0.64s  5.08%  io.ReadFull (inline)
+         0     0% 66.59%      0.56s  4.44%  net.(*conn).Write
+         0     0% 66.59%      5.63s 44.68%  net/http.(*ServeMux).ServeHTTP
+         0     0% 66.59%      0.91s  7.22%  net/http.(*conn).serve
+         0     0% 66.59%      5.50s 43.65%  net/http.HandlerFunc.ServeHTTP
+         0     0% 66.59%      0.21s  1.67%  os.(*File).ReadAt
+         0     0% 66.59%      0.08s  0.63%  os.(*File).ReadDir
+         0     0% 66.59%      0.35s  2.78%  os.(*File).WriteAt
+         0     0% 66.59%      0.21s  1.67%  os.(*File).pread (inline)
+         0     0% 66.59%      0.35s  2.78%  os.(*File).pwrite (inline)
+         0     0% 66.59%      0.12s  0.95%  os.Open (inline)
+         0     0% 66.59%      0.14s  1.11%  os.OpenFile
+         0     0% 66.59%      0.13s  1.03%  os.ReadDir
+         0     0% 66.59%      0.11s  0.87%  os.ignoringEINTR (inline)
+         0     0% 66.59%      0.10s  0.79%  os.open
+         0     0% 66.59%      0.07s  0.56%  pkt.systems/kryptograf.(*service).DecryptReader
+         0     0% 66.59%      0.12s  0.95%  pkt.systems/kryptograf.(*service).EncryptWriter
+         0     0% 66.59%      0.14s  1.11%  pkt.systems/kryptograf.(*service).ReconstructDEK
+         0     0% 66.59%      0.14s  1.11%  pkt.systems/kryptograf/keymgmt.ReconstructDEK
+         0     0% 66.59%      0.14s  1.11%  pkt.systems/kryptograf/keymgmt.ReconstructMaterial
+         0     0% 66.59%      0.13s  1.03%  pkt.systems/kryptograf/keymgmt.deriveDEK
+         0     0% 66.59%      0.17s  1.35%  pkt.systems/kryptograf/stream.(*reader).Read
+         0     0% 66.59%      0.17s  1.35%  pkt.systems/kryptograf/stream.(*reader).fill
+         0     0% 66.59%      0.07s  0.56%  pkt.systems/kryptograf/stream.NewDecryptReader
+         0     0% 66.59%      0.11s  0.87%  pkt.systems/kryptograf/stream.NewEncryptWriter
+         0     0% 66.59%      0.11s  0.87%  pkt.systems/kryptograf/stream.applyOptions.AESGCM.func1
+         0     0% 66.59%      0.07s  0.56%  pkt.systems/kryptograf/stream.zeroAll (inline)
+         0     0% 66.59%      0.72s  5.71%  pkt.systems/lockd/internal/core.(*Service).Acquire
+         0     0% 66.59%      0.77s  6.11%  pkt.systems/lockd/internal/core.(*Service).Update
+         0     0% 66.59%      0.57s  4.52%  pkt.systems/lockd/internal/core.(*Service).applyTxnDecisionForMeta.func1.1
+         0     0% 66.59%      0.11s  0.87%  pkt.systems/lockd/internal/core.(*Service).ensureMeta
+         0     0% 66.59%      0.30s  2.38%  pkt.systems/lockd/internal/core.(*Service).updateLeaseIndex
+         0     0% 66.59%      0.28s  2.22%  pkt.systems/lockd/internal/core.buildDocumentFromJSON
+         0     0% 66.59%      2.90s 23.02%  pkt.systems/lockd/internal/httpapi.(*Handler).handleRelease
+         0     0% 66.59%      0.30s  2.38%  pkt.systems/lockd/internal/qrf.(*Controller).Decide
+         0     0% 66.59%      0.30s  2.38%  pkt.systems/lockd/internal/qrf.(*Controller).recordDecision (inline)
+         0     0% 66.59%      0.11s  0.87%  pkt.systems/lockd/internal/search/index.(*Manager).Insert
+         0     0% 66.59%      0.11s  0.87%  pkt.systems/lockd/internal/search/index.(*Writer).Insert
+         0     0% 66.59%      0.74s  5.87%  pkt.systems/lockd/internal/storage.(*CommitGroup).Wait
+         0     0% 66.59%      0.07s  0.56%  pkt.systems/lockd/internal/storage.(*Crypto).DecryptReaderForMaterial
+         0     0% 66.59%      0.20s  1.59%  pkt.systems/lockd/internal/storage.(*Crypto).EncryptMetadata
+         0     0% 66.59%      0.14s  1.11%  pkt.systems/lockd/internal/storage.(*Crypto).MaterialFromDescriptor
+         0     0% 66.59%      0.18s  1.43%  pkt.systems/lockd/internal/storage.(*defaultStagingBackend).StageState
+         0     0% 66.59%      0.30s  2.38%  pkt.systems/lockd/internal/storage.MarshalMetaRecord
+         0     0% 66.59%      0.15s  1.19%  pkt.systems/lockd/internal/storage/disk.(*Store).DeleteObject
+         0     0% 66.59%      0.11s  0.87%  pkt.systems/lockd/internal/storage/disk.(*Store).LoadMeta
+         0     0% 66.59%      0.14s  1.11%  pkt.systems/lockd/internal/storage/disk.(*Store).PutObject
+         0     0% 66.59%      0.30s  2.38%  pkt.systems/lockd/internal/storage/disk.(*Store).loggers
+         0     0% 66.59%      0.13s  1.03%  pkt.systems/lockd/internal/storage/disk.(*logNamespace).commitPendingNoSync
+         0     0% 66.59%      0.14s  1.11%  pkt.systems/lockd/internal/storage/disk.(*logNamespace).flushAppends.func2
+         0     0% 66.59%      0.22s  1.75%  pkt.systems/lockd/internal/storage/disk.(*logNamespace).loadManifestLocked
+         0     0% 66.59%      0.12s  0.95%  pkt.systems/lockd/internal/storage/disk.(*logNamespace).openPayloadReader
+         0     0% 66.59%      0.41s  3.25%  pkt.systems/lockd/internal/storage/disk.(*logNamespace).refreshForce (inline)
+         0     0% 66.59%      0.42s  3.33%  pkt.systems/lockd/internal/storage/disk.(*logNamespace).refreshWithMode
+         0     0% 66.59%      0.10s  0.79%  pkt.systems/lockd/internal/storage/disk.(*logNamespace).resolvePayloadSpan
+         0     0% 66.59%      0.13s  1.03%  pkt.systems/lockd/internal/storage/disk.(*logNamespace).scanSegmentsLocked
+         0     0% 66.59%      0.22s  1.75%  pkt.systems/lockd/internal/storage/disk.(*manifestState).readNewSegments
+         0     0% 66.59%      0.13s  1.03%  pkt.systems/lockd/internal/storage/disk.(*segmentReader).Read
+         0     0% 66.59%      0.12s  0.95%  pkt.systems/lockd/internal/storage/disk.readPayloadInline
+         0     0% 66.59%      0.15s  1.19%  pkt.systems/lockd/internal/storage/retry.(*backend).DeleteObject
+         0     0% 66.59%      0.15s  1.19%  pkt.systems/lockd/internal/storage/retry.(*backend).DeleteObject.func1
+         0     0% 66.59%      0.11s  0.87%  pkt.systems/lockd/internal/storage/retry.(*backend).LoadMeta
+         0     0% 66.59%      0.11s  0.87%  pkt.systems/lockd/internal/storage/retry.(*backend).LoadMeta.func1
+         0     0% 66.59%      0.14s  1.11%  pkt.systems/lockd/internal/storage/retry.(*backend).PutObject
+         0     0% 66.59%      0.14s  1.11%  pkt.systems/lockd/internal/storage/retry.(*backend).PutObject.func1
+         0     0% 66.59%      0.44s  3.49%  pkt.systems/lockd/internal/storage/retry.(*backend).ReadState
+         0     0% 66.59%      0.84s  6.67%  pkt.systems/lockd/internal/storage/retry.(*backend).StoreMeta.func1
+         0     0% 66.59%      0.96s  7.62%  pkt.systems/lockd/internal/storage/retry.(*backend).WriteState
+         0     0% 66.59%      0.96s  7.62%  pkt.systems/lockd/internal/storage/retry.(*backend).WriteState.func1
+         0     0% 66.59%      2.69s 21.35%  pkt.systems/lockd/internal/storage/retry.(*backend).withRetry
+         0     0% 66.59%      0.08s  0.63%  pkt.systems/lockd/internal/svcfields.WithSubsystem
+         0     0% 66.59%      0.07s  0.56%  pkt.systems/lockd/namespaces.NormalizeKey
+         0     0% 66.59%      0.48s  3.81%  pkt.systems/pslog.(*jsonPlainLogger).With
+         0     0% 66.59%      0.22s  1.75%  pkt.systems/pslog.appendJSONValuePlain
+         0     0% 66.59%      0.09s  0.71%  pkt.systems/pslog.collectFields
+         0     0% 66.59%      0.14s  1.11%  runtime.(*mcentral).grow
+         0     0% 66.59%      0.12s  0.95%  runtime.(*mheap).alloc
+         0     0% 66.59%      0.11s  0.87%  runtime.(*mheap).allocSpan
+         0     0% 66.59%      0.19s  1.51%  runtime.(*mspan).markBitsForIndex (inline)
+         0     0% 66.59%      0.14s  1.11%  runtime.(*mspan).typePointersOfUnchecked
+         0     0% 66.59%      0.23s  1.83%  runtime.(*unwinder).next
+         0     0% 66.59%      0.11s  0.87%  runtime.chansend
+         0     0% 66.59%      0.10s  0.79%  runtime.chansend1
+         0     0% 66.59%      0.58s  4.60%  runtime.copystack
+         0     0% 66.59%      0.13s  1.03%  runtime.funcspdelta (inline)
+         0     0% 66.59%      0.23s  1.83%  runtime.futexwakeup
+         0     0% 66.59%      1.36s 10.79%  runtime.gcBgMarkWorker
+         0     0% 66.59%      1.36s 10.79%  runtime.gcBgMarkWorker.func2
+         0     0% 66.59%      0.46s  3.65%  runtime.gcDrainMarkWorkerDedicated (inline)
+         0     0% 66.59%      0.90s  7.14%  runtime.gcDrainMarkWorkerIdle (inline)
+         0     0% 66.59%      0.28s  2.22%  runtime.goexit0
+         0     0% 66.59%      0.14s  1.11%  runtime.goready (inline)
+         0     0% 66.59%      0.15s  1.19%  runtime.lock (inline)
+         0     0% 66.59%      0.18s  1.43%  runtime.lockWithRank (inline)
+         0     0% 66.59%      0.25s  1.98%  runtime.mPark (inline)
+         0     0% 66.59%      0.17s  1.35%  runtime.mapaccess1
+         0     0% 66.59%      1.63s 12.94%  runtime.mcall
+         0     0% 66.59%      0.07s  0.56%  runtime.newarray
+         0     0% 66.59%      0.63s  5.00%  runtime.newstack
+         0     0% 66.59%      0.23s  1.83%  runtime.notewakeup
+         0     0% 66.59%      0.12s  0.95%  runtime.pcdatavalue
+         0     0% 66.59%      0.14s  1.11%  runtime.ready
+         0     0% 66.59%      0.19s  1.51%  runtime.resetspinning
+         0     0% 66.59%      0.08s  0.63%  runtime.send.goready.func1
+         0     0% 66.59%      0.24s  1.90%  runtime.startm
+         0     0% 66.59%      0.28s  2.22%  runtime.stopm
+         0     0% 66.59%      0.11s  0.87%  runtime.unlock (inline)
+         0     0% 66.59%      0.11s  0.87%  runtime.unlockWithRank (inline)
+         0     0% 66.59%      0.35s  2.78%  sync.(*Mutex).Lock (inline)
+         0     0% 66.59%      0.10s  0.79%  syscall.Open (inline)
+         0     0% 66.59%      0.20s  1.59%  syscall.Pread (inline)
+         0     0% 66.59%      0.35s  2.78%  syscall.Pwrite (inline)
+         0     0% 66.59%      1.59s 12.62%  syscall.RawSyscall6
+         0     0% 66.59%      0.31s  2.46%  syscall.Read (inline)
+         0     0% 66.59%      1.04s  8.25%  syscall.Syscall
+         0     0% 66.59%      0.63s  5.00%  syscall.Syscall6
+         0     0% 66.59%      0.10s  0.79%  syscall.openat
+         0     0% 66.59%      0.20s  1.59%  syscall.pread
+         0     0% 66.59%      0.31s  2.46%  syscall.read
+         0     0% 66.59%      0.54s  4.29%  syscall.write
+         0     0% 66.59%      0.13s  1.03%  type:.hash.golang.org/x/net/http2/hpack.pairNameValue

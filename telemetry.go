@@ -6,16 +6,20 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	otelruntime "go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	otelprometheus "go.opentelemetry.io/otel/exporters/prometheus"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -33,6 +37,8 @@ type telemetryBundle struct {
 	meterProvider  *sdkmetric.MeterProvider
 	metricsServer  *http.Server
 	metricsLn      net.Listener
+	pprofServer    *http.Server
+	pprofLn        net.Listener
 	logger         pslog.Logger
 }
 
@@ -76,6 +82,17 @@ func (t *telemetryBundle) Shutdown(ctx context.Context) error {
 	if t.metricsLn != nil {
 		_ = t.metricsLn.Close()
 	}
+	if t.pprofServer != nil {
+		if err := t.pprofServer.Shutdown(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errs = append(errs, fmt.Errorf("pprof server shutdown: %w", err))
+			if t.logger != nil {
+				t.logger.Warn("telemetry.shutdown.pprof_server_failure", "error", err)
+			}
+		}
+	}
+	if t.pprofLn != nil {
+		_ = t.pprofLn.Close()
+	}
 	if t.tracerProvider != nil {
 		if err := t.tracerProvider.Shutdown(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("trace shutdown: %w", err))
@@ -100,8 +117,11 @@ type otlpTarget struct {
 	insecure bool
 }
 
-func setupTelemetry(ctx context.Context, endpoint, metricsListen string, logger pslog.Logger) (*telemetryBundle, error) {
-	if strings.TrimSpace(endpoint) == "" && strings.TrimSpace(metricsListen) == "" {
+var runtimeMetricsOnce sync.Once
+var runtimeMetricsErr error
+
+func setupTelemetry(ctx context.Context, endpoint, metricsListen, pprofListen string, enableProfilingMetrics bool, logger pslog.Logger) (*telemetryBundle, error) {
+	if strings.TrimSpace(endpoint) == "" && strings.TrimSpace(metricsListen) == "" && strings.TrimSpace(pprofListen) == "" && !enableProfilingMetrics {
 		return nil, nil
 	}
 	if logger == nil {
@@ -122,6 +142,8 @@ func setupTelemetry(ctx context.Context, endpoint, metricsListen string, logger 
 		meterProvider *sdkmetric.MeterProvider
 		metricsServer *http.Server
 		metricsLn     net.Listener
+		pprofServer   *http.Server
+		pprofLn       net.Listener
 		target        otlpTarget
 	)
 
@@ -153,7 +175,11 @@ func setupTelemetry(ctx context.Context, endpoint, metricsListen string, logger 
 	metricsListen = strings.TrimSpace(metricsListen)
 	if metricsListen != "" {
 		registry := prometheus.NewRegistry()
-		exporter, err := otelprometheus.New(otelprometheus.WithRegisterer(registry))
+		exporterOpts := []otelprometheus.Option{otelprometheus.WithRegisterer(registry)}
+		if enableProfilingMetrics {
+			exporterOpts = append(exporterOpts, otelprometheus.WithProducer(otelruntime.NewProducer()))
+		}
+		exporter, err := otelprometheus.New(exporterOpts...)
 		if err != nil {
 			if traceProvider != nil {
 				_ = traceProvider.Shutdown(ctx)
@@ -165,6 +191,16 @@ func setupTelemetry(ctx context.Context, endpoint, metricsListen string, logger 
 			sdkmetric.WithReader(exporter),
 		)
 		otel.SetMeterProvider(meterProvider)
+		if enableProfilingMetrics {
+			if err := startRuntimeMetricsWithProvider(meterProvider); err != nil {
+				if traceProvider != nil {
+					_ = traceProvider.Shutdown(ctx)
+				}
+				_ = meterProvider.Shutdown(ctx)
+				return nil, err
+			}
+			logger.Info("profiling.metrics.enabled")
+		}
 		metricsHandler := promhttp.HandlerFor(registry, promhttp.HandlerOpts{})
 		metricsServer, metricsLn, err = startMetricsServer(metricsListen, metricsHandler, logger)
 		if err != nil {
@@ -175,6 +211,23 @@ func setupTelemetry(ctx context.Context, endpoint, metricsListen string, logger 
 			return nil, err
 		}
 		logger.Info("telemetry.metrics.enabled", "listen", metricsListen)
+	} else if enableProfilingMetrics {
+		return nil, fmt.Errorf("telemetry: profiling metrics require metrics listen address")
+	}
+
+	pprofListen = strings.TrimSpace(pprofListen)
+	if pprofListen != "" {
+		pprofServer, pprofLn, err = startPprofServer(pprofListen, logger)
+		if err != nil {
+			if traceProvider != nil {
+				_ = traceProvider.Shutdown(ctx)
+			}
+			if meterProvider != nil {
+				_ = meterProvider.Shutdown(ctx)
+			}
+			return nil, err
+		}
+		logger.Info("profiling.pprof.enabled", "listen", pprofListen)
 	}
 
 	otel.SetTextMapPropagator(
@@ -190,6 +243,8 @@ func setupTelemetry(ctx context.Context, endpoint, metricsListen string, logger 
 		meterProvider:  meterProvider,
 		metricsServer:  metricsServer,
 		metricsLn:      metricsLn,
+		pprofServer:    pprofServer,
+		pprofLn:        pprofLn,
 		logger:         logger,
 	}, nil
 }
@@ -262,6 +317,40 @@ func startMetricsServer(addr string, handler http.Handler, logger pslog.Logger) 
 		}
 	}()
 	return srv, ln, nil
+}
+
+func startPprofServer(addr string, logger pslog.Logger) (*http.Server, net.Listener, error) {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("profiling: pprof listen: %w", err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	srv := &http.Server{
+		Handler: mux,
+	}
+	go func() {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			if logger != nil {
+				logger.Warn("profiling.pprof.serve_error", "error", err)
+			}
+		}
+	}()
+	return srv, ln, nil
+}
+
+func startRuntimeMetricsWithProvider(provider metric.MeterProvider) error {
+	if provider == nil {
+		return fmt.Errorf("profiling: meter provider unavailable")
+	}
+	runtimeMetricsOnce.Do(func() {
+		runtimeMetricsErr = otelruntime.Start(otelruntime.WithMeterProvider(provider))
+	})
+	return runtimeMetricsErr
 }
 
 func resolveOTLPTarget(raw string) (otlpTarget, error) {

@@ -31,7 +31,7 @@ const (
 
 var (
 	sharedCredsOnce sync.Once
-	sharedCreds     sharedMTLSState
+	sharedCreds     *sharedMTLSState
 	sharedCredsErr  error
 
 	sharedTCCredsOnce sync.Once
@@ -432,7 +432,7 @@ func MaybeEnableStorageEncryption(t testing.TB, cfg *lockd.Config) bool {
 	return true
 }
 
-func mustSharedCredentials(t testing.TB) sharedMTLSState {
+func mustSharedCredentials(t testing.TB) *sharedMTLSState {
 	t.Helper()
 	sharedCredsOnce.Do(func() {
 		sharedCreds, sharedCredsErr = generateSharedCredentials()
@@ -443,28 +443,28 @@ func mustSharedCredentials(t testing.TB) sharedMTLSState {
 	return sharedCreds
 }
 
-func generateSharedCredentials() (sharedMTLSState, error) {
+func generateSharedCredentials() (*sharedMTLSState, error) {
 	ca, err := tlsutil.GenerateCA("lockd-test-ca", 365*24*time.Hour)
 	if err != nil {
-		return sharedMTLSState{}, err
+		return nil, err
 	}
 	caBundle, err := tlsutil.EncodeCABundle(ca.CertPEM, ca.KeyPEM)
 	if err != nil {
-		return sharedMTLSState{}, err
+		return nil, err
 	}
 	material, err := cryptoutil.MetadataMaterialFromBytes(caBundle)
 	if err != nil {
-		return sharedMTLSState{}, err
+		return nil, err
 	}
 	clientIssued, err := ca.IssueClient(tlsutil.ClientCertRequest{CommonName: "lockd-test-client", Validity: 365 * 24 * time.Hour})
 	if err != nil {
-		return sharedMTLSState{}, err
+		return nil, err
 	}
 	clientBundle, err := tlsutil.EncodeClientBundle(ca.CertPEM, clientIssued.CertPEM, clientIssued.KeyPEM)
 	if err != nil {
-		return sharedMTLSState{}, err
+		return nil, err
 	}
-	return sharedMTLSState{
+	return &sharedMTLSState{
 		ca:           ca,
 		material:     material,
 		clientBundle: clientBundle,

@@ -229,19 +229,29 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 	flags.String("listen", ":9341", "listen address")
 	flags.String("listen-proto", "tcp", "listen network (tcp, tcp4, tcp6)")
 	flags.String("metrics-listen", lockd.DefaultMetricsListen, "metrics listen address (Prometheus scrape endpoint; empty disables; default off)")
+	flags.String("pprof-listen", lockd.DefaultPprofListen, "pprof listen address (debug/pprof endpoints; empty disables)")
+	flags.Bool("enable-profiling-metrics", false, "enable Go runtime profiling metrics on the Prometheus endpoint")
 	flags.String("store", "", "storage backend URL (mem://, s3://host[:port]/bucket, aws://bucket, disk:///path)")
+	flags.String("ha", lockd.DefaultHAMode, "HA mode when multiple servers share a backend (concurrent or failover)")
+	flags.Duration("ha-lease-ttl", lockd.DefaultHALeaseTTL, "lease TTL for HA failover mode (ignored in concurrent mode)")
 	flags.StringP("default-namespace", "n", lockd.DefaultNamespace, "default namespace applied when callers omit one")
 	jsonMaxDefault := humanizeBytes(lockd.DefaultJSONMaxBytes)
 	spoolDefault := humanizeBytes(lockd.DefaultPayloadSpoolMemoryThreshold)
+	stateCacheDefault := humanizeBytes(lockd.DefaultStateCacheBytes)
 	s3PartDefault := humanizeBytes(lockd.DefaultS3MaxPartSize)
+	s3EncryptBudgetDefault := humanizeBytes(lockd.DefaultS3SmallEncryptBufferBudget)
 	flags.String("json-max", jsonMaxDefault, "maximum JSON payload size")
 	flags.String("json-util", lockd.JSONUtilLockd, fmt.Sprintf("JSON compaction engine (%s)", strings.Join(lockd.ValidJSONUtils(), ", ")))
 	flags.String("payload-spool-mem", spoolDefault, "bytes to buffer JSON bodies in memory before spooling to disk")
+	flags.String("state-cache-bytes", stateCacheDefault, "bytes to cache published state payloads in memory (0 disables)")
 	flags.Duration("default-ttl", lockd.DefaultDefaultTTL, "default lease TTL")
 	flags.Duration("max-ttl", lockd.DefaultMaxTTL, "maximum lease TTL")
 	flags.Duration("acquire-block", lockd.DefaultAcquireBlock, "maximum time to wait on acquire conflicts")
 	flags.Duration("sweeper-interval", lockd.DefaultSweeperInterval, "sweeper interval for background tasks")
 	flags.Duration("txn-replay-interval", lockd.DefaultTxnReplayInterval, "minimum interval between transaction replay sweeps on active operations")
+	flags.Duration("queue-decision-cache-ttl", lockd.DefaultQueueDecisionCacheTTL, "cache duration for empty queue decision checks")
+	flags.Int("queue-decision-max-apply", lockd.DefaultQueueDecisionMaxApply, "maximum queue decision items applied per dequeue")
+	flags.Duration("queue-decision-apply-timeout", lockd.DefaultQueueDecisionApplyTimeout, "maximum time spent applying queue decisions per dequeue")
 	flags.Duration("idle-sweep-grace", lockd.DefaultIdleSweepGrace, "idle time before maintenance sweeper runs")
 	flags.Duration("idle-sweep-op-delay", lockd.DefaultIdleSweepOpDelay, "pause between maintenance sweep operations")
 	flags.Int("idle-sweep-max-ops", lockd.DefaultIdleSweepMaxOps, "maximum maintenance sweep operations per run")
@@ -251,6 +261,10 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 	flags.Duration("disk-retention", 0, "optional retention window for disk backend (0 keeps state indefinitely)")
 	flags.Duration("disk-janitor-interval", 0, "override janitor sweep interval for disk backend (default derived from retention)")
 	flags.Bool("disk-queue-watch", true, "enable inotify-based queue events for disk backend (Linux only; falls back to polling on unsupported filesystems)")
+	flags.Int("disk-lock-file-cache-size", lockd.DefaultDiskLockFileCacheSize, "max cached lockfile descriptors for disk/NFS (0 uses default, negative disables)")
+	logstoreSegmentDefault := humanizeBytes(lockd.DefaultLogstoreSegmentSize)
+	flags.Int("logstore-commit-max-ops", lockd.DefaultLogstoreCommitMaxOps, "maximum logstore entries per fsync batch (disk/NFS)")
+	flags.String("logstore-segment-size", logstoreSegmentDefault, "maximum logstore segment size before roll (disk/NFS)")
 	flags.Bool("disable-mem-queue-watch", false, "disable in-memory queue change notifications")
 	flags.Bool("disable-storage-encryption", false, "disable kryptograf envelope encryption (plaintext at rest)")
 	flags.Bool("storage-encryption-snappy", false, "enable Snappy compression before encrypting objects")
@@ -278,6 +292,7 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 	flags.String("s3-sse", "", "server-side encryption mode for S3 objects")
 	flags.String("s3-kms-key-id", "", "KMS key ID for S3 server-side encryption")
 	flags.String("s3-max-part-size", s3PartDefault, "maximum S3 multipart upload part size")
+	flags.String("s3-encrypt-buffer-budget", s3EncryptBudgetDefault, "max total bytes for buffered S3 encryption payloads before streaming")
 	flags.String("aws-region", "", "AWS region for aws:// backends")
 	flags.String("aws-kms-key-id", "", "KMS key ID for aws:// backends")
 	flags.String("azure-key", "", "Azure Storage account key (or use LOCKD_AZURE_ACCOUNT_KEY)")
@@ -291,17 +306,21 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 	flags.Duration("queue-poll-interval", lockd.DefaultQueuePollInterval, "baseline poll interval for queue discovery")
 	flags.Duration("queue-poll-jitter", lockd.DefaultQueuePollJitter, "extra random delay added to queue poll interval (set 0 to disable)")
 	flags.Duration("queue-resilient-poll-interval", lockd.DefaultQueueResilientPollInterval, "safety poll interval when watchers are active (set 0 to disable)")
+	flags.Int("queue-list-page-size", lockd.DefaultQueueListPageSize, "queue list page size per poll")
 	flags.Int("indexer-flush-docs", lockd.DefaultIndexerFlushDocs, "flush index segments after this many documents")
 	flags.Duration("indexer-flush-interval", lockd.DefaultIndexerFlushInterval, "maximum duration to buffer index postings before flushing")
+	flags.Int("query-doc-prefetch", lockd.DefaultQueryDocPrefetch, "prefetch depth for query return=documents (1 disables parallelism)")
 	flags.Duration("lsf-sample-interval", lockd.DefaultLSFSampleInterval, "sampling interval for the local security force (LSF)")
 	flags.Duration("lsf-log-interval", lockd.DefaultLSFLogInterval, "interval between LSF telemetry logs (set 0 to disable)")
-	flags.Bool("qrf-enabled", true, "enable perimeter defence quick reaction force (QRF)")
+	flags.Bool("qrf-disabled", false, "disable perimeter defence quick reaction force (QRF)")
 	flags.Int64("qrf-queue-soft-limit", 0, "soft inflight threshold for queue operations (auto when 0)")
 	flags.Int64("qrf-queue-hard-limit", 0, "hard inflight threshold for queue operations (auto when 0)")
 	flags.Int64("qrf-queue-consumer-soft-limit", 0, "soft limit for concurrent queue consumers (auto when 0)")
 	flags.Int64("qrf-queue-consumer-hard-limit", 0, "hard limit for concurrent queue consumers (auto when 0)")
 	flags.Int64("qrf-lock-soft-limit", 0, "soft inflight threshold for lock operations (auto when 0)")
 	flags.Int64("qrf-lock-hard-limit", 0, "hard inflight threshold for lock operations (auto when 0)")
+	flags.Int64("qrf-query-soft-limit", 0, "soft inflight threshold for query operations (auto when 0)")
+	flags.Int64("qrf-query-hard-limit", 0, "hard inflight threshold for query operations (auto when 0)")
 	flags.String("qrf-memory-soft-limit", "", "approximate RSS soft limit before QRF engages (blank disables)")
 	flags.String("qrf-memory-hard-limit", "", "approximate RSS hard limit triggering immediate QRF engagement (blank disables)")
 	flags.Float64("qrf-memory-soft-limit-percent", lockd.DefaultQRFMemorySoftLimitPercent, "system memory usage percentage that soft-arms the QRF")
@@ -311,14 +330,15 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 	flags.String("qrf-swap-hard-limit", "", "swap usage hard limit that fully engages the QRF (blank disables)")
 	flags.Float64("qrf-swap-soft-limit-percent", 0, "swap utilisation percentage that soft-arms the QRF (0 disables)")
 	flags.Float64("qrf-swap-hard-limit-percent", 0, "swap utilisation percentage that fully engages the QRF (0 disables)")
-	flags.Float64("qrf-cpu-soft-limit", 0, "legacy system CPU utilisation percentage that soft-arms the QRF (0 disables)")
-	flags.Float64("qrf-cpu-hard-limit", 0, "legacy system CPU utilisation percentage that fully engages the QRF (0 disables)")
+	flags.Float64("qrf-cpu-soft-limit", lockd.DefaultQRFCPUPercentSoftLimit, "system CPU utilisation percentage that soft-arms the QRF (0 disables)")
+	flags.Float64("qrf-cpu-hard-limit", lockd.DefaultQRFCPUPercentHardLimit, "system CPU utilisation percentage that fully engages the QRF (0 disables)")
 	flags.Float64("qrf-load-soft-limit-multiplier", lockd.DefaultQRFLoadSoftLimitMultiplier, "load average multiplier (relative to LSF baseline) that soft-arms the QRF")
 	flags.Float64("qrf-load-hard-limit-multiplier", lockd.DefaultQRFLoadHardLimitMultiplier, "load average multiplier (relative to LSF baseline) that fully engages the QRF")
 	flags.Int("qrf-recovery-samples", lockd.DefaultQRFRecoverySamples, "number of consecutive healthy samples before QRF disengages")
-	flags.Duration("qrf-soft-retry", lockd.DefaultQRFSoftRetryAfter, "retry-after used when QRF is soft-armed")
-	flags.Duration("qrf-engaged-retry", lockd.DefaultQRFEngagedRetryAfter, "retry-after used when QRF is fully engaged")
-	flags.Duration("qrf-recovery-retry", lockd.DefaultQRFRecoveryRetryAfter, "retry-after used while QRF is recovering")
+	flags.Duration("qrf-soft-delay", lockd.DefaultQRFSoftDelay, "base delay used when QRF is soft-armed")
+	flags.Duration("qrf-engaged-delay", lockd.DefaultQRFEngagedDelay, "base delay used when QRF is fully engaged")
+	flags.Duration("qrf-recovery-delay", lockd.DefaultQRFRecoveryDelay, "base delay used while QRF is recovering")
+	flags.Duration("qrf-max-wait", lockd.DefaultQRFMaxWait, "maximum delay applied by QRF pacing before returning a throttled response")
 	flags.String("otlp-endpoint", "", "OTLP collector endpoint (e.g. grpc://localhost:4317)")
 	flags.StringVar(&logLevel, "log-level", "info", "log level (trace,debug,info,...)")
 
@@ -334,23 +354,25 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 
 	names := []string{
 		"config",
-		"listen", "listen-proto", "metrics-listen", "store", "default-namespace", "json-max", "json-util", "payload-spool-mem", "default-ttl", "max-ttl", "acquire-block",
-		"sweeper-interval", "txn-replay-interval", "idle-sweep-grace", "idle-sweep-op-delay", "idle-sweep-max-ops", "idle-sweep-max-runtime", "drain-grace", "shutdown-timeout", "disk-retention", "disk-janitor-interval",
+		"listen", "listen-proto", "metrics-listen", "pprof-listen", "enable-profiling-metrics", "store", "ha", "ha-lease-ttl", "default-namespace", "json-max", "json-util", "payload-spool-mem", "state-cache-bytes", "default-ttl", "max-ttl", "acquire-block",
+		"sweeper-interval", "txn-replay-interval", "queue-decision-cache-ttl", "queue-decision-max-apply", "idle-sweep-grace", "idle-sweep-op-delay", "idle-sweep-max-ops", "idle-sweep-max-runtime", "drain-grace", "shutdown-timeout", "disk-retention", "disk-janitor-interval", "disk-lock-file-cache-size",
+		"logstore-commit-max-ops", "logstore-segment-size",
 		"disable-mtls", "http2-max-concurrent-streams", "bundle", "denylist-path", "tc-trust-dir", "tc-disable-auth", "tc-allow-default-ca",
 		"self", "join", "tc-fanout-timeout", "tc-fanout-attempts", "tc-fanout-base-delay", "tc-fanout-max-delay", "tc-fanout-multiplier", "tc-decision-retention", "tc-client-bundle",
 		"s3-sse",
-		"s3-kms-key-id", "s3-max-part-size", "aws-region", "aws-kms-key-id", "azure-key", "azure-endpoint", "azure-sas-token",
+		"s3-kms-key-id", "s3-max-part-size", "s3-encrypt-buffer-budget", "aws-region", "aws-kms-key-id", "azure-key", "azure-endpoint", "azure-sas-token",
 		"storage-retry-attempts", "storage-retry-base-delay", "storage-retry-max-delay", "storage-retry-multiplier",
 		"queue-max-consumers", "queue-poll-interval", "queue-poll-jitter", "queue-resilient-poll-interval",
 		"indexer-flush-docs", "indexer-flush-interval",
+		"query-doc-prefetch",
 		"disk-queue-watch", "disable-mem-queue-watch", "disable-storage-encryption", "storage-encryption-snappy", "disable-krypto-pool",
 		"lsf-sample-interval", "lsf-log-interval",
-		"qrf-enabled", "qrf-queue-soft-limit", "qrf-queue-hard-limit", "qrf-queue-consumer-soft-limit", "qrf-queue-consumer-hard-limit", "qrf-lock-soft-limit", "qrf-lock-hard-limit",
+		"qrf-disabled", "qrf-queue-soft-limit", "qrf-queue-hard-limit", "qrf-queue-consumer-soft-limit", "qrf-queue-consumer-hard-limit", "qrf-lock-soft-limit", "qrf-lock-hard-limit", "qrf-query-soft-limit", "qrf-query-hard-limit",
 		"qrf-memory-soft-limit", "qrf-memory-hard-limit", "qrf-memory-soft-limit-percent", "qrf-memory-hard-limit-percent",
 		"qrf-memory-strict-headroom-percent",
 		"qrf-swap-soft-limit", "qrf-swap-hard-limit", "qrf-swap-soft-limit-percent", "qrf-swap-hard-limit-percent",
 		"qrf-cpu-soft-limit", "qrf-cpu-hard-limit", "qrf-load-soft-limit-multiplier", "qrf-load-hard-limit-multiplier",
-		"qrf-recovery-samples", "qrf-soft-retry", "qrf-engaged-retry", "qrf-recovery-retry",
+		"qrf-recovery-samples", "qrf-soft-delay", "qrf-engaged-delay", "qrf-recovery-delay",
 		"otlp-endpoint", "log-level",
 	}
 	for _, name := range names {
@@ -378,7 +400,13 @@ func bindConfig(cfg *lockd.Config) error {
 	cfg.ListenProto = viper.GetString("listen-proto")
 	cfg.MetricsListen = viper.GetString("metrics-listen")
 	cfg.MetricsListenSet = viper.IsSet("metrics-listen")
+	cfg.PprofListen = viper.GetString("pprof-listen")
+	cfg.PprofListenSet = viper.IsSet("pprof-listen")
+	cfg.EnableProfilingMetrics = viper.GetBool("enable-profiling-metrics")
+	cfg.EnableProfilingMetricsSet = viper.IsSet("enable-profiling-metrics")
 	cfg.Store = viper.GetString("store")
+	cfg.HAMode = viper.GetString("ha")
+	cfg.HALeaseTTL = viper.GetDuration("ha-lease-ttl")
 	cfg.DefaultNamespace = viper.GetString("default-namespace")
 	maxBytes := viper.GetString("json-max")
 	if maxBytes != "" {
@@ -396,11 +424,22 @@ func bindConfig(cfg *lockd.Config) error {
 		}
 		cfg.SpoolMemoryThreshold = int64(size)
 	}
+	if cacheBytes := viper.GetString("state-cache-bytes"); cacheBytes != "" {
+		size, err := humanize.ParseBytes(cacheBytes)
+		if err != nil {
+			return fmt.Errorf("parse state-cache-bytes: %w", err)
+		}
+		cfg.StateCacheBytes = int64(size)
+	}
+	cfg.StateCacheBytesSet = viper.IsSet("state-cache-bytes")
 	cfg.DefaultTTL = viper.GetDuration("default-ttl")
 	cfg.MaxTTL = viper.GetDuration("max-ttl")
 	cfg.AcquireBlock = viper.GetDuration("acquire-block")
 	cfg.SweeperInterval = viper.GetDuration("sweeper-interval")
 	cfg.TxnReplayInterval = viper.GetDuration("txn-replay-interval")
+	cfg.QueueDecisionCacheTTL = viper.GetDuration("queue-decision-cache-ttl")
+	cfg.QueueDecisionMaxApply = viper.GetInt("queue-decision-max-apply")
+	cfg.QueueDecisionApplyTimeout = viper.GetDuration("queue-decision-apply-timeout")
 	cfg.IdleSweepGrace = viper.GetDuration("idle-sweep-grace")
 	cfg.IdleSweepOpDelay = viper.GetDuration("idle-sweep-op-delay")
 	cfg.IdleSweepMaxOps = viper.GetInt("idle-sweep-max-ops")
@@ -411,6 +450,15 @@ func bindConfig(cfg *lockd.Config) error {
 	cfg.ShutdownTimeoutSet = true
 	cfg.DiskRetention = viper.GetDuration("disk-retention")
 	cfg.DiskJanitorInterval = viper.GetDuration("disk-janitor-interval")
+	cfg.DiskLockFileCacheSize = viper.GetInt("disk-lock-file-cache-size")
+	cfg.LogstoreCommitMaxOps = viper.GetInt("logstore-commit-max-ops")
+	if segment := viper.GetString("logstore-segment-size"); segment != "" {
+		size, err := humanize.ParseBytes(segment)
+		if err != nil {
+			return fmt.Errorf("parse logstore-segment-size: %w", err)
+		}
+		cfg.LogstoreSegmentSize = int64(size)
+	}
 	cfg.DisableMTLS = viper.GetBool("disable-mtls")
 	if viper.IsSet("mtls") {
 		cfg.DisableMTLS = !viper.GetBool("mtls")
@@ -450,6 +498,13 @@ func bindConfig(cfg *lockd.Config) error {
 		}
 		cfg.S3MaxPartSize = int64(size)
 	}
+	if budget := viper.GetString("s3-encrypt-buffer-budget"); budget != "" {
+		size, err := humanize.ParseBytes(budget)
+		if err != nil {
+			return fmt.Errorf("parse s3-encrypt-buffer-budget: %w", err)
+		}
+		cfg.S3SmallEncryptBufferBudget = int64(size)
+	}
 	cfg.AWSRegion = strings.TrimSpace(viper.GetString("aws-region"))
 	cfg.AWSKMSKeyID = strings.TrimSpace(viper.GetString("aws-kms-key-id"))
 	if cfg.AWSRegion == "" {
@@ -479,6 +534,7 @@ func bindConfig(cfg *lockd.Config) error {
 	cfg.QueuePollInterval = viper.GetDuration("queue-poll-interval")
 	cfg.QueuePollJitter = viper.GetDuration("queue-poll-jitter")
 	cfg.QueueResilientPollInterval = viper.GetDuration("queue-resilient-poll-interval")
+	cfg.QueueListPageSize = viper.GetInt("queue-list-page-size")
 	cfg.IndexerFlushDocs = viper.GetInt("indexer-flush-docs")
 	if cfg.IndexerFlushDocs <= 0 {
 		cfg.IndexerFlushDocs = lockd.DefaultIndexerFlushDocs
@@ -487,16 +543,19 @@ func bindConfig(cfg *lockd.Config) error {
 	if cfg.IndexerFlushInterval <= 0 {
 		cfg.IndexerFlushInterval = lockd.DefaultIndexerFlushInterval
 	}
+	cfg.QueryDocPrefetch = viper.GetInt("query-doc-prefetch")
 	cfg.LSFSampleInterval = viper.GetDuration("lsf-sample-interval")
 	cfg.LSFLogInterval = viper.GetDuration("lsf-log-interval")
 	cfg.LSFLogIntervalSet = true
-	cfg.QRFEnabled = viper.GetBool("qrf-enabled")
+	cfg.QRFDisabled = viper.GetBool("qrf-disabled")
 	cfg.QRFQueueSoftLimit = viper.GetInt64("qrf-queue-soft-limit")
 	cfg.QRFQueueHardLimit = viper.GetInt64("qrf-queue-hard-limit")
 	cfg.QRFQueueConsumerSoftLimit = viper.GetInt64("qrf-queue-consumer-soft-limit")
 	cfg.QRFQueueConsumerHardLimit = viper.GetInt64("qrf-queue-consumer-hard-limit")
 	cfg.QRFLockSoftLimit = viper.GetInt64("qrf-lock-soft-limit")
 	cfg.QRFLockHardLimit = viper.GetInt64("qrf-lock-hard-limit")
+	cfg.QRFQuerySoftLimit = viper.GetInt64("qrf-query-soft-limit")
+	cfg.QRFQueryHardLimit = viper.GetInt64("qrf-query-hard-limit")
 	if softMem := viper.GetString("qrf-memory-soft-limit"); softMem != "" {
 		bytes, err := humanize.ParseBytes(softMem)
 		if err != nil {
@@ -532,12 +591,15 @@ func bindConfig(cfg *lockd.Config) error {
 	cfg.QRFSwapHardLimitPercent = viper.GetFloat64("qrf-swap-hard-limit-percent")
 	cfg.QRFCPUPercentSoftLimit = viper.GetFloat64("qrf-cpu-soft-limit")
 	cfg.QRFCPUPercentHardLimit = viper.GetFloat64("qrf-cpu-hard-limit")
+	cfg.QRFCPUPercentSoftLimitSet = viper.IsSet("qrf-cpu-soft-limit")
+	cfg.QRFCPUPercentHardLimitSet = viper.IsSet("qrf-cpu-hard-limit")
 	cfg.QRFLoadSoftLimitMultiplier = viper.GetFloat64("qrf-load-soft-limit-multiplier")
 	cfg.QRFLoadHardLimitMultiplier = viper.GetFloat64("qrf-load-hard-limit-multiplier")
 	cfg.QRFRecoverySamples = viper.GetInt("qrf-recovery-samples")
-	cfg.QRFSoftRetryAfter = viper.GetDuration("qrf-soft-retry")
-	cfg.QRFEngagedRetryAfter = viper.GetDuration("qrf-engaged-retry")
-	cfg.QRFRecoveryRetryAfter = viper.GetDuration("qrf-recovery-retry")
+	cfg.QRFSoftDelay = viper.GetDuration("qrf-soft-delay")
+	cfg.QRFEngagedDelay = viper.GetDuration("qrf-engaged-delay")
+	cfg.QRFRecoveryDelay = viper.GetDuration("qrf-recovery-delay")
+	cfg.QRFMaxWait = viper.GetDuration("qrf-max-wait")
 	cfg.DiskQueueWatch = viper.GetBool("disk-queue-watch")
 	cfg.OTLPEndpoint = viper.GetString("otlp-endpoint")
 	return nil

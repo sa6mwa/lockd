@@ -13,7 +13,7 @@ const maxQueueDequeueBatch = 64
 // It mirrors the HTTP handler semantics but is transport-neutral so gRPC and
 // future transports can share the same behaviour.
 func (s *Service) Dequeue(ctx context.Context, cmd QueueDequeueCommand) (*QueueDequeueResult, error) {
-	if err := s.maybeThrottleQueue(qrf.KindQueueConsumer); err != nil {
+	if err := s.maybeThrottleQueue(ctx, qrf.KindQueueConsumer); err != nil {
 		return nil, err
 	}
 	qsvc, ok := s.queueProvider.(*queue.Service)
@@ -50,7 +50,9 @@ func (s *Service) Dequeue(ctx context.Context, cmd QueueDequeueCommand) (*QueueD
 		visibility = s.resolveTTL(0)
 	}
 
-	s.maybeReplayTxnRecords(ctx)
+	if !s.maybeReplayTxnRecordsInline(ctx) {
+		s.maybeReplayTxnRecords(ctx)
+	}
 
 	deliveries, nextCursor, err := s.consumeQueueBatch(
 		ctx,

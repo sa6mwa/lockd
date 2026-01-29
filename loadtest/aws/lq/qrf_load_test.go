@@ -184,7 +184,7 @@ func prepareAWSQueueConfig(t testing.TB, opts awsQueueOptions) lockd.Config {
 		Store:       store,
 		AWSRegion:   os.Getenv("LOCKD_AWS_REGION"),
 		AWSKMSKeyID: os.Getenv("LOCKD_AWS_KMS_KEY_ID"),
-		QRFEnabled:  true,
+		QRFDisabled: false,
 	}
 	if cfg.AWSRegion == "" {
 		cfg.AWSRegion = os.Getenv("AWS_REGION")
@@ -198,7 +198,7 @@ func prepareAWSQueueConfig(t testing.TB, opts awsQueueOptions) lockd.Config {
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("aws queue config validation failed: %v", err)
 	}
-	cfg.QRFEnabled = true
+	cfg.QRFDisabled = false
 	return cfg
 }
 

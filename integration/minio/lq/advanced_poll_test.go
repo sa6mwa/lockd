@@ -16,6 +16,7 @@ import (
 	"pkt.systems/lockd"
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/integration/internal/cryptotest"
+	"pkt.systems/lockd/integration/internal/hatest"
 	queuetestutil "pkt.systems/lockd/integration/queue/testutil"
 	"pkt.systems/lockd/internal/qrf"
 	"pkt.systems/pslog"
@@ -40,6 +41,7 @@ func runMinioQueueMultiConsumerContention(t *testing.T) {
 		PollJitter:        0,
 		ResilientInterval: 250 * time.Millisecond,
 	})
+	cfg.HAMode = "concurrent"
 
 	ts := startMinioQueueServer(t, cfg)
 	cli := ts.Client
@@ -237,6 +239,7 @@ func runMinioQueueMultiServerRouting(t *testing.T) {
 		PollJitter:        0,
 		ResilientInterval: 250 * time.Millisecond,
 	})
+	cfg.HAMode = "concurrent"
 
 	serverA := startMinioQueueServer(t, cfg)
 	shared := cryptotest.SharedMTLSOptions(t)
@@ -271,6 +274,7 @@ func runMinioQueueMultiServerFailoverClient(t *testing.T) {
 		PollJitter:        0,
 		ResilientInterval: 250 * time.Millisecond,
 	})
+	cfg.HAMode = "failover"
 
 	var sharedCreds lockd.TestMTLSCredentials
 	if cryptotest.TestMTLSEnabled() {
@@ -281,9 +285,25 @@ func runMinioQueueMultiServerFailoverClient(t *testing.T) {
 	serverB := startMinioQueueServer(t, cfg, sharedOpts...)
 
 	queue := queuetestutil.QueueName("minio-failover")
-	queuetestutil.MustEnqueueBytes(t, serverA.Client, queue, []byte("failover-payload"))
+	activeCtx, cancelActive := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelActive()
+	activeServer, activeClient, err := hatest.FindActiveServer(activeCtx, serverA, serverB)
+	if err != nil {
+		t.Fatalf("find active server: %v", err)
+	}
+	t.Cleanup(func() { _ = activeClient.Close() })
+	standbyServer := serverB
+	if activeServer == serverB {
+		standbyServer = serverA
+	}
+	standbyClient, err := standbyServer.NewClient()
+	if err != nil {
+		t.Fatalf("standby client: %v", err)
+	}
+	t.Cleanup(func() { _ = standbyClient.Close() })
 
-	endpoints := []string{serverA.URL(), serverB.URL()}
+	queuetestutil.MustEnqueueBytes(t, activeClient, queue, []byte("failover-payload"))
+
 	capture := queuetestutil.NewLogCapture(t)
 	clientOptions := []lockdclient.Option{
 		lockdclient.WithEndpointShuffle(false),
@@ -293,18 +313,24 @@ func runMinioQueueMultiServerFailoverClient(t *testing.T) {
 		httpClient := cryptotest.RequireMTLSHTTPClient(t, sharedCreds)
 		clientOptions = append(clientOptions, lockdclient.WithHTTPClient(httpClient))
 	}
-	failoverClient, err := lockdclient.NewWithEndpoints(endpoints, clientOptions...)
+	failoverClient, err := lockdclient.NewWithEndpoints([]string{activeServer.URL(), standbyServer.URL()}, clientOptions...)
 	if err != nil {
 		t.Fatalf("new failover client: %v", err)
 	}
 	t.Cleanup(func() { _ = failoverClient.Close() })
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	if err := serverA.Stop(shutdownCtx); err != nil {
+	if err := activeServer.Stop(shutdownCtx); err != nil {
 		shutdownCancel()
 		t.Fatalf("stop serverA: %v", err)
 	}
 	shutdownCancel()
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := hatest.WaitForActive(waitCtx, standbyServer); err != nil {
+		waitCancel()
+		t.Fatalf("standby activation: %v", err)
+	}
+	waitCancel()
 
 	owner := queuetestutil.QueueOwner("failover-consumer")
 	dequeueCtx, dequeueCancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -328,7 +354,7 @@ func runMinioQueueMultiServerFailoverClient(t *testing.T) {
 	}
 	ackCancel()
 
-	queuetestutil.EnsureQueueEmpty(t, serverB.Client, queue)
+	queuetestutil.EnsureQueueEmpty(t, standbyClient, queue)
 }
 
 func runMinioQueueHighFanInFanOutSingleServer(t *testing.T) {
@@ -470,7 +496,7 @@ func runMinioQueueQRFThrottling(t *testing.T) {
 	queuetestutil.InstallWatchdog(t, "minio-qrf-throttling", 15*time.Second)
 
 	cfg := prepareMinioQueueConfig(t, minioQueueOptions{})
-	cfg.QRFEnabled = true
+	cfg.QRFDisabled = false
 	cfg.QRFQueueSoftLimit = 1
 	cfg.QRFQueueHardLimit = 3
 	cfg.QRFLockSoftLimit = 1
@@ -481,10 +507,11 @@ func runMinioQueueQRFThrottling(t *testing.T) {
 	cfg.QRFMemoryHardLimitBytes = 0
 	cfg.QRFLoadSoftLimitMultiplier = 2
 	cfg.QRFLoadHardLimitMultiplier = 4
-	cfg.QRFSoftRetryAfter = 40 * time.Millisecond
-	cfg.QRFEngagedRetryAfter = 200 * time.Millisecond
-	cfg.QRFRecoveryRetryAfter = 120 * time.Millisecond
+	cfg.QRFSoftDelay = 40 * time.Millisecond
+	cfg.QRFEngagedDelay = 200 * time.Millisecond
+	cfg.QRFRecoveryDelay = 120 * time.Millisecond
 	cfg.QRFRecoverySamples = 1
+	cfg.QRFMaxWait = time.Millisecond
 	cfg.LSFSampleInterval = time.Hour
 	ts, capture := startMinioQueueServerWithCapture(t, cfg)
 	cli := ts.Client

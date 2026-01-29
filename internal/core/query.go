@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 
 	"pkt.systems/lockd/internal/search"
 )
@@ -14,9 +15,14 @@ func (s *Service) Query(ctx context.Context, cmd QueryCommand) (*QueryResult, er
 	if s.searchAdapter == nil {
 		return nil, Failure{Code: "query_disabled", Detail: "query service not configured", HTTPStatus: http.StatusNotImplemented}
 	}
+	if err := s.maybeThrottleQuery(ctx); err != nil {
+		return nil, err
+	}
 	if err := s.applyShutdownGuard("query"); err != nil {
 		return nil, err
 	}
+	finish := s.beginQueryOp()
+	defer finish()
 	namespace, err := s.resolveNamespace(cmd.Namespace)
 	if err != nil {
 		return nil, Failure{Code: "invalid_namespace", Detail: err.Error(), HTTPStatus: http.StatusBadRequest}
@@ -42,6 +48,7 @@ func (s *Service) Query(ctx context.Context, cmd QueryCommand) (*QueryResult, er
 		if err := s.indexManager.WaitForReadable(ctx, namespace); err != nil {
 			return nil, err
 		}
+		_ = s.indexManager.WarmNamespace(ctx, namespace)
 	}
 
 	req := search.Request{
@@ -52,6 +59,9 @@ func (s *Service) Query(ctx context.Context, cmd QueryCommand) (*QueryResult, er
 		Fields:    cmd.Fields,
 		Engine:    engine,
 	}
+	if cmd.Return == apiQueryReturnDocuments {
+		req.IncludeDocMeta = true
+	}
 	result, err := s.searchAdapter.Query(ctx, req)
 	if err != nil {
 		if errors.Is(err, search.ErrInvalidCursor) {
@@ -60,6 +70,20 @@ func (s *Service) Query(ctx context.Context, cmd QueryCommand) (*QueryResult, er
 		return nil, fmt.Errorf("query: %w", err)
 	}
 	if engine == search.EngineIndex && s.indexManager != nil {
+		if rebuilt, err := s.maybeScheduleIndexRebuild(ctx, namespace, result.Format); err != nil {
+			if s.logger != nil {
+				s.logger.Warn("index.rebuild.on_read.failed", "namespace", namespace, "error", err)
+			}
+		} else if rebuilt {
+			rebuiltResult, rebuildErr := s.searchAdapter.Query(ctx, req)
+			if rebuildErr != nil {
+				if s.logger != nil {
+					s.logger.Warn("index.rebuild.on_read.query_failed", "namespace", namespace, "error", rebuildErr)
+				}
+			} else {
+				result = rebuiltResult
+			}
+		}
 		if result.Metadata == nil {
 			result.Metadata = make(map[string]string)
 		}
@@ -72,6 +96,7 @@ func (s *Service) Query(ctx context.Context, cmd QueryCommand) (*QueryResult, er
 		Cursor:    result.Cursor,
 		IndexSeq:  result.IndexSeq,
 		Metadata:  result.Metadata,
+		DocMeta:   result.DocMeta,
 	}, nil
 }
 
@@ -89,32 +114,32 @@ func (s *Service) QueryDocuments(ctx context.Context, cmd QueryCommand, sink Doc
 	if len(cmd.Keys) > 0 {
 		keys = cmd.Keys
 	}
-	for _, key := range keys {
-		if err := s.streamPublishedDocument(ctx, result.Namespace, key, sink); err != nil {
-			return nil, err
-		}
+	if err := s.StreamPublishedDocuments(ctx, result.Namespace, keys, result.DocMeta, sink); err != nil {
+		return nil, err
 	}
 	return result, nil
 }
 
 // StreamPublishedDocuments streams already-selected keys to the sink.
-func (s *Service) StreamPublishedDocuments(ctx context.Context, namespace string, keys []string, sink DocumentSink) error {
-	for _, key := range keys {
-		if err := s.streamPublishedDocument(ctx, namespace, key, sink); err != nil {
-			return err
-		}
+func (s *Service) StreamPublishedDocuments(ctx context.Context, namespace string, keys []string, docMeta map[string]search.DocMetadata, sink DocumentSink) error {
+	if len(keys) == 0 {
+		return nil
 	}
-	return nil
+	prefetch := s.queryDocPrefetch
+	if prefetch <= 1 || len(keys) == 1 {
+		return s.streamPublishedDocumentsSequential(ctx, namespace, keys, docMeta, sink)
+	}
+	return s.streamPublishedDocumentsParallel(ctx, namespace, keys, docMeta, sink, prefetch)
 }
 
-func (s *Service) streamPublishedDocument(ctx context.Context, namespace, key string, sink DocumentSink) error {
+func (s *Service) streamPublishedDocument(ctx context.Context, namespace, key string, meta *search.DocMetadata, sink DocumentSink) error {
 	if sink == nil {
 		return Failure{Code: "invalid_sink", Detail: "document sink required", HTTPStatus: http.StatusBadRequest}
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	doc, err := s.OpenPublishedDocument(ctx, namespace, key)
+	doc, err := s.openPublishedDocumentWithMeta(ctx, namespace, key, meta)
 	if err != nil {
 		return err
 	}
@@ -132,6 +157,143 @@ func (s *Service) streamPublishedDocument(ctx context.Context, namespace, key st
 		return err
 	}
 	doc.Reader.Close()
+	return nil
+}
+
+type docFetch struct {
+	idx int
+	key string
+	doc PublishedDocumentResult
+	err error
+}
+
+func (s *Service) streamPublishedDocumentsSequential(ctx context.Context, namespace string, keys []string, docMeta map[string]search.DocMetadata, sink DocumentSink) error {
+	for _, key := range keys {
+		if err := s.streamPublishedDocument(ctx, namespace, key, docMetaLookup(docMeta, key), sink); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) streamPublishedDocumentsParallel(ctx context.Context, namespace string, keys []string, docMeta map[string]search.DocMetadata, sink DocumentSink, prefetch int) error {
+	if sink == nil {
+		return Failure{Code: "invalid_sink", Detail: "document sink required", HTTPStatus: http.StatusBadRequest}
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	if prefetch > len(keys) {
+		prefetch = len(keys)
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	jobs := make(chan int)
+	results := make(chan docFetch, prefetch)
+
+	var wg sync.WaitGroup
+	worker := func() {
+		defer wg.Done()
+		for idx := range jobs {
+			if ctx.Err() != nil {
+				return
+			}
+			key := keys[idx]
+			doc, err := s.openPublishedDocumentWithMeta(ctx, namespace, key, docMetaLookup(docMeta, key))
+			results <- docFetch{idx: idx, key: key, doc: doc, err: err}
+		}
+	}
+	for i := 0; i < prefetch; i++ {
+		wg.Add(1)
+		go worker()
+	}
+	go func() {
+		for i := range keys {
+			select {
+			case <-ctx.Done():
+				close(jobs)
+				wg.Wait()
+				close(results)
+				return
+			case jobs <- i:
+			}
+		}
+		close(jobs)
+		wg.Wait()
+		close(results)
+	}()
+
+	pending := make([]docFetch, len(keys))
+	ready := make([]bool, len(keys))
+	next := 0
+	var outErr error
+	closePending := func() {
+		for i, ok := range ready {
+			if !ok {
+				continue
+			}
+			if r := pending[i]; r.doc.Reader != nil {
+				r.doc.Reader.Close()
+			}
+			ready[i] = false
+		}
+	}
+	for res := range results {
+		if outErr != nil {
+			if res.doc.Reader != nil {
+				res.doc.Reader.Close()
+			}
+			continue
+		}
+		if res.err != nil {
+			outErr = res.err
+			cancel()
+			closePending()
+			if res.doc.Reader != nil {
+				res.doc.Reader.Close()
+			}
+			continue
+		}
+		pending[res.idx] = res
+		ready[res.idx] = true
+		for next < len(keys) && ready[next] && outErr == nil {
+			curr := pending[next]
+			if curr.doc.NoContent {
+				if curr.doc.Reader != nil {
+					_ = curr.doc.Reader.Close()
+				}
+			} else if curr.doc.Reader != nil {
+				if err := sink.OnDocument(ctx, namespace, curr.key, curr.doc.Version, curr.doc.Reader); err != nil {
+					outErr = err
+					cancel()
+					_ = curr.doc.Reader.Close()
+					closePending()
+					break
+				}
+				_ = curr.doc.Reader.Close()
+			}
+			ready[next] = false
+			next++
+		}
+	}
+	if outErr != nil {
+		return outErr
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func docMetaLookup(meta map[string]search.DocMetadata, key string) *search.DocMetadata {
+	if meta == nil || key == "" {
+		return nil
+	}
+	if entry, ok := meta[key]; ok {
+		copyEntry := entry
+		return &copyEntry
+	}
 	return nil
 }
 

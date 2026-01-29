@@ -6,9 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"net/url"
 	"path"
-	"strings"
 	"testing"
 	"time"
 
@@ -28,6 +26,11 @@ func TestMixedArchipelagoLeaderFailover(t *testing.T) {
 	minioCfg := loadMinioConfig(t)
 	awsCfg := loadMixedAWSConfig(t)
 	azureCfg := loadMixedAzureConfig(t)
+	memCfg.HAMode = "concurrent"
+	diskCfg.HAMode = "concurrent"
+	minioCfg.HAMode = "concurrent"
+	awsCfg.HAMode = "concurrent"
+	azureCfg.HAMode = "concurrent"
 	cryptotest.ConfigureTCAuth(t, &memCfg)
 	cryptotest.ConfigureTCAuth(t, &diskCfg)
 	cryptotest.ConfigureTCAuth(t, &minioCfg)
@@ -396,20 +399,4 @@ func startMixedMemNode(tb testing.TB, base lockd.Config, backend *memorybackend.
 		opts = append(opts, cryptotest.SharedMTLSOptions(tb)...)
 	}
 	return lockd.StartTestServer(tb, opts...)
-}
-
-func appendStorePath(tb testing.TB, store, suffix string) string {
-	tb.Helper()
-	parsed, err := url.Parse(store)
-	if err != nil {
-		tb.Fatalf("parse store: %v", err)
-	}
-	pathPart := strings.Trim(strings.TrimPrefix(parsed.Path, "/"), "/")
-	if pathPart == "" {
-		pathPart = suffix
-	} else {
-		pathPart = path.Join(pathPart, suffix)
-	}
-	parsed.Path = "/" + pathPart
-	return parsed.String()
 }

@@ -594,6 +594,7 @@ func TestAWSQueryTxnDecisionEndpoints(t *testing.T) {
 
 func TestAWSQueryTxnFanoutAcrossNodes(t *testing.T) {
 	cfg := awsQueryConfigWithSweeper(t, 2*time.Second)
+	cfg.HAMode = "concurrent"
 	bundlePath := cryptotest.SharedTCClientBundlePath(t)
 	if bundlePath == "" {
 		cfg.DisableMTLS = true
@@ -711,6 +712,7 @@ func TestAWSQueryTxnFanoutAcrossNodes(t *testing.T) {
 
 func TestAWSQueryTxnFanoutRollbackAcrossNodes(t *testing.T) {
 	cfg := awsQueryConfigWithSweeper(t, 2*time.Second)
+	cfg.HAMode = "concurrent"
 	bundlePath := cryptotest.SharedTCClientBundlePath(t)
 	if bundlePath == "" {
 		cfg.DisableMTLS = true
@@ -812,6 +814,7 @@ func TestAWSQueryTxnFanoutRollbackAcrossNodes(t *testing.T) {
 
 func TestAWSQueryTxnReplayAfterRestartAcrossNodes(t *testing.T) {
 	cfg := awsQueryConfigWithSweeper(t, time.Hour) // disable sweeper; explicit replay after restart
+	cfg.HAMode = "concurrent"
 	tsA := startAWSQueryServerWithConfig(t, cfg)
 	tsB := startAWSQueryServerWithConfig(t, cfg)
 

@@ -704,8 +704,8 @@ func TestCLIClientTxMultiKeyCommitApplies(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	state1 := loadKeyState(t, ctx, ts, key1)
-	state2 := loadKeyState(t, ctx, ts, key2)
+	state1 := loadKeyState(ctx, t, ts, key1)
+	state2 := loadKeyState(ctx, t, ts, key2)
 	if state1["counter"] != float64(1) || state2["counter"] != float64(2) {
 		t.Fatalf("unexpected states: k1=%v k2=%v", state1, state2)
 	}
@@ -752,7 +752,7 @@ func TestCLIClientTxReplayRollsBackExpiredPending(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	state := loadKeyState(t, ctx, ts, key)
+	state := loadKeyState(ctx, t, ts, key)
 	if len(state) != 0 {
 		t.Fatalf("expected empty state after rollback, got %v", state)
 	}
@@ -817,7 +817,7 @@ func TestCLIClientAcquireJoinsTxnAndCommitApplies(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	state := loadKeyState(t, ctx, ts, key)
+	state := loadKeyState(ctx, t, ts, key)
 	if got := state["stage"]; got != "pending" {
 		t.Fatalf("expected committed stage, got %v", got)
 	}
@@ -881,7 +881,7 @@ func TestCLIClientAcquireReleaseRollbackClearsState(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	state := loadKeyState(t, ctx, ts, key)
+	state := loadKeyState(ctx, t, ts, key)
 	if len(state) != 0 {
 		t.Fatalf("expected empty state after rollback release, got %v", state)
 	}
@@ -944,7 +944,7 @@ func TestCLIClientAcquireGeneratesKeyAndCommits(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	state := loadKeyState(t, ctx, ts, acquireResp.Key)
+	state := loadKeyState(ctx, t, ts, acquireResp.Key)
 	if state["hello"] != "world" {
 		t.Fatalf("expected committed state, got %v", state)
 	}
@@ -1052,7 +1052,7 @@ func TestCLIClientAcquireWithNamespacePersists(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	state := loadKeyStateNamespace(t, ctx, ts, ns, key)
+	state := loadKeyStateNamespace(ctx, t, ts, ns, key)
 	if state["ns"] != "ok" {
 		t.Fatalf("expected state in namespace, got %v", state)
 	}
@@ -1465,12 +1465,12 @@ func stageKeyWithTxnTTL(t *testing.T, ts *lockd.TestServer, key, txn string, sta
 	// replay) are responsible for deciding and clearing the lease.
 }
 
-func loadKeyState(t *testing.T, ctx context.Context, ts *lockd.TestServer, key string) map[string]any {
+func loadKeyState(ctx context.Context, t *testing.T, ts *lockd.TestServer, key string) map[string]any {
 	t.Helper()
-	return loadKeyStateNamespace(t, ctx, ts, namespaces.Default, key)
+	return loadKeyStateNamespace(ctx, t, ts, namespaces.Default, key)
 }
 
-func loadKeyStateNamespace(t *testing.T, ctx context.Context, ts *lockd.TestServer, ns, key string) map[string]any {
+func loadKeyStateNamespace(ctx context.Context, t *testing.T, ts *lockd.TestServer, ns, key string) map[string]any {
 	t.Helper()
 	lease, err := ts.Client.Acquire(ctx, api.AcquireRequest{
 		Namespace:  ns,

@@ -18,10 +18,11 @@ import (
 	lockdclient "pkt.systems/lockd/client"
 	awsintegration "pkt.systems/lockd/integration/aws"
 	"pkt.systems/lockd/integration/internal/cryptotest"
+	"pkt.systems/lockd/integration/internal/storepath"
 	queuetestutil "pkt.systems/lockd/integration/queue/testutil"
 	"pkt.systems/lockd/internal/diagnostics/storagecheck"
 	"pkt.systems/lockd/internal/storage"
-	"pkt.systems/lockd/internal/storage/s3"
+	awsstore "pkt.systems/lockd/internal/storage/aws"
 	"pkt.systems/lockd/namespaces"
 	"pkt.systems/pslog"
 )
@@ -153,6 +154,7 @@ func buildAWSConfig(t testing.TB) lockd.Config {
 	if !strings.HasPrefix(store, "aws://") {
 		t.Fatalf("LOCKD_STORE must reference an aws:// URI, got %q", store)
 	}
+	store = storepath.Scoped(t, store, "aws-crypto")
 	cfg := lockd.Config{
 		Store:                      store,
 		AWSRegion:                  strings.TrimSpace(os.Getenv("LOCKD_AWS_REGION")),
@@ -196,7 +198,7 @@ func cleanupAWSLock(tb testing.TB, cfg lockd.Config, key string) {
 		tb.Fatalf("build aws config: %v", err)
 	}
 	awsCfg := awsResult.Config
-	store, err := s3.New(awsCfg)
+	store, err := awsstore.New(awsCfg)
 	if err != nil {
 		tb.Fatalf("new aws store: %v", err)
 	}
@@ -217,7 +219,7 @@ func cleanupAWSQueue(tb testing.TB, cfg lockd.Config, queue string) {
 		tb.Fatalf("build aws config: %v", err)
 	}
 	awsCfg := awsResult.Config
-	store, err := s3.New(awsCfg)
+	store, err := awsstore.New(awsCfg)
 	if err != nil {
 		tb.Fatalf("new aws store: %v", err)
 	}

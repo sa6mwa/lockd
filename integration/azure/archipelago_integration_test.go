@@ -23,6 +23,7 @@ import (
 func TestAzureArchipelagoLeaderFailover(t *testing.T) {
 	leaseTTL := 10 * time.Second
 	baseCfg := loadAzureConfig(t)
+	baseCfg.HAMode = "concurrent"
 	cryptotest.ConfigureTCAuth(t, &baseCfg)
 	baseCfg.TCClientBundlePath = cryptotest.SharedTCClientBundlePath(t)
 

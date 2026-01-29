@@ -14,11 +14,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"pkt.systems/pslog"
+	"github.com/shirou/gopsutil/v4/cpu"
+	"github.com/shirou/gopsutil/v4/load"
+	"github.com/shirou/gopsutil/v4/mem"
 
-	"golang.org/x/sys/unix"
 	"pkt.systems/lockd/internal/qrf"
 	"pkt.systems/lockd/internal/svcfields"
+	"pkt.systems/pslog"
 )
 
 // Config controls the LSF sampling cadence.
@@ -40,10 +42,8 @@ type Observer struct {
 	queueConsumerInflight atomic.Int64
 	queueAckInflight      atomic.Int64
 	lockInflight          atomic.Int64
-
-	lastCPUTotal uint64
-	lastCPUIdle  uint64
-	lastLogTime  time.Time
+	queryInflight         atomic.Int64
+	lastLogTime           time.Time
 
 	wg sync.WaitGroup
 
@@ -136,6 +136,17 @@ func (o *Observer) BeginLockOp() func() {
 	}
 }
 
+// BeginQueryOp records the start of a query operation and returns a completion callback.
+func (o *Observer) BeginQueryOp() func() {
+	if !o.cfg.Enabled {
+		return func() {}
+	}
+	o.queryInflight.Add(1)
+	return func() {
+		o.queryInflight.Add(-1)
+	}
+}
+
 func (o *Observer) run(ctx context.Context) {
 	ticker := time.NewTicker(o.cfg.SampleInterval)
 	defer ticker.Stop()
@@ -186,6 +197,7 @@ func (o *Observer) sample(ts time.Time) {
 		QueueConsumerInflight:           o.queueConsumerInflight.Load(),
 		QueueAckInflight:                o.queueAckInflight.Load(),
 		LockInflight:                    o.lockInflight.Load(),
+		QueryInflight:                   o.queryInflight.Load(),
 		RSSBytes:                        rss,
 		SwapBytes:                       swapUsedBytes,
 		SystemMemoryUsedPercent:         memoryPercent,
@@ -230,7 +242,7 @@ func (o *Observer) sample(ts time.Time) {
 		o.lastLogTime = ts
 	}
 	if o.metrics != nil {
-		o.metrics.recordSample(nil, snapshot)
+		o.metrics.recordSample(context.TODO(), snapshot)
 	}
 	o.qrf.Observe(snapshot)
 }
@@ -289,23 +301,14 @@ func ratio(value, baseline float64) float64 {
 }
 
 func (o *Observer) systemCPUPercent() float64 {
-	total, idle, err := readSystemCPUStat()
+	values, err := cpu.Percent(0, false)
 	if err != nil {
 		return 0
 	}
-	if o.lastCPUTotal == 0 && o.lastCPUIdle == 0 {
-		o.lastCPUTotal = total
-		o.lastCPUIdle = idle
+	if len(values) == 0 {
 		return 0
 	}
-	deltaTotal := total - o.lastCPUTotal
-	deltaIdle := idle - o.lastCPUIdle
-	o.lastCPUTotal = total
-	o.lastCPUIdle = idle
-	if deltaTotal == 0 || deltaTotal < deltaIdle {
-		return 0
-	}
-	return (float64(deltaTotal-deltaIdle) / float64(deltaTotal)) * 100
+	return values[0]
 }
 
 type systemUsage struct {
@@ -417,54 +420,51 @@ func parseMeminfo(r io.Reader) (meminfo, error) {
 }
 
 func gatherSystemUsage() (systemUsage, error) {
-	var si unix.Sysinfo_t
-	if err := unix.Sysinfo(&si); err != nil {
-		return systemUsage{}, err
+	vm, err := mem.VirtualMemory()
+	if err != nil {
+		mi, miErr := readMeminfo()
+		if miErr != nil {
+			return systemUsage{}, err
+		}
+		available := min(mi.availableBytes, mi.totalBytes)
+		memoryUsed := 1 - float64(available)/float64(mi.totalBytes)
+		if memoryUsed < 0 {
+			memoryUsed = 0
+		}
+		if memoryUsed > 1 {
+			memoryUsed = 1
+		}
+		return systemUsage{
+			memoryPercent:             memoryUsed * 100,
+			memoryIncludesReclaimable: mi.includesReclaimableData,
+		}, nil
 	}
-	memoryIncludesReclaimable := false
-	unit := uint64(si.Unit)
-	if unit == 0 {
-		unit = 1
+	memoryIncludesReclaimable := vm.Available > 0
+	memoryPercent := vm.UsedPercent
+	if memoryPercent < 0 {
+		memoryPercent = 0
 	}
-	totalRAM := uint64(si.Totalram) * unit
-	if totalRAM == 0 {
-		return systemUsage{}, errors.New("sysinfo: totalram reported as zero")
-	}
-	freeRAM := uint64(si.Freeram) * unit
-	bufferRAM := uint64(si.Bufferram) * unit
-	available := min(freeRAM+bufferRAM, totalRAM)
-	if mi, err := readMeminfo(); err == nil && mi.totalBytes > 0 && mi.availableBytes > 0 {
-		totalRAM = mi.totalBytes
-		available = min(mi.availableBytes, totalRAM)
-		memoryIncludesReclaimable = mi.includesReclaimableData
-	}
-	memoryUsed := 1 - float64(available)/float64(totalRAM)
-	if memoryUsed < 0 {
-		memoryUsed = 0
-	}
-	if memoryUsed > 1 {
-		memoryUsed = 1
+	if memoryPercent > 100 {
+		memoryPercent = 100
 	}
 
-	totalSwap := uint64(si.Totalswap) * unit
-	freeSwap := uint64(si.Freeswap) * unit
 	swapUsed := uint64(0)
 	swapPercent := 0.0
-	if totalSwap > 0 {
-		if freeSwap > totalSwap {
-			freeSwap = totalSwap
-		}
-		swapUsed = totalSwap - freeSwap
-		swapPercent = float64(swapUsed) / float64(totalSwap) * 100
+	if swap, swapErr := mem.SwapMemory(); swapErr == nil {
+		swapUsed = swap.Used
+		swapPercent = swap.UsedPercent
+	}
+	load1 := 0.0
+	load5 := 0.0
+	load15 := 0.0
+	if avg, loadErr := load.Avg(); loadErr == nil && avg != nil {
+		load1 = avg.Load1
+		load5 = avg.Load5
+		load15 = avg.Load15
 	}
 
-	const loadScale = 65536.0
-	load1 := float64(si.Loads[0]) / loadScale
-	load5 := float64(si.Loads[1]) / loadScale
-	load15 := float64(si.Loads[2]) / loadScale
-
 	return systemUsage{
-		memoryPercent:             memoryUsed * 100,
+		memoryPercent:             memoryPercent,
 		memoryIncludesReclaimable: memoryIncludesReclaimable,
 		swapPercent:               swapPercent,
 		swapBytes:                 swapUsed,
@@ -472,40 +472,4 @@ func gatherSystemUsage() (systemUsage, error) {
 		load5:                     load5,
 		load15:                    load15,
 	}, nil
-}
-
-func readSystemCPUStat() (uint64, uint64, error) {
-	f, err := os.Open("/proc/stat")
-	if err != nil {
-		return 0, 0, err
-	}
-	defer f.Close()
-	scanner := bufio.NewScanner(f)
-	if scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) < 5 || fields[0] != "cpu" {
-			return 0, 0, errors.New("unexpected /proc/stat format")
-		}
-		var values []uint64
-		for _, field := range fields[1:] {
-			val, err := strconv.ParseUint(field, 10, 64)
-			if err != nil {
-				return 0, 0, err
-			}
-			values = append(values, val)
-		}
-		var idle uint64
-		if len(values) >= 4 {
-			idle = values[3]
-		}
-		total := uint64(0)
-		for _, v := range values {
-			total += v
-		}
-		return total, idle, nil
-	}
-	if err := scanner.Err(); err != nil {
-		return 0, 0, err
-	}
-	return 0, 0, errors.New("no cpu line in /proc/stat")
 }

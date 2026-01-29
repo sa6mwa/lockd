@@ -1,6 +1,7 @@
 package qrf
 
 import (
+	"context"
 	"math"
 	"sync"
 	"time"
@@ -21,6 +22,8 @@ const (
 	KindQueueAck
 	// KindLock marks lock-related operations (acquire/keepalive/release, state ops).
 	KindLock
+	// KindQuery marks query operations.
+	KindQuery
 )
 
 // State represents the current posture of the quick reaction force.
@@ -62,6 +65,8 @@ type Config struct {
 	QueueConsumerHardLimit int64
 	LockSoftLimit          int64
 	LockHardLimit          int64
+	QuerySoftLimit         int64
+	QueryHardLimit         int64
 
 	MemorySoftLimitBytes        uint64
 	MemoryHardLimitBytes        uint64
@@ -81,9 +86,10 @@ type Config struct {
 
 	RecoverySamples int
 
-	SoftRetryAfter     time.Duration
-	EngagedRetryAfter  time.Duration
-	RecoveryRetryAfter time.Duration
+	SoftDelay     time.Duration
+	EngagedDelay  time.Duration
+	RecoveryDelay time.Duration
+	MaxWait       time.Duration
 
 	Logger pslog.Logger
 }
@@ -94,6 +100,7 @@ type Snapshot struct {
 	QueueConsumerInflight           int64
 	QueueAckInflight                int64
 	LockInflight                    int64
+	QueryInflight                   int64
 	RSSBytes                        uint64
 	SwapBytes                       uint64
 	SystemMemoryUsedPercent         float64
@@ -122,10 +129,20 @@ type Status struct {
 
 // Decision reports whether an operation should be throttled.
 type Decision struct {
-	Throttle   bool
-	RetryAfter time.Duration
-	State      State
-	Reason     string
+	Throttle bool
+	Delay    time.Duration
+	State    State
+	Reason   string
+}
+
+// WaitError is returned when the throttle delay exceeds the configured max wait.
+type WaitError struct {
+	Delay  time.Duration
+	Reason string
+}
+
+func (e *WaitError) Error() string {
+	return "throttled: perimeter defence engaged"
 }
 
 // Controller manages the QRF state machine.
@@ -232,7 +249,7 @@ func (c *Controller) Observe(snapshot Snapshot) {
 		c.state = next
 		c.logTransition(prev, next, c.lastReason, snapshot)
 		if c.metrics != nil {
-			c.metrics.recordTransition(nil, prev, next, c.lastReason)
+			c.metrics.recordTransition(context.TODO(), prev, next, c.lastReason)
 		}
 		if next == StateEngaged || next == StateSoftArm {
 			c.consecutiveHealthy = 0
@@ -252,12 +269,22 @@ func (c *Controller) Decide(kind Kind) Decision {
 	snapshot := c.lastSnapshot
 	c.mu.RUnlock()
 
+	totalQueue := snapshot.QueueProducerInflight + snapshot.QueueConsumerInflight + snapshot.QueueAckInflight
 	consumerHardExceeded := c.consumerHardExceeded(snapshot)
 	consumerLimitExceeded := consumerHardExceeded || c.consumerSoftExceeded(snapshot)
 	needsMoreConsumers := snapshot.QueueProducerInflight > snapshot.QueueConsumerInflight
 
-	totalQueue := snapshot.QueueProducerInflight + snapshot.QueueConsumerInflight + snapshot.QueueAckInflight
-	healthy := c.isHealthy(totalQueue, snapshot)
+	queueSoftExceeded := c.queueSoftExceeded(totalQueue)
+	queueHardExceeded := c.queueHardExceeded(totalQueue)
+	lockSoftExceeded := c.lockSoftExceeded(snapshot)
+	lockHardExceeded := c.lockHardExceeded(snapshot)
+	querySoftExceeded := c.querySoftExceeded(snapshot)
+	queryHardExceeded := c.queryHardExceeded(snapshot)
+	globalSoftExceeded := c.globalSoftExceeded(snapshot)
+	globalHardExceeded := c.globalHardExceeded(snapshot)
+	globalPressure := globalSoftExceeded || globalHardExceeded
+	queueDominant, lockDominant, queryDominant := dominantKinds(snapshot)
+	anyDominant := queueDominant || lockDominant || queryDominant
 
 	switch state {
 	case StateDisengaged:
@@ -265,15 +292,23 @@ func (c *Controller) Decide(kind Kind) Decision {
 	case StateSoftArm:
 		switch kind {
 		case KindQueueProducer:
-			if healthy {
-				return c.recordDecision(kind, Decision{Throttle: false, State: StateSoftArm})
+			if queueSoftExceeded || queueHardExceeded {
+				return c.recordDecision(kind, Decision{
+					Throttle: true,
+					State:    StateSoftArm,
+					Delay:    nonZero(c.cfg.SoftDelay, 50*time.Millisecond),
+					Reason:   reason,
+				})
 			}
-			return c.recordDecision(kind, Decision{
-				Throttle:   true,
-				State:      StateSoftArm,
-				RetryAfter: nonZero(c.cfg.SoftRetryAfter, 50*time.Millisecond),
-				Reason:     reason,
-			})
+			if globalPressure && (queueDominant || !anyDominant) {
+				return c.recordDecision(kind, Decision{
+					Throttle: true,
+					State:    StateSoftArm,
+					Delay:    nonZero(c.cfg.SoftDelay, 50*time.Millisecond),
+					Reason:   reason,
+				})
+			}
+			return c.recordDecision(kind, Decision{Throttle: false, State: StateSoftArm})
 		case KindQueueConsumer, KindQueueAck:
 			if consumerHardExceeded || (consumerLimitExceeded && !needsMoreConsumers) {
 				limitReason := "queue_consumer_soft"
@@ -281,30 +316,40 @@ func (c *Controller) Decide(kind Kind) Decision {
 					limitReason = "queue_consumer_hard"
 				}
 				return c.recordDecision(kind, Decision{
-					Throttle:   true,
-					State:      StateSoftArm,
-					RetryAfter: nonZero(c.cfg.SoftRetryAfter, 50*time.Millisecond),
-					Reason:     limitReason,
+					Throttle: true,
+					State:    StateSoftArm,
+					Delay:    nonZero(c.cfg.SoftDelay, 50*time.Millisecond),
+					Reason:   limitReason,
 				})
 			}
 			return c.recordDecision(kind, Decision{Throttle: false, State: state})
+		case KindLock:
+			return c.decideNonQueue(kind, state, reason, lockSoftExceeded, lockHardExceeded, globalPressure, lockDominant, anyDominant, "lock_inflight_soft", "lock_inflight_hard")
+		case KindQuery:
+			return c.decideNonQueue(kind, state, reason, querySoftExceeded, queryHardExceeded, globalPressure, queryDominant, anyDominant, "query_inflight_soft", "query_inflight_hard")
 		default:
-			return c.recordDecision(kind, Decision{
-				Throttle:   true,
-				State:      StateSoftArm,
-				RetryAfter: nonZero(c.cfg.SoftRetryAfter, 50*time.Millisecond),
-				Reason:     reason,
-			})
+			return c.decideNonQueue(kind, state, reason, false, false, globalPressure, false, anyDominant, "", "")
 		}
 	case StateEngaged:
 		switch kind {
 		case KindQueueProducer:
-			return c.recordDecision(kind, Decision{
-				Throttle:   true,
-				State:      StateEngaged,
-				RetryAfter: nonZero(c.cfg.EngagedRetryAfter, 500*time.Millisecond),
-				Reason:     reason,
-			})
+			if queueHardExceeded || queueSoftExceeded {
+				return c.recordDecision(kind, Decision{
+					Throttle: true,
+					State:    StateEngaged,
+					Delay:    nonZero(c.cfg.EngagedDelay, 500*time.Millisecond),
+					Reason:   reason,
+				})
+			}
+			if globalPressure && (queueDominant || !anyDominant) {
+				return c.recordDecision(kind, Decision{
+					Throttle: true,
+					State:    StateEngaged,
+					Delay:    nonZero(c.cfg.EngagedDelay, 500*time.Millisecond),
+					Reason:   reason,
+				})
+			}
+			return c.recordDecision(kind, Decision{Throttle: false, State: state})
 		case KindQueueConsumer, KindQueueAck:
 			if consumerHardExceeded || (consumerLimitExceeded && !needsMoreConsumers) {
 				limitReason := "queue_consumer_soft"
@@ -312,10 +357,10 @@ func (c *Controller) Decide(kind Kind) Decision {
 					limitReason = "queue_consumer_hard"
 				}
 				return c.recordDecision(kind, Decision{
-					Throttle:   true,
-					State:      StateEngaged,
-					RetryAfter: nonZero(c.cfg.RecoveryRetryAfter, 200*time.Millisecond),
-					Reason:     limitReason,
+					Throttle: true,
+					State:    StateEngaged,
+					Delay:    nonZero(c.cfg.RecoveryDelay, 200*time.Millisecond),
+					Reason:   limitReason,
 				})
 			}
 			if c.cfg.QueueSoftLimit == 0 || totalQueue <= c.cfg.QueueSoftLimit {
@@ -328,41 +373,49 @@ func (c *Controller) Decide(kind Kind) Decision {
 				return c.recordDecision(kind, Decision{Throttle: false, State: state})
 			}
 			return c.recordDecision(kind, Decision{
-				Throttle:   true,
-				State:      StateEngaged,
-				RetryAfter: nonZero(c.cfg.RecoveryRetryAfter, 200*time.Millisecond),
-				Reason:     reason,
+				Throttle: true,
+				State:    StateEngaged,
+				Delay:    nonZero(c.cfg.RecoveryDelay, 200*time.Millisecond),
+				Reason:   reason,
 			})
+		case KindLock:
+			return c.decideNonQueue(kind, state, reason, lockSoftExceeded, lockHardExceeded, globalPressure, lockDominant, anyDominant, "lock_inflight_soft", "lock_inflight_hard")
+		case KindQuery:
+			return c.decideNonQueue(kind, state, reason, querySoftExceeded, queryHardExceeded, globalPressure, queryDominant, anyDominant, "query_inflight_soft", "query_inflight_hard")
 		default:
-			return c.recordDecision(kind, Decision{
-				Throttle:   true,
-				State:      StateEngaged,
-				RetryAfter: nonZero(c.cfg.EngagedRetryAfter, 500*time.Millisecond),
-				Reason:     reason,
-			})
+			return c.decideNonQueue(kind, state, reason, false, false, globalPressure, false, anyDominant, "", "")
 		}
 	case StateRecovery:
 		switch kind {
 		case KindQueueProducer:
-			return c.recordDecision(kind, Decision{
-				Throttle:   true,
-				State:      StateRecovery,
-				RetryAfter: nonZero(c.cfg.RecoveryRetryAfter, 200*time.Millisecond),
-				Reason:     reason,
-			})
+			if queueHardExceeded || queueSoftExceeded {
+				return c.recordDecision(kind, Decision{
+					Throttle: true,
+					State:    StateRecovery,
+					Delay:    nonZero(c.cfg.RecoveryDelay, 200*time.Millisecond),
+					Reason:   reason,
+				})
+			}
+			if globalPressure && (queueDominant || !anyDominant) {
+				return c.recordDecision(kind, Decision{
+					Throttle: true,
+					State:    StateRecovery,
+					Delay:    nonZero(c.cfg.RecoveryDelay, 200*time.Millisecond),
+					Reason:   reason,
+				})
+			}
+			return c.recordDecision(kind, Decision{Throttle: false, State: state})
 		case KindQueueConsumer, KindQueueAck:
 			if consumerHardExceeded || (consumerLimitExceeded && !needsMoreConsumers) {
-				limitReason := reason
+				limitReason := "queue_consumer_soft"
 				if consumerHardExceeded {
 					limitReason = "queue_consumer_hard"
-				} else {
-					limitReason = "queue_consumer_soft"
 				}
 				return c.recordDecision(kind, Decision{
-					Throttle:   true,
-					State:      StateRecovery,
-					RetryAfter: nonZero(c.cfg.RecoveryRetryAfter, 200*time.Millisecond),
-					Reason:     limitReason,
+					Throttle: true,
+					State:    StateRecovery,
+					Delay:    nonZero(c.cfg.RecoveryDelay, 200*time.Millisecond),
+					Reason:   limitReason,
 				})
 			}
 			if c.cfg.QueueSoftLimit == 0 || totalQueue <= c.cfg.QueueSoftLimit {
@@ -375,22 +428,74 @@ func (c *Controller) Decide(kind Kind) Decision {
 				return c.recordDecision(kind, Decision{Throttle: false, State: state})
 			}
 			return c.recordDecision(kind, Decision{
-				Throttle:   true,
-				State:      StateRecovery,
-				RetryAfter: nonZero(c.cfg.RecoveryRetryAfter, 200*time.Millisecond),
-				Reason:     reason,
+				Throttle: true,
+				State:    StateRecovery,
+				Delay:    nonZero(c.cfg.RecoveryDelay, 200*time.Millisecond),
+				Reason:   reason,
 			})
+		case KindLock:
+			return c.decideNonQueue(kind, state, reason, lockSoftExceeded, lockHardExceeded, globalPressure, lockDominant, anyDominant, "lock_inflight_soft", "lock_inflight_hard")
+		case KindQuery:
+			return c.decideNonQueue(kind, state, reason, querySoftExceeded, queryHardExceeded, globalPressure, queryDominant, anyDominant, "query_inflight_soft", "query_inflight_hard")
 		default:
-			return c.recordDecision(kind, Decision{
-				Throttle:   true,
-				State:      StateRecovery,
-				RetryAfter: nonZero(c.cfg.RecoveryRetryAfter, 200*time.Millisecond),
-				Reason:     reason,
-			})
+			return c.decideNonQueue(kind, state, reason, false, false, globalPressure, false, anyDominant, "", "")
 		}
 	default:
 		return c.recordDecision(kind, Decision{Throttle: false, State: state})
 	}
+}
+
+// Wait applies throttling by sleeping for a computed duration when pressure is detected.
+// It returns a WaitError only if the computed delay exceeds the configured max wait.
+func (c *Controller) Wait(ctx context.Context, kind Kind) error {
+	if c == nil || !c.cfg.Enabled {
+		return nil
+	}
+	decision := c.Decide(kind)
+	if !decision.Throttle {
+		return nil
+	}
+	delay := c.delayForDecision(decision)
+	if delay <= 0 {
+		return nil
+	}
+	maxWait := c.cfg.MaxWait
+	if maxWait <= 0 {
+		return &WaitError{Delay: delay, Reason: decision.Reason}
+	}
+	waitFor := delay
+	if maxWait > 0 && waitFor > maxWait {
+		waitFor = maxWait
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctxDeadlineSoon := false
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return ctx.Err()
+		}
+		if remaining < delay {
+			ctxDeadlineSoon = true
+		}
+		if remaining < waitFor {
+			waitFor = remaining
+		}
+	}
+	if err := sleepWithContext(ctx, waitFor); err != nil {
+		return err
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if ctxDeadlineSoon {
+		return context.DeadlineExceeded
+	}
+	if maxWait > 0 && delay > maxWait {
+		return &WaitError{Delay: delay, Reason: decision.Reason}
+	}
+	return nil
 }
 
 // State returns the current QRF posture.
@@ -418,7 +523,7 @@ func (c *Controller) recordDecision(kind Kind, decision Decision) Decision {
 	if c == nil || c.metrics == nil {
 		return decision
 	}
-	c.metrics.recordDecision(nil, kind, decision)
+	c.metrics.recordDecision(context.TODO(), kind, decision)
 	return decision
 }
 
@@ -432,6 +537,9 @@ func (c *Controller) hardBreach(totalQueue int64, s Snapshot) (bool, string) {
 	}
 	if c.cfg.LockHardLimit > 0 && s.LockInflight >= c.cfg.LockHardLimit {
 		return true, "lock_inflight_hard"
+	}
+	if c.cfg.QueryHardLimit > 0 && s.QueryInflight >= c.cfg.QueryHardLimit {
+		return true, "query_inflight_hard"
 	}
 	if c.cfg.MemoryHardLimitPercent > 0 && memPercent >= c.cfg.MemoryHardLimitPercent {
 		return true, "memory_hard"
@@ -465,6 +573,9 @@ func (c *Controller) softBreach(totalQueue int64, s Snapshot) (bool, string) {
 	if c.cfg.LockSoftLimit > 0 && s.LockInflight >= c.cfg.LockSoftLimit {
 		return true, "lock_inflight_soft"
 	}
+	if c.cfg.QuerySoftLimit > 0 && s.QueryInflight >= c.cfg.QuerySoftLimit {
+		return true, "query_inflight_soft"
+	}
 	if c.cfg.MemorySoftLimitPercent > 0 && memPercent >= c.cfg.MemorySoftLimitPercent {
 		return true, "memory_soft"
 	}
@@ -494,11 +605,12 @@ func (c *Controller) isHealthy(totalQueue int64, s Snapshot) bool {
 	}
 	consumerHealthy := c.consumerHealthy(s)
 	lockHealthy := c.cfg.LockSoftLimit == 0 || s.LockInflight <= maxInt64(1, c.cfg.LockSoftLimit/2)
+	queryHealthy := c.cfg.QuerySoftLimit == 0 || s.QueryInflight <= maxInt64(1, c.cfg.QuerySoftLimit/2)
 	memHealthy := (c.cfg.MemorySoftLimitPercent == 0 || memPercent <= percentRecoveryTarget(c.cfg.MemorySoftLimitPercent)) && (c.cfg.MemorySoftLimitBytes == 0 || s.RSSBytes <= c.cfg.MemorySoftLimitBytes/2)
 	swapHealthy := (c.cfg.SwapSoftLimitPercent == 0 || s.SystemSwapUsedPercent <= percentRecoveryTarget(c.cfg.SwapSoftLimitPercent)) && (c.cfg.SwapSoftLimitBytes == 0 || s.SwapBytes <= c.cfg.SwapSoftLimitBytes/2)
 	cpuHealthy := c.cfg.CPUPercentSoftLimit == 0 || s.SystemCPUPercent <= percentRecoveryTarget(c.cfg.CPUPercentSoftLimit)
 	loadHealthy := c.cfg.LoadSoftLimitMultiplier == 0 || s.Load1Multiplier <= multiplierRecoveryTarget(c.cfg.LoadSoftLimitMultiplier)
-	return queueHealthy && consumerHealthy && lockHealthy && memHealthy && swapHealthy && cpuHealthy && loadHealthy
+	return queueHealthy && consumerHealthy && lockHealthy && queryHealthy && memHealthy && swapHealthy && cpuHealthy && loadHealthy
 }
 
 func (c *Controller) logTransition(prev, next State, reason string, snapshot Snapshot) {
@@ -512,6 +624,7 @@ func (c *Controller) logTransition(prev, next State, reason string, snapshot Sna
 			"queue_consumer_inflight", snapshot.QueueConsumerInflight,
 			"queue_ack_inflight", snapshot.QueueAckInflight,
 			"lock_inflight", snapshot.LockInflight,
+			"query_inflight", snapshot.QueryInflight,
 			"rss_bytes", snapshot.RSSBytes,
 			"swap_bytes", snapshot.SwapBytes,
 			"system_memory_percent", snapshot.SystemMemoryUsedPercent,
@@ -535,6 +648,7 @@ func (c *Controller) logTransition(prev, next State, reason string, snapshot Sna
 			"queue_consumer_inflight", snapshot.QueueConsumerInflight,
 			"queue_ack_inflight", snapshot.QueueAckInflight,
 			"lock_inflight", snapshot.LockInflight,
+			"query_inflight", snapshot.QueryInflight,
 			"rss_bytes", snapshot.RSSBytes,
 			"swap_bytes", snapshot.SwapBytes,
 			"system_memory_percent", snapshot.SystemMemoryUsedPercent,
@@ -558,6 +672,7 @@ func (c *Controller) logTransition(prev, next State, reason string, snapshot Sna
 			"queue_consumer_inflight", snapshot.QueueConsumerInflight,
 			"queue_ack_inflight", snapshot.QueueAckInflight,
 			"lock_inflight", snapshot.LockInflight,
+			"query_inflight", snapshot.QueryInflight,
 			"rss_bytes", snapshot.RSSBytes,
 			"swap_bytes", snapshot.SwapBytes,
 			"system_memory_percent", snapshot.SystemMemoryUsedPercent,
@@ -581,6 +696,7 @@ func (c *Controller) logTransition(prev, next State, reason string, snapshot Sna
 			"queue_consumer_inflight", snapshot.QueueConsumerInflight,
 			"queue_ack_inflight", snapshot.QueueAckInflight,
 			"lock_inflight", snapshot.LockInflight,
+			"query_inflight", snapshot.QueryInflight,
 			"rss_bytes", snapshot.RSSBytes,
 			"swap_bytes", snapshot.SwapBytes,
 			"system_memory_percent", snapshot.SystemMemoryUsedPercent,
@@ -673,4 +789,246 @@ func (c *Controller) consumerHealthy(s Snapshot) bool {
 		return true
 	}
 	return s.QueueConsumerInflight <= maxInt64(1, limit/2)
+}
+
+func (c *Controller) queueSoftExceeded(totalQueue int64) bool {
+	return c.cfg.QueueSoftLimit > 0 && totalQueue >= c.cfg.QueueSoftLimit
+}
+
+func (c *Controller) queueHardExceeded(totalQueue int64) bool {
+	return c.cfg.QueueHardLimit > 0 && totalQueue >= c.cfg.QueueHardLimit
+}
+
+func (c *Controller) lockSoftExceeded(s Snapshot) bool {
+	return c.cfg.LockSoftLimit > 0 && s.LockInflight >= c.cfg.LockSoftLimit
+}
+
+func (c *Controller) lockHardExceeded(s Snapshot) bool {
+	return c.cfg.LockHardLimit > 0 && s.LockInflight >= c.cfg.LockHardLimit
+}
+
+func (c *Controller) querySoftExceeded(s Snapshot) bool {
+	return c.cfg.QuerySoftLimit > 0 && s.QueryInflight >= c.cfg.QuerySoftLimit
+}
+
+func (c *Controller) queryHardExceeded(s Snapshot) bool {
+	return c.cfg.QueryHardLimit > 0 && s.QueryInflight >= c.cfg.QueryHardLimit
+}
+
+func (c *Controller) globalSoftExceeded(s Snapshot) bool {
+	memPercent := c.effectiveMemoryPercent(s)
+	if c.cfg.MemorySoftLimitPercent > 0 && memPercent >= c.cfg.MemorySoftLimitPercent {
+		return true
+	}
+	if c.cfg.MemorySoftLimitBytes > 0 && s.RSSBytes >= c.cfg.MemorySoftLimitBytes {
+		return true
+	}
+	if c.cfg.SwapSoftLimitPercent > 0 && s.SystemSwapUsedPercent >= c.cfg.SwapSoftLimitPercent {
+		return true
+	}
+	if c.cfg.SwapSoftLimitBytes > 0 && s.SwapBytes >= c.cfg.SwapSoftLimitBytes {
+		return true
+	}
+	if c.cfg.CPUPercentSoftLimit > 0 && s.SystemCPUPercent >= c.cfg.CPUPercentSoftLimit {
+		return true
+	}
+	if c.cfg.LoadSoftLimitMultiplier > 0 && s.Load1Multiplier >= c.cfg.LoadSoftLimitMultiplier {
+		return true
+	}
+	return false
+}
+
+func (c *Controller) globalHardExceeded(s Snapshot) bool {
+	memPercent := c.effectiveMemoryPercent(s)
+	if c.cfg.MemoryHardLimitPercent > 0 && memPercent >= c.cfg.MemoryHardLimitPercent {
+		return true
+	}
+	if c.cfg.MemoryHardLimitBytes > 0 && s.RSSBytes >= c.cfg.MemoryHardLimitBytes {
+		return true
+	}
+	if c.cfg.SwapHardLimitPercent > 0 && s.SystemSwapUsedPercent >= c.cfg.SwapHardLimitPercent {
+		return true
+	}
+	if c.cfg.SwapHardLimitBytes > 0 && s.SwapBytes >= c.cfg.SwapHardLimitBytes {
+		return true
+	}
+	if c.cfg.CPUPercentHardLimit > 0 && s.SystemCPUPercent >= c.cfg.CPUPercentHardLimit {
+		return true
+	}
+	if c.cfg.LoadHardLimitMultiplier > 0 && s.Load1Multiplier >= c.cfg.LoadHardLimitMultiplier {
+		return true
+	}
+	return false
+}
+
+func dominantKinds(s Snapshot) (queue bool, lock bool, query bool) {
+	queueTotal := s.QueueProducerInflight + s.QueueConsumerInflight + s.QueueAckInflight
+	max := queueTotal
+	if s.LockInflight > max {
+		max = s.LockInflight
+	}
+	if s.QueryInflight > max {
+		max = s.QueryInflight
+	}
+	if max == 0 {
+		return false, false, false
+	}
+	return queueTotal == max, s.LockInflight == max, s.QueryInflight == max
+}
+
+func (c *Controller) decideNonQueue(kind Kind, state State, reason string, softExceeded, hardExceeded bool, globalPressure bool, dominant bool, anyDominant bool, softReason, hardReason string) Decision {
+	if hardExceeded {
+		return c.recordDecision(kind, Decision{
+			Throttle: true,
+			State:    state,
+			Delay:    baseDelayForState(c.cfg, state),
+			Reason:   hardReason,
+		})
+	}
+	if softExceeded {
+		return c.recordDecision(kind, Decision{
+			Throttle: true,
+			State:    state,
+			Delay:    baseDelayForState(c.cfg, state),
+			Reason:   softReason,
+		})
+	}
+	if globalPressure && (dominant || !anyDominant) {
+		return c.recordDecision(kind, Decision{
+			Throttle: true,
+			State:    state,
+			Delay:    baseDelayForState(c.cfg, state),
+			Reason:   reason,
+		})
+	}
+	return c.recordDecision(kind, Decision{Throttle: false, State: state})
+}
+
+func baseDelayForState(cfg Config, state State) time.Duration {
+	switch state {
+	case StateSoftArm:
+		return nonZero(cfg.SoftDelay, 50*time.Millisecond)
+	case StateEngaged:
+		return nonZero(cfg.EngagedDelay, 500*time.Millisecond)
+	case StateRecovery:
+		return nonZero(cfg.RecoveryDelay, 200*time.Millisecond)
+	default:
+		return 0
+	}
+}
+
+func sleepWithContext(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (c *Controller) delayForDecision(decision Decision) time.Duration {
+	base := decision.Delay
+	if base <= 0 {
+		base = baseDelayForState(c.cfg, decision.State)
+	}
+	if base <= 0 {
+		return 0
+	}
+	pressure := c.pressureForReason(decision.Reason)
+	if pressure <= 0 {
+		pressure = 0.1
+	}
+	if pressure > 1 {
+		pressure = 1
+	}
+	minDelay := minDelayForState(decision.State, base)
+	scaled := time.Duration(float64(base) * pressure)
+	if scaled < minDelay {
+		scaled = minDelay
+	}
+	if scaled > base {
+		scaled = base
+	}
+	return scaled
+}
+
+func minDelayForState(state State, base time.Duration) time.Duration {
+	if base <= 0 {
+		return 0
+	}
+	min := base / 10
+	switch state {
+	case StateEngaged:
+		if min < 10*time.Millisecond {
+			min = 10 * time.Millisecond
+		}
+	case StateRecovery:
+		if min < 5*time.Millisecond {
+			min = 5 * time.Millisecond
+		}
+	default:
+		if min < 2*time.Millisecond {
+			min = 2 * time.Millisecond
+		}
+	}
+	if min > base {
+		return base
+	}
+	return min
+}
+
+func (c *Controller) pressureForReason(reason string) float64 {
+	s := c.Snapshot()
+	switch reason {
+	case "queue_inflight_soft", "queue_inflight_hard":
+		total := s.QueueProducerInflight + s.QueueConsumerInflight + s.QueueAckInflight
+		return ratio(float64(total), float64(c.cfg.QueueSoftLimit), float64(c.cfg.QueueHardLimit))
+	case "queue_consumer_soft", "queue_consumer_hard":
+		return ratio(float64(s.QueueConsumerInflight), float64(c.cfg.QueueConsumerSoftLimit), float64(c.cfg.QueueConsumerHardLimit))
+	case "lock_inflight_soft", "lock_inflight_hard":
+		return ratio(float64(s.LockInflight), float64(c.cfg.LockSoftLimit), float64(c.cfg.LockHardLimit))
+	case "query_inflight_soft", "query_inflight_hard":
+		return ratio(float64(s.QueryInflight), float64(c.cfg.QuerySoftLimit), float64(c.cfg.QueryHardLimit))
+	case "memory_soft", "memory_hard":
+		memPercent := c.effectiveMemoryPercent(s)
+		if c.cfg.MemorySoftLimitPercent > 0 || c.cfg.MemoryHardLimitPercent > 0 {
+			return ratio(memPercent, c.cfg.MemorySoftLimitPercent, c.cfg.MemoryHardLimitPercent)
+		}
+		return ratio(float64(s.RSSBytes), float64(c.cfg.MemorySoftLimitBytes), float64(c.cfg.MemoryHardLimitBytes))
+	case "swap_soft", "swap_hard":
+		if c.cfg.SwapSoftLimitPercent > 0 || c.cfg.SwapHardLimitPercent > 0 {
+			return ratio(s.SystemSwapUsedPercent, c.cfg.SwapSoftLimitPercent, c.cfg.SwapHardLimitPercent)
+		}
+		return ratio(float64(s.SwapBytes), float64(c.cfg.SwapSoftLimitBytes), float64(c.cfg.SwapHardLimitBytes))
+	case "cpu_soft", "cpu_hard":
+		return ratio(s.SystemCPUPercent, c.cfg.CPUPercentSoftLimit, c.cfg.CPUPercentHardLimit)
+	case "load_soft", "load_hard":
+		return ratio(s.Load1Multiplier, c.cfg.LoadSoftLimitMultiplier, c.cfg.LoadHardLimitMultiplier)
+	default:
+		return 1
+	}
+}
+
+func ratio(value, soft, hard float64) float64 {
+	if soft <= 0 && hard <= 0 {
+		return 1
+	}
+	if soft <= 0 && hard > 0 {
+		soft = hard / 2
+	}
+	if hard <= soft {
+		if soft == 0 {
+			return 1
+		}
+		hard = soft * 2
+	}
+	if value <= soft {
+		return 0
+	}
+	return math.Max(0, math.Min(1, (value-soft)/(hard-soft)))
 }

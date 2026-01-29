@@ -27,6 +27,7 @@ import (
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/tcclient"
 	"pkt.systems/lockd/internal/tccluster"
+	"pkt.systems/lockd/internal/uuidv7"
 	"pkt.systems/lockd/namespaces"
 	"pkt.systems/lockd/tlsutil"
 )
@@ -226,48 +227,49 @@ func JoinClusterOnce(t testing.TB, servers []*lockd.TestServer, endpoints []stri
 }
 
 func joinClusterOnce(t testing.TB, servers []*lockd.TestServer, endpoints []string, clientFn HTTPClientFunc) error {
-	expected := normalizeEndpoints(endpoints)
-	if len(expected) == 0 {
+	targets := normalizeEndpoints(endpoints)
+	if len(targets) == 0 {
 		return fmt.Errorf("join cluster: endpoints required")
 	}
-	serverByEndpoint := make(map[string]*lockd.TestServer, len(servers))
 	for _, ts := range servers {
 		if ts == nil {
 			return fmt.Errorf("join cluster: nil server")
 		}
-		serverByEndpoint[normalizeEndpoint(ts.URL())] = ts
-	}
-	for _, endpoint := range expected {
-		ts := serverByEndpoint[endpoint]
-		if ts == nil {
-			return fmt.Errorf("join cluster: endpoint %s missing from servers", endpoint)
+		self := normalizeEndpoint(ts.URL())
+		if self == "" {
+			return fmt.Errorf("join cluster: server endpoint required")
 		}
-		client := http.DefaultClient
+		var client *http.Client
 		if clientFn != nil {
 			client = clientFn(t, ts)
 		} else {
 			client = serverHTTPClient(t, ts)
 		}
-		req := api.TCClusterAnnounceRequest{SelfEndpoint: endpoint}
+		req := api.TCClusterAnnounceRequest{SelfEndpoint: self}
 		body, err := json.Marshal(req)
 		if err != nil {
 			return fmt.Errorf("join cluster: marshal: %w", err)
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, ts.URL()+"/v1/tc/cluster/announce", bytes.NewReader(body))
-		if err != nil {
+		for _, target := range targets {
+			if target == "" {
+				continue
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, target+"/v1/tc/cluster/announce", bytes.NewReader(body))
+			if err != nil {
+				cancel()
+				return fmt.Errorf("join cluster: request: %w", err)
+			}
+			httpReq.Header.Set("Content-Type", "application/json")
+			resp, err := client.Do(httpReq)
 			cancel()
-			return fmt.Errorf("join cluster: request: %w", err)
-		}
-		httpReq.Header.Set("Content-Type", "application/json")
-		resp, err := client.Do(httpReq)
-		cancel()
-		if err != nil {
-			return fmt.Errorf("join cluster: %w", err)
-		}
-		_ = resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("join cluster: status=%d", resp.StatusCode)
+			if err != nil {
+				return fmt.Errorf("join cluster: %w", err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				return fmt.Errorf("join cluster: status=%d", resp.StatusCode)
+			}
 		}
 	}
 	return nil
@@ -310,7 +312,7 @@ func leaveClusterOnce(t testing.TB, servers []*lockd.TestServer, endpoints []str
 		if ts == nil {
 			return fmt.Errorf("leave cluster: endpoint %s missing from servers", endpoint)
 		}
-		client := http.DefaultClient
+		var client *http.Client
 		if clientFn != nil {
 			client = clientFn(t, ts)
 		} else {
@@ -423,7 +425,7 @@ func WaitForLeaderOn(t testing.TB, ts *lockd.TestServer, clientFn HTTPClientFunc
 	deadline := time.Now().Add(timeout)
 	for {
 		now := time.Now().UnixMilli()
-		client := http.DefaultClient
+		var client *http.Client
 		if clientFn != nil {
 			client = clientFn(t, ts)
 		} else {
@@ -475,7 +477,7 @@ func WaitForLeaderUnavailable(t testing.TB, ts *lockd.TestServer, clientFn HTTPC
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 	for {
-		client := http.DefaultClient
+		var client *http.Client
 		if clientFn != nil {
 			client = clientFn(t, ts)
 		} else {
@@ -523,7 +525,7 @@ func fetchLeaderResponse(t testing.TB, ts *lockd.TestServer, clientFn HTTPClient
 	if ts == nil {
 		return api.TCLeaderResponse{}, fmt.Errorf("leader response: nil server")
 	}
-	client := http.DefaultClient
+	var client *http.Client
 	if clientFn != nil {
 		client = clientFn(t, ts)
 	} else {
@@ -558,8 +560,123 @@ func fetchLeaderResponse(t testing.TB, ts *lockd.TestServer, clientFn HTTPClient
 // WaitForLeaderAll waits until every server reports the same non-expired leader.
 func WaitForLeaderAll(t testing.TB, servers []*lockd.TestServer, clientFn HTTPClientFunc, timeout time.Duration) (string, uint64) {
 	t.Helper()
+	leader, term, ok, lastErr := waitForLeaderAll(t, servers, clientFn, timeout)
+	if ok {
+		return leader, term
+	}
+	if lastErr != nil {
+		t.Fatalf("wait leader all: timed out: %v", lastErr)
+	}
+	t.Fatalf("wait leader all: timed out")
+	return "", 0
+}
+
+// WaitForLeaderAllChange waits until every server reports the same leader different from prev.
+func WaitForLeaderAllChange(t testing.TB, servers []*lockd.TestServer, clientFn HTTPClientFunc, prev string, timeout time.Duration) (string, uint64) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	var candidate string
+	var candidateTerm uint64
+	stable := 0
+	const stableRequired = 3
+	for {
+		if time.Now().After(deadline) {
+			diag := summarizeLeaderStatuses(t, servers, clientFn)
+			if lastErr != nil {
+				t.Fatalf("wait leader all change: timed out (prev=%s): %v\n%s", prev, lastErr, diag)
+			}
+			t.Fatalf("wait leader all change: timed out (prev=%s)\n%s", prev, diag)
+		}
+		leader, term, ok := leaderConsensus(t, servers, clientFn)
+		if ok && leader != "" && leader != prev {
+			if leader == candidate && term == candidateTerm {
+				stable++
+			} else {
+				candidate = leader
+				candidateTerm = term
+				stable = 1
+			}
+			if stable >= stableRequired {
+				remaining := time.Until(deadline)
+				confirmTimeout := 10 * time.Second
+				if remaining < confirmTimeout {
+					confirmTimeout = remaining
+				}
+				if confirmTimeout < time.Second {
+					confirmTimeout = time.Second
+				}
+				leaderAll, termAll, okAll, err := waitForLeaderAll(t, servers, clientFn, confirmTimeout)
+				if okAll && leaderAll == candidate && termAll == candidateTerm {
+					return leaderAll, termAll
+				}
+				if err != nil {
+					lastErr = err
+				}
+			}
+		} else {
+			candidate = ""
+			candidateTerm = 0
+			stable = 0
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func summarizeLeaderStatuses(t testing.TB, servers []*lockd.TestServer, clientFn HTTPClientFunc) string {
+	t.Helper()
+	var b strings.Builder
+	b.WriteString("leader status summary:\n")
+	for _, ts := range servers {
+		if ts == nil {
+			continue
+		}
+		resp, err := fetchLeaderResponse(t, ts, clientFn)
+		if err != nil {
+			fmt.Fprintf(&b, "  %s: %v\n", ts.URL(), err)
+			continue
+		}
+		fmt.Fprintf(&b, "  %s: leader=%s term=%d expires=%d\n", ts.URL(), resp.LeaderEndpoint, resp.Term, resp.ExpiresAtUnix)
+	}
+	return b.String()
+}
+
+func leaderExpirySlack(t testing.TB, servers []*lockd.TestServer, clientFn HTTPClientFunc, prev string) time.Duration {
+	t.Helper()
+	if strings.TrimSpace(prev) == "" {
+		return 0
+	}
+	now := time.Now().UnixMilli()
+	var maxRemaining int64
+	for _, ts := range servers {
+		if ts == nil {
+			continue
+		}
+		resp, err := fetchLeaderResponse(t, ts, clientFn)
+		if err != nil {
+			continue
+		}
+		if strings.TrimSpace(resp.LeaderEndpoint) != strings.TrimSpace(prev) {
+			continue
+		}
+		if resp.ExpiresAtUnix <= now {
+			continue
+		}
+		remaining := resp.ExpiresAtUnix - now
+		if remaining > maxRemaining {
+			maxRemaining = remaining
+		}
+	}
+	if maxRemaining <= 0 {
+		return 0
+	}
+	return time.Duration(maxRemaining) * time.Millisecond
+}
+
+func waitForLeaderAll(t testing.TB, servers []*lockd.TestServer, clientFn HTTPClientFunc, timeout time.Duration) (string, uint64, bool, error) {
+	t.Helper()
 	if len(servers) == 0 {
-		t.Fatalf("wait leader all: no servers")
+		return "", 0, false, fmt.Errorf("no servers")
 	}
 	deadline := time.Now().Add(timeout)
 	var lastErr error
@@ -574,7 +691,7 @@ func WaitForLeaderAll(t testing.TB, servers []*lockd.TestServer, clientFn HTTPCl
 				lastErr = fmt.Errorf("nil server")
 				break
 			}
-			client := http.DefaultClient
+			var client *http.Client
 			if clientFn != nil {
 				client = clientFn(t, ts)
 			} else {
@@ -642,30 +759,10 @@ func WaitForLeaderAll(t testing.TB, servers []*lockd.TestServer, clientFn HTTPCl
 			}
 		}
 		if ok && leader != "" {
-			return leader, term
+			return leader, term, true, nil
 		}
 		if time.Now().After(deadline) {
-			if lastErr != nil {
-				t.Fatalf("wait leader all: timed out: %v", lastErr)
-			}
-			t.Fatalf("wait leader all: timed out")
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-}
-
-// WaitForLeaderAllChange waits until every server reports the same leader different from prev.
-func WaitForLeaderAllChange(t testing.TB, servers []*lockd.TestServer, clientFn HTTPClientFunc, prev string, timeout time.Duration) (string, uint64) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			t.Fatalf("wait leader all change: timed out (prev=%s)", prev)
-		}
-		leader, term := WaitForLeaderAll(t, servers, clientFn, remaining)
-		if leader != "" && leader != prev {
-			return leader, term
+			return "", 0, false, lastErr
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -700,7 +797,7 @@ func leaderConsensus(t testing.TB, servers []*lockd.TestServer, clientFn HTTPCli
 			continue
 		}
 		total++
-		client := http.DefaultClient
+		var client *http.Client
 		if clientFn != nil {
 			client = clientFn(t, ts)
 		} else {
@@ -783,7 +880,7 @@ func allNoLeader(t testing.TB, servers []*lockd.TestServer, clientFn HTTPClientF
 		if ts == nil {
 			continue
 		}
-		client := http.DefaultClient
+		var client *http.Client
 		if clientFn != nil {
 			client = clientFn(t, ts)
 		} else {
@@ -833,6 +930,33 @@ func NonLeader(servers []*lockd.TestServer, leaderEndpoint string) *lockd.TestSe
 		}
 	}
 	return nil
+}
+
+// ActiveNonLeader returns an active non-leader server, falling back to the leader when none respond.
+func ActiveNonLeader(ctx context.Context, servers []*lockd.TestServer, leaderEndpoint string) *lockd.TestServer {
+	if len(servers) == 0 {
+		return nil
+	}
+	candidates := make([]*lockd.TestServer, 0, len(servers))
+	for _, ts := range servers {
+		if ts == nil || ts.URL() == leaderEndpoint {
+			continue
+		}
+		candidates = append(candidates, ts)
+	}
+	if len(candidates) == 0 {
+		return serverByEndpoint(servers, leaderEndpoint)
+	}
+	active := findActiveServer(ctx, candidates)
+	if active != nil {
+		return active
+	}
+	if leader := serverByEndpoint(servers, leaderEndpoint); leader != nil {
+		if findActiveServer(ctx, []*lockd.TestServer{leader}) != nil {
+			return leader
+		}
+	}
+	return candidates[0]
 }
 
 // FanoutGate coordinates pausing fan-out after local apply.
@@ -888,6 +1012,7 @@ func (g *FanoutGate) WaitForStart(t testing.TB, timeout time.Duration) {
 	t.Helper()
 	if g == nil {
 		t.Fatalf("fanout gate required")
+		return
 	}
 	g.mu.Lock()
 	started := g.started
@@ -1238,7 +1363,21 @@ func RunLeaderFailoverScenarioMulti(t testing.TB, tcs []*lockd.TestServer, islan
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 
-	clients, hashes, keys := collectIslandInputs(t, ctx, islands, tcHTTP)
+	clients, hashes, keys := collectIslandInputs(ctx, t, islands, tcs, tcHTTP)
+	keyByHash := make(map[string]string, len(hashes))
+	clientByHash := make(map[string]*lockdclient.Client, len(hashes))
+	clientByKey := make(map[string]*lockdclient.Client, len(keys))
+	for i, hash := range hashes {
+		if strings.TrimSpace(hash) == "" {
+			t.Fatalf("scenario: backend hash missing for key %q", keys[i])
+		}
+		if keyByHash[hash] != "" {
+			t.Fatalf("scenario: duplicate backend hash %q", hash)
+		}
+		keyByHash[hash] = keys[i]
+		clientByHash[hash] = clients[i]
+		clientByKey[keys[i]] = clients[i]
+	}
 	const scenarioTTLSeconds = 90
 
 	lease0, err := clients[0].Acquire(ctx, api.AcquireRequest{
@@ -1263,11 +1402,15 @@ func RunLeaderFailoverScenarioMulti(t testing.TB, tcs []*lockd.TestServer, islan
 		if err != nil {
 			t.Fatalf("scenario: acquire %d: %v", i, err)
 		}
-		if err := lease.Save(ctx, map[string]any{"value": fmt.Sprintf("island-%d", i)}); err != nil {
+		if err := retryOnNodePassive(ctx, func() error {
+			return lease.Save(ctx, map[string]any{"value": fmt.Sprintf("island-%d", i)})
+		}); err != nil {
 			t.Fatalf("scenario: save %d: %v", i, err)
 		}
 	}
-	if err := lease0.Save(ctx, map[string]any{"value": "island-0"}); err != nil {
+	if err := retryOnNodePassive(ctx, func() error {
+		return lease0.Save(ctx, map[string]any{"value": "island-0"})
+	}); err != nil {
 		t.Fatalf("scenario: save 0: %v", err)
 	}
 
@@ -1298,7 +1441,9 @@ func RunLeaderFailoverScenarioMulti(t testing.TB, tcs []*lockd.TestServer, islan
 		if err != nil {
 			t.Fatalf("scenario: acquire pending %d: %v", target, err)
 		}
-		if err := lease.Save(ctx, map[string]any{"value": "pending"}); err != nil {
+		if err := retryOnNodePassive(ctx, func() error {
+			return lease.Save(ctx, map[string]any{"value": "pending"})
+		}); err != nil {
 			t.Fatalf("scenario: save pending %d: %v", target, err)
 		}
 		pendingLeases = append(pendingLeases, pendingLeaseInfo{
@@ -1323,13 +1468,13 @@ func RunLeaderFailoverScenarioMulti(t testing.TB, tcs []*lockd.TestServer, islan
 	}
 	newLeader, _ := WaitForLeaderChange(t, alive, tcHTTP, leaderEndpoint, 45*time.Second)
 
-	aliveClients := make([]*lockdclient.Client, 0, len(hashes))
+	aliveByHash := make(map[string]*lockd.TestServer, len(hashes))
 	for _, hash := range hashes {
 		aliveIsland := serverForHash(alive, hash)
 		if aliveIsland == nil {
 			t.Fatalf("scenario: missing live server for backend %q", hash)
 		}
-		aliveClients = append(aliveClients, ensureClient(t, aliveIsland))
+		aliveByHash[hash] = aliveIsland
 	}
 
 	for _, tc := range alive {
@@ -1341,7 +1486,7 @@ func RunLeaderFailoverScenarioMulti(t testing.TB, tcs []*lockd.TestServer, islan
 	WaitForRMRegistry(t, alive, tcHTTP, expectedRMs, 15*time.Second)
 
 	newKey := fmt.Sprintf("archi-new-%d", time.Now().UnixNano())
-	_, err = aliveClients[len(aliveClients)-1].Acquire(ctx, api.AcquireRequest{
+	_, err = clientByHash[hashes[len(hashes)-1]].Acquire(ctx, api.AcquireRequest{
 		Namespace:  namespaces.Default,
 		Key:        newKey,
 		Owner:      "archipelago-new",
@@ -1352,11 +1497,16 @@ func RunLeaderFailoverScenarioMulti(t testing.TB, tcs []*lockd.TestServer, islan
 		t.Fatalf("scenario: acquire new txn: %v", err)
 	}
 
-	nonLeader := NonLeader(alive, newLeader)
+	pickCtx, pickCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	nonLeader := ActiveNonLeader(pickCtx, alive, newLeader)
+	pickCancel()
 	if nonLeader == nil {
 		t.Fatalf("scenario: non-leader not found")
 	}
-	WaitForLeaderOn(t, nonLeader, tcHTTP, 20*time.Second)
+	observedLeader, _ := WaitForLeaderOn(t, nonLeader, tcHTTP, 20*time.Second)
+	if strings.TrimSpace(observedLeader) != "" && observedLeader != newLeader {
+		newLeader = observedLeader
+	}
 	tcCli := tcClient(t, nonLeader)
 
 	participants := make([]api.TxnParticipant, 0, len(keys))
@@ -1372,11 +1522,33 @@ func RunLeaderFailoverScenarioMulti(t testing.TB, tcs []*lockd.TestServer, islan
 		Participants: participants,
 	}
 	if _, err := tcCli.TxnCommit(ctx, req); err != nil {
-		t.Fatalf("scenario: txn commit: %v", err)
+		var apiErr *lockdclient.APIError
+		if errors.As(err, &apiErr) && apiErr.Response.ErrorCode == "node_passive" {
+			leaderTS := serverByEndpoint(alive, newLeader)
+			if leaderTS == nil {
+				leaderTS = serverByEndpoint(tcs, newLeader)
+			}
+			if leaderTS == nil {
+				t.Fatalf("scenario: leader %q not found for commit retry", newLeader)
+			}
+			if _, retryErr := tcClient(t, leaderTS).TxnCommit(ctx, req); retryErr != nil {
+				t.Fatalf("scenario: txn commit retry: %v", retryErr)
+			}
+		} else {
+			t.Fatalf("scenario: txn commit: %v", err)
+		}
 	}
 
-	for i, cli := range aliveClients {
-		WaitForState(t, cli, keys[i], true, 20*time.Second)
+	for _, hash := range hashes {
+		key := keyByHash[hash]
+		if key == "" {
+			t.Fatalf("scenario: missing key for backend %q", hash)
+		}
+		cli := clientByKey[key]
+		if cli == nil {
+			t.Fatalf("scenario: missing client for backend %q", hash)
+		}
+		WaitForState(t, cli, key, true, 20*time.Second)
 	}
 	if len(pendingLeases) > 0 {
 		for _, pending := range pendingLeases {
@@ -1442,7 +1614,22 @@ func RunNonLeaderForwardUnavailableScenario(t testing.TB, tcs []*lockd.TestServe
 	if leaderTS == nil {
 		t.Fatalf("scenario: leader %q not found", leaderEndpoint)
 	}
-	nonLeader := NonLeader(tcs, leaderEndpoint)
+	activeCtx, activeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer activeCancel()
+	for findActiveServer(activeCtx, []*lockd.TestServer{leaderTS}) == nil {
+		if activeCtx.Err() != nil {
+			t.Fatalf("scenario: leader %q not active before forward", leaderEndpoint)
+		}
+		time.Sleep(200 * time.Millisecond)
+		leaderEndpoint, _ = WaitForLeaderAll(t, tcs, tcHTTP, 5*time.Second)
+		leaderTS = serverByEndpoint(tcs, leaderEndpoint)
+		if leaderTS == nil {
+			t.Fatalf("scenario: leader %q not found after refresh", leaderEndpoint)
+		}
+	}
+	pickCtx, pickCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	nonLeader := ActiveNonLeader(pickCtx, tcs, leaderEndpoint)
+	pickCancel()
 	if nonLeader == nil {
 		t.Fatalf("scenario: non-leader not found")
 	}
@@ -1460,7 +1647,9 @@ func RunNonLeaderForwardUnavailableScenario(t testing.TB, tcs []*lockd.TestServe
 					if leaderTS == nil {
 						t.Fatalf("scenario: leader %q not found after lease refresh", leaderEndpoint)
 					}
-					nonLeader = NonLeader(tcs, leaderEndpoint)
+					pickCtx, pickCancel := context.WithTimeout(context.Background(), 5*time.Second)
+					nonLeader = ActiveNonLeader(pickCtx, tcs, leaderEndpoint)
+					pickCancel()
 					if nonLeader == nil {
 						t.Fatalf("scenario: non-leader not found after lease refresh")
 					}
@@ -1495,9 +1684,45 @@ func RunNonLeaderForwardUnavailableScenario(t testing.TB, tcs []*lockd.TestServe
 	if hash == "" {
 		t.Fatalf("scenario: backend hash empty")
 	}
+	forwardCLI := ensureClient(t, island)
+	forwardServers := serversForBackendHash(tcs, hash)
+	if len(forwardServers) == 0 {
+		forwardServers = tcs
+	}
+	forwardEndpoints := endpointsForServers(forwardServers)
+	activeEndpoint := ""
+	if active := findActiveServer(ctx, forwardServers); active != nil {
+		activeEndpoint = strings.TrimSpace(active.URL())
+	}
+	if island != nil {
+		islandEndpoint := strings.TrimSpace(island.URL())
+		if islandEndpoint != "" {
+			ordered := make([]string, 0, len(forwardEndpoints)+2)
+			if activeEndpoint != "" {
+				ordered = append(ordered, activeEndpoint)
+			}
+			if islandEndpoint != "" && islandEndpoint != activeEndpoint {
+				ordered = append(ordered, islandEndpoint)
+			}
+			for _, endpoint := range forwardEndpoints {
+				if endpoint == islandEndpoint || endpoint == activeEndpoint {
+					continue
+				}
+				ordered = append(ordered, endpoint)
+			}
+			forwardEndpoints = ordered
+		}
+	}
+	if len(forwardEndpoints) > 0 {
+		cli, err := island.NewEndpointsClient(forwardEndpoints, lockdclient.WithEndpointShuffle(false))
+		if err != nil {
+			t.Fatalf("scenario: forward client: %v", err)
+		}
+		forwardCLI = cli
+	}
 
 	key := fmt.Sprintf("archi-forward-%d", time.Now().UnixNano())
-	lease, err := ensureClient(t, island).Acquire(ctx, api.AcquireRequest{
+	lease, err := forwardCLI.Acquire(ctx, api.AcquireRequest{
 		Namespace:  namespaces.Default,
 		Key:        key,
 		Owner:      "archipelago-forward",
@@ -1517,9 +1742,21 @@ func RunNonLeaderForwardUnavailableScenario(t testing.TB, tcs []*lockd.TestServe
 			{Namespace: namespaces.Default, Key: key, BackendHash: hash},
 		},
 	}); err != nil {
-		t.Fatalf("scenario: non-leader forward commit: %v", err)
+		var apiErr *lockdclient.APIError
+		if errors.As(err, &apiErr) && apiErr.Response.ErrorCode == "node_passive" {
+			if _, err := tcClient(t, leaderTS).TxnCommit(ctx, api.TxnDecisionRequest{
+				TxnID: lease.TxnID,
+				Participants: []api.TxnParticipant{
+					{Namespace: namespaces.Default, Key: key, BackendHash: hash},
+				},
+			}); err != nil {
+				t.Fatalf("scenario: non-leader forward commit via leader: %v", err)
+			}
+		} else {
+			t.Fatalf("scenario: non-leader forward commit: %v", err)
+		}
 	}
-	WaitForState(t, ensureClient(t, island), key, true, 20*time.Second)
+	WaitForState(t, forwardCLI, key, true, 20*time.Second)
 
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	_ = leaderTS.Abort(stopCtx)
@@ -1733,6 +1970,12 @@ func RunRMApplyTermFencingScenario(t testing.TB, tcs []*lockd.TestServer, island
 	if hash == "" {
 		t.Fatalf("scenario: backend hash empty")
 	}
+	if candidates := serversForBackendHash(tcs, hash); len(candidates) > 0 {
+		if active := findActiveServer(ctx, candidates); active != nil {
+			target = active
+		}
+	}
+	WaitForLeaderOn(t, target, tcHTTP, 20*time.Second)
 	key := fmt.Sprintf("archi-rm-term-%d", time.Now().UnixNano())
 	lease, err := ensureClient(t, target).Acquire(ctx, api.AcquireRequest{
 		Namespace:  namespaces.Default,
@@ -1802,7 +2045,7 @@ func RunTCMembershipChurnScenario(t testing.TB, tcs []*lockd.TestServer, tcHTTP 
 	memberTimeout := scale(20 * time.Second)
 	leaderTimeout := scale(30 * time.Second)
 	leaveTimeout := scale(20 * time.Second)
-	leaderChangeTimeout := scale(60 * time.Second)
+	leaderChangeTimeout := scale(20 * time.Second)
 	leaderDisableTimeout := scale(20 * time.Second)
 
 	allEndpoints := endpointsForServers(tcs)
@@ -1847,6 +2090,16 @@ func RunTCMembershipChurnScenario(t testing.TB, tcs []*lockd.TestServer, tcHTTP 
 	}
 	WaitForLeaderUnavailable(t, leaderTS, tcHTTP, leaderDisableTimeout)
 
+	if slack := leaderExpirySlack(t, remaining, tcHTTP, leaderEndpoint); slack > 0 {
+		extended := slack + 5*time.Second
+		maxExtended := scale(60 * time.Second)
+		if extended > maxExtended {
+			extended = maxExtended
+		}
+		if extended > leaderChangeTimeout {
+			leaderChangeTimeout = extended
+		}
+	}
 	newLeader, _ := WaitForLeaderAllChange(t, remaining, tcHTTP, leaderEndpoint, leaderChangeTimeout)
 	sample := FetchClusterList(t, remaining[0], tcHTTP)
 	if !containsEndpoint(sample.Endpoints, newLeader) {
@@ -1873,24 +2126,149 @@ func RunQueueStateFailoverScenario(t testing.TB, tcs []*lockd.TestServer, island
 		t.Fatalf("scenario: leader %q not found", leaderEndpoint)
 	}
 
-	queueIsland := islands[0]
-	if queueIsland == leaderTS {
+	backendHashFor := func(ts *lockd.TestServer) string {
+		if ts == nil || ts.Backend() == nil {
+			return ""
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		hash, err := ts.Backend().BackendHash(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("scenario: backend hash: %v", err)
+		}
+		return strings.TrimSpace(hash)
+	}
+	leaderHash := backendHashFor(leaderTS)
+	targetHash := ""
+	for _, island := range islands {
+		if island == nil || island == leaderTS {
+			continue
+		}
+		hash := backendHashFor(island)
+		if hash != "" && hash != leaderHash {
+			targetHash = hash
+			break
+		}
+	}
+	if targetHash == "" {
 		for _, island := range islands {
-			if island != nil && island != leaderTS {
-				queueIsland = island
+			if island == nil {
+				continue
+			}
+			hash := backendHashFor(island)
+			if hash != "" {
+				targetHash = hash
 				break
+			}
+		}
+	}
+	queueIsland := serverByEndpoint(tcs, preferredEndpointForBackend(ExpectedRMEndpoints(t, tcs), targetHash))
+	if queueIsland == nil {
+		queueIsland = serverForHash(islands, targetHash)
+	}
+	if queueIsland == nil {
+		queueIsland = islands[0]
+		if queueIsland == leaderTS {
+			for _, island := range islands {
+				if island != nil && island != leaderTS {
+					queueIsland = island
+					break
+				}
 			}
 		}
 	}
 	if queueIsland == nil {
 		t.Fatalf("scenario: queue island required")
 	}
-	queueCLI := ensureClient(t, queueIsland)
+	queueCandidates := serversForBackendHash(tcs, targetHash)
+	if len(queueCandidates) == 0 {
+		queueCandidates = []*lockd.TestServer{queueIsland}
+	} else {
+		seen := false
+		for _, candidate := range queueCandidates {
+			if candidate == queueIsland {
+				seen = true
+				break
+			}
+		}
+		if !seen && queueIsland != nil {
+			queueCandidates = append(queueCandidates, queueIsland)
+		}
+	}
+	activeQueueCtx, activeQueueCancel := context.WithTimeout(context.Background(), 20*time.Second)
+	activeQueue := findActiveServer(activeQueueCtx, queueCandidates)
+	activeQueueCancel()
+	if activeQueue == nil {
+		t.Fatalf("scenario: queue active node not found")
+	}
+	queueCLI := ensureClient(t, activeQueue)
+	queueEndpoints := endpointsForServers(queueCandidates)
+	if activeQueue != nil {
+		queueEndpoint := strings.TrimSpace(activeQueue.URL())
+		if queueEndpoint != "" {
+			ordered := make([]string, 0, len(queueEndpoints)+1)
+			ordered = append(ordered, queueEndpoint)
+			for _, endpoint := range queueEndpoints {
+				if endpoint == queueEndpoint {
+					continue
+				}
+				ordered = append(ordered, endpoint)
+			}
+			queueEndpoints = ordered
+		}
+	}
+	if len(queueEndpoints) > 0 {
+		clientHost := activeQueue
+		if clientHost == nil && len(queueCandidates) > 0 {
+			clientHost = queueCandidates[0]
+		}
+		if clientHost == nil {
+			t.Fatalf("scenario: queue client host required")
+		}
+		cli, err := clientHost.NewEndpointsClient(queueEndpoints, lockdclient.WithEndpointShuffle(false))
+		if err != nil {
+			t.Fatalf("scenario: queue client: %v", err)
+		}
+		queueCLI = cli
+	}
 	queueName := fmt.Sprintf("archi-queue-%d", time.Now().UnixNano())
 	owner := fmt.Sprintf("archi-queue-owner-%d", time.Now().UnixNano())
 
+	enqueueWithRetry := func(ctx context.Context, queue string, payload []byte) error {
+		var lastErr error
+		for {
+			if ctx != nil && ctx.Err() != nil {
+				if lastErr != nil {
+					return lastErr
+				}
+				return ctx.Err()
+			}
+			_, err := queueCLI.EnqueueBytes(ctx, queue, payload, lockdclient.EnqueueOptions{})
+			if err == nil {
+				return nil
+			}
+			lastErr = err
+			var apiErr *lockdclient.APIError
+			if errors.As(err, &apiErr) {
+				if apiErr.Response.ErrorCode == "node_passive" {
+					sleep := apiErr.RetryAfterDuration()
+					if sleep <= 0 {
+						sleep = 100 * time.Millisecond
+					}
+					time.Sleep(sleep)
+					continue
+				}
+			}
+			if isRetryableNetError(err) || strings.Contains(err.Error(), "connection refused") || strings.Contains(err.Error(), "connection reset") || strings.Contains(err.Error(), "EOF") || strings.Contains(err.Error(), "all endpoints unreachable") {
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			return err
+		}
+	}
+
 	enqueueCtx, enqueueCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	_, err := queueCLI.EnqueueBytes(enqueueCtx, queueName, []byte("archipelago-queue"), lockdclient.EnqueueOptions{})
+	err := enqueueWithRetry(enqueueCtx, queueName, []byte("archipelago-queue"))
 	enqueueCancel()
 	if err != nil {
 		t.Fatalf("scenario: enqueue: %v", err)
@@ -1926,13 +2304,7 @@ func RunQueueStateFailoverScenario(t testing.TB, tcs []*lockd.TestServer, island
 	participantMessage := strings.TrimPrefix(messageKey, ns+"/")
 	participantState := strings.TrimPrefix(stateKey, ns+"/")
 
-	hashCtx, hashCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	backendHash, err := queueIsland.Backend().BackendHash(hashCtx)
-	hashCancel()
-	if err != nil {
-		t.Fatalf("scenario: backend hash: %v", err)
-	}
-	backendHash = strings.TrimSpace(backendHash)
+	backendHash := backendHashFor(queueIsland)
 	if backendHash == "" {
 		t.Fatalf("scenario: backend hash empty")
 	}
@@ -1981,12 +2353,33 @@ func RunQueueStateFailoverScenario(t testing.TB, tcs []*lockd.TestServer, island
 	}
 
 	queueProbe := queueCLI
-	probeEndpoints := endpointsForServers(alive)
-	if queueIsland != nil && !containsEndpoint(probeEndpoints, queueIsland.URL()) {
-		probeEndpoints = append(probeEndpoints, queueIsland.URL())
+	probeEndpoints := endpointsForServers(queueCandidates)
+	if activeQueue != nil {
+		queueEndpoint := strings.TrimSpace(activeQueue.URL())
+		if queueEndpoint != "" {
+			ordered := make([]string, 0, len(probeEndpoints)+1)
+			ordered = append(ordered, queueEndpoint)
+			for _, endpoint := range probeEndpoints {
+				if endpoint == queueEndpoint {
+					continue
+				}
+				ordered = append(ordered, endpoint)
+			}
+			probeEndpoints = ordered
+		}
 	}
 	if len(probeEndpoints) > 0 {
-		cli, err := queueIsland.NewEndpointsClient(probeEndpoints, lockdclient.WithEndpointShuffle(false))
+		clientHost := activeQueue
+		if clientHost == nil && queueIsland != nil {
+			clientHost = queueIsland
+		}
+		if clientHost == nil && len(queueCandidates) > 0 {
+			clientHost = queueCandidates[0]
+		}
+		if clientHost == nil {
+			t.Fatalf("scenario: queue probe client host required")
+		}
+		cli, err := clientHost.NewEndpointsClient(probeEndpoints, lockdclient.WithEndpointShuffle(false))
 		if err != nil {
 			t.Fatalf("scenario: queue probe client: %v", err)
 		}
@@ -1994,7 +2387,7 @@ func RunQueueStateFailoverScenario(t testing.TB, tcs []*lockd.TestServer, island
 	}
 
 	waitForQueueEmpty := func() {
-		deadline := time.Now().Add(10 * time.Second)
+		deadline := time.Now().Add(45 * time.Second)
 		for {
 			checkCtx, checkCancel := context.WithTimeout(context.Background(), 2*time.Second)
 			probe, err := queueProbe.Dequeue(checkCtx, queueName, lockdclient.DequeueOptions{
@@ -2024,7 +2417,7 @@ func RunQueueStateFailoverScenario(t testing.TB, tcs []*lockd.TestServer, island
 
 	stateObjKey := queueStateObjectKey(queueName, msg.MessageID())
 	stateMetaKey := participantState
-	checkCtx, checkCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	checkCtx, checkCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	if err := waitForQueueStateObject(checkCtx, queueIsland.Backend(), ns, stateObjKey, false); err != nil {
 		checkCancel()
 		t.Fatalf("scenario: state object still present after commit: %v", err)
@@ -2054,7 +2447,7 @@ func RunQueueStateFailoverScenario(t testing.TB, tcs []*lockd.TestServer, island
 	queueNameStale := fmt.Sprintf("archi-queue-stale-%d", time.Now().UnixNano())
 	ownerStale := owner + "-stale"
 	enqueueCtx, enqueueCancel = context.WithTimeout(context.Background(), 5*time.Second)
-	_, err = queueCLI.EnqueueBytes(enqueueCtx, queueNameStale, []byte("archipelago-queue-stale"), lockdclient.EnqueueOptions{})
+	err = enqueueWithRetry(enqueueCtx, queueNameStale, []byte("archipelago-queue-stale"))
 	enqueueCancel()
 	if err != nil {
 		t.Fatalf("scenario: enqueue stale: %v", err)
@@ -2066,13 +2459,14 @@ func RunQueueStateFailoverScenario(t testing.TB, tcs []*lockd.TestServer, island
 		t.Fatalf("scenario: leader missing for stale pending extension")
 	}
 
+	staleVisibility := 5 * time.Second
 	staleTxnID := xid.New().String()
 	var staleMsg *lockdclient.QueueMessage
 	for attempt := 0; attempt < 3; attempt++ {
 		staleMsg, err = dequeueWithStateRetry(t, queueCLI, queueNameStale, lockdclient.DequeueOptions{
 			Owner:        ownerStale,
 			TxnID:        staleTxnID,
-			Visibility:   5 * time.Second,
+			Visibility:   staleVisibility,
 			BlockSeconds: 1,
 		}, 15*time.Second)
 		if err == nil {
@@ -2123,24 +2517,44 @@ func RunQueueStateFailoverScenario(t testing.TB, tcs []*lockd.TestServer, island
 	}
 
 	if expiresAt := staleMsg.LeaseExpiresAt(); expiresAt > 0 {
-		wait := time.Until(time.UnixMilli(expiresAt).Add(200 * time.Millisecond))
+		wait := time.Until(time.Unix(expiresAt, 0).Add(200 * time.Millisecond))
+		if wait < staleVisibility {
+			wait = staleVisibility + 200*time.Millisecond
+		}
 		if wait > 0 {
 			time.Sleep(wait)
 		}
 	} else {
-		time.Sleep(1500 * time.Millisecond)
+		time.Sleep(staleVisibility + 200*time.Millisecond)
 	}
 
-	reacquireMsg, err := dequeueWithStateRetry(t, queueCLI, queueNameStale, lockdclient.DequeueOptions{
-		Owner:        ownerStale + "-reacquire",
-		Visibility:   5 * time.Second,
-		BlockSeconds: 1,
-	}, 15*time.Second)
-	if err != nil {
-		t.Fatalf("scenario: reacquire stale message: %v", err)
+	var reacquireMsg *lockdclient.QueueMessage
+	for attempt := 0; attempt < 3; attempt++ {
+		reacquireMsg, err = dequeueWithStateRetry(t, queueCLI, queueNameStale, lockdclient.DequeueOptions{
+			Owner:        ownerStale + "-reacquire",
+			Visibility:   staleVisibility,
+			BlockSeconds: 1,
+		}, 15*time.Second)
+		if err != nil {
+			t.Fatalf("scenario: reacquire stale message: %v", err)
+		}
+		if reacquireMsg == nil {
+			t.Fatalf("scenario: reacquire message missing")
+		}
+		if reacquireMsg.TxnID() != staleTxnID {
+			break
+		}
+		_ = reacquireMsg.ClosePayload()
+		nackCtx, nackCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = reacquireMsg.Nack(nackCtx, 0, nil)
+		nackCancel()
+		time.Sleep(staleVisibility + 200*time.Millisecond)
 	}
 	if reacquireMsg == nil {
 		t.Fatalf("scenario: reacquire message missing")
+	}
+	if reacquireMsg.TxnID() == staleTxnID {
+		t.Fatalf("scenario: expected new txn id after lease expiry")
 	}
 	_ = reacquireMsg.ClosePayload()
 
@@ -2149,7 +2563,19 @@ func RunQueueStateFailoverScenario(t testing.TB, tcs []*lockd.TestServer, island
 	if leaderTS == nil {
 		t.Fatalf("scenario: leader missing for stale commit")
 	}
-	err = postTxnCommitWithParticipants(t, queueIsland, tcHTTP, staleTxnID, term, staleParticipants)
+	staleCommitTarget := leaderTS
+	if candidates := serversForBackendHash(tcs, backendHash); len(candidates) > 0 {
+		if active := findActiveServer(context.Background(), candidates); active != nil {
+			staleCommitTarget = active
+		}
+	} else if queueIsland != nil {
+		staleCommitTarget = queueIsland
+	}
+	commitCtx, commitCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	err = retryOnNodePassive(commitCtx, func() error {
+		return postTxnCommitWithParticipants(t, staleCommitTarget, tcHTTP, staleTxnID, term, staleParticipants)
+	})
+	commitCancel()
 	if err == nil {
 		t.Fatalf("scenario: expected queue_message_lease_mismatch or txn_conflict for stale lease")
 	}
@@ -2192,7 +2618,7 @@ func RunQuorumLossDuringRenewScenario(t testing.TB, tcs []*lockd.TestServer, isl
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 
-	clients, hashes, keys := collectIslandInputs(t, ctx, islands, tcHTTP)
+	clients, hashes, keys := collectIslandInputs(ctx, t, islands, tcs, tcHTTP)
 	const scenarioTTLSeconds = 90
 
 	lease0, err := clients[0].Acquire(ctx, api.AcquireRequest{
@@ -2217,11 +2643,15 @@ func RunQuorumLossDuringRenewScenario(t testing.TB, tcs []*lockd.TestServer, isl
 		if err != nil {
 			t.Fatalf("scenario: acquire %d: %v", i, err)
 		}
-		if err := lease.Save(ctx, map[string]any{"value": fmt.Sprintf("island-%d", i)}); err != nil {
+		if err := retryOnNodePassive(ctx, func() error {
+			return lease.Save(ctx, map[string]any{"value": fmt.Sprintf("island-%d", i)})
+		}); err != nil {
 			t.Fatalf("scenario: save %d: %v", i, err)
 		}
 	}
-	if err := lease0.Save(ctx, map[string]any{"value": "island-0"}); err != nil {
+	if err := retryOnNodePassive(ctx, func() error {
+		return lease0.Save(ctx, map[string]any{"value": "island-0"})
+	}); err != nil {
 		t.Fatalf("scenario: save 0: %v", err)
 	}
 
@@ -2280,8 +2710,8 @@ func RunQuorumLossDuringRenewScenario(t testing.TB, tcs []*lockd.TestServer, isl
 	if !errors.As(err, &apiErr) {
 		t.Fatalf("scenario: expected api error, got %v", err)
 	}
-	if apiErr.Response.ErrorCode != "tc_unavailable" {
-		t.Fatalf("scenario: expected tc_unavailable, got %s", apiErr.Response.ErrorCode)
+	if apiErr.Response.ErrorCode != "tc_unavailable" && apiErr.Response.ErrorCode != "node_passive" {
+		t.Fatalf("scenario: expected tc_unavailable or node_passive, got %s", apiErr.Response.ErrorCode)
 	}
 
 	for _, spec := range restarts {
@@ -2300,7 +2730,16 @@ func RunQuorumLossDuringRenewScenario(t testing.TB, tcs []*lockd.TestServer, isl
 		t.Fatalf("scenario: expected term to increase: old=%d new=%d", oldTerm, newTerm)
 	}
 
-	target := NonLeader(tcs, newLeader)
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 20*time.Second)
+	if !waitForActiveBackends(waitCtx, tcs, participants) {
+		waitCancel()
+		t.Fatalf("scenario: active backends not available after quorum restore")
+	}
+	waitCancel()
+
+	pickCtx, pickCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	target := ActiveNonLeader(pickCtx, tcs, newLeader)
+	pickCancel()
 	if target == nil {
 		target = serverByEndpoint(tcs, newLeader)
 	}
@@ -2323,7 +2762,11 @@ func RunQuorumLossDuringRenewScenario(t testing.TB, tcs []*lockd.TestServer, isl
 		WaitForState(t, ensureClient(t, aliveServer), keys[i], true, 20*time.Second)
 	}
 
-	err = postTxnCommitWithTerm(t, islands[0], tcHTTP, xid.New().String(), oldTerm)
+	leaderTS := serverByEndpoint(tcs, newLeader)
+	if leaderTS == nil {
+		leaderTS = islands[0]
+	}
+	err = postTxnCommitWithTerm(t, leaderTS, tcHTTP, xid.New().String(), oldTerm)
 	if err == nil {
 		t.Fatalf("scenario: expected tc_term_stale for old term")
 	}
@@ -2364,11 +2807,60 @@ func commitTxnWithRetry(t testing.TB, tcs []*lockd.TestServer, target *lockd.Tes
 		var apiErr *lockdclient.APIError
 		if errors.As(err, &apiErr) {
 			switch apiErr.Response.ErrorCode {
+			case "node_passive":
+				if target != nil {
+					lookup := remaining
+					if lookup > 5*time.Second {
+						lookup = 5 * time.Second
+					}
+					lookupCtx, cancel := context.WithTimeout(context.Background(), lookup)
+					hash, hashErr := target.Backend().BackendHash(lookupCtx)
+					hash = strings.TrimSpace(hash)
+					var active *lockd.TestServer
+					if hashErr == nil && hash != "" {
+						candidates := serversForBackendHash(tcs, hash)
+						active = findActiveServer(lookupCtx, candidates)
+					}
+					if active == nil {
+						active = findActiveServer(lookupCtx, tcs)
+					}
+					cancel()
+					if active != nil {
+						target = active
+					}
+				}
+				sleep := apiErr.RetryAfterDuration()
+				if sleep <= 0 {
+					sleep = 200 * time.Millisecond
+				}
+				if sleep > remaining {
+					sleep = remaining
+				}
+				time.Sleep(sleep)
+				continue
 			case "txn_conflict":
 				return nil
 			case "txn_fanout_failed":
 				if fanoutConflictOnly(apiErr.Response.Detail) {
 					return nil
+				}
+				if fanoutNodePassiveOnly(apiErr.Response.Detail) {
+					wait := remaining
+					if wait > 2*time.Second {
+						wait = 2 * time.Second
+					}
+					waitCtx, cancel := context.WithTimeout(context.Background(), wait)
+					_ = waitForActiveBackends(waitCtx, tcs, req.Participants)
+					cancel()
+					sleep := apiErr.RetryAfterDuration()
+					if sleep <= 0 {
+						sleep = 200 * time.Millisecond
+					}
+					if sleep > remaining {
+						sleep = remaining
+					}
+					time.Sleep(sleep)
+					continue
 				}
 			case "tc_not_leader", "tc_unavailable":
 				if apiErr.Response.LeaderEndpoint != "" && len(tcs) > 0 {
@@ -2387,7 +2879,17 @@ func commitTxnWithRetry(t testing.TB, tcs []*lockd.TestServer, target *lockd.Tes
 				continue
 			}
 		}
-		if errors.Is(err, context.DeadlineExceeded) && time.Now().Before(deadline) {
+		if errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "all endpoints unreachable") {
+			if next := nextServer(tcs, target); next != nil {
+				target = next
+			}
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		if time.Now().Before(deadline) && isRetryableNetError(err) {
+			if next := nextServer(tcs, target); next != nil {
+				target = next
+			}
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
@@ -2397,6 +2899,68 @@ func commitTxnWithRetry(t testing.TB, tcs []*lockd.TestServer, target *lockd.Tes
 		return lastErr
 	}
 	return fmt.Errorf("commit retry: timed out")
+}
+
+func nextServer(tcs []*lockd.TestServer, current *lockd.TestServer) *lockd.TestServer {
+	if len(tcs) == 0 {
+		return current
+	}
+	if current == nil {
+		for _, ts := range tcs {
+			if ts != nil {
+				return ts
+			}
+		}
+		return current
+	}
+	for i, ts := range tcs {
+		if ts == current {
+			for j := 1; j < len(tcs)+1; j++ {
+				idx := (i + j) % len(tcs)
+				if tcs[idx] != nil && tcs[idx] != current {
+					return tcs[idx]
+				}
+			}
+			return current
+		}
+	}
+	return current
+}
+
+func isRetryableNetError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return netErr.Timeout()
+	}
+	return false
+}
+
+func waitForActiveBackends(ctx context.Context, tcs []*lockd.TestServer, participants []api.TxnParticipant) bool {
+	if len(participants) == 0 || len(tcs) == 0 {
+		return false
+	}
+	seen := make(map[string]struct{}, len(participants))
+	for _, p := range participants {
+		hash := strings.TrimSpace(p.BackendHash)
+		if hash == "" {
+			continue
+		}
+		if _, ok := seen[hash]; ok {
+			continue
+		}
+		seen[hash] = struct{}{}
+		candidates := serversForBackendHash(tcs, hash)
+		if len(candidates) == 0 {
+			return false
+		}
+		if findActiveServer(ctx, candidates) == nil {
+			return false
+		}
+	}
+	return len(seen) > 0
 }
 
 func saveWithRetry(t testing.TB, lease *lockdclient.LeaseSession, payload any, timeout time.Duration) error {
@@ -2425,7 +2989,7 @@ func saveWithRetry(t testing.TB, lease *lockdclient.LeaseSession, payload any, t
 		var apiErr *lockdclient.APIError
 		if errors.As(err, &apiErr) {
 			switch apiErr.Response.ErrorCode {
-			case "tc_not_leader", "tc_unavailable":
+			case "tc_not_leader", "tc_unavailable", "node_passive":
 				sleep := apiErr.RetryAfterDuration()
 				if sleep <= 0 {
 					sleep = 200 * time.Millisecond
@@ -2481,6 +3045,44 @@ func fanoutConflictOnly(detail string) bool {
 	return true
 }
 
+func fanoutNodePassiveOnly(detail string) bool {
+	detail = strings.TrimSpace(detail)
+	if detail == "" {
+		return false
+	}
+	found := false
+	for {
+		idx := strings.Index(detail, "status ")
+		if idx == -1 {
+			break
+		}
+		detail = detail[idx+len("status "):]
+		if len(detail) < 3 {
+			return false
+		}
+		codeStr := detail[:3]
+		if _, err := strconv.Atoi(codeStr); err != nil {
+			return false
+		}
+		detail = detail[3:]
+		colon := strings.Index(detail, ":")
+		if colon == -1 {
+			return false
+		}
+		codeText := strings.TrimSpace(detail[colon+1:])
+		if codeText == "" {
+			return false
+		}
+		codeWord := strings.Fields(codeText)[0]
+		codeWord = strings.Trim(codeWord, ";,")
+		if codeWord != "node_passive" {
+			return false
+		}
+		found = true
+	}
+	return found
+}
+
 // RunLeaderDecisionFanoutInterruptedScenario stops the leader after decision recording but before fan-out.
 func RunLeaderDecisionFanoutInterruptedScenario(t testing.TB, tcs []*lockd.TestServer, islands []*lockd.TestServer, tcHTTP HTTPClientFunc, tcClient func(testing.TB, *lockd.TestServer) *lockdclient.Client, gate *FanoutGate, restarts map[int]RestartSpec) {
 	t.Helper()
@@ -2511,7 +3113,7 @@ func RunLeaderDecisionFanoutInterruptedScenario(t testing.TB, tcs []*lockd.TestS
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 
-	clients, hashes, keys := collectIslandInputs(t, ctx, selected, tcHTTP)
+	clients, hashes, keys := collectIslandInputs(ctx, t, selected, tcs, tcHTTP)
 	const scenarioTTLSeconds = 30
 
 	lease0, err := clients[0].Acquire(ctx, api.AcquireRequest{
@@ -2535,10 +3137,14 @@ func RunLeaderDecisionFanoutInterruptedScenario(t testing.TB, tcs []*lockd.TestS
 	if err != nil {
 		t.Fatalf("scenario: acquire 1: %v", err)
 	}
-	if err := lease1.Save(ctx, map[string]any{"value": "fanout-b"}); err != nil {
+	if err := retryOnNodePassive(ctx, func() error {
+		return lease1.Save(ctx, map[string]any{"value": "fanout-b"})
+	}); err != nil {
 		t.Fatalf("scenario: save 1: %v", err)
 	}
-	if err := lease0.Save(ctx, map[string]any{"value": "fanout-a"}); err != nil {
+	if err := retryOnNodePassive(ctx, func() error {
+		return lease0.Save(ctx, map[string]any{"value": "fanout-a"})
+	}); err != nil {
 		t.Fatalf("scenario: save 0: %v", err)
 	}
 
@@ -2638,7 +3244,7 @@ func RunFanoutScenarioMulti(t testing.TB, tcs []*lockd.TestServer, islands []*lo
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 
-	clients, hashes, keys := collectIslandInputs(t, ctx, islands, tcHTTP)
+	clients, hashes, keys := collectIslandInputs(ctx, t, islands, tcs, tcHTTP)
 	const scenarioTTLSeconds = 30
 
 	lease0, err := clients[0].Acquire(ctx, api.AcquireRequest{
@@ -2663,11 +3269,15 @@ func RunFanoutScenarioMulti(t testing.TB, tcs []*lockd.TestServer, islands []*lo
 		if err != nil {
 			t.Fatalf("scenario: acquire %d: %v", i, err)
 		}
-		if err := lease.Save(ctx, map[string]any{"value": fmt.Sprintf("island-%d", i)}); err != nil {
+		if err := retryOnNodePassive(ctx, func() error {
+			return lease.Save(ctx, map[string]any{"value": fmt.Sprintf("island-%d", i)})
+		}); err != nil {
 			t.Fatalf("scenario: save %d: %v", i, err)
 		}
 	}
-	if err := lease0.Save(ctx, map[string]any{"value": "island-0"}); err != nil {
+	if err := retryOnNodePassive(ctx, func() error {
+		return lease0.Save(ctx, map[string]any{"value": "island-0"})
+	}); err != nil {
 		t.Fatalf("scenario: save 0: %v", err)
 	}
 
@@ -2716,7 +3326,7 @@ func RunAttachmentTxnScenario(t testing.TB, tcs []*lockd.TestServer, islands []*
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 
-	clients, hashes, keys := collectIslandInputs(t, ctx, islands, tcHTTP)
+	clients, hashes, keys := collectIslandInputs(ctx, t, islands, tcs, tcHTTP)
 	const scenarioTTLSeconds = 30
 
 	lease0, err := clients[0].Acquire(ctx, api.AcquireRequest{
@@ -2804,7 +3414,7 @@ func RunAttachmentTxnScenario(t testing.TB, tcs []*lockd.TestServer, islands []*
 	}
 }
 
-func collectIslandInputs(t testing.TB, ctx context.Context, islands []*lockd.TestServer, tcHTTP HTTPClientFunc) ([]*lockdclient.Client, []string, []string) {
+func collectIslandInputs(ctx context.Context, t testing.TB, islands []*lockd.TestServer, allServers []*lockd.TestServer, tcHTTP HTTPClientFunc) ([]*lockdclient.Client, []string, []string) {
 	t.Helper()
 	hashSeen := make(map[string]struct{}, len(islands))
 	clients := make([]*lockdclient.Client, 0, len(islands))
@@ -2828,11 +3438,52 @@ func collectIslandInputs(t testing.TB, ctx context.Context, islands []*lockd.Tes
 			t.Fatalf("scenario: duplicate backend hash %q", hash)
 		}
 		hashSeen[hash] = struct{}{}
-		clients = append(clients, ensureClient(t, island))
+		candidates := serversForBackendHash(allServers, hash)
+		if len(candidates) == 0 {
+			t.Fatalf("scenario: backend hash %q has no servers", hash)
+		}
+		active := findActiveServer(ctx, candidates)
+		if active == nil {
+			t.Fatalf("scenario: backend hash %q has no active server", hash)
+		}
+		endpoints := endpointsForServers(candidates)
+		preferred := normalizeEndpoint(active.URL())
+		for i, endpoint := range endpoints {
+			if endpoint == preferred && i != 0 {
+				endpoints[0], endpoints[i] = endpoints[i], endpoints[0]
+				break
+			}
+		}
+		client, err := active.NewEndpointsClient(endpoints, lockdclient.WithEndpointShuffle(false))
+		if err != nil {
+			t.Fatalf("scenario: client %d: %v", idx, err)
+		}
+		clients = append(clients, client)
 		hashes = append(hashes, hash)
 		keys = append(keys, fmt.Sprintf("archi-%d-%d", idx, time.Now().UnixNano()))
 	}
 	return clients, hashes, keys
+}
+
+func retryOnNodePassive(ctx context.Context, op func() error) error {
+	for {
+		if ctx != nil && ctx.Err() != nil {
+			return ctx.Err()
+		}
+		err := op()
+		if err == nil {
+			return nil
+		}
+		var apiErr *lockdclient.APIError
+		if !errors.As(err, &apiErr) || apiErr.Response.ErrorCode != "node_passive" {
+			return err
+		}
+		delay := apiErr.RetryAfterDuration()
+		if delay <= 0 {
+			delay = 100 * time.Millisecond
+		}
+		time.Sleep(delay)
+	}
 }
 
 func indexOfServer(servers []*lockd.TestServer, target *lockd.TestServer) int {
@@ -2904,6 +3555,7 @@ func ensureClient(t testing.TB, ts *lockd.TestServer) *lockdclient.Client {
 	t.Helper()
 	if ts == nil {
 		t.Fatalf("ensure client: server required")
+		return nil
 	}
 	if ts.Client != nil {
 		return ts.Client
@@ -2961,6 +3613,18 @@ func normalizeEndpoints(list []string) []string {
 	return out
 }
 
+func preferredEndpointForBackend(expected map[string][]string, backendHash string) string {
+	backendHash = strings.TrimSpace(backendHash)
+	if backendHash == "" || len(expected) == 0 {
+		return ""
+	}
+	endpoints := expected[backendHash]
+	if len(endpoints) == 0 {
+		return ""
+	}
+	return normalizeEndpoint(endpoints[0])
+}
+
 func normalizeEndpoint(raw string) string {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -2997,6 +3661,87 @@ func endpointsForServers(servers []*lockd.TestServer) []string {
 	return out
 }
 
+func serversForBackendHash(servers []*lockd.TestServer, backendHash string) []*lockd.TestServer {
+	backendHash = strings.TrimSpace(backendHash)
+	if backendHash == "" {
+		return nil
+	}
+	out := make([]*lockd.TestServer, 0, len(servers))
+	for _, ts := range servers {
+		if ts == nil || ts.Backend() == nil {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		hash, err := ts.Backend().BackendHash(ctx)
+		cancel()
+		if err != nil {
+			continue
+		}
+		if strings.TrimSpace(hash) == backendHash {
+			out = append(out, ts)
+		}
+	}
+	return out
+}
+
+func probeActive(ctx context.Context, cli *lockdclient.Client, key string) (bool, error) {
+	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	lease, err := cli.Acquire(probeCtx, api.AcquireRequest{
+		Key:        key,
+		Owner:      "ha-probe",
+		TTLSeconds: 5,
+		BlockSecs:  lockdclient.BlockNoWait,
+	})
+	if err != nil {
+		return false, err
+	}
+	releaseCtx, releaseCancel := context.WithTimeout(ctx, 2*time.Second)
+	_ = lease.Release(releaseCtx)
+	releaseCancel()
+	return true, nil
+}
+
+func findActiveServer(ctx context.Context, servers []*lockd.TestServer) *lockd.TestServer {
+	if len(servers) == 0 {
+		return nil
+	}
+	key := "ha-probe-" + uuidv7.NewString()
+	for {
+		if ctx != nil && ctx.Err() != nil {
+			return nil
+		}
+		for _, ts := range servers {
+			if ts == nil {
+				continue
+			}
+			cli, err := ts.NewClient(lockdclient.WithEndpointShuffle(false))
+			if err != nil {
+				continue
+			}
+			active, probeErr := probeActive(ctx, cli, key)
+			_ = cli.Close()
+			if probeErr == nil && active {
+				return ts
+			}
+			if probeErr != nil {
+				var apiErr *lockdclient.APIError
+				if errors.As(probeErr, &apiErr) {
+					if apiErr.Response.ErrorCode == "node_passive" {
+						continue
+					}
+					return nil
+				}
+				if isRetryableNetError(probeErr) || strings.Contains(probeErr.Error(), "connection refused") || strings.Contains(probeErr.Error(), "connection reset") || strings.Contains(probeErr.Error(), "EOF") {
+					continue
+				}
+				return nil
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 func postTxnCommitWithTerm(t testing.TB, ts *lockd.TestServer, clientFn HTTPClientFunc, txnID string, term uint64) error {
 	t.Helper()
 	payload := api.TxnDecisionRequest{
@@ -3012,6 +3757,9 @@ func postTxnCommitWithParticipants(t testing.TB, ts *lockd.TestServer, clientFn 
 		TxnID:        txnID,
 		TCTerm:       term,
 		Participants: participants,
+	}
+	if target := targetBackendHash(participants); target != "" {
+		payload.TargetBackendHash = target
 	}
 	return postTxnApply(t, ts, clientFn, "/v1/txn/commit", payload)
 }
@@ -3035,7 +3783,30 @@ func postTxnRollbackWithParticipants(t testing.TB, ts *lockd.TestServer, clientF
 		TCTerm:       term,
 		Participants: participants,
 	}
+	if target := targetBackendHash(participants); target != "" {
+		payload.TargetBackendHash = target
+	}
 	return postTxnApply(t, ts, clientFn, "/v1/txn/rollback", payload)
+}
+
+func targetBackendHash(participants []api.TxnParticipant) string {
+	if len(participants) == 0 {
+		return ""
+	}
+	var hash string
+	for _, participant := range participants {
+		if participant.BackendHash == "" {
+			return ""
+		}
+		if hash == "" {
+			hash = participant.BackendHash
+			continue
+		}
+		if participant.BackendHash != hash {
+			return ""
+		}
+	}
+	return hash
 }
 
 func postTxnApply(t testing.TB, ts *lockd.TestServer, clientFn HTTPClientFunc, path string, payload api.TxnDecisionRequest) error {

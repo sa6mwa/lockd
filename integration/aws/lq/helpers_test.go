@@ -12,15 +12,15 @@ import (
 	"testing"
 	"time"
 
-	minio "github.com/minio/minio-go/v7"
-
 	"pkt.systems/lockd"
 	lockdclient "pkt.systems/lockd/client"
 	awsbase "pkt.systems/lockd/integration/aws"
 	"pkt.systems/lockd/integration/internal/cryptotest"
+	"pkt.systems/lockd/integration/internal/storepath"
 	queuetestutil "pkt.systems/lockd/integration/queue/testutil"
 	"pkt.systems/lockd/internal/diagnostics/storagecheck"
-	"pkt.systems/lockd/internal/storage/s3"
+	"pkt.systems/lockd/internal/storage"
+	awsstore "pkt.systems/lockd/internal/storage/aws"
 	"pkt.systems/lockd/internal/uuidv7"
 	"pkt.systems/pslog"
 )
@@ -39,8 +39,10 @@ var (
 
 func prepareAWSQueueConfig(t testing.TB, opts awsQueueOptions) lockd.Config {
 	cfg := loadAWSQueueConfig(t)
+	cfg.Store = withQueueTestPrefix(t, cfg.Store)
 	cfg.ListenProto = "tcp"
 	cfg.Listen = "127.0.0.1:0"
+	cfg.HAMode = "failover"
 	ensureAWSQueueReady(t, context.Background(), cfg)
 
 	if opts.PollInterval > 0 {
@@ -61,13 +63,19 @@ func prepareAWSQueueConfig(t testing.TB, opts awsQueueOptions) lockd.Config {
 		cfg.SweeperInterval = opts.SweeperInterval
 	}
 
-	cfg.QRFEnabled = false
+	cfg.QRFDisabled = true
 
 	cryptotest.MaybeEnableStorageEncryption(t, &cfg)
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("aws queue config validation failed: %v", err)
 	}
 	return cfg
+}
+
+func withQueueTestPrefix(t testing.TB, store string) string {
+	t.Helper()
+	suffix := "lq-" + uuidv7.NewString()
+	return storepath.Append(t, store, suffix)
 }
 
 func startAWSQueueServer(t testing.TB, cfg lockd.Config) *lockd.TestServer {
@@ -123,6 +131,7 @@ func loadAWSQueueConfig(t testing.TB) lockd.Config {
 	if !strings.HasPrefix(store, "aws://") {
 		t.Fatalf("LOCKD_STORE must reference an aws:// URI, got %q", store)
 	}
+	store = storepath.Scoped(t, store, "aws")
 	cfg := lockd.Config{
 		Store:         store,
 		AWSRegion:     os.Getenv("LOCKD_AWS_REGION"),
@@ -181,22 +190,23 @@ func ensureAWSQueuePrefixWritable(t testing.TB, cfg lockd.Config) {
 		t.Fatalf("build aws config: %v", err)
 	}
 	awsCfg := awsResult.Config
-	store, err := s3.New(awsCfg)
+	store, err := awsstore.New(awsCfg)
 	if err != nil {
 		t.Fatalf("create s3 store: %v", err)
 	}
+	defer store.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	key := "q/" + uuidv7.NewString() + "/msg/bootstrap.bin"
 	data := []byte("probe")
-	_, err = store.Client().PutObject(ctx, awsCfg.Bucket, key, bytes.NewReader(data), int64(len(data)), minio.PutObjectOptions{ContentType: "text/plain"})
+	_, err = store.PutObject(ctx, "", key, bytes.NewReader(data), storage.PutObjectOptions{ContentType: "text/plain"})
 	if err != nil {
 		t.Fatalf("put object probe failed (check bucket permissions for queue namespace): %v", err)
 	}
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = store.Client().RemoveObject(ctx, awsCfg.Bucket, key, minio.RemoveObjectOptions{})
+		_ = store.DeleteObject(ctx, "", key, storage.DeleteObjectOptions{IgnoreNotFound: true})
 	}()
 }
 

@@ -22,6 +22,7 @@ import (
 func TestMinioArchipelagoLeaderFailover(t *testing.T) {
 	leaseTTL := 10 * time.Second
 	baseCfg := loadMinioConfig(t)
+	baseCfg.HAMode = "concurrent"
 	baseCfg.TCClientBundlePath = cryptotest.SharedTCClientBundlePath(t)
 
 	prefix := "archipelago-" + uuidv7.NewString()

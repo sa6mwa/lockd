@@ -218,6 +218,49 @@ func TestSetEndpointsReleasesLeaderLeasesOnDisable(t *testing.T) {
 	}
 }
 
+func TestEligibilitySkipsElectionUntilActive(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	peerA := httptest.NewServer(http.HandlerFunc((&tcStub{}).handler))
+	defer peerA.Close()
+	peerB := httptest.NewServer(http.HandlerFunc((&tcStub{}).handler))
+	defer peerB.Close()
+
+	selfEndpoint := "http://self"
+	var eligible atomic.Bool
+	eligible.Store(false)
+	manager, err := NewManager(Config{
+		SelfEndpoint: selfEndpoint,
+		Endpoints:    []string{selfEndpoint, peerA.URL, peerB.URL},
+		LeaseTTL:     500 * time.Millisecond,
+		Logger:       pslog.NoopLogger(),
+		HTTPClient:   &http.Client{Timeout: time.Second},
+		DisableMTLS:  true,
+		Eligible: func() bool {
+			return eligible.Load()
+		},
+	})
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	manager.Start(ctx)
+
+	time.Sleep(200 * time.Millisecond)
+	if manager.isLeaderState() {
+		t.Fatalf("expected not leader while ineligible")
+	}
+
+	eligible.Store(true)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if manager.isLeaderState() {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("expected leader after eligibility")
+}
+
 func TestObservedLeaderWait(t *testing.T) {
 	selfEndpoint := "http://self"
 	manager, err := NewManager(Config{

@@ -8,11 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net"
 	"runtime"
 	"strconv"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -21,31 +18,13 @@ import (
 	api "pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
 	cryptotest "pkt.systems/lockd/integration/internal/cryptotest"
+	"pkt.systems/lockd/integration/internal/hatest"
 	shutdowntest "pkt.systems/lockd/integration/internal/shutdowntest"
 	testlog "pkt.systems/lockd/integration/internal/testlog"
 	"pkt.systems/lockd/internal/uuidv7"
+	"pkt.systems/lockd/namespaces"
 	"pkt.systems/pslog"
 )
-
-func retryableTransportError(err error) bool {
-	if err == nil {
-		return false
-	}
-	if strings.Contains(err.Error(), "all endpoints unreachable") {
-		return true
-	}
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-		return true
-	}
-	if errors.Is(err, io.ErrUnexpectedEOF) || strings.Contains(err.Error(), "unexpected EOF") {
-		return true
-	}
-	var netErr net.Error
-	if errors.As(err, &netErr) {
-		return netErr.Timeout() || netErr.Temporary()
-	}
-	return false
-}
 
 func TestMinioStoreVerification(t *testing.T) {
 	cfg := loadMinioConfig(t)
@@ -57,6 +36,7 @@ func TestMinioShutdownDrainingBlocksAcquire(t *testing.T) {
 	cfg := loadMinioConfig(t)
 	ensureMinioBucket(t, cfg)
 	ensureStoreReady(t, context.Background(), cfg)
+	CleanupNamespaces(t, cfg, namespaces.Default)
 	ts := startMinioTestServer(t, cfg)
 	t.Cleanup(func() { _ = ts.Stop(context.Background()) })
 	cli := ts.Client
@@ -141,6 +121,41 @@ func TestMinioLockLifecycle(t *testing.T) {
 		t.Fatalf("expected release success")
 	}
 
+	cleanupMinio(t, cfg, key)
+}
+
+func TestMinioAcquireNoWaitReturnsWaiting(t *testing.T) {
+	cfg := loadMinioConfig(t)
+	ensureMinioBucket(t, cfg)
+	ensureStoreReady(t, context.Background(), cfg)
+	cli := startLockdServer(t, cfg)
+
+	ctx := context.Background()
+	key := "minio-nowait-" + uuidv7.NewString()
+	lease := acquireWithRetry(t, ctx, cli, key, "holder", 30, lockdclient.BlockWaitForever)
+	t.Cleanup(func() { _ = releaseLease(t, ctx, lease) })
+
+	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	_, err := cli.Acquire(reqCtx, api.AcquireRequest{
+		Key:        key,
+		Owner:      "no-wait",
+		TTLSeconds: 30,
+		BlockSecs:  lockdclient.BlockNoWait,
+	})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatalf("expected no-wait acquire to fail")
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("expected no-wait acquire within 5s, got %s", elapsed)
+	}
+	var apiErr *lockdclient.APIError
+	if !errors.As(err, &apiErr) || apiErr.Response.ErrorCode != "waiting" {
+		t.Fatalf("expected waiting API error, got %v", err)
+	}
 	cleanupMinio(t, cfg, key)
 }
 
@@ -249,15 +264,14 @@ func TestMinioAcquireForUpdateCallbackSingleServer(t *testing.T) {
 	key := "minio-single-" + uuidv7.NewString()
 	defer cleanupMinio(t, cfg, key)
 
-	proxiedClient := ts.Client
-	if proxiedClient == nil {
-		var err error
-		proxiedClient, err = ts.NewClient(
-			lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
-		)
-		if err != nil {
-			t.Fatalf("new client: %v", err)
-		}
+	proxiedClient, err := ts.NewClient(
+		lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)),
+		lockdclient.WithHTTPTimeout(15*time.Second),
+		lockdclient.WithKeepAliveTimeout(15*time.Second),
+		lockdclient.WithCloseTimeout(15*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
 	}
 	t.Cleanup(func() { _ = proxiedClient.Close() })
 
@@ -740,15 +754,15 @@ func TestMinioAcquireForUpdateCallbackFailover(t *testing.T) {
 	key := "minio-forupdate-failover-" + uuidv7.NewString()
 	defer cleanupMinio(t, cfg, key)
 
-	seedClient := backup.Client
-	if seedClient == nil {
-		var err error
-		seedClient, err = backup.NewClient(lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)))
-		if err != nil {
-			t.Fatalf("seed client: %v", err)
-		}
+	activeServer, seedClient, err := hatest.FindActiveServer(ctx, primary, backup)
+	if err != nil {
+		t.Fatalf("find active server: %v", err)
 	}
 	t.Cleanup(func() { _ = seedClient.Close() })
+	standbyServer := backup
+	if activeServer == backup {
+		standbyServer = primary
+	}
 
 	seedLease, err := seedClient.Acquire(ctx, api.AcquireRequest{
 		Key:        key,
@@ -766,9 +780,15 @@ func TestMinioAcquireForUpdateCallbackFailover(t *testing.T) {
 		t.Fatalf("seed release: %v", err)
 	}
 
-	if err := primary.Stop(context.Background()); err != nil {
-		t.Fatalf("stop primary: %v", err)
+	if err := activeServer.Stop(context.Background()); err != nil {
+		t.Fatalf("stop active server: %v", err)
 	}
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := hatest.WaitForActive(waitCtx, standbyServer); err != nil {
+		waitCancel()
+		t.Fatalf("standby activation: %v", err)
+	}
+	waitCancel()
 
 	clientLogger, clientLogs := testlog.NewRecorder(t, pslog.TraceLevel)
 	clientOptions := []lockdclient.Option{
@@ -788,7 +808,7 @@ func TestMinioAcquireForUpdateCallbackFailover(t *testing.T) {
 		clientOptions = append(clientOptions, lockdclient.WithHTTPClient(httpClient))
 	}
 	failoverClient, err := lockdclient.NewWithEndpoints(
-		[]string{primary.URL(), backup.URL()},
+		[]string{activeServer.URL(), standbyServer.URL()},
 		clientOptions...,
 	)
 	if err != nil {
@@ -822,8 +842,13 @@ func TestMinioAcquireForUpdateCallbackFailover(t *testing.T) {
 		t.Fatalf("callback was not invoked")
 	}
 
-	verifier := acquireWithRetry(t, ctx, seedClient, key, "verifier", 45, lockdclient.BlockWaitForever)
-	finalState, _, _, err := getStateJSON(ctx, seedClient, key, verifier.LeaseID)
+	verifyClient, err := standbyServer.NewClient(lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)))
+	if err != nil {
+		t.Fatalf("verify client: %v", err)
+	}
+	t.Cleanup(func() { _ = verifyClient.Close() })
+	verifier := acquireWithRetry(t, ctx, verifyClient, key, "verifier", 45, lockdclient.BlockWaitForever)
+	finalState, _, _, err := getStateJSON(ctx, verifyClient, key, verifier.LeaseID)
 	if err != nil {
 		t.Fatalf("verify get_state: %v", err)
 	}
@@ -840,8 +865,8 @@ func TestMinioAcquireForUpdateCallbackFailover(t *testing.T) {
 		t.Fatalf("unexpected count: %v", finalState["count"])
 	}
 
-	primaryURL := primary.URL()
-	backupURL := backup.URL()
+	primaryURL := activeServer.URL()
+	backupURL := standbyServer.URL()
 	var sawError bool
 	var sawSuccess bool
 	for _, entry := range clientLogs.Events() {
@@ -933,15 +958,15 @@ func TestMinioRemoveFailover(t *testing.T) {
 	key := "minio-remove-failover-" + uuidv7.NewString()
 	defer cleanupMinio(t, cfg, key)
 
-	seedClient := backup.Client
-	if seedClient == nil {
-		var err error
-		seedClient, err = backup.NewClient(lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)))
-		if err != nil {
-			t.Fatalf("seed client: %v", err)
-		}
+	activeServer, seedClient, err := hatest.FindActiveServer(ctx, primary, backup)
+	if err != nil {
+		t.Fatalf("find active server: %v", err)
 	}
-	defer seedClient.Close()
+	t.Cleanup(func() { _ = seedClient.Close() })
+	standby := backup
+	if activeServer == backup {
+		standby = primary
+	}
 
 	seedLease, err := seedClient.Acquire(ctx, api.AcquireRequest{
 		Key:        key,
@@ -975,7 +1000,7 @@ func TestMinioRemoveFailover(t *testing.T) {
 		clientOptions = append(clientOptions, lockdclient.WithHTTPClient(httpClient))
 	}
 	failoverClient, err := lockdclient.NewWithEndpoints(
-		[]string{primary.URL(), backup.URL()},
+		[]string{activeServer.URL(), standby.URL()},
 		clientOptions...,
 	)
 	if err != nil {
@@ -985,9 +1010,15 @@ func TestMinioRemoveFailover(t *testing.T) {
 
 	lease := acquireWithRetry(t, ctx, failoverClient, key, "failover-remover", 45, lockdclient.BlockWaitForever)
 
-	if err := primary.Stop(context.Background()); err != nil {
-		t.Fatalf("stop primary: %v", err)
+	if err := activeServer.Stop(context.Background()); err != nil {
+		t.Fatalf("stop active server: %v", err)
 	}
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := hatest.WaitForActive(waitCtx, standby); err != nil {
+		waitCancel()
+		t.Fatalf("standby activation: %v", err)
+	}
+	waitCancel()
 
 	res, err := lease.Remove(ctx)
 	if err != nil {
@@ -998,8 +1029,13 @@ func TestMinioRemoveFailover(t *testing.T) {
 	}
 	releaseLease(t, ctx, lease)
 
-	verify := acquireWithRetry(t, ctx, seedClient, key, "failover-verify", 45, lockdclient.BlockWaitForever)
-	state, _, _, err := getStateJSON(ctx, seedClient, key, verify.LeaseID)
+	verifyClient, err := standby.NewClient(lockdclient.WithLogger(lockd.NewTestingLogger(t, pslog.TraceLevel)))
+	if err != nil {
+		t.Fatalf("verify client: %v", err)
+	}
+	t.Cleanup(func() { _ = verifyClient.Close() })
+	verify := acquireWithRetry(t, ctx, verifyClient, key, "failover-verify", 45, lockdclient.BlockWaitForever)
+	state, _, _, err := getStateJSON(ctx, verifyClient, key, verify.LeaseID)
 	if err != nil {
 		t.Fatalf("verify get: %v", err)
 	}
@@ -1008,7 +1044,7 @@ func TestMinioRemoveFailover(t *testing.T) {
 	}
 	releaseLease(t, ctx, verify)
 
-	assertMinioRemoveFailoverLogs(t, clientLogs, primary.URL(), backup.URL())
+	assertMinioRemoveFailoverLogs(t, clientLogs, activeServer.URL(), standby.URL())
 }
 
 func TestMinioRemoveCASMismatch(t *testing.T) {

@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"path"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -28,18 +29,19 @@ import (
 
 // Config controls the behaviour of the S3 storage backend.
 type Config struct {
-	Endpoint       string
-	Region         string
-	Bucket         string
-	Prefix         string
-	Insecure       bool
-	ForcePathStyle bool
-	PartSize       int64
-	ServerSideEnc  string
-	KMSKeyID       string
-	CustomCreds    *credentials.Credentials
-	Transport      http.RoundTripper
-	Crypto         *storage.Crypto
+	Endpoint                 string
+	Region                   string
+	Bucket                   string
+	Prefix                   string
+	Insecure                 bool
+	ForcePathStyle           bool
+	PartSize                 int64
+	SmallEncryptBufferBudget int64
+	ServerSideEnc            string
+	KMSKeyID                 string
+	CustomCreds              *credentials.Credentials
+	Transport                http.RoundTripper
+	Crypto                   *storage.Crypto
 }
 
 // Store implements storage.Backend backed by S3-compatible object storage.
@@ -47,6 +49,7 @@ type Store struct {
 	client *minio.Client
 	cfg    Config
 	crypto *storage.Crypto
+	budget *byteBudget
 }
 
 // DefaultNamespaceConfig returns the preferred namespace defaults for S3 backends.
@@ -60,6 +63,41 @@ func (s *Store) DefaultNamespaceConfig() namespaces.Config {
 type countingWriter struct {
 	n int64
 	w io.Writer
+}
+
+const (
+	s3SmallEncryptedStateLimit = 4 << 20 // 4 MiB; aligns with default spool threshold
+	s3MinMultipartSize         = 5 << 20 // 5 MiB; matches S3 minimum part size
+)
+
+type byteBudget struct {
+	max  int64
+	used atomic.Int64
+}
+
+func newByteBudget(max int64) *byteBudget {
+	if max <= 0 {
+		return nil
+	}
+	return &byteBudget{max: max}
+}
+
+func (b *byteBudget) tryAcquire(size int64) (func(), bool) {
+	if b == nil || size <= 0 {
+		return func() {}, true
+	}
+	if size > b.max {
+		return nil, false
+	}
+	for {
+		cur := b.used.Load()
+		if cur+size > b.max {
+			return nil, false
+		}
+		if b.used.CompareAndSwap(cur, cur+size) {
+			return func() { b.used.Add(-size) }, true
+		}
+	}
 }
 
 const descriptorMetadataKey = "lockd-descriptor"
@@ -112,7 +150,7 @@ func New(cfg Config) (*Store, error) {
 		}
 	}
 	if cfg.Transport == nil {
-		cfg.Transport = http.DefaultTransport
+		cfg.Transport = defaultTransport()
 	}
 	var creds *credentials.Credentials
 	if cfg.CustomCreds != nil {
@@ -140,7 +178,31 @@ func New(cfg Config) (*Store, error) {
 		return nil, fmt.Errorf("s3: create client: %w", err)
 	}
 	cfg.Prefix = strings.Trim(cfg.Prefix, "/")
-	return &Store{client: client, cfg: cfg, crypto: cfg.Crypto}, nil
+	return &Store{client: client, cfg: cfg, crypto: cfg.Crypto, budget: newByteBudget(cfg.SmallEncryptBufferBudget)}, nil
+}
+
+func defaultTransport() http.RoundTripper {
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return http.DefaultTransport
+	}
+	clone := base.Clone()
+	if clone.MaxIdleConns == 0 {
+		clone.MaxIdleConns = 256
+	}
+	if clone.MaxIdleConnsPerHost == 0 {
+		clone.MaxIdleConnsPerHost = 64
+	}
+	if clone.IdleConnTimeout == 0 {
+		clone.IdleConnTimeout = 90 * time.Second
+	}
+	if clone.TLSHandshakeTimeout == 0 {
+		clone.TLSHandshakeTimeout = 10 * time.Second
+	}
+	if clone.ExpectContinueTimeout == 0 {
+		clone.ExpectContinueTimeout = 1 * time.Second
+	}
+	return clone
 }
 
 // Close satisfies storage.Backend and is a no-op for the S3 client.
@@ -152,13 +214,18 @@ func (s *Store) BackendHash(ctx context.Context) (string, error) {
 	bucket := strings.TrimSpace(s.cfg.Bucket)
 	prefix := strings.Trim(s.cfg.Prefix, "/")
 	desc := fmt.Sprintf("s3|endpoint=%s|bucket=%s|prefix=%s", endpoint, bucket, prefix)
-	result, err := storage.ResolveBackendHash(ctx, s, desc)
+	result, err := storage.ResolveBackendHash(ctx, s, desc, s.crypto)
 	return result.Hash, err
 }
 
 // Client exposes the underlying MinIO client for diagnostics.
 func (s *Store) Client() *minio.Client {
 	return s.client
+}
+
+// BucketExists reports whether the configured bucket exists.
+func (s *Store) BucketExists(ctx context.Context) (bool, error) {
+	return s.client.BucketExists(ctx, s.cfg.Bucket)
 }
 
 // Config returns a copy of the configuration used to build the store.
@@ -360,7 +427,7 @@ func (s *Store) ListMetaKeys(ctx context.Context, namespace string) ([]string, e
 		if rel == "" || strings.HasSuffix(rel, "/") {
 			continue
 		}
-		if strings.HasPrefix(rel, "tmp/") {
+		if strings.HasPrefix(rel, "inflight/") {
 			continue
 		}
 		if !strings.HasSuffix(rel, ".pb") {
@@ -386,19 +453,20 @@ func (s *Store) ReadState(ctx context.Context, namespace, key string) (storage.R
 		return storage.ReadStateResult{}, err
 	}
 	verbose.Trace("s3.read_state.begin", "namespace", namespace, "key", key, "object", object)
-	info, err := s.client.StatObject(ctx, s.cfg.Bucket, object, minio.StatObjectOptions{})
+	obj, err := s.client.GetObject(ctx, s.cfg.Bucket, object, minio.GetObjectOptions{})
 	if err != nil {
+		logger.Debug("s3.read_state.get_error", "namespace", namespace, "key", key, "object", object, "error", err)
+		return storage.ReadStateResult{}, s.wrapError(err, "s3: get state")
+	}
+	info, err := obj.Stat()
+	if err != nil {
+		_ = obj.Close()
 		if isNotFound(err) {
 			verbose.Debug("s3.read_state.not_found", "namespace", namespace, "key", key, "object", object, "elapsed", time.Since(start))
 			return storage.ReadStateResult{}, storage.ErrNotFound
 		}
 		logger.Debug("s3.read_state.stat_error", "namespace", namespace, "key", key, "object", object, "error", err)
 		return storage.ReadStateResult{}, s.wrapError(err, "s3: stat state")
-	}
-	obj, err := s.client.GetObject(ctx, s.cfg.Bucket, object, minio.GetObjectOptions{})
-	if err != nil {
-		logger.Debug("s3.read_state.get_error", "namespace", namespace, "key", key, "object", object, "error", err)
-		return storage.ReadStateResult{}, s.wrapError(err, "s3: get state")
 	}
 	etag := stripETag(info.ETag)
 	infoOut := &storage.StateInfo{
@@ -427,7 +495,8 @@ func (s *Store) ReadState(ctx context.Context, namespace, key string) (storage.R
 	if plain, ok := storage.StatePlaintextSizeFromContext(ctx); ok && plain > 0 {
 		infoOut.Size = plain
 	}
-	objectCtx := storage.StateObjectContext(path.Join(namespace, key))
+	defaultCtx := storage.StateObjectContext(path.Join(namespace, key))
+	objectCtx := storage.StateObjectContextFromContext(ctx, defaultCtx)
 	if encrypted {
 		if len(descriptor) == 0 {
 			obj.Close()
@@ -490,11 +559,31 @@ func (s *Store) WriteState(ctx context.Context, namespace, key string, body io.R
 		putOpts.SetMatchETagExcept("*")
 	}
 	length := int64(-1)
+	plainSize := int64(-1)
+	if plain, ok := storage.StatePlaintextSizeFromContext(ctx); ok && plain > 0 {
+		plainSize = plain
+	}
 	encrypted := s.crypto != nil && s.crypto.Enabled()
 	var descriptor []byte
 	var plainBytes atomic.Int64
 	reader := body
-	objectCtx := storage.StateObjectContext(path.Join(namespace, key))
+	defaultCtx := storage.StateObjectContext(path.Join(namespace, key))
+	objectCtx := storage.StateObjectContextFromContext(ctx, defaultCtx)
+	if seeker, ok := body.(io.Seeker); ok {
+		if current, err := seeker.Seek(0, io.SeekCurrent); err == nil {
+			if end, err := seeker.Seek(0, io.SeekEnd); err == nil {
+				length = end - current
+				if plainSize <= 0 {
+					plainSize = length
+				}
+				_, _ = seeker.Seek(current, io.SeekStart)
+			}
+		}
+	}
+	if !encrypted && length < 0 && plainSize > 0 {
+		length = plainSize
+	}
+	needsStat := true
 	if encrypted {
 		putOpts.ContentType = storage.ContentTypeJSONEncrypted
 		descFromCtx, ok := storage.StateDescriptorFromContext(ctx)
@@ -503,6 +592,10 @@ func (s *Store) WriteState(ctx context.Context, namespace, key string, body io.R
 		if ok && len(descFromCtx) > 0 {
 			descriptor = append([]byte(nil), descFromCtx...)
 			mat, err = s.crypto.MaterialFromDescriptor(objectCtx, descriptor)
+			if err != nil {
+				logger.Debug("s3.write_state.descriptor_error", "namespace", namespace, "key", key, "object", object, "error", err)
+				return nil, err
+			}
 		} else {
 			var minted storage.MaterialResult
 			minted, err = s.crypto.MintMaterial(objectCtx)
@@ -519,36 +612,62 @@ func (s *Store) WriteState(ctx context.Context, namespace, key string, body io.R
 			}
 			putOpts.UserMetadata[descriptorMetadataKey] = encodeDescriptor(descriptor)
 		}
-		pr, pw := io.Pipe()
-		encWriter, err := s.crypto.EncryptWriterForMaterial(pw, mat)
-		if err != nil {
-			pw.Close()
-			logger.Debug("s3.write_state.encrypt_writer_error", "namespace", namespace, "key", key, "object", object, "error", err)
-			return nil, err
-		}
-		go func() {
-			cw := &countingWriter{w: encWriter}
-			if _, err := io.Copy(cw, body); err != nil {
-				encWriter.Close()
-				pw.CloseWithError(err)
-				return
-			}
-			if err := encWriter.Close(); err != nil {
-				pw.CloseWithError(err)
-				return
-			}
-			plainBytes.Store(cw.n)
-			pw.Close()
-		}()
-		reader = pr
-		length = -1
-	} else if seeker, ok := body.(io.Seeker); ok {
-		if current, err := seeker.Seek(0, io.SeekCurrent); err == nil {
-			if end, err := seeker.Seek(0, io.SeekEnd); err == nil {
-				length = end - current
-				_, _ = seeker.Seek(current, io.SeekStart)
+		usedBuffer := false
+		if plainSize > 0 && plainSize <= s3SmallEncryptedStateLimit {
+			release, ok := s.reserveExactBuffer(plainSize)
+			if ok {
+				defer release()
+				var cipherBuf bytes.Buffer
+				cipherBuf.Grow(int(plainSize) + 256)
+				encWriter, err := s.crypto.EncryptWriterForMaterial(&cipherBuf, mat)
+				if err != nil {
+					logger.Debug("s3.write_state.encrypt_writer_error", "namespace", namespace, "key", key, "object", object, "error", err)
+					return nil, err
+				}
+				cw := &countingWriter{w: encWriter}
+				if _, err := io.Copy(cw, body); err != nil {
+					encWriter.Close()
+					logger.Debug("s3.write_state.encrypt_write_error", "namespace", namespace, "key", key, "object", object, "error", err)
+					return nil, err
+				}
+				if err := encWriter.Close(); err != nil {
+					logger.Debug("s3.write_state.encrypt_close_error", "namespace", namespace, "key", key, "object", object, "error", err)
+					return nil, err
+				}
+				plainBytes.Store(cw.n)
+				reader = bytes.NewReader(cipherBuf.Bytes())
+				length = int64(cipherBuf.Len())
+				usedBuffer = true
 			}
 		}
+		if !usedBuffer {
+			pr, pw := io.Pipe()
+			encWriter, err := s.crypto.EncryptWriterForMaterial(pw, mat)
+			if err != nil {
+				pw.Close()
+				logger.Debug("s3.write_state.encrypt_writer_error", "namespace", namespace, "key", key, "object", object, "error", err)
+				return nil, err
+			}
+			go func() {
+				cw := &countingWriter{w: encWriter}
+				if _, err := io.Copy(cw, body); err != nil {
+					encWriter.Close()
+					pw.CloseWithError(err)
+					return
+				}
+				if err := encWriter.Close(); err != nil {
+					pw.CloseWithError(err)
+					return
+				}
+				plainBytes.Store(cw.n)
+				pw.Close()
+			}()
+			reader = pr
+			length = -1
+		}
+	}
+	if length >= 0 && isSinglePart(length, putOpts.PartSize) {
+		needsStat = false
 	}
 	info, err := s.client.PutObject(ctx, s.cfg.Bucket, object, reader, length, putOpts)
 	if err != nil {
@@ -571,8 +690,10 @@ func (s *Store) WriteState(ctx context.Context, namespace, key string, body io.R
 	}
 	// Some S3 providers return a provisional ETag on streaming uploads. A quick
 	// stat after the upload gives us the final, durable ETag for CAS.
-	if statInfo, statErr := s.client.StatObject(ctx, s.cfg.Bucket, object, minio.StatObjectOptions{}); statErr == nil {
-		result.NewETag = stripETag(statInfo.ETag)
+	if needsStat {
+		if statInfo, statErr := s.client.StatObject(ctx, s.cfg.Bucket, object, minio.StatObjectOptions{}); statErr == nil {
+			result.NewETag = stripETag(statInfo.ETag)
+		}
 	}
 	if len(descriptor) > 0 {
 		result.Descriptor = append([]byte(nil), descriptor...)
@@ -691,24 +812,65 @@ func (s *Store) ListObjects(ctx context.Context, namespace string, opts storage.
 	return result, nil
 }
 
+// ListNamespaces enumerates namespaces stored under the configured prefix.
+func (s *Store) ListNamespaces(ctx context.Context) ([]string, error) {
+	if s == nil || s.client == nil {
+		return nil, storage.ErrNotImplemented
+	}
+	prefix := strings.Trim(s.cfg.Prefix, "/")
+	if prefix != "" {
+		prefix += "/"
+	}
+	opts := minio.ListObjectsOptions{
+		Prefix:    prefix,
+		Recursive: true,
+	}
+	set := make(map[string]struct{})
+	for object := range s.client.ListObjects(ctx, s.cfg.Bucket, opts) {
+		if object.Err != nil {
+			return nil, s.wrapError(object.Err, "s3: list namespaces")
+		}
+		rel := strings.TrimPrefix(object.Key, prefix)
+		if rel == "" || rel == object.Key {
+			continue
+		}
+		parts := strings.SplitN(rel, "/", 2)
+		if len(parts) == 0 {
+			continue
+		}
+		ns := strings.TrimSpace(parts[0])
+		if ns == "" {
+			continue
+		}
+		set[ns] = struct{}{}
+	}
+	names := make([]string, 0, len(set))
+	for name := range set {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
 // GetObject downloads the raw payload for key within the namespace.
 func (s *Store) GetObject(ctx context.Context, namespace, key string) (storage.GetObjectResult, error) {
 	logger, verbose := s.loggers(ctx)
 	object := s.objectKey(namespace, key)
 	verbose.Trace("s3.get_object.begin", "namespace", namespace, "key", key, "object", object)
-	info, err := s.client.StatObject(ctx, s.cfg.Bucket, object, minio.StatObjectOptions{})
+	obj, err := s.client.GetObject(ctx, s.cfg.Bucket, object, minio.GetObjectOptions{})
 	if err != nil {
+		logger.Debug("s3.get_object.get_error", "namespace", namespace, "key", key, "object", object, "error", err)
+		return storage.GetObjectResult{}, s.wrapError(err, "s3: get object")
+	}
+	info, err := obj.Stat()
+	if err != nil {
+		_ = obj.Close()
 		if isNotFound(err) {
 			verbose.Debug("s3.get_object.not_found", "namespace", namespace, "key", key, "object", object)
 			return storage.GetObjectResult{}, storage.ErrNotFound
 		}
 		logger.Debug("s3.get_object.stat_error", "namespace", namespace, "key", key, "object", object, "error", err)
 		return storage.GetObjectResult{}, s.wrapError(err, "s3: stat object")
-	}
-	obj, err := s.client.GetObject(ctx, s.cfg.Bucket, object, minio.GetObjectOptions{})
-	if err != nil {
-		logger.Debug("s3.get_object.get_error", "namespace", namespace, "key", key, "object", object, "error", err)
-		return storage.GetObjectResult{}, s.wrapError(err, "s3: get object")
 	}
 	reader := &notFoundAwareObject{object: obj}
 	meta := &storage.ObjectInfo{
@@ -766,6 +928,22 @@ func (s *Store) PutObject(ctx context.Context, namespace, key string, body io.Re
 				_, _ = seeker.Seek(current, io.SeekStart)
 			}
 		}
+	}
+	var releaseBudget func()
+	if length < 0 {
+		reader, newLen, release, ok, err := s.maybeBufferObject(body)
+		if err != nil {
+			logger.Debug("s3.put_object.buffer_error", "namespace", namespace, "key", key, "object", object, "error", err)
+			return nil, err
+		}
+		if ok {
+			body = reader
+			length = newLen
+			releaseBudget = release
+		}
+	}
+	if releaseBudget != nil {
+		defer releaseBudget()
 	}
 	info, err := s.client.PutObject(ctx, s.cfg.Bucket, object, body, length, putOpts)
 	if err != nil {
@@ -879,6 +1057,71 @@ func (s *Store) applySSE(opts *minio.PutObjectOptions) {
 	}
 }
 
+func (s *Store) reserveExactBuffer(size int64) (func(), bool) {
+	if size <= 0 || s.budget == nil {
+		return nil, false
+	}
+	return s.budget.tryAcquire(size)
+}
+
+func (s *Store) reserveUpTo(limit int64) (func(), int64, bool) {
+	if limit <= 0 || s.budget == nil {
+		return nil, 0, false
+	}
+	size := limit
+	if s.budget.max < size {
+		size = s.budget.max
+	}
+	if size <= 0 {
+		return nil, 0, false
+	}
+	release, ok := s.budget.tryAcquire(size)
+	if !ok {
+		return nil, 0, false
+	}
+	return release, size, true
+}
+
+func (s *Store) maybeBufferObject(body io.Reader) (io.Reader, int64, func(), bool, error) {
+	release, limit, ok := s.reserveUpTo(s3SmallEncryptedStateLimit)
+	if !ok {
+		return nil, 0, nil, false, nil
+	}
+	buf, complete, err := readUpTo(body, limit)
+	if err != nil {
+		release()
+		return nil, 0, nil, false, err
+	}
+	reader := bytes.NewReader(buf)
+	if complete {
+		return reader, int64(len(buf)), release, true, nil
+	}
+	return io.MultiReader(reader, body), -1, release, true, nil
+}
+
+func readUpTo(r io.Reader, limit int64) ([]byte, bool, error) {
+	if limit <= 0 {
+		return nil, false, nil
+	}
+	lr := &io.LimitedReader{R: r, N: limit + 1}
+	buf, err := io.ReadAll(lr)
+	if err != nil {
+		return buf, false, err
+	}
+	complete := len(buf) <= int(limit) && lr.N > 0
+	return buf, complete, nil
+}
+
+func isSinglePart(length int64, partSize uint64) bool {
+	if length <= 0 {
+		return false
+	}
+	if partSize > 0 {
+		return length <= int64(partSize)
+	}
+	return length < s3MinMultipartSize
+}
+
 func classifyPutObjectError(err error, hasExpectedETag bool) error {
 	if err == nil {
 		return nil
@@ -912,6 +1155,9 @@ func (o *notFoundAwareObject) Read(p []byte) (int, error) {
 	if err != nil && isNotFound(err) {
 		err = storage.ErrNotFound
 	}
+	if err != nil && isPreconditionFailed(err) {
+		err = storage.ErrCASMismatch
+	}
 	return n, err
 }
 
@@ -920,6 +1166,9 @@ func (o *notFoundAwareObject) ReadAt(p []byte, offset int64) (int, error) {
 	if err != nil && isNotFound(err) {
 		err = storage.ErrNotFound
 	}
+	if err != nil && isPreconditionFailed(err) {
+		err = storage.ErrCASMismatch
+	}
 	return n, err
 }
 
@@ -927,6 +1176,9 @@ func (o *notFoundAwareObject) Seek(offset int64, whence int) (int64, error) {
 	pos, err := o.object.Seek(offset, whence)
 	if err != nil && isNotFound(err) {
 		err = storage.ErrNotFound
+	}
+	if err != nil && isPreconditionFailed(err) {
+		err = storage.ErrCASMismatch
 	}
 	return pos, err
 }

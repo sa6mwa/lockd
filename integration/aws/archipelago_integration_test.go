@@ -6,9 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"net/url"
 	"path"
-	"strings"
 	"testing"
 	"time"
 
@@ -21,8 +19,9 @@ import (
 )
 
 func TestAWSArchipelagoLeaderFailover(t *testing.T) {
-	leaseTTL := 10 * time.Second
+	leaseTTL := 4 * time.Second
 	baseCfg := loadAWSConfig(t)
+	baseCfg.HAMode = "concurrent"
 	cryptotest.ConfigureTCAuth(t, &baseCfg)
 	baseCfg.TCClientBundlePath = cryptotest.SharedTCClientBundlePath(t)
 
@@ -181,20 +180,4 @@ func startAWSArchipelagoNode(tb testing.TB, base lockd.Config, addr, scheme stri
 		opts = append(opts, lockd.WithTestMTLSCredentials(creds[0]))
 	}
 	return startAWSTestServer(tb, cfg, opts...)
-}
-
-func appendStorePath(tb testing.TB, store, suffix string) string {
-	tb.Helper()
-	parsed, err := url.Parse(store)
-	if err != nil {
-		tb.Fatalf("parse store: %v", err)
-	}
-	pathPart := strings.Trim(strings.TrimPrefix(parsed.Path, "/"), "/")
-	if pathPart == "" {
-		pathPart = suffix
-	} else {
-		pathPart = path.Join(pathPart, suffix)
-	}
-	parsed.Path = "/" + pathPart
-	return parsed.String()
 }

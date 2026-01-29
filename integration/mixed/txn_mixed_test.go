@@ -4,9 +4,11 @@ package mixedintegration
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
+	"path"
 	"strings"
 	"testing"
 	"time"
@@ -17,7 +19,10 @@ import (
 	"pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/integration/internal/cryptotest"
+	"pkt.systems/lockd/integration/internal/storepath"
+	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/s3"
+	"pkt.systems/lockd/internal/uuidv7"
 	"pkt.systems/lockd/namespaces"
 )
 
@@ -33,9 +38,13 @@ func TestMixedBackendTxnCommitRollback(t *testing.T) {
 func runMixedBackendTxn(t *testing.T, commit bool) {
 	diskCfg := loadDiskConfig(t)
 	minioCfg := loadMinioConfig(t)
+	prefix := "mixed-txn-" + uuidv7.NewString()
+	minioCfg.Store = appendStorePath(t, minioCfg.Store, path.Join(prefix, "minio"))
 	cryptotest.ConfigureTCAuth(t, &diskCfg)
 	cryptotest.ConfigureTCAuth(t, &minioCfg)
+	ensureStoreReady(t, minioCfg)
 	ensureMinioBucket(t, minioCfg)
+	resetMixedMinioBackendIDForCrypto(t, minioCfg)
 
 	serverOpts := cryptotest.SharedMTLSOptions(t)
 	bundlePath := cryptotest.SharedTCClientBundlePath(t)
@@ -176,6 +185,7 @@ func loadMinioConfig(tb testing.TB) lockd.Config {
 	if !strings.HasPrefix(store, "s3://") {
 		tb.Fatalf("LOCKD_MINIO_STORE must reference an s3:// URI for MinIO integration tests, got %q", store)
 	}
+	store = storepath.Scoped(tb, store, "mixed")
 	accessKey := firstEnv("LOCKD_MINIO_S3_ACCESS_KEY_ID", "LOCKD_S3_ACCESS_KEY_ID")
 	secretKey := firstEnv("LOCKD_MINIO_S3_SECRET_ACCESS_KEY", "LOCKD_S3_SECRET_ACCESS_KEY")
 	if accessKey == "" || secretKey == "" {
@@ -196,6 +206,28 @@ func loadMinioConfig(tb testing.TB) lockd.Config {
 	}
 	cryptotest.MaybeEnableStorageEncryption(tb, &cfg)
 	return cfg
+}
+
+func resetMixedMinioBackendIDForCrypto(tb testing.TB, cfg lockd.Config) {
+	tb.Helper()
+	if os.Getenv(cryptotest.EnvVar) != "1" {
+		return
+	}
+	minioResult, err := lockd.BuildGenericS3Config(cfg)
+	if err != nil {
+		tb.Fatalf("build minio config: %v", err)
+	}
+	store, err := s3.New(minioResult.Config)
+	if err != nil {
+		tb.Fatalf("new minio store: %v", err)
+	}
+	defer store.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := store.DeleteObject(ctx, ".lockd", "backend-id", storage.DeleteObjectOptions{IgnoreNotFound: true}); err != nil && !errors.Is(err, storage.ErrNotFound) {
+		tb.Fatalf("cleanup backend-id: %v", err)
+	}
 }
 
 func ensureMinioCredentials(tb testing.TB) {

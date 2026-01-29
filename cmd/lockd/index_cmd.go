@@ -20,6 +20,7 @@ func newIndexCommand() *cobra.Command {
 	var namespace string
 	cmd.PersistentFlags().StringVarP(&namespace, "namespace", "n", "", "namespace name (defaults to client default)")
 	cmd.AddCommand(newIndexFlushCommand(cfg, &namespace))
+	cmd.AddCommand(newIndexRebuildCommand())
 	return cmd
 }
 

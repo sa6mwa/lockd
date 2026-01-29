@@ -9,6 +9,7 @@ import (
 
 	"pkt.systems/lockd/internal/jsonpointer"
 	indexer "pkt.systems/lockd/internal/search/index"
+	"pkt.systems/lockd/internal/storage"
 )
 
 func buildDocumentFromJSON(key string, reader io.Reader) (indexer.Document, error) {
@@ -21,6 +22,26 @@ func buildDocumentFromJSON(key string, reader io.Reader) (indexer.Document, erro
 	}
 	recursiveIndex("", raw, &doc)
 	return doc, nil
+}
+
+func buildIndexDocumentMeta(meta *storage.Meta) *indexer.DocumentMetadata {
+	if meta == nil {
+		return nil
+	}
+	publishedVersion := meta.PublishedVersion
+	if publishedVersion == 0 {
+		publishedVersion = meta.Version
+	}
+	out := &indexer.DocumentMetadata{
+		StateETag:           meta.StateETag,
+		StatePlaintextBytes: meta.StatePlaintextBytes,
+		PublishedVersion:    publishedVersion,
+		QueryExcluded:       meta.QueryExcluded(),
+	}
+	if len(meta.StateDescriptor) > 0 {
+		out.StateDescriptor = append([]byte(nil), meta.StateDescriptor...)
+	}
+	return out
 }
 
 func recursiveIndex(path string, value any, doc *indexer.Document) {

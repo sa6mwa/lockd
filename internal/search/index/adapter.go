@@ -1,6 +1,7 @@
 package index
 
 import (
+	"container/heap"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"pkt.systems/lockd/api"
@@ -29,6 +31,11 @@ type AdapterConfig struct {
 type Adapter struct {
 	store  *Store
 	logger pslog.Logger
+
+	docMetaHits    atomic.Uint64
+	docMetaMisses  atomic.Uint64
+	docMetaInvalid atomic.Uint64
+	docMetaLogAt   atomic.Int64
 }
 
 // NewAdapter builds a query adapter backed by the index store.
@@ -67,6 +74,13 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 		manifest = NewManifest()
 	}
 	reader := newSegmentReader(req.Namespace, manifest, a.store, a.logger)
+	visibility, err := a.visibilityMap(ctx, req.Namespace)
+	if err != nil {
+		return search.Result{}, err
+	}
+	if term, ok := simpleEq(req.Selector); ok {
+		return a.queryEq(ctx, req, term, reader, manifest, visibility)
+	}
 	var matches keySet
 	if zeroSelector(req.Selector) {
 		matches, err = reader.allKeys(ctx)
@@ -83,7 +97,7 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 		return search.Result{}, fmt.Errorf("%w: %v", search.ErrInvalidCursor, err)
 	}
 	if startIdx >= len(sortedKeys) {
-		return search.Result{IndexSeq: manifest.Seq}, nil
+		return search.Result{IndexSeq: manifest.Seq, Format: manifest.Format}, nil
 	}
 	limit := req.Limit
 	if limit <= 0 {
@@ -93,9 +107,24 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 		limit = len(sortedKeys) - startIdx
 	}
 	if limit <= 0 {
-		return search.Result{IndexSeq: manifest.Seq}, nil
+		return search.Result{IndexSeq: manifest.Seq, Format: manifest.Format}, nil
 	}
 	visible := make([]string, 0, min(limit, len(sortedKeys)-startIdx))
+	canUseDocMeta := manifest.Format >= IndexFormatVersionV3
+	var docMeta map[string]DocumentMetadata
+	docMetaReady := false
+	getDocMeta := func() (map[string]DocumentMetadata, error) {
+		if docMetaReady {
+			return docMeta, nil
+		}
+		docMetaReady = true
+		metaMap, err := reader.docMetaMap(ctx)
+		if err != nil {
+			return nil, err
+		}
+		docMeta = metaMap
+		return docMeta, nil
+	}
 	nextIndex := len(sortedKeys)
 	var lastReturned string
 	for i := startIdx; i < len(sortedKeys); i++ {
@@ -107,16 +136,49 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 			return search.Result{}, err
 		}
 		key := sortedKeys[i]
-		metaRes, metaErr := a.store.backend.LoadMeta(ctx, req.Namespace, key)
-		if metaErr != nil {
-			if errors.Is(metaErr, storage.ErrNotFound) {
-				continue
-			}
-			return search.Result{}, fmt.Errorf("load meta %s: %w", key, metaErr)
+		visibleKey, ok, err := a.visibleFromLedger(ctx, req.Namespace, key, visibility)
+		if err != nil {
+			return search.Result{}, err
 		}
-		meta := metaRes.Meta
-		if meta == nil || meta.PublishedVersion == 0 || meta.QueryExcluded() {
+		if ok && !visibleKey {
 			continue
+		}
+		if !ok {
+			if canUseDocMeta {
+				metaMap, err := getDocMeta()
+				if err != nil {
+					return search.Result{}, err
+				}
+				if meta, ok := metaMap[key]; ok {
+					if meta.PublishedVersion == 0 || meta.QueryExcluded {
+						continue
+					}
+				} else {
+					metaRes, metaErr := a.store.backend.LoadMeta(ctx, req.Namespace, key)
+					if metaErr != nil {
+						if errors.Is(metaErr, storage.ErrNotFound) {
+							continue
+						}
+						return search.Result{}, fmt.Errorf("load meta %s: %w", key, metaErr)
+					}
+					meta := metaRes.Meta
+					if meta == nil || meta.PublishedVersion == 0 || meta.QueryExcluded() {
+						continue
+					}
+				}
+			} else {
+				metaRes, metaErr := a.store.backend.LoadMeta(ctx, req.Namespace, key)
+				if metaErr != nil {
+					if errors.Is(metaErr, storage.ErrNotFound) {
+						continue
+					}
+					return search.Result{}, fmt.Errorf("load meta %s: %w", key, metaErr)
+				}
+				meta := metaRes.Meta
+				if meta == nil || meta.PublishedVersion == 0 || meta.QueryExcluded() {
+					continue
+				}
+			}
 		}
 		visible = append(visible, key)
 		lastReturned = key
@@ -125,6 +187,14 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 	result := search.Result{
 		Keys:     visible,
 		IndexSeq: manifest.Seq,
+		Format:   manifest.Format,
+	}
+	if req.IncludeDocMeta && len(visible) > 0 {
+		meta, err := a.collectDocMeta(ctx, visible, reader)
+		if err != nil {
+			return search.Result{}, err
+		}
+		result.DocMeta = meta
 	}
 	if manifest.UpdatedAt.Unix() > 0 {
 		if result.Metadata == nil {
@@ -136,6 +206,22 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 		result.Cursor = encodeCursor(lastReturned)
 	}
 	return result, nil
+}
+
+func simpleEq(sel api.Selector) (*api.Term, bool) {
+	if sel.Eq == nil {
+		return nil, false
+	}
+	if sel.Prefix != nil || sel.Range != nil || sel.In != nil || sel.Exists != "" {
+		return nil, false
+	}
+	if sel.Not != nil && !sel.Not.IsEmpty() {
+		return nil, false
+	}
+	if len(sel.And) > 0 || len(sel.Or) > 0 {
+		return nil, false
+	}
+	return sel.Eq, true
 }
 
 type segmentReader struct {
@@ -178,11 +264,14 @@ func (r *segmentReader) keysForEq(ctx context.Context, term *api.Term) (keySet, 
 	}
 	value := normalizeTermValue(term.Value)
 	result := make(keySet)
-	err := r.forEachPosting(ctx, field, func(termValue string, keys []string) error {
-		if termValue == value {
-			for _, key := range keys {
-				result[key] = struct{}{}
-			}
+	err := r.forEachSegment(ctx, func(seg *Segment) error {
+		block, ok := seg.Fields[field]
+		if !ok {
+			return nil
+		}
+		keys := block.Postings[value]
+		for _, key := range keys {
+			result[key] = struct{}{}
 		}
 		return nil
 	})
@@ -314,22 +403,342 @@ func (r *segmentReader) loadSegment(ctx context.Context, id string) (*Segment, e
 	return segment, nil
 }
 
+func (r *segmentReader) docMetaMap(ctx context.Context) (map[string]DocumentMetadata, error) {
+	if r == nil {
+		return nil, nil
+	}
+	out := make(map[string]DocumentMetadata)
+	err := r.forEachSegment(ctx, func(seg *Segment) error {
+		if seg == nil || len(seg.DocMeta) == 0 {
+			return nil
+		}
+		for key, meta := range seg.DocMeta {
+			if key == "" {
+				continue
+			}
+			if _, exists := out[key]; exists {
+				continue
+			}
+			out[key] = meta
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 type selectorEvaluator struct {
 	reader *segmentReader
 }
 
-func (e selectorEvaluator) evaluate(ctx context.Context, sel api.Selector) (keySet, error) {
-	if len(sel.Or) > 0 {
-		unionSet := make(keySet)
-		for _, branch := range sel.Or {
-			branchSet, err := e.evaluate(ctx, branch)
-			if err != nil {
-				return nil, err
-			}
-			unionSet = union(unionSet, branchSet)
+type postingCursor struct {
+	key  string
+	keys []string
+	idx  int
+}
+
+type postingHeap []*postingCursor
+
+func (h postingHeap) Len() int           { return len(h) }
+func (h postingHeap) Less(i, j int) bool { return h[i].key < h[j].key }
+func (h postingHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+
+func (h *postingHeap) Push(x any) {
+	*h = append(*h, x.(*postingCursor))
+}
+
+func (h *postingHeap) Pop() any {
+	old := *h
+	n := len(old)
+	item := old[n-1]
+	*h = old[:n-1]
+	return item
+}
+
+func (a *Adapter) queryEq(ctx context.Context, req search.Request, term *api.Term, reader *segmentReader, manifest *Manifest, visibility map[string]bool) (search.Result, error) {
+	field := normalizeField(term)
+	if field == "" {
+		return search.Result{IndexSeq: manifest.Seq, Format: manifest.Format}, nil
+	}
+	value := normalizeTermValue(term.Value)
+	cursorValue := ""
+	if req.Cursor != "" {
+		decoded, err := decodeCursor(req.Cursor)
+		if err != nil {
+			return search.Result{}, fmt.Errorf("%w: %v", search.ErrInvalidCursor, err)
 		}
+		cursorValue = decoded
+	}
+	var lists [][]string
+	err := reader.forEachSegment(ctx, func(seg *Segment) error {
+		block, ok := seg.Fields[field]
+		if !ok {
+			return nil
+		}
+		keys := block.Postings[value]
+		if len(keys) == 0 {
+			return nil
+		}
+		lists = append(lists, keys)
+		return nil
+	})
+	if err != nil {
+		return search.Result{}, err
+	}
+	if len(lists) == 0 {
+		return search.Result{IndexSeq: manifest.Seq, Format: manifest.Format}, nil
+	}
+	limit := req.Limit
+	if limit < 0 {
+		limit = 0
+	}
+	h := make(postingHeap, 0, len(lists))
+	for _, keys := range lists {
+		start := 0
+		if cursorValue != "" {
+			start = sort.SearchStrings(keys, cursorValue)
+			if start < len(keys) && keys[start] == cursorValue {
+				start++
+			}
+		}
+		if start >= len(keys) {
+			continue
+		}
+		h = append(h, &postingCursor{key: keys[start], keys: keys, idx: start})
+	}
+	if len(h) == 0 {
+		return search.Result{IndexSeq: manifest.Seq, Format: manifest.Format}, nil
+	}
+	heap.Init(&h)
+	visible := make([]string, 0, min(limit, 64))
+	canUseDocMeta := manifest.Format >= IndexFormatVersionV3
+	var docMeta map[string]DocumentMetadata
+	docMetaReady := false
+	getDocMeta := func() (map[string]DocumentMetadata, error) {
+		if docMetaReady {
+			return docMeta, nil
+		}
+		docMetaReady = true
+		metaMap, err := reader.docMetaMap(ctx)
+		if err != nil {
+			return nil, err
+		}
+		docMeta = metaMap
+		return docMeta, nil
+	}
+	lastKey := ""
+	for h.Len() > 0 {
+		if err := ctx.Err(); err != nil {
+			return search.Result{}, err
+		}
+		cursor := heap.Pop(&h).(*postingCursor)
+		key := cursor.key
+		cursor.idx++
+		if cursor.idx < len(cursor.keys) {
+			cursor.key = cursor.keys[cursor.idx]
+			heap.Push(&h, cursor)
+		}
+		if key == lastKey {
+			continue
+		}
+		lastKey = key
+		ledgerVisible, ok, err := a.visibleFromLedger(ctx, req.Namespace, key, visibility)
+		if err != nil {
+			return search.Result{}, err
+		}
+		if ok && !ledgerVisible {
+			continue
+		}
+		if !ok {
+			if canUseDocMeta {
+				metaMap, err := getDocMeta()
+				if err != nil {
+					return search.Result{}, err
+				}
+				if meta, ok := metaMap[key]; ok {
+					if meta.PublishedVersion == 0 || meta.QueryExcluded {
+						continue
+					}
+				} else {
+					metaRes, metaErr := a.store.backend.LoadMeta(ctx, req.Namespace, key)
+					if metaErr != nil {
+						if errors.Is(metaErr, storage.ErrNotFound) {
+							continue
+						}
+						return search.Result{}, fmt.Errorf("load meta %s: %w", key, metaErr)
+					}
+					meta := metaRes.Meta
+					if meta == nil || meta.PublishedVersion == 0 || meta.QueryExcluded() {
+						continue
+					}
+				}
+			} else {
+				metaRes, metaErr := a.store.backend.LoadMeta(ctx, req.Namespace, key)
+				if metaErr != nil {
+					if errors.Is(metaErr, storage.ErrNotFound) {
+						continue
+					}
+					return search.Result{}, fmt.Errorf("load meta %s: %w", key, metaErr)
+				}
+				meta := metaRes.Meta
+				if meta == nil || meta.PublishedVersion == 0 || meta.QueryExcluded() {
+					continue
+				}
+			}
+		}
+		visible = append(visible, key)
+		if limit > 0 && len(visible) >= limit {
+			break
+		}
+	}
+	result := search.Result{
+		Keys:     visible,
+		IndexSeq: manifest.Seq,
+		Format:   manifest.Format,
+	}
+	if req.IncludeDocMeta && len(visible) > 0 {
+		meta, err := a.collectDocMeta(ctx, visible, reader)
+		if err != nil {
+			return search.Result{}, err
+		}
+		result.DocMeta = meta
+	}
+	if manifest.UpdatedAt.Unix() > 0 {
+		result.Metadata = map[string]string{
+			"index_updated_at": manifest.UpdatedAt.UTC().Format(time.RFC3339),
+		}
+	}
+	if limit > 0 && len(visible) == limit && lastKey != "" && h.Len() > 0 {
+		result.Cursor = encodeCursor(lastKey)
+	}
+	return result, nil
+}
+
+var errDocMetaComplete = errors.New("doc meta complete")
+
+func (a *Adapter) collectDocMeta(ctx context.Context, keys []string, reader *segmentReader) (map[string]search.DocMetadata, error) {
+	if len(keys) == 0 || reader == nil {
+		return nil, nil
+	}
+	out := make(map[string]search.DocMetadata, len(keys))
+	remaining := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		remaining[key] = struct{}{}
+	}
+	invalid := 0
+	err := reader.forEachSegment(ctx, func(seg *Segment) error {
+		if len(remaining) == 0 {
+			return errDocMetaComplete
+		}
+		for key := range remaining {
+			meta, ok := seg.DocMeta[key]
+			if !ok {
+				continue
+			}
+			entry := search.DocMetadata{
+				StateETag:           meta.StateETag,
+				StatePlaintextBytes: meta.StatePlaintextBytes,
+				PublishedVersion:    meta.PublishedVersion,
+			}
+			if meta.StateETag == "" || meta.PublishedVersion == 0 {
+				invalid++
+			}
+			if len(meta.StateDescriptor) > 0 {
+				entry.StateDescriptor = append([]byte(nil), meta.StateDescriptor...)
+			}
+			out[key] = entry
+			delete(remaining, key)
+			if len(remaining) == 0 {
+				return errDocMetaComplete
+			}
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, errDocMetaComplete) {
+		return nil, err
+	}
+	found := len(out)
+	missing := len(remaining)
+	if found < 0 {
+		found = 0
+	}
+	if missing < 0 {
+		missing = 0
+	}
+	a.recordDocMetaStats(found, missing, invalid)
+	return out, nil
+}
+
+func (a *Adapter) recordDocMetaStats(found, missing, invalid int) {
+	if a == nil {
+		return
+	}
+	if found > 0 {
+		a.docMetaHits.Add(uint64(found))
+	}
+	if missing > 0 {
+		a.docMetaMisses.Add(uint64(missing))
+	}
+	if invalid > 0 {
+		a.docMetaInvalid.Add(uint64(invalid))
+	}
+	logger := a.logger
+	if logger == nil {
+		return
+	}
+	now := time.Now().UnixNano()
+	last := a.docMetaLogAt.Load()
+	if last != 0 && now-last < int64(10*time.Second) {
+		return
+	}
+	if !a.docMetaLogAt.CompareAndSwap(last, now) {
+		return
+	}
+	hits := a.docMetaHits.Load()
+	misses := a.docMetaMisses.Load()
+	bad := a.docMetaInvalid.Load()
+	total := hits + misses
+	if total == 0 {
+		return
+	}
+	hitRatio := float64(hits) / float64(total)
+	logger.Trace("index.docmeta.stats",
+		"hits", hits,
+		"misses", misses,
+		"invalid", bad,
+		"total", total,
+		"hit_ratio", hitRatio,
+	)
+}
+
+func (e selectorEvaluator) evaluate(ctx context.Context, sel api.Selector) (keySet, error) {
+	baseSet, initialized, err := e.evaluateBase(ctx, sel)
+	if err != nil {
+		return nil, err
+	}
+	if len(sel.Or) == 0 {
+		if !initialized {
+			return e.reader.allKeys(ctx)
+		}
+		return baseSet, nil
+	}
+	unionSet := make(keySet)
+	for _, branch := range sel.Or {
+		branchSet, err := e.evaluate(ctx, branch)
+		if err != nil {
+			return nil, err
+		}
+		unionSet = union(unionSet, branchSet)
+	}
+	if !initialized {
 		return unionSet, nil
 	}
+	return intersect(baseSet, unionSet), nil
+}
+
+func (e selectorEvaluator) evaluateBase(ctx context.Context, sel api.Selector) (keySet, bool, error) {
 	var (
 		result      keySet
 		initialized bool
@@ -345,55 +754,55 @@ func (e selectorEvaluator) evaluate(ctx context.Context, sel api.Selector) (keyS
 	if sel.Eq != nil {
 		set, err := e.reader.keysForEq(ctx, sel.Eq)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		intersectWith(set)
 	}
 	if sel.Prefix != nil {
 		set, err := e.reader.keysForPrefix(ctx, sel.Prefix)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		intersectWith(set)
 	}
 	if sel.Range != nil {
 		set, err := e.reader.keysForRange(ctx, sel.Range)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		intersectWith(set)
 	}
 	if sel.In != nil {
 		set, err := e.reader.keysForIn(ctx, sel.In)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		intersectWith(set)
 	}
 	if sel.Exists != "" {
 		set, err := e.reader.keysForExists(ctx, sel.Exists)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		intersectWith(set)
 	}
 	for _, clause := range sel.And {
 		clauseSet, err := e.evaluate(ctx, clause)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		intersectWith(clauseSet)
 	}
 	if sel.Not != nil {
 		notSet, err := e.evaluate(ctx, *sel.Not)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if len(notSet) > 0 {
 			if !initialized {
 				all, err := e.reader.allKeys(ctx)
 				if err != nil {
-					return nil, err
+					return nil, false, err
 				}
 				result = subtract(all, notSet)
 				initialized = true
@@ -402,10 +811,26 @@ func (e selectorEvaluator) evaluate(ctx context.Context, sel api.Selector) (keyS
 			}
 		}
 	}
-	if !initialized {
-		return e.reader.allKeys(ctx)
+	return result, initialized, nil
+}
+
+func (a *Adapter) visibilityMap(ctx context.Context, namespace string) (map[string]bool, error) {
+	if a == nil || a.store == nil {
+		return nil, nil
 	}
-	return result, nil
+	entries, _, err := a.store.VisibilityEntries(ctx, namespace)
+	if err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+func (a *Adapter) visibleFromLedger(ctx context.Context, namespace, key string, entries map[string]bool) (bool, bool, error) {
+	if entries == nil {
+		return false, false, nil
+	}
+	visible, ok := entries[key]
+	return visible, ok, nil
 }
 
 type keySet map[string]struct{}

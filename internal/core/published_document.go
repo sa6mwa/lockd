@@ -7,9 +7,11 @@ import (
 	"io"
 	"net/http"
 
+	"pkt.systems/lockd/internal/search"
 	"pkt.systems/lockd/internal/storage"
 )
 
+// PublishedDocumentResult contains the published document payload and metadata.
 type PublishedDocumentResult struct {
 	Reader    io.ReadCloser
 	Version   int64
@@ -49,7 +51,7 @@ func (s *Service) openPublishedDocument(ctx context.Context, namespace, key stri
 	if meta.StatePlaintextBytes > 0 {
 		stateCtx = storage.ContextWithStatePlaintextSize(stateCtx, meta.StatePlaintextBytes)
 	}
-	reader, info, err := s.readStateWithWarmup(stateCtx, namespace, storageKey, true)
+	reader, info, err := s.readStateWithWarmup(stateCtx, namespace, storageKey, meta.StateETag, meta.StatePlaintextBytes, true)
 	if errors.Is(err, storage.ErrNotFound) {
 		return PublishedDocumentResult{NoContent: true}, nil
 	}
@@ -69,6 +71,53 @@ func (s *Service) openPublishedDocument(ctx context.Context, namespace, key stri
 		}
 	}
 	return PublishedDocumentResult{Reader: reader, Version: publishedVersion}, nil
+}
+
+func (s *Service) openPublishedDocumentWithMeta(ctx context.Context, namespace, key string, meta *search.DocMetadata) (PublishedDocumentResult, error) {
+	if meta == nil {
+		return s.openPublishedDocument(ctx, namespace, key)
+	}
+	storageKey, err := s.namespacedKey(namespace, key)
+	if err != nil {
+		return PublishedDocumentResult{}, Failure{Code: "invalid_key", Detail: err.Error(), HTTPStatus: http.StatusBadRequest}
+	}
+	if meta.StateETag == "" || meta.PublishedVersion == 0 {
+		return PublishedDocumentResult{NoContent: true}, nil
+	}
+	if s.crypto != nil && s.crypto.Enabled() && len(meta.StateDescriptor) == 0 {
+		return s.openPublishedDocument(ctx, namespace, key)
+	}
+	stateCtx := ctx
+	if len(meta.StateDescriptor) > 0 {
+		stateCtx = storage.ContextWithStateDescriptor(stateCtx, meta.StateDescriptor)
+	}
+	if meta.StatePlaintextBytes > 0 {
+		stateCtx = storage.ContextWithStatePlaintextSize(stateCtx, meta.StatePlaintextBytes)
+	}
+	reader, info, err := s.readStateWithWarmup(stateCtx, namespace, storageKey, meta.StateETag, meta.StatePlaintextBytes, true)
+	if errors.Is(err, storage.ErrNotFound) {
+		return s.openPublishedDocument(ctx, namespace, key)
+	}
+	if err != nil {
+		return PublishedDocumentResult{}, err
+	}
+	if info == nil || info.ETag == "" || info.ETag != meta.StateETag {
+		reader.Close()
+		return s.openPublishedDocument(ctx, namespace, key)
+	}
+	size := meta.StatePlaintextBytes
+	if size == 0 && info != nil {
+		size = info.Size
+	}
+	if s.jsonMaxBytes > 0 && size > s.jsonMaxBytes {
+		reader.Close()
+		return PublishedDocumentResult{}, Failure{
+			Code:       "document_too_large",
+			Detail:     fmt.Sprintf("state exceeds %d bytes", s.jsonMaxBytes),
+			HTTPStatus: http.StatusRequestEntityTooLarge,
+		}
+	}
+	return PublishedDocumentResult{Reader: reader, Version: meta.PublishedVersion}, nil
 }
 
 // OpenPublishedDocument is exported for adapters to stream documents.

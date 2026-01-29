@@ -28,7 +28,7 @@ func (s *Service) Attach(ctx context.Context, cmd AttachCommand) (res *AttachRes
 		duration := s.clock.Now().Sub(start)
 		s.attachmentMetrics.recordAttach(ctx, namespaceLabel, attachBytes, duration, err)
 	}()
-	if err := s.maybeThrottleLock(); err != nil {
+	if err := s.maybeThrottleLock(ctx); err != nil {
 		return nil, err
 	}
 	finish := s.beginLockOp()
@@ -85,42 +85,47 @@ func (s *Service) Attach(ctx context.Context, cmd AttachCommand) (res *AttachRes
 	var attachmentID string
 	var attempt int
 	for {
+		plan := s.newWritePlan(ctx)
+		commitCtx := plan.Context()
 		attempt++
 		now := s.clock.Now()
-		meta, metaETag, err := s.ensureMeta(ctx, namespace, storageKey)
+		meta, metaETag, err := s.ensureMeta(commitCtx, namespace, storageKey)
 		if err != nil {
-			return nil, err
+			return nil, plan.Wait(err)
 		}
 		if meta.Lease != nil && meta.Lease.ExpiresAtUnix <= now.Unix() {
 			leaseErr := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now)
-			if _, _, err := s.clearExpiredLease(ctx, namespace, keyComponent, meta, metaETag, now, sweepModeTransparent, true); err != nil {
+			if _, _, err := s.clearExpiredLease(commitCtx, namespace, keyComponent, meta, metaETag, now, sweepModeTransparent, true); err != nil {
 				if errors.Is(err, storage.ErrCASMismatch) {
+					if waitErr := plan.Wait(nil); waitErr != nil {
+						return nil, waitErr
+					}
 					continue
 				}
-				return nil, err
+				return nil, plan.Wait(err)
 			}
 			if stagedPrepared {
-				_ = s.deleteAttachmentObject(ctx, namespace, stagedKey)
+				_ = s.deleteAttachmentObject(commitCtx, namespace, stagedKey)
 			}
-			return nil, leaseErr
+			return nil, plan.Wait(leaseErr)
 		}
 		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now); err != nil {
 			if stagedPrepared {
-				_ = s.deleteAttachmentObject(ctx, namespace, stagedKey)
+				_ = s.deleteAttachmentObject(commitCtx, namespace, stagedKey)
 			}
-			return nil, err
+			return nil, plan.Wait(err)
 		}
 		if meta.StagedTxnID != "" && meta.StagedTxnID != cmd.TxnID {
 			if stagedPrepared {
-				_ = s.deleteAttachmentObject(ctx, namespace, stagedKey)
+				_ = s.deleteAttachmentObject(commitCtx, namespace, stagedKey)
 			}
-			return nil, Failure{
+			return nil, plan.Wait(Failure{
 				Code:       "txn_mismatch",
 				Detail:     "different transaction already staged",
 				Version:    meta.Version,
 				ETag:       meta.StateETag,
 				HTTPStatus: http.StatusConflict,
-			}
+			})
 		}
 		if !stagedPrepared {
 			view := buildAttachmentView(meta, true, cmd.TxnID)
@@ -130,9 +135,15 @@ func (s *Service) Attach(ctx context.Context, cmd AttachCommand) (res *AttachRes
 				committed = findCommittedAttachment(meta, name)
 			}
 			if ok && cmd.PreventOverwrite {
+				if waitErr := plan.Wait(nil); waitErr != nil {
+					return nil, waitErr
+				}
 				return &AttachResult{Attachment: entry.info, Noop: true, Version: view.currentVersion(meta)}, nil
 			}
 			if !ok && committed != nil && cmd.PreventOverwrite {
+				if waitErr := plan.Wait(nil); waitErr != nil {
+					return nil, waitErr
+				}
 				return &AttachResult{Attachment: attachmentInfoFromAttachment(*committed), Noop: true, Version: view.currentVersion(meta)}, nil
 			}
 			if ok {
@@ -155,23 +166,24 @@ func (s *Service) Attach(ctx context.Context, cmd AttachCommand) (res *AttachRes
 			updatedAt := now.Unix()
 
 			stagedKey = storage.StagedAttachmentObjectKey(keyComponent, cmd.TxnID, attachmentID)
-			payload, err := s.prepareAttachmentPayload(ctx, namespace, stagedKey, cmd.Body, maxBytes, contentType)
+			commitKey := storage.AttachmentObjectKey(keyComponent, attachmentID)
+			payload, err := s.prepareAttachmentPayload(commitCtx, namespace, stagedKey, commitKey, cmd.Body, maxBytes, contentType)
 			if err != nil {
-				return nil, err
+				return nil, plan.Wait(err)
 			}
 			stagedBody = payload.reader
 			stagedDescriptor = payload.descriptor
 
-			if err := s.putAttachmentObject(ctx, namespace, stagedKey, stagedBody, payload.storageContentType, stagedDescriptor); err != nil {
-				return nil, err
+			if err := s.putAttachmentObject(commitCtx, namespace, stagedKey, stagedBody, payload.storageContentType, stagedDescriptor); err != nil {
+				return nil, plan.Wait(err)
 			}
 			if payload.counter != nil {
 				stagedSize = payload.counter.Count()
 			}
 			attachBytes = stagedSize
 			if maxBytes > 0 && stagedSize > maxBytes {
-				_ = s.deleteAttachmentObject(ctx, namespace, stagedKey)
-				return nil, Failure{Code: "attachment_too_large", Detail: "attachment exceeds max_bytes", HTTPStatus: http.StatusRequestEntityTooLarge}
+				_ = s.deleteAttachmentObject(commitCtx, namespace, stagedKey)
+				return nil, plan.Wait(Failure{Code: "attachment_too_large", Detail: "attachment exceeds max_bytes", HTTPStatus: http.StatusRequestEntityTooLarge})
 			}
 			staged = storage.StagedAttachment{
 				ID:               attachmentID,
@@ -198,21 +210,27 @@ func (s *Service) Attach(ctx context.Context, cmd AttachCommand) (res *AttachRes
 		removeAttachmentDelete(meta, name)
 		upsertStagedAttachment(meta, staged)
 
-		newMetaETag, err := s.store.StoreMeta(ctx, namespace, keyComponent, meta, metaETag)
+		newMetaETag, err := s.store.StoreMeta(commitCtx, namespace, keyComponent, meta, metaETag)
 		if err != nil {
 			if errors.Is(err, storage.ErrCASMismatch) {
 				if attempt < 3 {
+					if waitErr := plan.Wait(nil); waitErr != nil {
+						return nil, waitErr
+					}
 					continue
 				}
 			}
-			_ = s.deleteAttachmentObject(ctx, namespace, stagedKey)
-			return nil, fmt.Errorf("store meta: %w", err)
+			_ = s.deleteAttachmentObject(commitCtx, namespace, stagedKey)
+			return nil, plan.Wait(fmt.Errorf("store meta: %w", err))
 		}
-		if meta.Lease != nil {
-			if _, _, err := s.enlistTxnParticipant(ctx, cmd.TxnID, namespace, keyComponent, meta.Lease.ExpiresAtUnix); err != nil {
-				_ = s.deleteAttachmentObject(ctx, namespace, stagedKey)
-				return nil, fmt.Errorf("register txn participant: %w", err)
+		if txnExplicit(meta) {
+			if _, _, err := s.enlistTxnParticipant(commitCtx, cmd.TxnID, namespace, keyComponent, meta.Lease.ExpiresAtUnix); err != nil {
+				_ = s.deleteAttachmentObject(commitCtx, namespace, stagedKey)
+				return nil, plan.Wait(fmt.Errorf("register txn participant: %w", err))
 			}
+		}
+		if waitErr := plan.Wait(nil); waitErr != nil {
+			return nil, waitErr
 		}
 		return &AttachResult{
 			Attachment: attachmentInfoFromStaged(staged),
@@ -236,7 +254,7 @@ func (s *Service) ListAttachments(ctx context.Context, cmd ListAttachmentsComman
 		duration := s.clock.Now().Sub(start)
 		s.attachmentMetrics.recordList(ctx, namespaceLabel, itemCount, duration, err)
 	}()
-	if err := s.maybeThrottleLock(); err != nil {
+	if err := s.maybeThrottleLock(ctx); err != nil {
 		return nil, err
 	}
 	finish := s.beginLockOp()
@@ -312,7 +330,7 @@ func (s *Service) RetrieveAttachment(ctx context.Context, cmd RetrieveAttachment
 		duration := s.clock.Now().Sub(start)
 		s.attachmentMetrics.recordRetrieve(ctx, namespaceLabel, retrieveBytes, duration, err)
 	}()
-	if err := s.maybeThrottleLock(); err != nil {
+	if err := s.maybeThrottleLock(ctx); err != nil {
 		return nil, err
 	}
 	finish := s.beginLockOp()
@@ -381,18 +399,21 @@ func (s *Service) RetrieveAttachment(ctx context.Context, cmd RetrieveAttachment
 		return nil, Failure{Code: "attachment_not_found", Detail: "attachment not found", HTTPStatus: http.StatusNotFound}
 	}
 	objectKey := ""
+	contextKey := ""
 	descriptor := []byte(nil)
 	if entry.staged {
 		if meta.StagedTxnID == "" {
 			return nil, Failure{Code: "attachment_not_found", Detail: "attachment not found", HTTPStatus: http.StatusNotFound}
 		}
 		objectKey = storage.StagedAttachmentObjectKey(keyComponent, meta.StagedTxnID, entry.info.ID)
+		contextKey = storage.AttachmentObjectKey(keyComponent, entry.info.ID)
 		descriptor = entry.stagedDescriptor
 	} else {
 		objectKey = storage.AttachmentObjectKey(keyComponent, entry.info.ID)
+		contextKey = objectKey
 		descriptor = entry.descriptor
 	}
-	reader, err := s.readAttachmentObject(ctx, namespace, objectKey, descriptor)
+	reader, err := s.readAttachmentObject(ctx, namespace, objectKey, contextKey, descriptor)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, Failure{Code: "attachment_not_found", Detail: "attachment not found", HTTPStatus: http.StatusNotFound}
@@ -414,7 +435,7 @@ func (s *Service) DeleteAttachment(ctx context.Context, cmd DeleteAttachmentComm
 		duration := s.clock.Now().Sub(start)
 		s.attachmentMetrics.recordDelete(ctx, namespaceLabel, duration, err)
 	}()
-	if err := s.maybeThrottleLock(); err != nil {
+	if err := s.maybeThrottleLock(ctx); err != nil {
 		return nil, err
 	}
 	finish := s.beginLockOp()
@@ -446,44 +467,55 @@ func (s *Service) DeleteAttachment(ctx context.Context, cmd DeleteAttachmentComm
 	keyComponent := relativeKey(namespace, storageKey)
 
 	for {
+		plan := s.newWritePlan(ctx)
+		commitCtx := plan.Context()
 		now := s.clock.Now()
-		meta, metaETag, err := s.ensureMeta(ctx, namespace, storageKey)
+		meta, metaETag, err := s.ensureMeta(commitCtx, namespace, storageKey)
 		if err != nil {
-			return nil, err
+			return nil, plan.Wait(err)
 		}
 		if meta.Lease != nil && meta.Lease.ExpiresAtUnix <= now.Unix() {
 			leaseErr := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now)
-			if _, _, err := s.clearExpiredLease(ctx, namespace, keyComponent, meta, metaETag, now, sweepModeTransparent, true); err != nil {
+			if _, _, err := s.clearExpiredLease(commitCtx, namespace, keyComponent, meta, metaETag, now, sweepModeTransparent, true); err != nil {
 				if errors.Is(err, storage.ErrCASMismatch) {
+					if waitErr := plan.Wait(nil); waitErr != nil {
+						return nil, waitErr
+					}
 					continue
 				}
-				return nil, err
+				return nil, plan.Wait(err)
 			}
-			return nil, leaseErr
+			return nil, plan.Wait(leaseErr)
 		}
 		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now); err != nil {
-			return nil, err
+			return nil, plan.Wait(err)
 		}
 		if meta.StagedTxnID != "" && meta.StagedTxnID != cmd.TxnID {
-			return nil, Failure{
+			return nil, plan.Wait(Failure{
 				Code:       "txn_mismatch",
 				Detail:     "different transaction already staged",
 				Version:    meta.Version,
 				ETag:       meta.StateETag,
 				HTTPStatus: http.StatusConflict,
-			}
+			})
 		}
 		if meta.StagedRemove && meta.StagedTxnID == cmd.TxnID {
+			if waitErr := plan.Wait(nil); waitErr != nil {
+				return nil, waitErr
+			}
 			return &DeleteAttachmentResult{Deleted: false, Version: meta.StagedVersion}, nil
 		}
 		view := buildAttachmentView(meta, true, cmd.TxnID)
 		entry, ok := view.lookup(selector)
 		if !ok {
+			if waitErr := plan.Wait(nil); waitErr != nil {
+				return nil, waitErr
+			}
 			return &DeleteAttachmentResult{Deleted: false, Version: view.currentVersion(meta)}, nil
 		}
 		if entry.staged {
 			removeStagedAttachment(meta, entry.info.Name, entry.info.ID)
-			_ = s.deleteAttachmentObject(ctx, namespace, storage.StagedAttachmentObjectKey(keyComponent, cmd.TxnID, entry.info.ID))
+			_ = s.deleteAttachmentObject(commitCtx, namespace, storage.StagedAttachmentObjectKey(keyComponent, cmd.TxnID, entry.info.ID))
 			if committed := findCommittedAttachment(meta, entry.info.Name); committed != nil && !meta.StagedAttachmentsClear {
 				addAttachmentDelete(meta, entry.info.Name)
 			}
@@ -501,17 +533,23 @@ func (s *Service) DeleteAttachment(ctx context.Context, cmd DeleteAttachmentComm
 			meta.FencingToken = cmd.FencingToken
 		}
 
-		newMetaETag, err := s.store.StoreMeta(ctx, namespace, keyComponent, meta, metaETag)
+		newMetaETag, err := s.store.StoreMeta(commitCtx, namespace, keyComponent, meta, metaETag)
 		if err != nil {
 			if errors.Is(err, storage.ErrCASMismatch) {
+				if waitErr := plan.Wait(nil); waitErr != nil {
+					return nil, waitErr
+				}
 				continue
 			}
-			return nil, fmt.Errorf("store meta: %w", err)
+			return nil, plan.Wait(fmt.Errorf("store meta: %w", err))
 		}
-		if meta.Lease != nil {
-			if _, _, err := s.enlistTxnParticipant(ctx, cmd.TxnID, namespace, keyComponent, meta.Lease.ExpiresAtUnix); err != nil {
-				return nil, fmt.Errorf("register txn participant: %w", err)
+		if txnExplicit(meta) {
+			if _, _, err := s.enlistTxnParticipant(commitCtx, cmd.TxnID, namespace, keyComponent, meta.Lease.ExpiresAtUnix); err != nil {
+				return nil, plan.Wait(fmt.Errorf("register txn participant: %w", err))
 			}
+		}
+		if waitErr := plan.Wait(nil); waitErr != nil {
+			return nil, waitErr
 		}
 		return &DeleteAttachmentResult{Deleted: true, Version: meta.StagedVersion, Meta: meta, MetaETag: newMetaETag}, nil
 	}
@@ -529,7 +567,7 @@ func (s *Service) DeleteAllAttachments(ctx context.Context, cmd DeleteAllAttachm
 		duration := s.clock.Now().Sub(start)
 		s.attachmentMetrics.recordDeleteAll(ctx, namespaceLabel, deletedCount, duration, err)
 	}()
-	if err := s.maybeThrottleLock(); err != nil {
+	if err := s.maybeThrottleLock(ctx); err != nil {
 		return nil, err
 	}
 	finish := s.beginLockOp()
@@ -557,40 +595,48 @@ func (s *Service) DeleteAllAttachments(ctx context.Context, cmd DeleteAllAttachm
 	keyComponent := relativeKey(namespace, storageKey)
 
 	for {
+		plan := s.newWritePlan(ctx)
+		commitCtx := plan.Context()
 		now := s.clock.Now()
-		meta, metaETag, err := s.ensureMeta(ctx, namespace, storageKey)
+		meta, metaETag, err := s.ensureMeta(commitCtx, namespace, storageKey)
 		if err != nil {
-			return nil, err
+			return nil, plan.Wait(err)
 		}
 		if meta.Lease != nil && meta.Lease.ExpiresAtUnix <= now.Unix() {
 			leaseErr := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now)
-			if _, _, err := s.clearExpiredLease(ctx, namespace, keyComponent, meta, metaETag, now, sweepModeTransparent, true); err != nil {
+			if _, _, err := s.clearExpiredLease(commitCtx, namespace, keyComponent, meta, metaETag, now, sweepModeTransparent, true); err != nil {
 				if errors.Is(err, storage.ErrCASMismatch) {
+					if waitErr := plan.Wait(nil); waitErr != nil {
+						return nil, waitErr
+					}
 					continue
 				}
-				return nil, err
+				return nil, plan.Wait(err)
 			}
-			return nil, leaseErr
+			return nil, plan.Wait(leaseErr)
 		}
 		if err := validateLease(meta, cmd.LeaseID, cmd.FencingToken, cmd.TxnID, now); err != nil {
-			return nil, err
+			return nil, plan.Wait(err)
 		}
 		if meta.StagedTxnID != "" && meta.StagedTxnID != cmd.TxnID {
-			return nil, Failure{
+			return nil, plan.Wait(Failure{
 				Code:       "txn_mismatch",
 				Detail:     "different transaction already staged",
 				Version:    meta.Version,
 				ETag:       meta.StateETag,
 				HTTPStatus: http.StatusConflict,
-			}
+			})
 		}
 		if meta.StagedRemove && meta.StagedTxnID == cmd.TxnID {
+			if waitErr := plan.Wait(nil); waitErr != nil {
+				return nil, waitErr
+			}
 			return &DeleteAllAttachmentsResult{Deleted: 0, Version: meta.StagedVersion}, nil
 		}
 		view := buildAttachmentView(meta, true, cmd.TxnID)
 		deletedCount = len(view.byName)
 		if len(meta.StagedAttachments) > 0 {
-			discardStagedAttachments(ctx, s.store, namespace, keyComponent, cmd.TxnID, meta.StagedAttachments)
+			discardStagedAttachments(commitCtx, s.store, namespace, keyComponent, cmd.TxnID, meta.StagedAttachments)
 		}
 		meta.StagedAttachmentsClear = true
 		meta.StagedAttachmentDeletes = nil
@@ -604,17 +650,23 @@ func (s *Service) DeleteAllAttachments(ctx context.Context, cmd DeleteAllAttachm
 			meta.FencingToken = cmd.FencingToken
 		}
 
-		newMetaETag, err := s.store.StoreMeta(ctx, namespace, keyComponent, meta, metaETag)
+		newMetaETag, err := s.store.StoreMeta(commitCtx, namespace, keyComponent, meta, metaETag)
 		if err != nil {
 			if errors.Is(err, storage.ErrCASMismatch) {
+				if waitErr := plan.Wait(nil); waitErr != nil {
+					return nil, waitErr
+				}
 				continue
 			}
-			return nil, fmt.Errorf("store meta: %w", err)
+			return nil, plan.Wait(fmt.Errorf("store meta: %w", err))
 		}
-		if meta.Lease != nil {
-			if _, _, err := s.enlistTxnParticipant(ctx, cmd.TxnID, namespace, keyComponent, meta.Lease.ExpiresAtUnix); err != nil {
-				return nil, fmt.Errorf("register txn participant: %w", err)
+		if txnExplicit(meta) {
+			if _, _, err := s.enlistTxnParticipant(commitCtx, cmd.TxnID, namespace, keyComponent, meta.Lease.ExpiresAtUnix); err != nil {
+				return nil, plan.Wait(fmt.Errorf("register txn participant: %w", err))
 			}
+		}
+		if waitErr := plan.Wait(nil); waitErr != nil {
+			return nil, waitErr
 		}
 		return &DeleteAllAttachmentsResult{Deleted: deletedCount, Version: meta.StagedVersion, Meta: meta, MetaETag: newMetaETag}, nil
 	}
@@ -640,10 +692,7 @@ func buildAttachmentView(meta *storage.Meta, includeStaged bool, txnID string) a
 	if meta == nil {
 		return view
 	}
-	includeCommitted := true
-	if includeStaged && meta.StagedTxnID != "" && meta.StagedTxnID == txnID && meta.StagedAttachmentsClear {
-		includeCommitted = false
-	}
+	includeCommitted := !(includeStaged && meta.StagedTxnID != "" && meta.StagedTxnID == txnID && meta.StagedAttachmentsClear)
 	if includeCommitted {
 		for _, att := range meta.Attachments {
 			if att.Name == "" || att.ID == "" {
@@ -862,7 +911,7 @@ type attachmentPayload struct {
 	storageContentType string
 }
 
-func (s *Service) prepareAttachmentPayload(ctx context.Context, namespace, objectKey string, body io.Reader, maxBytes int64, contentType string) (attachmentPayload, error) {
+func (s *Service) prepareAttachmentPayload(ctx context.Context, namespace, objectKey, contextKey string, body io.Reader, maxBytes int64, contentType string) (attachmentPayload, error) {
 	counting := &countingReader{r: body}
 	reader := io.Reader(counting)
 	if maxBytes > 0 {
@@ -877,7 +926,10 @@ func (s *Service) prepareAttachmentPayload(ctx context.Context, namespace, objec
 		payload.reader = reader
 		return payload, nil
 	}
-	objectCtx := storage.AttachmentObjectContext(path.Join(namespace, objectKey))
+	if contextKey == "" {
+		contextKey = objectKey
+	}
+	objectCtx := storage.AttachmentObjectContext(path.Join(namespace, contextKey))
 	minted, err := s.crypto.MintMaterial(objectCtx)
 	if err != nil {
 		return payload, err
@@ -917,7 +969,7 @@ func (s *Service) putAttachmentObject(ctx context.Context, namespace, objectKey 
 	return nil
 }
 
-func (s *Service) readAttachmentObject(ctx context.Context, namespace, objectKey string, descriptor []byte) (io.ReadCloser, error) {
+func (s *Service) readAttachmentObject(ctx context.Context, namespace, objectKey, contextKey string, descriptor []byte) (io.ReadCloser, error) {
 	obj, err := s.store.GetObject(ctx, namespace, objectKey)
 	if err != nil {
 		return nil, err
@@ -934,7 +986,10 @@ func (s *Service) readAttachmentObject(ctx context.Context, namespace, objectKey
 		reader.Close()
 		return nil, fmt.Errorf("attachment: missing descriptor for %s/%s", namespace, objectKey)
 	}
-	mat, err := s.crypto.MaterialFromDescriptor(storage.AttachmentObjectContext(path.Join(namespace, objectKey)), descriptor)
+	if contextKey == "" {
+		contextKey = objectKey
+	}
+	mat, err := s.crypto.MaterialFromDescriptor(storage.AttachmentObjectContext(path.Join(namespace, contextKey)), descriptor)
 	if err != nil {
 		reader.Close()
 		return nil, err
@@ -992,7 +1047,39 @@ func (s *Service) promoteStagedAttachment(ctx context.Context, namespace, key, t
 		return nil, fmt.Errorf("attachment: missing id")
 	}
 	stagedKey := storage.StagedAttachmentObjectKey(key, txnID, staged.ID)
-	reader, err := s.readAttachmentObject(ctx, namespace, stagedKey, staged.StagedDescriptor)
+	commitKey := storage.AttachmentObjectKey(key, staged.ID)
+	useCopy := false
+	if copier, ok := s.store.(storage.ObjectCopier); ok {
+		useCopy = true
+		if s.crypto != nil && s.crypto.Enabled() && len(staged.StagedDescriptor) > 0 {
+			objectCtx := storage.AttachmentObjectContext(path.Join(namespace, commitKey))
+			if _, err := s.crypto.MaterialFromDescriptor(objectCtx, staged.StagedDescriptor); err != nil {
+				useCopy = false
+			}
+		}
+		if useCopy {
+			if _, err := copier.CopyObject(ctx, namespace, stagedKey, commitKey, storage.CopyObjectOptions{}); err == nil {
+				if err := s.deleteAttachmentObject(ctx, namespace, stagedKey); err != nil {
+					return nil, err
+				}
+				size := staged.PlaintextBytes
+				if size == 0 {
+					size = staged.Size
+				}
+				return &storage.Attachment{
+					ID:             staged.ID,
+					Name:           staged.Name,
+					Size:           size,
+					PlaintextBytes: size,
+					ContentType:    staged.ContentType,
+					Descriptor:     append([]byte(nil), staged.StagedDescriptor...),
+					CreatedAtUnix:  staged.CreatedAtUnix,
+					UpdatedAtUnix:  staged.UpdatedAtUnix,
+				}, nil
+			}
+		}
+	}
+	reader, err := s.readAttachmentObject(ctx, namespace, stagedKey, commitKey, staged.StagedDescriptor)
 	if err != nil {
 		return nil, err
 	}
@@ -1002,8 +1089,7 @@ func (s *Service) promoteStagedAttachment(ctx context.Context, namespace, key, t
 	if contentType == "" {
 		contentType = attachmentDefaultContentType
 	}
-	commitKey := storage.AttachmentObjectKey(key, staged.ID)
-	payload, err := s.prepareAttachmentPayload(ctx, namespace, commitKey, reader, 0, contentType)
+	payload, err := s.prepareAttachmentPayload(ctx, namespace, commitKey, commitKey, reader, 0, contentType)
 	if err != nil {
 		return nil, err
 	}

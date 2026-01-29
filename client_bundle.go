@@ -24,9 +24,12 @@ const (
 )
 
 const (
-	spiffeHost          = "lockd"
-	SPIFFESDKPrefix     = "spiffe://lockd/sdk/"
-	SPIFFETCPrefix      = "spiffe://lockd/tc/"
+	spiffeHost = "lockd"
+	// SPIFFESDKPrefix is the SPIFFE URI prefix for SDK client identities.
+	SPIFFESDKPrefix = "spiffe://lockd/sdk/"
+	// SPIFFETCPrefix is the SPIFFE URI prefix for transaction coordinator client identities.
+	SPIFFETCPrefix = "spiffe://lockd/tc/"
+	// SPIFFEServerPrefix is the SPIFFE URI prefix for server identities.
 	SPIFFEServerPrefix  = "spiffe://lockd/server/"
 	defaultClientPrefix = "client"
 	defaultTCClientName = "tc-client"

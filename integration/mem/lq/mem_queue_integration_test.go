@@ -21,6 +21,7 @@ import (
 	api "pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/integration/internal/cryptotest"
+	"pkt.systems/lockd/integration/internal/hatest"
 	shutdowntest "pkt.systems/lockd/integration/internal/shutdowntest"
 	queuetestutil "pkt.systems/lockd/integration/queue/testutil"
 	"pkt.systems/lockd/internal/qrf"
@@ -462,17 +463,18 @@ func buildMemQueueConfig(t testing.TB, queueWatch bool) lockd.Config {
 		QueuePollInterval:          5 * time.Millisecond,
 		QueuePollJitter:            0,
 		QueueResilientPollInterval: 200 * time.Millisecond,
+		HAMode:                     "failover",
 	}
 	cfg.DisableMemQueueWatch = !queueWatch
-	cfg.QRFEnabled = true
+	cfg.QRFDisabled = false
 	cfg.QRFQueueSoftLimit = 3
 	cfg.QRFQueueHardLimit = 6
 	cfg.QRFLockSoftLimit = 4
 	cfg.QRFLockHardLimit = 8
 	cfg.QRFRecoverySamples = 1
-	cfg.QRFSoftRetryAfter = 25 * time.Millisecond
-	cfg.QRFEngagedRetryAfter = 150 * time.Millisecond
-	cfg.QRFRecoveryRetryAfter = 75 * time.Millisecond
+	cfg.QRFSoftDelay = 25 * time.Millisecond
+	cfg.QRFEngagedDelay = 150 * time.Millisecond
+	cfg.QRFRecoveryDelay = 75 * time.Millisecond
 	cfg.QRFCPUPercentSoftLimit = 0
 	cfg.QRFCPUPercentHardLimit = 0
 	cfg.QRFMemorySoftLimitBytes = 0
@@ -749,6 +751,7 @@ func runMemQueueMultiServerRouting(t *testing.T, mode memQueueMode) {
 	queuetestutil.InstallWatchdog(t, "mem-multiserver-routing", 5*time.Second)
 
 	cfg := buildMemQueueConfig(t, mode.queueWatch)
+	cfg.HAMode = "concurrent"
 	backend := memorybackend.New()
 
 	serverA := startMemQueueServerWithBackend(t, cfg, backend, cryptotest.SharedMTLSOptions(t)...)
@@ -781,36 +784,58 @@ func runMemQueueMultiServerFailoverClient(t *testing.T, mode memQueueMode) {
 	backend := memorybackend.New()
 
 	serverA := startMemQueueServerWithBackend(t, cfg, backend)
-	creds := serverA.TestMTLSCredentials()
 	serverB := startMemQueueServerWithBackend(t, cfg, backend)
 
 	queue := queuetestutil.QueueName("mem-failover")
-	queuetestutil.MustEnqueueBytes(t, serverA.Client, queue, []byte("failover-payload"))
+	activeCtx, cancelActive := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancelActive()
+	activeServer, activeClient, err := hatest.FindActiveServer(activeCtx, serverA, serverB)
+	if err != nil {
+		t.Fatalf("find active server: %v", err)
+	}
+	t.Cleanup(func() { _ = activeClient.Close() })
+	standbyServer := serverB
+	if activeServer == serverB {
+		standbyServer = serverA
+	}
+	standbyClient, err := standbyServer.NewClient()
+	if err != nil {
+		t.Fatalf("standby client: %v", err)
+	}
+	t.Cleanup(func() { _ = standbyClient.Close() })
 
-	endpoints := []string{serverA.URL(), serverB.URL()}
+	queuetestutil.MustEnqueueBytes(t, activeClient, queue, []byte("failover-payload"))
+
 	clientCapture := queuetestutil.NewLogCapture(t)
 	failoverOpts := []lockdclient.Option{
 		lockdclient.WithEndpointShuffle(false),
 		lockdclient.WithLogger(clientCapture.Logger()),
 	}
 	if cryptotest.TestMTLSEnabled() {
+		creds := activeServer.TestMTLSCredentials()
 		if !creds.Valid() {
 			t.Fatalf("mem queue failover: missing MTLS credentials")
 		}
 		httpClient := cryptotest.RequireMTLSHTTPClient(t, creds)
 		failoverOpts = append(failoverOpts, lockdclient.WithHTTPClient(httpClient))
 	}
-	failoverClient, err := lockdclient.NewWithEndpoints(endpoints, failoverOpts...)
+	failoverClient, err := lockdclient.NewWithEndpoints([]string{activeServer.URL(), standbyServer.URL()}, failoverOpts...)
 	if err != nil {
 		t.Fatalf("new failover client: %v", err)
 	}
 	t.Cleanup(func() { _ = failoverClient.Close() })
 
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	if err := serverA.Stop(stopCtx); err != nil {
+	if err := activeServer.Stop(stopCtx); err != nil {
 		t.Fatalf("stop serverA: %v", err)
 	}
 	stopCancel()
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 12*time.Second)
+	if err := hatest.WaitForActive(waitCtx, standbyServer); err != nil {
+		waitCancel()
+		t.Fatalf("standby activation: %v", err)
+	}
+	waitCancel()
 
 	owner := queuetestutil.QueueOwner("failover-consumer")
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
@@ -833,7 +858,7 @@ func runMemQueueMultiServerFailoverClient(t *testing.T, mode memQueueMode) {
 	}
 	ackCancel()
 
-	queuetestutil.EnsureQueueEmpty(t, serverB.Client, queue)
+	queuetestutil.EnsureQueueEmpty(t, standbyClient, queue)
 }
 
 func runMemQueueHighFanInFanOutSingleServer(t *testing.T, mode memQueueMode) {

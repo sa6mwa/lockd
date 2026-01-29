@@ -9,8 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"pkt.systems/lockd/internal/search/index"
 	"pkt.systems/lockd/internal/storage"
+	"pkt.systems/lockd/internal/storage/disk"
 	"pkt.systems/lockd/internal/storage/memory"
+	"pkt.systems/pslog"
 )
 
 func newTestService(t testing.TB) *Service {
@@ -74,6 +77,93 @@ func TestApplyTxnDecisionCommit(t *testing.T) {
 	}
 	if updated.Lease != nil {
 		t.Fatalf("expected lease cleared")
+	}
+}
+
+func TestApplyTxnDecisionCommitIndexesState(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	store, err := disk.New(disk.Config{
+		Root:            root,
+		Retention:       0,
+		JanitorInterval: 0,
+		QueueWatch:      false,
+	})
+	if err != nil {
+		t.Fatalf("disk store: %v", err)
+	}
+	indexStore := index.NewStore(store, nil)
+	indexManager := index.NewManager(indexStore, index.WriterOptions{
+		FlushDocs:     1,
+		FlushInterval: time.Second,
+		Logger:        pslog.NoopLogger(),
+	})
+	svc := New(Config{
+		Store:            store,
+		BackendHash:      "test-backend",
+		DefaultNamespace: "default",
+		IndexManager:     indexManager,
+		Logger:           pslog.NoopLogger(),
+	})
+
+	txnID := "c5v9d0sl70b3m3q8ndg1"
+	ns, key := "default", "commit-indexed"
+
+	body := bytes.NewBufferString(`{"value":"indexed"}`)
+	stageRes, err := svc.staging.StageState(ctx, ns, key, txnID, body, storage.PutStateOptions{})
+	if err != nil {
+		t.Fatalf("stage state: %v", err)
+	}
+	meta := &storage.Meta{
+		Lease: &storage.Lease{
+			ID:            "lease-1",
+			Owner:         "test",
+			ExpiresAtUnix: time.Now().Add(5 * time.Minute).Unix(),
+			TxnID:         txnID,
+		},
+		StagedTxnID:           txnID,
+		StagedStateETag:       stageRes.NewETag,
+		StagedVersion:         1,
+		StagedStateDescriptor: stageRes.Descriptor,
+	}
+	if _, err := svc.store.StoreMeta(ctx, ns, key, meta, ""); err != nil {
+		t.Fatalf("store meta: %v", err)
+	}
+
+	rec := &TxnRecord{
+		TxnID:        txnID,
+		State:        TxnStateCommit,
+		Participants: []TxnParticipant{{Namespace: ns, Key: key}},
+	}
+
+	if err := svc.applyTxnDecision(ctx, rec); err != nil {
+		t.Fatalf("apply decision: %v", err)
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if err := indexManager.WaitForReadable(waitCtx, ns); err != nil {
+		t.Fatalf("index wait: %v", err)
+	}
+	manifestRes, err := indexStore.LoadManifest(ctx, ns)
+	if err != nil {
+		t.Fatalf("load manifest: %v", err)
+	}
+	if manifestRes.Manifest == nil {
+		t.Fatalf("expected manifest")
+	}
+	foundSegment := false
+	for _, shard := range manifestRes.Manifest.Shards {
+		if shard == nil {
+			continue
+		}
+		if len(shard.Segments) > 0 {
+			foundSegment = true
+			break
+		}
+	}
+	if !foundSegment {
+		t.Fatalf("expected index manifest segments")
 	}
 }
 

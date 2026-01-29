@@ -15,6 +15,7 @@ const (
 	ContentTypeProtobufEncrypted    = "application/vnd.lockd+protobuf-encrypted"
 	ContentTypeOctetStream          = "application/octet-stream"
 	ContentTypeOctetStreamEncrypted = "application/vnd.lockd.octet-stream+encrypted"
+	ContentTypeTextEncrypted        = "application/vnd.lockd.text+encrypted"
 )
 
 // ErrNotFound indicates the requested key or resource is missing.
@@ -63,6 +64,7 @@ type Lease struct {
 	ExpiresAtUnix int64  `json:"expires_at_unix"`
 	FencingToken  int64  `json:"fencing_token,omitempty"`
 	TxnID         string `json:"txn_id,omitempty"`
+	TxnExplicit   bool   `json:"txn_explicit,omitempty"`
 }
 
 // StateInfo provides metadata about a stored state blob.
@@ -170,6 +172,11 @@ type Backend interface {
 	Close() error
 }
 
+// NamespaceLister reports all namespaces stored in the backend, when supported.
+type NamespaceLister interface {
+	ListNamespaces(ctx context.Context) ([]string, error)
+}
+
 type transientError struct {
 	err error
 }
@@ -215,6 +222,12 @@ type DeleteObjectOptions struct {
 	IgnoreNotFound bool
 }
 
+// CopyObjectOptions controls conditional semantics for object copy operations.
+type CopyObjectOptions struct {
+	ExpectedETag string
+	IfNotExists  bool
+}
+
 // ListOptions guides ListObjects traversal.
 type ListOptions struct {
 	Prefix     string
@@ -254,10 +267,27 @@ type QueueWatchStatus struct {
 	Reason  string
 }
 
+// SingleWriterControl allows callers to enable single-writer optimizations when
+// the backend is exclusively owned by one server.
+type SingleWriterControl interface {
+	SetSingleWriter(enabled bool)
+}
+
+// ConcurrentWriteSupport reports whether the backend supports multiple writers
+// against the same backend root without risking corruption.
+type ConcurrentWriteSupport interface {
+	SupportsConcurrentWrites() bool
+}
+
 // GetObjectResult captures an object reader with its metadata.
 type GetObjectResult struct {
 	Reader io.ReadCloser
 	Info   *ObjectInfo
+}
+
+// ObjectCopier indicates the backend can copy objects server-side.
+type ObjectCopier interface {
+	CopyObject(ctx context.Context, namespace, srcKey, dstKey string, opts CopyObjectOptions) (*ObjectInfo, error)
 }
 
 // IndexerDefaultsProvider allows storage backends to tune writer flush behaviour

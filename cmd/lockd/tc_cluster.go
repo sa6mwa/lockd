@@ -327,26 +327,3 @@ func doTCClusterRequest(ctx context.Context, client *http.Client, method, endpoi
 	}
 	return fmt.Errorf("status %d", resp.StatusCode)
 }
-
-func subtractEndpoints(base []string, remove []string) []string {
-	removeSet := make(map[string]struct{}, len(remove))
-	for _, endpoint := range remove {
-		normalized := strings.TrimSuffix(strings.TrimSpace(endpoint), "/")
-		if normalized == "" {
-			continue
-		}
-		removeSet[normalized] = struct{}{}
-	}
-	out := make([]string, 0, len(base))
-	for _, endpoint := range base {
-		normalized := strings.TrimSuffix(strings.TrimSpace(endpoint), "/")
-		if normalized == "" {
-			continue
-		}
-		if _, ok := removeSet[normalized]; ok {
-			continue
-		}
-		out = append(out, normalized)
-	}
-	return tccluster.NormalizeEndpoints(out)
-}

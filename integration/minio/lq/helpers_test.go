@@ -14,6 +14,7 @@ import (
 	"pkt.systems/lockd"
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/integration/internal/cryptotest"
+	"pkt.systems/lockd/integration/internal/storepath"
 	miniohelpers "pkt.systems/lockd/integration/minio"
 	queuetestutil "pkt.systems/lockd/integration/queue/testutil"
 	"pkt.systems/lockd/internal/diagnostics/storagecheck"
@@ -32,6 +33,7 @@ func prepareMinioQueueConfig(t testing.TB, opts minioQueueOptions) lockd.Config 
 	t.Helper()
 
 	cfg := loadMinioQueueConfig(t)
+	cfg.HAMode = "concurrent"
 	ensureMinioQueueBucket(t, cfg)
 	ensureMinioQueueReady(t, context.Background(), cfg)
 
@@ -50,7 +52,7 @@ func prepareMinioQueueConfig(t testing.TB, opts minioQueueOptions) lockd.Config 
 		cfg.QueueResilientPollInterval = 250 * time.Millisecond
 	}
 
-	cfg.QRFEnabled = false
+	cfg.QRFDisabled = true
 	cfg.QRFQueueSoftLimit = 0
 	cfg.QRFQueueHardLimit = 0
 	cfg.QRFLockSoftLimit = 0
@@ -138,6 +140,7 @@ func loadMinioQueueConfig(t testing.TB) lockd.Config {
 	if !strings.HasPrefix(store, "s3://") {
 		t.Fatalf("LOCKD_STORE must reference an s3:// URI for MinIO integration tests, got %q", store)
 	}
+	store = storepath.Scoped(t, store, "minio")
 
 	cfg := lockd.Config{
 		Store:           store,

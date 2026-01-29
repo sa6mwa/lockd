@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"pkt.systems/lockd/lql"
+	"pkt.systems/lql"
 )
 
 func TestParseMutations(t *testing.T) {

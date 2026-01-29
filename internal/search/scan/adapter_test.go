@@ -12,8 +12,8 @@ import (
 	"pkt.systems/lockd/internal/search"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/memory"
-	"pkt.systems/lockd/lql"
 	"pkt.systems/lockd/namespaces"
+	"pkt.systems/lql"
 )
 
 func TestScanAdapterMatchAll(t *testing.T) {

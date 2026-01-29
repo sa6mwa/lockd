@@ -245,6 +245,9 @@ func (s *Store) list(ctx context.Context) ([]LeaseRecord, error) {
 		if err != nil {
 			return nil, err
 		}
+		if result == nil {
+			return nil, errors.New("tccluster: list returned nil result")
+		}
 		for _, obj := range result.Objects {
 			key := strings.TrimSpace(obj.Key)
 			if key == "" {
@@ -273,7 +276,7 @@ func (s *Store) list(ctx context.Context) ([]LeaseRecord, error) {
 			}
 			records = append(records, record)
 		}
-		if result == nil || !result.Truncated {
+		if !result.Truncated {
 			break
 		}
 		startAfter = strings.TrimSpace(result.NextStartAfter)

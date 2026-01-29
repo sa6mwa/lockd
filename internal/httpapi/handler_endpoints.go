@@ -30,8 +30,8 @@ import (
 	"pkt.systems/lockd/internal/tcrm"
 	"pkt.systems/lockd/internal/txncoord"
 	"pkt.systems/lockd/internal/uuidv7"
-	"pkt.systems/lockd/lql"
 	"pkt.systems/lockd/namespaces"
+	"pkt.systems/lql"
 	"pkt.systems/pslog"
 )
 
@@ -1243,7 +1243,7 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request) error {
 
 // handleQuery godoc
 // @Summary      Query keys within a namespace
-// @Description  Executes a selector-based search within a namespace and returns matching keys plus a cursor for pagination. Example request body: `{"namespace":"default","selector":{"eq":{"field":"type","value":"alpha"}},"limit":25,"return":"keys"}`
+// @Description  Executes a selector-based search within a namespace. When return=keys, responds with a JSON envelope containing keys + cursor. When return=documents, streams NDJSON rows (one document per line).
 // @Tags         lease
 // @Accept       json
 // @Produce      json
@@ -1254,16 +1254,14 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request) error {
 // @Param        selector   query    string  false  "Selector JSON (optional when providing a JSON body)"
 // @Param        return     query    string  false  "Return mode (keys or documents)"
 // @Param        request    body     api.QueryRequest  false  "Query request (selector, limit, cursor)"
-// @Success      200        {object} api.QueryResponse
+// @Success      200        {object}  api.QueryResponse  "Keys response when return=keys"
+// @Success      200        {string}  string            "NDJSON stream when return=documents"
 // @Failure      400        {object} api.ErrorResponse
 // @Failure      404        {object} api.ErrorResponse
 // @Failure      409        {object} api.ErrorResponse
 // @Failure      503        {object} api.ErrorResponse
 // @Router       /v1/query [post]
 func (h *Handler) handleQuery(w http.ResponseWriter, r *http.Request) error {
-	if err := h.maybeThrottleLock(); err != nil {
-		return err
-	}
 	if h.searchAdapter == nil {
 		return httpError{
 			Status: http.StatusNotImplemented,
@@ -1495,6 +1493,7 @@ func (h *Handler) handleIndexFlush(w http.ResponseWriter, r *http.Request) error
 	if err := h.indexControl.FlushNamespace(r.Context(), resolved); err != nil {
 		return fmt.Errorf("index flush: %w", err)
 	}
+	_ = h.indexControl.WarmNamespace(r.Context(), resolved)
 	seq, err := h.indexControl.ManifestSeq(r.Context(), resolved)
 	if err != nil {
 		return fmt.Errorf("load index manifest: %w", err)
@@ -2131,33 +2130,30 @@ func (h *Handler) handleQueueDequeue(w http.ResponseWriter, r *http.Request) err
 		BlockSeconds: blockSeconds,
 		PageSize:     pageSize,
 	}
-	for {
-		res, err := h.core.Dequeue(ctx, cmd)
-		if err != nil {
-			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, core.ErrQueueEmpty) {
-				disconnectStatus = "empty"
-				retryAfter := int64(1)
-				switch {
-				case blockSeconds == api.BlockNoWait:
-					retryAfter = 0
-				case blockSeconds > 0:
-					retryAfter = max(int64(math.Ceil(waitDuration.Seconds())), 1)
-				}
-				return httpError{
-					Status:     http.StatusConflict,
-					Code:       "waiting",
-					Detail:     "no messages available",
-					RetryAfter: retryAfter,
-				}
+	res, err := h.core.Dequeue(ctx, cmd)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, core.ErrQueueEmpty) {
+			disconnectStatus = "empty"
+			retryAfter := int64(1)
+			switch {
+			case blockSeconds == api.BlockNoWait:
+				retryAfter = 0
+			case blockSeconds > 0:
+				retryAfter = max(int64(math.Ceil(waitDuration.Seconds())), 1)
 			}
-			disconnectStatus = "error"
-			h.logQueueSubscribeError(queueLogger, queueName, owner, err)
-			return convertCoreError(err)
+			return httpError{
+				Status:     http.StatusConflict,
+				Code:       "waiting",
+				Detail:     "no messages available",
+				RetryAfter: retryAfter,
+			}
 		}
-		deliveries = res.Deliveries
-		nextCursor = res.NextCursor
-		break
+		disconnectStatus = "error"
+		h.logQueueSubscribeError(queueLogger, queueName, owner, err)
+		return convertCoreError(err)
 	}
+	deliveries = res.Deliveries
+	nextCursor = res.NextCursor
 
 	success := false
 	defer func() {
@@ -2194,7 +2190,7 @@ func (h *Handler) handleQueueDequeue(w http.ResponseWriter, r *http.Request) err
 
 // handleQueueDequeueWithState godoc
 // @Summary      Fetch queue messages with state sidecars
-// @Description  Dequeues messages and includes their associated state blobs in the multipart response when available. If txn_id is provided, the message and state sidecar are enlisted as transaction participants.
+// @Description  Dequeues messages and includes their associated state blobs in a multipart/related response when available. If txn_id is provided, the message and state sidecar are enlisted as transaction participants.
 // @Tags         queue
 // @Accept       json
 // @Produce      multipart/related
@@ -2202,7 +2198,7 @@ func (h *Handler) handleQueueDequeue(w http.ResponseWriter, r *http.Request) err
 // @Param        queue      query    string  false  "Queue name override when the request body omits it"
 // @Param        owner      query    string  false  "Owner override when the request body omits it"
 // @Param        request  body      api.DequeueRequest  true  "Dequeue parameters"
-// @Success      200      {string}  string  "Multipart response with message metadata, payload, and state sidecar"
+// @Success      200      {string}  string  "multipart/related stream: message metadata, payload, optional state sidecar"
 // @Failure      400      {object}  api.ErrorResponse
 // @Failure      404      {object}  api.ErrorResponse
 // @Failure      409      {object}  api.ErrorResponse
@@ -2363,7 +2359,7 @@ func (h *Handler) handleQueueDequeueWithState(w http.ResponseWriter, r *http.Req
 
 // handleQueueSubscribe godoc
 // @Summary      Stream queue deliveries
-// @Description  Opens a long-lived multipart stream of deliveries for the specified queue owner. Each part contains message metadata and payload. If txn_id is provided, each delivery is enlisted as a transaction participant.
+// @Description  Opens a long-lived multipart/related stream of deliveries for the specified queue owner. Each part contains message metadata and payload. If txn_id is provided, each delivery is enlisted as a transaction participant.
 // @Tags         queue
 // @Accept       json
 // @Produce      multipart/related
@@ -2371,7 +2367,7 @@ func (h *Handler) handleQueueDequeueWithState(w http.ResponseWriter, r *http.Req
 // @Param        queue      query    string  false  "Queue name override when the request body omits it"
 // @Param        owner      query    string  false  "Owner override when the request body omits it"
 // @Param        request  body      api.DequeueRequest  true  "Subscription parameters (queue, owner, wait_seconds, visibility)"
-// @Success      200      {string}  string  "Multipart stream of message deliveries"
+// @Success      200      {string}  string  "multipart/related stream: message metadata + payload"
 // @Failure      400      {object}  api.ErrorResponse
 // @Failure      404      {object}  api.ErrorResponse
 // @Failure      409      {object}  api.ErrorResponse
@@ -2384,7 +2380,7 @@ func (h *Handler) handleQueueSubscribe(w http.ResponseWriter, r *http.Request) e
 
 // handleQueueSubscribeWithState godoc
 // @Summary      Stream queue deliveries with state
-// @Description  Opens a long-lived multipart stream where each part contains message metadata, payload, and state snapshot when available. If txn_id is provided, the message and state sidecar are enlisted as transaction participants.
+// @Description  Opens a long-lived multipart/related stream where each part contains message metadata, payload, and state snapshot when available. If txn_id is provided, the message and state sidecar are enlisted as transaction participants.
 // @Tags         queue
 // @Accept       json
 // @Produce      multipart/related
@@ -2392,7 +2388,7 @@ func (h *Handler) handleQueueSubscribe(w http.ResponseWriter, r *http.Request) e
 // @Param        queue      query    string  false  "Queue name override when the request body omits it"
 // @Param        owner      query    string  false  "Owner override when the request body omits it"
 // @Param        request  body      api.DequeueRequest  true  "Subscription parameters (queue, owner, wait_seconds, visibility)"
-// @Success      200      {string}  string  "Multipart stream of message deliveries"
+// @Success      200      {string}  string  "multipart/related stream: message metadata, payload, optional state snapshot"
 // @Failure      400      {object}  api.ErrorResponse
 // @Failure      404      {object}  api.ErrorResponse
 // @Failure      409      {object}  api.ErrorResponse

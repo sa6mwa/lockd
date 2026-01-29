@@ -23,6 +23,7 @@ func TestHandlerLeaseCacheAvoidsExtraLoadMeta(t *testing.T) {
 	h := New(Config{
 		Store:                   store,
 		Logger:                  pslog.NoopLogger(),
+		HAMode:                  "concurrent",
 		JSONMaxBytes:            1 << 20,
 		DefaultTTL:              30 * time.Second,
 		MaxTTL:                  time.Minute,
@@ -49,8 +50,8 @@ func TestHandlerLeaseCacheAvoidsExtraLoadMeta(t *testing.T) {
 	fence := strconv.FormatInt(acq.FencingToken, 10)
 
 	loadCalls := store.resetCounters()
-	if loadCalls != 1 {
-		t.Fatalf("expected 1 initial load, got %d", loadCalls)
+	if loadCalls != 0 {
+		t.Fatalf("expected acquire to avoid LoadMeta, got %d", loadCalls)
 	}
 
 	updateBody := bytes.NewBufferString("  { \"value\" : 42 }\n")
@@ -111,6 +112,7 @@ func TestHandlerRemoveClearsMeta(t *testing.T) {
 	h := New(Config{
 		Store:                   store,
 		Logger:                  pslog.NoopLogger(),
+		HAMode:                  "concurrent",
 		JSONMaxBytes:            1 << 20,
 		DefaultTTL:              30 * time.Second,
 		MaxTTL:                  time.Minute,
@@ -135,7 +137,6 @@ func TestHandlerRemoveClearsMeta(t *testing.T) {
 		t.Fatalf("decode acquire: %v", err)
 	}
 	fence := strconv.FormatInt(acq.FencingToken, 10)
-	nsKey := h.defaultNamespace + "/orders"
 
 	updateBody := bytes.NewBufferString(`{"value":42}`)
 	upReq := httptest.NewRequest(http.MethodPost, "/v1/update?key=orders", updateBody)
@@ -173,7 +174,7 @@ func TestHandlerRemoveClearsMeta(t *testing.T) {
 		t.Fatalf("decode reacquire: %v", err)
 	}
 	fence = strconv.FormatInt(acq2.FencingToken, 10)
-	nsKey = h.defaultNamespace + "/orders"
+	nsKey := h.defaultNamespace + "/orders"
 
 	store.mu.Lock()
 	entry, ok := store.meta[nsKey]

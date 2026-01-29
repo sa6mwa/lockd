@@ -24,6 +24,8 @@ const (
 	txnDecisionBucketsKey   = "buckets.json"
 )
 
+var errTxnApplySkipped = errors.New("txn apply skipped")
+
 type txnDecisionMarker struct {
 	TxnID         string   `json:"txn_id"`
 	State         TxnState `json:"state"`
@@ -90,8 +92,11 @@ func (s *Service) putTxnDecisionMarker(ctx context.Context, marker *txnDecisionM
 type TxnState string
 
 const (
-	TxnStatePending  TxnState = "pending"
-	TxnStateCommit   TxnState = "commit"
+	// TxnStatePending indicates the transaction decision is pending.
+	TxnStatePending TxnState = "pending"
+	// TxnStateCommit indicates the transaction committed.
+	TxnStateCommit TxnState = "commit"
+	// TxnStateRollback indicates the transaction rolled back.
 	TxnStateRollback TxnState = "rollback"
 )
 
@@ -130,6 +135,10 @@ func (s *Service) loadTxnRecord(ctx context.Context, txnID string) (*TxnRecord, 
 		rec.TxnID = txnID
 	}
 	return &rec, obj.Info.ETag, nil
+}
+
+func txnExplicit(meta *storage.Meta) bool {
+	return meta != nil && meta.Lease != nil && meta.Lease.TxnExplicit
 }
 
 func (s *Service) putTxnRecord(ctx context.Context, rec *TxnRecord, expectedETag string) (string, error) {
@@ -434,12 +443,14 @@ func (s *Service) enlistTxnParticipant(ctx context.Context, txnID, namespace, ke
 // decideTxn records the transaction decision using CAS to avoid races.
 func (s *Service) decideTxn(ctx context.Context, txnID string, decision TxnState) (*TxnRecord, error) {
 	for {
-		rec, etag, err := s.loadTxnRecord(ctx, txnID)
+		plan := s.newWritePlan(ctx)
+		commitCtx := plan.Context()
+		rec, etag, err := s.loadTxnRecord(commitCtx, txnID)
 		if err != nil && !errors.Is(err, storage.ErrNotFound) {
 			if errors.Is(err, storage.ErrNotImplemented) {
 				return &TxnRecord{TxnID: txnID, State: decision}, nil
 			}
-			return nil, err
+			return nil, plan.Wait(err)
 		}
 		now := s.clock.Now().Unix()
 		if rec == nil {
@@ -458,14 +469,23 @@ func (s *Service) decideTxn(ctx context.Context, txnID string, decision TxnState
 			rec.ExpiresAtUnix = now + int64(s.defaultTTL.Default/time.Second)
 		}
 		rec.UpdatedAtUnix = now
-		if _, err := s.putTxnRecord(ctx, rec, etag); err != nil {
+		if _, err := s.putTxnRecord(commitCtx, rec, etag); err != nil {
 			if errors.Is(err, storage.ErrNotImplemented) {
+				if waitErr := plan.Wait(nil); waitErr != nil {
+					return nil, waitErr
+				}
 				return rec, nil
 			}
 			if errors.Is(err, storage.ErrCASMismatch) {
+				if waitErr := plan.Wait(nil); waitErr != nil {
+					return nil, waitErr
+				}
 				continue
 			}
-			return nil, err
+			return nil, plan.Wait(err)
+		}
+		if waitErr := plan.Wait(nil); waitErr != nil {
+			return nil, waitErr
 		}
 		return rec, nil
 	}
@@ -480,21 +500,33 @@ func (s *Service) decideTxnWithMerge(ctx context.Context, rec TxnRecord) (*TxnRe
 		}
 		s.txnMetrics.recordDecision(ctx, state, s.clock.Now().Sub(start))
 	}
+	recordQueueDecision := func(rec *TxnRecord) {
+		if rec == nil || rec.State == "" || rec.State == TxnStatePending {
+			return
+		}
+		s.recordQueueDecisionWorklist(ctx, rec)
+	}
 	for {
-		existing, etag, err := s.loadTxnRecord(ctx, rec.TxnID)
+		plan := s.newWritePlan(ctx)
+		commitCtx := plan.Context()
+		existing, etag, err := s.loadTxnRecord(commitCtx, rec.TxnID)
 		if err != nil && !errors.Is(err, storage.ErrNotFound) {
 			if errors.Is(err, storage.ErrNotImplemented) {
 				existing = &TxnRecord{TxnID: rec.TxnID}
 			} else {
-				return nil, err
+				return nil, plan.Wait(err)
 			}
 		}
 		now := s.clock.Now().Unix()
 		if existing == nil {
-			if resolved, err := s.resolveDecisionFromMarker(ctx, rec); err != nil {
-				return resolved, err
+			if resolved, err := s.resolveDecisionFromMarker(commitCtx, rec); err != nil {
+				return resolved, plan.Wait(err)
 			} else if resolved != nil {
 				recordDecision(resolved.State)
+				recordQueueDecision(resolved)
+				if waitErr := plan.Wait(nil); waitErr != nil {
+					return nil, waitErr
+				}
 				return resolved, nil
 			}
 			existing = &TxnRecord{
@@ -520,9 +552,13 @@ func (s *Service) decideTxnWithMerge(ctx context.Context, rec TxnRecord) (*TxnRe
 		}
 		if existing.State != TxnStatePending && existing.State != rec.State {
 			if rec.TCTerm != 0 || existing.TCTerm != 0 {
-				return existing, Failure{Code: "txn_conflict", Detail: "transaction already decided", HTTPStatus: http.StatusConflict}
+				return existing, plan.Wait(Failure{Code: "txn_conflict", Detail: "transaction already decided", HTTPStatus: http.StatusConflict})
 			}
 			recordDecision(existing.State)
+			recordQueueDecision(existing)
+			if waitErr := plan.Wait(nil); waitErr != nil {
+				return nil, waitErr
+			}
 			return existing, nil
 		}
 		if rec.TCTerm != 0 {
@@ -530,17 +566,28 @@ func (s *Service) decideTxnWithMerge(ctx context.Context, rec TxnRecord) (*TxnRe
 		}
 		existing.State = rec.State
 		existing.UpdatedAtUnix = now
-		if _, err := s.putTxnRecord(ctx, existing, etag); err != nil {
+		if _, err := s.putTxnRecord(commitCtx, existing, etag); err != nil {
 			if errors.Is(err, storage.ErrNotImplemented) {
 				recordDecision(existing.State)
+				recordQueueDecision(existing)
+				if waitErr := plan.Wait(nil); waitErr != nil {
+					return nil, waitErr
+				}
 				return existing, nil
 			}
 			if errors.Is(err, storage.ErrCASMismatch) {
+				if waitErr := plan.Wait(nil); waitErr != nil {
+					return nil, waitErr
+				}
 				continue
 			}
-			return nil, err
+			return nil, plan.Wait(err)
 		}
 		recordDecision(existing.State)
+		recordQueueDecision(existing)
+		if waitErr := plan.Wait(nil); waitErr != nil {
+			return nil, waitErr
+		}
 		return existing, nil
 	}
 }
@@ -716,42 +763,47 @@ func (s *Service) MarkTxnParticipantsApplied(ctx context.Context, txnID string, 
 		return nil
 	}
 	for {
-		rec, etag, err := s.loadTxnRecord(ctx, txnID)
+		plan := s.newWritePlan(ctx)
+		commitCtx := plan.Context()
+		rec, etag, err := s.loadTxnRecord(commitCtx, txnID)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) || errors.Is(err, storage.ErrNotImplemented) {
 				return nil
 			}
-			return err
+			return plan.Wait(err)
 		}
 		changed := markAppliedParticipants(rec, applied)
 		allApplied := allParticipantsApplied(rec.Participants)
 		if !changed && !allApplied {
-			return nil
+			return plan.Wait(nil)
 		}
 		now := s.clock.Now().Unix()
 		rec.UpdatedAtUnix = now
 		if allApplied && rec.State != TxnStatePending {
-			if err := s.writeDecisionMarker(ctx, rec); err != nil {
-				return err
+			if err := s.writeDecisionMarker(commitCtx, rec); err != nil {
+				return plan.Wait(err)
 			}
-			if err := s.store.DeleteObject(ctx, txnNamespace, rec.TxnID, storage.DeleteObjectOptions{}); err != nil {
+			if err := s.store.DeleteObject(commitCtx, txnNamespace, rec.TxnID, storage.DeleteObjectOptions{}); err != nil {
 				if errors.Is(err, storage.ErrNotFound) || errors.Is(err, storage.ErrNotImplemented) {
-					return nil
+					return plan.Wait(nil)
 				}
-				return err
+				return plan.Wait(err)
 			}
-			return nil
+			return plan.Wait(nil)
 		}
-		if _, err := s.putTxnRecord(ctx, rec, etag); err != nil {
+		if _, err := s.putTxnRecord(commitCtx, rec, etag); err != nil {
 			if errors.Is(err, storage.ErrCASMismatch) {
+				if waitErr := plan.Wait(nil); waitErr != nil {
+					return waitErr
+				}
 				continue
 			}
 			if errors.Is(err, storage.ErrNotImplemented) {
-				return nil
+				return plan.Wait(nil)
 			}
-			return err
+			return plan.Wait(err)
 		}
-		return nil
+		return plan.Wait(nil)
 	}
 }
 
@@ -842,6 +894,9 @@ func (s *Service) applyTxnDecisionWithOptions(ctx context.Context, rec *TxnRecor
 		}
 		retries, err := s.applyTxnDecisionWithRetry(ctx, p, rec.TxnID, commit, opts)
 		retryCount += retries
+		if errors.Is(err, errTxnApplySkipped) {
+			continue
+		}
 		if err != nil {
 			s.txnDecisionFailed.Add(1)
 			failedCount++
@@ -922,7 +977,7 @@ func (s *Service) applyTxnDecisionWithRetry(ctx context.Context, p TxnParticipan
 			}
 			return retries, ctx.Err()
 		}
-		err := s.applyTxnDecisionToKey(ctx, p.Namespace, p.Key, txnID, commit)
+		err := s.applyTxnDecisionToKey(ctx, p.Namespace, p.Key, txnID, commit, opts.tolerateQueueLeaseMismatch)
 		if err == nil {
 			return retries, nil
 		}
@@ -934,7 +989,7 @@ func (s *Service) applyTxnDecisionWithRetry(ctx context.Context, p TxnParticipan
 					"txn_id", txnID,
 					"commit", commit)
 			}
-			return retries, nil
+			return retries, errTxnApplySkipped
 		}
 		lastErr = err
 		if attempt == txnApplyRetryAttempts-1 {
@@ -963,11 +1018,54 @@ func (s *Service) applyTxnDecisionForMeta(ctx context.Context, namespace, key, t
 	var promotedStagedETag string
 	var promotedAttachments map[string]storage.Attachment
 	var promotedAttachmentsTxn string
+	queueIndexInsert := func(plan *writePlan, namespace, key string) {
+		if s.indexManager == nil || plan == nil {
+			return
+		}
+		namespace = strings.TrimSpace(namespace)
+		key = strings.TrimSpace(key)
+		if namespace == "" || key == "" {
+			return
+		}
+		plan.AddFinalizer(func() error {
+			stateRes, err := s.store.ReadState(storage.ContextWithCommitGroup(ctx, nil), namespace, key)
+			if err != nil {
+				return nil
+			}
+			defer stateRes.Reader.Close()
+			if doc, derr := buildDocumentFromJSON(key, stateRes.Reader); derr == nil {
+				if docMeta := buildIndexDocumentMeta(meta); docMeta != nil {
+					doc.Meta = docMeta
+				}
+				_ = s.indexManager.Insert(namespace, doc)
+			}
+			return nil
+		})
+	}
+	queueVisibilityUpdate := func(plan *writePlan, namespace, key string, meta *storage.Meta) {
+		if s.indexManager == nil || plan == nil || meta == nil {
+			return
+		}
+		visible := meta.PublishedVersion > 0 && !meta.QueryExcluded()
+		plan.AddFinalizer(func() error {
+			if err := s.indexManager.UpdateVisibility(namespace, key, visible); err != nil {
+				if s.logger != nil {
+					s.logger.Warn("index.visibility.update_failed", "namespace", namespace, "key", key, "error", err)
+				}
+			}
+			return nil
+		})
+	}
 	for {
+		plan := s.newWritePlan(ctx)
+		commitCtx := plan.Context()
+		waitCommit := func(err error) error {
+			return plan.Wait(err)
+		}
 		if meta == nil {
 			var err error
 			var metaRes storage.LoadMetaResult
-			metaRes, err = s.store.LoadMeta(ctx, namespace, key)
+			metaRes, err = s.store.LoadMeta(commitCtx, namespace, key)
 			if err != nil {
 				if errors.Is(err, storage.ErrNotFound) {
 					if s.logger != nil {
@@ -977,9 +1075,9 @@ func (s *Service) applyTxnDecisionForMeta(ctx context.Context, namespace, key, t
 							"txn_id", txnID,
 							"commit", commit)
 					}
-					return nil
+					return waitCommit(nil)
 				}
-				return err
+				return waitCommit(err)
 			}
 			meta = metaRes.Meta
 			metaETag = metaRes.ETag
@@ -992,7 +1090,7 @@ func (s *Service) applyTxnDecisionForMeta(ctx context.Context, namespace, key, t
 					"txn_id", txnID,
 					"staged_txn_id", meta.StagedTxnID)
 			}
-			return nil
+			return waitCommit(nil)
 		}
 		if meta.StagedTxnID == "" && meta.Lease != nil && meta.Lease.TxnID != txnID {
 			if s.logger != nil {
@@ -1002,7 +1100,7 @@ func (s *Service) applyTxnDecisionForMeta(ctx context.Context, namespace, key, t
 					"txn_id", txnID,
 					"lease_txn_id", meta.Lease.TxnID)
 			}
-			return nil
+			return waitCommit(nil)
 		}
 		if s.logger != nil {
 			s.logger.Debug("txn.apply.meta",
@@ -1022,10 +1120,10 @@ func (s *Service) applyTxnDecisionForMeta(ctx context.Context, namespace, key, t
 				oldExpires = meta.Lease.ExpiresAtUnix
 			}
 			if meta.StagedStateETag != "" {
-				_ = s.staging.DiscardStagedState(ctx, namespace, key, meta.StagedTxnID, storage.DiscardStagedOptions{IgnoreNotFound: true})
+				_ = s.staging.DiscardStagedState(commitCtx, namespace, key, meta.StagedTxnID, storage.DiscardStagedOptions{IgnoreNotFound: true})
 			}
 			if len(meta.StagedAttachments) > 0 {
-				discardStagedAttachments(ctx, s.store, namespace, key, meta.StagedTxnID, meta.StagedAttachments)
+				discardStagedAttachments(commitCtx, s.store, namespace, key, meta.StagedTxnID, meta.StagedAttachments)
 			}
 			meta.StagedTxnID = ""
 			meta.StagedVersion = 0
@@ -1039,31 +1137,34 @@ func (s *Service) applyTxnDecisionForMeta(ctx context.Context, namespace, key, t
 			meta.StagedAttachmentsClear = false
 			meta.Lease = nil
 			meta.UpdatedAtUnix = now.Unix()
-			if _, err := s.store.StoreMeta(ctx, namespace, key, meta, metaETag); err != nil {
+			if _, err := s.store.StoreMeta(commitCtx, namespace, key, meta, metaETag); err != nil {
 				if errors.Is(err, storage.ErrCASMismatch) {
+					if waitErr := waitCommit(nil); waitErr != nil {
+						return waitErr
+					}
 					meta = nil
 					continue
 				}
-				return err
+				return waitCommit(err)
 			}
-			if err := s.updateLeaseIndex(ctx, namespace, key, oldExpires, 0); err != nil && s.logger != nil {
+			if err := s.updateLeaseIndex(commitCtx, namespace, key, oldExpires, 0); err != nil && s.logger != nil {
 				s.logger.Warn("lease.index.update_failed", "namespace", namespace, "key", key, "error", err)
 			}
-			return nil
+			return waitCommit(nil)
 		}
 
 		if meta.StagedRemove {
-			_ = s.staging.DiscardStagedState(ctx, namespace, key, meta.StagedTxnID, storage.DiscardStagedOptions{IgnoreNotFound: true})
+			_ = s.staging.DiscardStagedState(commitCtx, namespace, key, meta.StagedTxnID, storage.DiscardStagedOptions{IgnoreNotFound: true})
 			if len(meta.StagedAttachments) > 0 {
-				discardStagedAttachments(ctx, s.store, namespace, key, meta.StagedTxnID, meta.StagedAttachments)
+				discardStagedAttachments(commitCtx, s.store, namespace, key, meta.StagedTxnID, meta.StagedAttachments)
 			}
 			if len(meta.Attachments) > 0 {
 				for _, att := range meta.Attachments {
 					if att.ID == "" {
 						continue
 					}
-					if err := s.store.DeleteObject(ctx, namespace, storage.AttachmentObjectKey(key, att.ID), storage.DeleteObjectOptions{IgnoreNotFound: true}); err != nil && !errors.Is(err, storage.ErrNotFound) {
-						return err
+					if err := s.store.DeleteObject(commitCtx, namespace, storage.AttachmentObjectKey(key, att.ID), storage.DeleteObjectOptions{IgnoreNotFound: true}); err != nil && !errors.Is(err, storage.ErrNotFound) {
+						return waitCommit(err)
 					}
 				}
 			}
@@ -1071,30 +1172,33 @@ func (s *Service) applyTxnDecisionForMeta(ctx context.Context, namespace, key, t
 			meta.StagedAttachments = nil
 			meta.StagedAttachmentDeletes = nil
 			meta.StagedAttachmentsClear = false
-			if err := s.store.Remove(ctx, namespace, key, meta.StateETag); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			if err := s.store.Remove(commitCtx, namespace, key, meta.StateETag); err != nil && !errors.Is(err, storage.ErrNotFound) {
 				if errors.Is(err, storage.ErrCASMismatch) {
-					stateRes, readErr := s.store.ReadState(ctx, namespace, key)
+					stateRes, readErr := s.store.ReadState(commitCtx, namespace, key)
 					if readErr != nil {
 						if errors.Is(readErr, storage.ErrNotFound) {
 							// state already removed; continue with meta cleanup
 						} else {
-							return readErr
+							return waitCommit(readErr)
 						}
 					} else {
 						info := stateRes.Info
 						_ = stateRes.Reader.Close()
 						if info != nil && info.ETag != "" {
-							if err := s.store.Remove(ctx, namespace, key, info.ETag); err != nil && !errors.Is(err, storage.ErrNotFound) {
+							if err := s.store.Remove(commitCtx, namespace, key, info.ETag); err != nil && !errors.Is(err, storage.ErrNotFound) {
 								if errors.Is(err, storage.ErrCASMismatch) {
+									if waitErr := waitCommit(nil); waitErr != nil {
+										return waitErr
+									}
 									meta = nil
 									continue
 								}
-								return err
+								return waitCommit(err)
 							}
 						}
 					}
 				}
-				return err
+				return waitCommit(err)
 			}
 			meta.StateETag = ""
 			meta.StateDescriptor = nil
@@ -1103,7 +1207,7 @@ func (s *Service) applyTxnDecisionForMeta(ctx context.Context, namespace, key, t
 			meta.PublishedVersion = meta.Version
 		} else if meta.StagedStateETag != "" {
 			skipPromote := false
-			if stateRes, rerr := s.store.ReadState(ctx, namespace, key); rerr == nil {
+			if stateRes, rerr := s.store.ReadState(commitCtx, namespace, key); rerr == nil {
 				info := stateRes.Info
 				if info == nil {
 					info = &storage.StateInfo{}
@@ -1122,23 +1226,14 @@ func (s *Service) applyTxnDecisionForMeta(ctx context.Context, namespace, key, t
 					meta.StatePlaintextBytes = info.Size
 					meta.Version = pickStagedVersion(meta)
 					meta.PublishedVersion = meta.Version
-					if s.indexManager != nil {
-						func() {
-							defer stateRes.Reader.Close()
-							if doc, derr := buildDocumentFromJSON(key, stateRes.Reader); derr == nil {
-								_ = s.indexManager.Insert(namespace, doc)
-							}
-						}()
-					} else {
-						_ = stateRes.Reader.Close()
-					}
-					_ = s.staging.DiscardStagedState(ctx, namespace, key, meta.StagedTxnID, storage.DiscardStagedOptions{IgnoreNotFound: true})
+					queueIndexInsert(plan, namespace, key)
+					_ = s.staging.DiscardStagedState(commitCtx, namespace, key, meta.StagedTxnID, storage.DiscardStagedOptions{IgnoreNotFound: true})
 					skipPromote = true
 				} else {
 					_ = stateRes.Reader.Close()
 				}
 			} else if !errors.Is(rerr, storage.ErrNotFound) {
-				return rerr
+				return waitCommit(rerr)
 			}
 
 			if !skipPromote {
@@ -1149,7 +1244,30 @@ func (s *Service) applyTxnDecisionForMeta(ctx context.Context, namespace, key, t
 					meta.Version = pickStagedVersion(meta)
 					meta.PublishedVersion = meta.Version
 				} else {
-					result, err := s.staging.PromoteStagedState(ctx, namespace, key, meta.StagedTxnID, storage.PromoteStagedOptions{ExpectedHeadETag: meta.StateETag})
+					useLegacy := false
+					if s.crypto != nil && s.crypto.Enabled() && len(meta.StagedStateDescriptor) > 0 {
+						objectCtx := storage.StateObjectContext(path.Join(namespace, key))
+						if _, derr := s.crypto.MaterialFromDescriptor(objectCtx, meta.StagedStateDescriptor); derr != nil {
+							useLegacy = true
+						}
+					}
+					var (
+						result *storage.PutStateResult
+						err    error
+					)
+					if useLegacy {
+						legacy := storage.NewDefaultStagingBackend(s.store)
+						result, err = legacy.PromoteStagedState(commitCtx, namespace, key, meta.StagedTxnID, storage.PromoteStagedOptions{ExpectedHeadETag: meta.StateETag})
+					} else {
+						promoteCtx := storage.ContextWithStateObjectContext(commitCtx, storage.StateObjectContext(path.Join(namespace, key)))
+						if len(meta.StagedStateDescriptor) > 0 {
+							promoteCtx = storage.ContextWithStateDescriptor(promoteCtx, meta.StagedStateDescriptor)
+						}
+						if meta.StagedStatePlaintextBytes > 0 {
+							promoteCtx = storage.ContextWithStatePlaintextSize(promoteCtx, meta.StagedStatePlaintextBytes)
+						}
+						result, err = s.staging.PromoteStagedState(promoteCtx, namespace, key, meta.StagedTxnID, storage.PromoteStagedOptions{ExpectedHeadETag: meta.StateETag})
+					}
 					if err != nil {
 						if errors.Is(err, storage.ErrCASMismatch) {
 							if s.logger != nil {
@@ -1158,6 +1276,9 @@ func (s *Service) applyTxnDecisionForMeta(ctx context.Context, namespace, key, t
 									"key", key,
 									"txn_id", txnID,
 									"expected_etag", meta.StateETag)
+							}
+							if waitErr := waitCommit(nil); waitErr != nil {
+								return waitErr
 							}
 							meta = nil
 							continue
@@ -1169,9 +1290,9 @@ func (s *Service) applyTxnDecisionForMeta(ctx context.Context, namespace, key, t
 									"key", key,
 									"txn_id", txnID)
 							}
-							stateRes, readErr := s.store.ReadState(ctx, namespace, key)
+							stateRes, readErr := s.store.ReadState(commitCtx, namespace, key)
 							if readErr != nil {
-								return readErr
+								return waitCommit(readErr)
 							}
 							reader := stateRes.Reader
 							info := stateRes.Info
@@ -1189,7 +1310,7 @@ func (s *Service) applyTxnDecisionForMeta(ctx context.Context, namespace, key, t
 									"txn_id", txnID,
 									"error", err)
 							}
-							return err
+							return waitCommit(err)
 						}
 					} else {
 						promoted = result
@@ -1209,16 +1330,7 @@ func (s *Service) applyTxnDecisionForMeta(ctx context.Context, namespace, key, t
 						meta.PublishedVersion = meta.Version
 					}
 				}
-				if s.indexManager != nil {
-					if stateRes, rerr := s.store.ReadState(ctx, namespace, key); rerr == nil {
-						func() {
-							defer stateRes.Reader.Close()
-							if doc, derr := buildDocumentFromJSON(key, stateRes.Reader); derr == nil {
-								_ = s.indexManager.Insert(namespace, doc)
-							}
-						}()
-					}
-				}
+				queueIndexInsert(plan, namespace, key)
 			}
 		}
 
@@ -1237,8 +1349,8 @@ func (s *Service) applyTxnDecisionForMeta(ctx context.Context, namespace, key, t
 					if att.ID == "" {
 						continue
 					}
-					if err := s.store.DeleteObject(ctx, namespace, storage.AttachmentObjectKey(key, att.ID), storage.DeleteObjectOptions{IgnoreNotFound: true}); err != nil && !errors.Is(err, storage.ErrNotFound) {
-						return err
+					if err := s.store.DeleteObject(commitCtx, namespace, storage.AttachmentObjectKey(key, att.ID), storage.DeleteObjectOptions{IgnoreNotFound: true}); err != nil && !errors.Is(err, storage.ErrNotFound) {
+						return waitCommit(err)
 					}
 				}
 			}
@@ -1248,8 +1360,8 @@ func (s *Service) applyTxnDecisionForMeta(ctx context.Context, namespace, key, t
 					continue
 				}
 				if att, ok := attachments[name]; ok {
-					if err := s.store.DeleteObject(ctx, namespace, storage.AttachmentObjectKey(key, att.ID), storage.DeleteObjectOptions{IgnoreNotFound: true}); err != nil && !errors.Is(err, storage.ErrNotFound) {
-						return err
+					if err := s.store.DeleteObject(commitCtx, namespace, storage.AttachmentObjectKey(key, att.ID), storage.DeleteObjectOptions{IgnoreNotFound: true}); err != nil && !errors.Is(err, storage.ErrNotFound) {
+						return waitCommit(err)
 					}
 					delete(attachments, name)
 				}
@@ -1265,9 +1377,9 @@ func (s *Service) applyTxnDecisionForMeta(ctx context.Context, namespace, key, t
 					}
 					promoted, ok := promotedAttachments[staged.ID]
 					if !ok {
-						result, err := s.promoteStagedAttachment(ctx, namespace, key, meta.StagedTxnID, staged)
+						result, err := s.promoteStagedAttachment(commitCtx, namespace, key, meta.StagedTxnID, staged)
 						if err != nil {
-							return err
+							return waitCommit(err)
 						}
 						promoted = *result
 						promotedAttachments[staged.ID] = promoted
@@ -1319,21 +1431,25 @@ func (s *Service) applyTxnDecisionForMeta(ctx context.Context, namespace, key, t
 		meta.Lease = nil
 		meta.UpdatedAtUnix = now.Unix()
 
-		if _, err := s.store.StoreMeta(ctx, namespace, key, meta, metaETag); err != nil {
+		if _, err := s.store.StoreMeta(commitCtx, namespace, key, meta, metaETag); err != nil {
 			if errors.Is(err, storage.ErrCASMismatch) {
+				if waitErr := waitCommit(nil); waitErr != nil {
+					return waitErr
+				}
 				meta = nil
 				continue
 			}
-			return err
+			return waitCommit(err)
 		}
-		if err := s.updateLeaseIndex(ctx, namespace, key, oldExpires, 0); err != nil && s.logger != nil {
+		queueVisibilityUpdate(plan, namespace, key, meta)
+		if err := s.updateLeaseIndex(commitCtx, namespace, key, oldExpires, 0); err != nil && s.logger != nil {
 			s.logger.Warn("lease.index.update_failed", "namespace", namespace, "key", key, "error", err)
 		}
-		return nil
+		return waitCommit(nil)
 	}
 }
 
-func (s *Service) applyTxnDecisionToKey(ctx context.Context, namespace, key, txnID string, commit bool) error {
+func (s *Service) applyTxnDecisionToKey(ctx context.Context, namespace, key, txnID string, commit bool, tolerateQueueLeaseMismatch bool) error {
 	if parts, ok := queue.ParseStateLeaseKey(key); ok {
 		return s.applyTxnDecisionQueueState(ctx, namespace, parts.Queue, parts.ID, txnID, commit)
 	}
@@ -1368,7 +1484,7 @@ func (s *Service) ReplayTxn(ctx context.Context, txnID string) (TxnState, error)
 		case duration > txnReplaySlowThreshold:
 			s.logger.Warn("txn.replay.slow", fields...)
 		default:
-			s.logger.Info("txn.replay.complete", fields...)
+			s.logger.Debug("txn.replay.complete", fields...)
 		}
 		if s.txnMetrics != nil {
 			s.txnMetrics.recordReplay(ctx, state, duration)

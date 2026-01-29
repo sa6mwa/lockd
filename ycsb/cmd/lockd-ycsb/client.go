@@ -17,6 +17,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -29,6 +30,152 @@ import (
 	"github.com/pingcap/go-ycsb/pkg/prop"
 	"github.com/spf13/cobra"
 )
+
+type warmupConfig struct {
+	ops           int
+	minWindows    int
+	maxWindows    int
+	stablePercent float64
+	stableCount   int
+	cooldown      time.Duration
+}
+
+func normalizeWarmupConfig(cfg warmupConfig) (warmupConfig, error) {
+	if cfg.ops <= 0 {
+		return cfg, nil
+	}
+	if cfg.minWindows <= 0 {
+		cfg.minWindows = 1
+	}
+	if cfg.maxWindows <= 0 {
+		cfg.maxWindows = cfg.minWindows
+	}
+	if cfg.maxWindows < cfg.minWindows {
+		return cfg, fmt.Errorf("warmup max windows (%d) must be >= min windows (%d)", cfg.maxWindows, cfg.minWindows)
+	}
+	if cfg.stablePercent < 0 {
+		return cfg, fmt.Errorf("warmup stable percent must be >= 0")
+	}
+	if cfg.stableCount <= 0 {
+		cfg.stableCount = 2
+	}
+	return cfg, nil
+}
+
+func (cfg warmupConfig) enabled() bool {
+	return cfg.ops > 0 && cfg.maxWindows > 0
+}
+
+func runWarmup(dbName string, baseProps *properties.Properties, cfg warmupConfig, doTransactions bool, command string) error {
+	threadCount := baseProps.GetInt64(prop.ThreadCount, 1)
+	if threadCount < 1 {
+		threadCount = 1
+	}
+	if int64(cfg.ops) < threadCount {
+		return fmt.Errorf("warmup ops (%d) must be >= threadcount (%d)", cfg.ops, threadCount)
+	}
+
+	samples := make([]float64, 0, cfg.maxWindows)
+	for window := 1; window <= cfg.maxWindows; window++ {
+		props := cloneProperties(baseProps)
+		props.Set(prop.Command, command)
+		if doTransactions {
+			props.Set(prop.DoTransactions, "true")
+		} else {
+			props.Set(prop.DoTransactions, "false")
+		}
+		warmOps, err := applyWarmupOverrides(props, baseProps, cfg.ops, doTransactions)
+		if err != nil {
+			return err
+		}
+		measurement.InitMeasure(props)
+		workload, db, err := buildContext(dbName, props)
+		if err != nil {
+			return err
+		}
+		start := time.Now()
+		c := ycsbclient.NewClient(props, workload, db)
+		c.Run(globalContext)
+		elapsed := time.Since(start)
+		workload.Close()
+		db.Close()
+
+		opsPerSec := float64(warmOps) / math.Max(elapsed.Seconds(), 0.000001)
+		samples = append(samples, opsPerSec)
+		stable := warmupStable(samples, cfg.stableCount, cfg.stablePercent)
+		fmt.Printf("warmup window=%d/%d ops=%d elapsed=%s ops_per_sec=%.1f stable=%t\n",
+			window,
+			cfg.maxWindows,
+			warmOps,
+			elapsed,
+			opsPerSec,
+			stable)
+		if window >= cfg.minWindows && stable {
+			break
+		}
+	}
+
+	if cfg.cooldown > 0 {
+		fmt.Printf("warmup cooldown=%s\n", cfg.cooldown)
+		time.Sleep(cfg.cooldown)
+	}
+
+	return nil
+}
+
+func applyWarmupOverrides(props *properties.Properties, baseProps *properties.Properties, ops int, doTransactions bool) (int64, error) {
+	if doTransactions {
+		props.Set(prop.OperationCount, strconv.Itoa(ops))
+		props.Set(prop.WarmUpTime, "0")
+		return int64(ops), nil
+	}
+
+	baseRecordCount := baseProps.GetInt64(prop.RecordCount, prop.RecordCountDefault)
+	if baseRecordCount < 0 {
+		baseRecordCount = 0
+	}
+	warmupRecordCount := baseRecordCount + int64(ops)
+	props.Set(prop.RecordCount, strconv.FormatInt(warmupRecordCount, 10))
+	props.Set(prop.InsertStart, strconv.FormatInt(baseRecordCount, 10))
+	props.Set(prop.InsertCount, strconv.Itoa(ops))
+	return int64(ops), nil
+}
+
+func warmupStable(samples []float64, stableCount int, stablePercent float64) bool {
+	if stableCount <= 1 || stablePercent <= 0 {
+		return false
+	}
+	if len(samples) < stableCount {
+		return false
+	}
+	window := samples[len(samples)-stableCount:]
+	minVal := window[0]
+	maxVal := window[0]
+	sum := 0.0
+	for _, val := range window {
+		if val < minVal {
+			minVal = val
+		}
+		if val > maxVal {
+			maxVal = val
+		}
+		sum += val
+	}
+	mean := sum / float64(len(window))
+	if mean <= 0 {
+		return false
+	}
+	allowance := mean * (stablePercent / 100.0)
+	return (maxVal - minVal) <= allowance
+}
+
+func cloneProperties(src *properties.Properties) *properties.Properties {
+	dst := properties.NewProperties()
+	for key, value := range src.Map() {
+		dst.Set(key, value)
+	}
+	return dst
+}
 
 func runClientCommandFunc(cmd *cobra.Command, args []string, doTransactions bool, command string) {
 	db := args[0]
@@ -49,30 +196,43 @@ func runClientCommandFunc(cmd *cobra.Command, args []string, doTransactions bool
 		}
 	}
 
-	initialGlobal(db, func() {
+	warmupCfg, err := normalizeWarmupConfig(warmupConfig{
+		ops:           warmupOps,
+		minWindows:    warmupMinWindows,
+		maxWindows:    warmupMaxWindows,
+		stablePercent: warmupStablePercent,
+		stableCount:   warmupStableCount,
+		cooldown:      warmupCooldown,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "lockd-ycsb: warmup config invalid: %v\n", err)
+		return
+	}
+
+	props := buildProperties(func(p *properties.Properties) {
 		doTransFlag := "true"
 		if !doTransactions {
 			doTransFlag = "false"
 		}
-		globalProps.Set(prop.DoTransactions, doTransFlag)
-		globalProps.Set(prop.Command, command)
+		p.Set(prop.DoTransactions, doTransFlag)
+		p.Set(prop.Command, command)
 
 		if cmd.Flags().Changed("threads") {
-			globalProps.Set(prop.ThreadCount, strconv.Itoa(threadsArg))
+			p.Set(prop.ThreadCount, strconv.Itoa(threadsArg))
 		}
 
 		if cmd.Flags().Changed("target") {
-			globalProps.Set(prop.Target, strconv.Itoa(targetArg))
+			p.Set(prop.Target, strconv.Itoa(targetArg))
 		}
 
 		if cmd.Flags().Changed("interval") {
-			globalProps.Set(prop.LogInterval, strconv.Itoa(reportInterval))
+			p.Set(prop.LogInterval, strconv.Itoa(reportInterval))
 		}
 
 		if perfEnabled {
-			existing := strings.TrimSpace(globalProps.GetString(prop.MeasurementRawOutputFile, ""))
+			existing := strings.TrimSpace(p.GetString(prop.MeasurementRawOutputFile, ""))
 			if existing == "" && perfOutputTemp != "" {
-				globalProps.Set(prop.MeasurementRawOutputFile, perfOutputTemp)
+				p.Set(prop.MeasurementRawOutputFile, perfOutputTemp)
 				perfOutputPath = perfOutputTemp
 				perfOutputTemporary = true
 			} else {
@@ -80,6 +240,13 @@ func runClientCommandFunc(cmd *cobra.Command, args []string, doTransactions bool
 			}
 		}
 	})
+	if warmupCfg.enabled() {
+		if err := runWarmup(db, props, warmupCfg, doTransactions, command); err != nil {
+			fmt.Fprintf(os.Stderr, "lockd-ycsb: warmup failed: %v\n", err)
+			return
+		}
+	}
+	setupGlobal(db, props)
 
 	fmt.Println("***************** properties *****************")
 	for key, value := range globalProps.Map() {
@@ -128,10 +295,16 @@ func runTransCommandFunc(cmd *cobra.Command, args []string) {
 }
 
 var (
-	threadsArg     int
-	targetArg      int
-	reportInterval int
-	perfLogPath    string
+	threadsArg          int
+	targetArg           int
+	reportInterval      int
+	perfLogPath         string
+	warmupOps           int
+	warmupMinWindows    int
+	warmupMaxWindows    int
+	warmupStablePercent float64
+	warmupStableCount   int
+	warmupCooldown      time.Duration
 )
 
 func initClientCommand(m *cobra.Command) {
@@ -142,6 +315,12 @@ func initClientCommand(m *cobra.Command) {
 	m.Flags().IntVar(&targetArg, "target", 0, "Attempt to do n operations per second (overrides target property)")
 	m.Flags().IntVar(&reportInterval, "interval", 10, "Interval (seconds) for outputting measurements")
 	m.Flags().StringVar(&perfLogPath, "perf-log", "performance.log", "Append summary metrics to this file (empty disables)")
+	m.Flags().IntVar(&warmupOps, "warmup-ops", 0, "Warmup ops per window (0 disables)")
+	m.Flags().IntVar(&warmupMinWindows, "warmup-min-windows", 2, "Minimum warmup windows before considering stability")
+	m.Flags().IntVar(&warmupMaxWindows, "warmup-max-windows", 3, "Maximum warmup windows before running the benchmark")
+	m.Flags().Float64Var(&warmupStablePercent, "warmup-stable-percent", 7.5, "Max percent spread across warmup windows to consider stable")
+	m.Flags().IntVar(&warmupStableCount, "warmup-stable-count", 2, "Consecutive warmup windows used for stability check")
+	m.Flags().DurationVar(&warmupCooldown, "warmup-cooldown", 10*time.Second, "Cooldown delay after warmup before benchmark")
 }
 
 func newLoadCommand() *cobra.Command {
@@ -231,8 +410,11 @@ func perfMetadata(dbName, phase string) string {
 	threads := globalProps.GetString(prop.ThreadCount, "")
 	target := globalProps.GetString(prop.Target, "")
 	endpoints := perfEndpoints(dbName, globalProps)
+	walFsyncInterval := perfWalFsyncInterval(dbName, globalProps)
+	walCommitMaxOps := perfWalCommitMaxOps(dbName, globalProps)
+	walCommitSingleWait := perfWalCommitSingleWait(dbName, globalProps)
 	return fmt.Sprintf(
-		"backend=%s phase=%s workload=%s recordcount=%s operationcount=%s threads=%s target=%s endpoints=%s",
+		"backend=%s phase=%s workload=%s recordcount=%s operationcount=%s threads=%s target=%s endpoints=%s wal_fsync_interval=%s wal_commit_max_ops=%s wal_commit_single_wait=%s",
 		dbName,
 		phase,
 		workload,
@@ -241,6 +423,9 @@ func perfMetadata(dbName, phase string) string {
 		threads,
 		target,
 		endpoints,
+		walFsyncInterval,
+		walCommitMaxOps,
+		walCommitSingleWait,
 	)
 }
 
@@ -256,4 +441,40 @@ func perfEndpoints(dbName string, props *properties.Properties) string {
 	default:
 		return ""
 	}
+}
+
+func perfWalFsyncInterval(dbName string, props *properties.Properties) string {
+	if !strings.EqualFold(dbName, "lockd") {
+		return ""
+	}
+	if props != nil {
+		if v := strings.TrimSpace(props.GetString("lockd.wal_fsync_interval", "")); v != "" {
+			return v
+		}
+	}
+	return strings.TrimSpace(os.Getenv("LOCKD_WAL_FSYNC_INTERVAL"))
+}
+
+func perfWalCommitMaxOps(dbName string, props *properties.Properties) string {
+	if !strings.EqualFold(dbName, "lockd") {
+		return ""
+	}
+	if props != nil {
+		if v := strings.TrimSpace(props.GetString("lockd.wal_commit_max_ops", "")); v != "" {
+			return v
+		}
+	}
+	return strings.TrimSpace(os.Getenv("LOCKD_WAL_COMMIT_MAX_OPS"))
+}
+
+func perfWalCommitSingleWait(dbName string, props *properties.Properties) string {
+	if !strings.EqualFold(dbName, "lockd") {
+		return ""
+	}
+	if props != nil {
+		if v := strings.TrimSpace(props.GetString("lockd.wal_commit_single_wait", "")); v != "" {
+			return v
+		}
+	}
+	return strings.TrimSpace(os.Getenv("LOCKD_WAL_COMMIT_SINGLE_WAIT"))
 }

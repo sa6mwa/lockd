@@ -185,13 +185,16 @@ func serverHTTPClient(t testing.TB, ts *lockd.TestServer) *http.Client {
 	t.Helper()
 	if ts == nil {
 		t.Fatalf("server http client: nil test server")
+		return nil
 	}
 	if len(ts.Config.BundlePEM) == 0 {
 		t.Fatalf("server http client: missing server bundle")
+		return nil
 	}
 	bundle, err := tlsutil.LoadBundleFromBytes(ts.Config.BundlePEM)
 	if err != nil {
 		t.Fatalf("server http client: load bundle: %v", err)
+		return nil
 	}
 	base, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
@@ -211,6 +214,7 @@ func baseArchipelagoConfig() lockd.Config {
 	return lockd.Config{
 		Store:             "mem://",
 		ListenProto:       "tcp",
+		HAMode:            "concurrent",
 		DefaultTTL:        30 * time.Second,
 		MaxTTL:            2 * time.Minute,
 		AcquireBlock:      2 * time.Second,
@@ -1261,3 +1265,18 @@ func postTxnCommitWithTerm(t testing.TB, ts *lockd.TestServer, clientFn archipel
 	}
 	return &lockdclient.APIError{Status: resp.StatusCode, Response: errResp}
 }
+
+var (
+	_ = startMemIsland
+	_ = waitForLeaderChangeWithClock
+	_ = waitForLeaderAllChangeWithClock
+	_ = leaderConsensusFromServers
+	_ = leaderAllFromServers
+	_ = firstOther
+	_ = leaderInfoOn
+	_ = waitForLeaderOnOptional
+	_ = waitForLeaderOn
+	_ = waitForLeaderOnAny
+	_ = waitForLeaderPair
+	_ = postTxnCommitWithTerm
+)

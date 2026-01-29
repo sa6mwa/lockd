@@ -24,6 +24,7 @@ recover.
   * queue consumers (dequeue)
   * queue acknowledgers (ack/nack/extend)
   * lock/state operations (acquire/keepalive/update/remove)
+  * query operations (`/v1/query`)
 * Captures environment telemetry via `unix.Sysinfo` and `/proc` (prefers `MemAvailable`, falls back to the stricter `freeram+bufferram` view when `/proc` is unavailable):
   * process RSS and Go heap usage
   * system memory and swap utilisation (percentage and absolute bytes)
@@ -42,8 +43,10 @@ recover.
     idempotent control paths (ack/nack/extend) so queues can drain.
   * **recovery** – metrics improving; throttling gradually relaxes until the
     system is healthy.
-* Distinguishes between queue producers/consumers/acks and lock calls so the
-  right workloads get preference while recovering.
+* Distinguishes between queue producers/consumers/acks, lock calls, and queries
+  so the right workloads get preference while recovering. When host-wide
+  pressure (memory/load/CPU) is the trigger, QRF targets whichever inflight
+  category is dominant rather than blindly throttling everything.
 * Logs transitions via `lockd.qrf.soft_arm`, `lockd.qrf.engaged`,
   `lockd.qrf.recovery`, and `lockd.qrf.disengaged`, including the trigger reason
   (queue inflight, consumer ceiling, memory, swap, CPU, or load-multiplier
@@ -55,8 +58,12 @@ recover.
 
 ## Back-pressure semantics
 
-When the QRF decides to throttle a request, the handler returns **HTTP 429
-Too Many Requests** with:
+When the QRF decides to throttle a request, the handler **paces the request
+server-side** by waiting for a computed delay before proceeding. This keeps
+latency predictable while avoiding the “thrash” pattern of immediate retries.
+
+Only if the delay exceeds `--qrf-max-wait` (or the request context deadline)
+does the handler return **HTTP 429 Too Many Requests** with:
 
 * JSON body containing `retry_after_seconds`.
 * `Retry-After` response header (always seconds for now).
@@ -78,13 +85,15 @@ corresponding environment variable, and a short description:
 
 | Flag | Environment variable | Meaning |
 |------|----------------------|---------|
-| `--qrf-enabled` | `LOCKD_QRF_ENABLED` | Enable or disable the perimeter defence (default: true). |
+| `--qrf-disabled` | `LOCKD_QRF_DISABLED` | Disable the perimeter defence (default: false). |
 | `--qrf-queue-soft-limit` | `LOCKD_QRF_QUEUE_SOFT_LIMIT` | Soft inflight threshold across producers/consumers/acks (`0` keeps it disabled). |
 | `--qrf-queue-hard-limit` | `LOCKD_QRF_QUEUE_HARD_LIMIT` | Hard inflight threshold that immediately engages the QRF (`0` keeps it disabled). |
 | `--qrf-queue-consumer-soft-limit` | `LOCKD_QRF_QUEUE_CONSUMER_SOFT_LIMIT` | Soft ceiling for concurrent queue consumers; defaults to ~75 % of `QueueMaxConsumers`. |
 | `--qrf-queue-consumer-hard-limit` | `LOCKD_QRF_QUEUE_CONSUMER_HARD_LIMIT` | Hard ceiling for concurrent queue consumers; defaults to `QueueMaxConsumers`. |
 | `--qrf-lock-soft-limit` | `LOCKD_QRF_LOCK_SOFT_LIMIT` | Soft inflight threshold for lock/state operations (`0` disables). |
 | `--qrf-lock-hard-limit` | `LOCKD_QRF_LOCK_HARD_LIMIT` | Hard inflight threshold for lock/state operations (`0` disables). |
+| `--qrf-query-soft-limit` | `LOCKD_QRF_QUERY_SOFT_LIMIT` | Soft inflight threshold for query operations (`0` disables). |
+| `--qrf-query-hard-limit` | `LOCKD_QRF_QUERY_HARD_LIMIT` | Hard inflight threshold for query operations (`0` disables). |
 | `--qrf-memory-soft-limit` | `LOCKD_QRF_MEMORY_SOFT_LIMIT` | Process RSS soft guardrail (blank/`0` disables; off by default). |
 | `--qrf-memory-hard-limit` | `LOCKD_QRF_MEMORY_HARD_LIMIT` | Process RSS hard guardrail (blank/`0` disables; off by default). |
 | `--qrf-memory-soft-limit-percent` | `LOCKD_QRF_MEMORY_SOFT_LIMIT_PERCENT` | Host-wide memory usage percentage that soft-arms the QRF (default: 80 %). |
@@ -94,14 +103,15 @@ corresponding environment variable, and a short description:
 | `--qrf-swap-hard-limit` | `LOCKD_QRF_SWAP_HARD_LIMIT` | Swap usage hard guardrail (bytes). |
 | `--qrf-swap-soft-limit-percent` | `LOCKD_QRF_SWAP_SOFT_LIMIT_PERCENT` | Swap utilisation percentage that soft-arms the QRF (`0` disables). |
 | `--qrf-swap-hard-limit-percent` | `LOCKD_QRF_SWAP_HARD_LIMIT_PERCENT` | Swap utilisation percentage that fully engages the QRF (`0` disables). |
-| `--qrf-cpu-soft-limit` | `LOCKD_QRF_CPU_SOFT_LIMIT` | Legacy system CPU utilisation percentage that soft-arms the QRF (`0` disables). |
-| `--qrf-cpu-hard-limit` | `LOCKD_QRF_CPU_HARD_LIMIT` | Legacy system CPU utilisation percentage that fully engages the QRF (`0` disables). |
+| `--qrf-cpu-soft-limit` | `LOCKD_QRF_CPU_SOFT_LIMIT` | System CPU utilisation percentage that soft-arms the QRF (default: 80 %; set `0` to disable). |
+| `--qrf-cpu-hard-limit` | `LOCKD_QRF_CPU_HARD_LIMIT` | System CPU utilisation percentage that fully engages the QRF (default: 90 %; set `0` to disable). |
 | `--qrf-load-soft-limit-multiplier` | `LOCKD_QRF_LOAD_SOFT_LIMIT_MULTIPLIER` | Load-average multiplier that soft-arms the QRF (default: 4× the LSF baseline). |
 | `--qrf-load-hard-limit-multiplier` | `LOCKD_QRF_LOAD_HARD_LIMIT_MULTIPLIER` | Load-average multiplier that fully engages the QRF (default: 8× the LSF baseline). |
 | `--qrf-recovery-samples` | `LOCKD_QRF_RECOVERY_SAMPLES` | Number of consecutive healthy samples before softening/disengaging (default: 5). |
-| `--qrf-soft-retry` | `LOCKD_QRF_SOFT_RETRY` | Retry-after hint while the QRF is soft-armed. |
-| `--qrf-engaged-retry` | `LOCKD_QRF_ENGAGED_RETRY` | Retry-after hint while the QRF is fully engaged. |
-| `--qrf-recovery-retry` | `LOCKD_QRF_RECOVERY_RETRY` | Retry-after hint while the QRF is recovering. |
+| `--qrf-soft-delay` | `LOCKD_QRF_SOFT_DELAY` | Base delay used while the QRF is soft-armed. |
+| `--qrf-engaged-delay` | `LOCKD_QRF_ENGAGED_DELAY` | Base delay used while the QRF is fully engaged. |
+| `--qrf-recovery-delay` | `LOCKD_QRF_RECOVERY_DELAY` | Base delay used while the QRF is recovering. |
+| `--qrf-max-wait` | `LOCKD_QRF_MAX_WAIT` | Maximum delay applied before returning HTTP 429. |
 | `--lsf-sample-interval` | `LOCKD_LSF_SAMPLE_INTERVAL` | Override the Local Security Force sampling cadence (default: 200 ms). |
 | `--lsf-log-interval` | `LOCKD_LSF_LOG_INTERVAL` | Interval between `lockd.lsf.sample` logs; set `0` to disable (default: 15 s). |
 
@@ -134,7 +144,8 @@ LSF samples to understand which metric tripped the guardrail.
 
 ## Client behaviour
 
-The Go SDK inspects `Retry-After` and `X-Lockd-QRF-State` on every response:
+The Go SDK inspects `Retry-After` and `X-Lockd-QRF-State` on every response
+when a 429 is returned:
 
 * Automatic backoff honours the suggested delay during `Acquire`, `AcquireForUpdate`,
   and queue operations.

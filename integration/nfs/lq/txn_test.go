@@ -3,6 +3,7 @@
 package nfslq
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -10,7 +11,7 @@ import (
 )
 
 func runNFSQueueTxnDecision(t *testing.T) {
-	queuetestutil.InstallWatchdog(t, "nfs-txn", 15*time.Second)
+	queuetestutil.InstallWatchdog(t, "nfs-txn", 30*time.Second)
 	root := prepareNFSQueueRoot(t)
 	cfg := buildNFSQueueConfig(t, root, nfsQueueOptions{
 		PollInterval:      100 * time.Millisecond,
@@ -37,6 +38,10 @@ func runNFSQueueTxnDecision(t *testing.T) {
 		queuetestutil.InstallWatchdog(t, "nfs-txn-mixed-rollback", 15*time.Second)
 		queuetestutil.RunQueueTxnMixedKeyScenario(t, ts, false)
 	})
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	_ = ts.Stop(stopCtx)
+	stopCancel()
 
 	t.Run("ReplayCommit", func(t *testing.T) {
 		queuetestutil.InstallWatchdog(t, "nfs-txn-replay-commit", 15*time.Second)

@@ -4,6 +4,16 @@ package index
 type Document struct {
 	Key    string
 	Fields map[string][]string // field -> terms
+	Meta   *DocumentMetadata
+}
+
+// DocumentMetadata captures per-document metadata stored alongside index entries.
+type DocumentMetadata struct {
+	StateETag           string
+	StatePlaintextBytes int64
+	StateDescriptor     []byte
+	PublishedVersion    int64
+	QueryExcluded       bool
 }
 
 // AddTerm appends a term to the document field.

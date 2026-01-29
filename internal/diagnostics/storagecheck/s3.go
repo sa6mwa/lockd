@@ -8,11 +8,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	minio "github.com/minio/minio-go/v7"
 
 	"pkt.systems/lockd"
 	"pkt.systems/lockd/internal/storage"
-	"pkt.systems/lockd/internal/storage/s3"
+	awsstore "pkt.systems/lockd/internal/storage/aws"
+	s3store "pkt.systems/lockd/internal/storage/s3"
 	"pkt.systems/lockd/internal/uuidv7"
 	"pkt.systems/lockd/namespaces"
 )
@@ -60,7 +63,7 @@ func VerifyStore(ctx context.Context, cfg lockd.Config) (Result, error) {
 			return Result{}, err
 		}
 		awsResult.Config.Crypto = crypto
-		return verifyObjectStore(ctx, "aws", awsResult.Config, true, awsResult.Credentials)
+		return verifyAWS(ctx, awsResult.Config, true, awsResult.Credentials)
 	}
 	if strings.HasPrefix(cfg.Store, "s3://") {
 		s3Result, err := lockd.BuildGenericS3Config(cfg)
@@ -89,8 +92,8 @@ func VerifyStore(ctx context.Context, cfg lockd.Config) (Result, error) {
 	return Result{}, storage.ErrNotImplemented
 }
 
-func verifyObjectStore(ctx context.Context, provider string, s3cfg s3.Config, includePolicy bool, summary lockd.CredentialSummary) (Result, error) {
-	store, err := s3.New(s3cfg)
+func verifyObjectStore(ctx context.Context, provider string, s3cfg s3store.Config, includePolicy bool, summary lockd.CredentialSummary) (Result, error) {
+	store, err := s3store.New(s3cfg)
 	if err != nil {
 		return Result{}, fmt.Errorf("init %s store: %w", provider, err)
 	}
@@ -230,6 +233,169 @@ func verifyObjectStore(ctx context.Context, provider string, s3cfg s3.Config, in
 
 	if includePolicy && !result.Passed() {
 		result.RecommendedPolicy = buildAWSPolicy(s3cfg.Bucket, s3cfg.Prefix)
+	}
+	return result, nil
+}
+
+func verifyAWS(ctx context.Context, awscfg awsstore.Config, includePolicy bool, summary lockd.CredentialSummary) (Result, error) {
+	store, err := awsstore.New(awscfg)
+	if err != nil {
+		return Result{}, fmt.Errorf("init aws store: %w", err)
+	}
+	defer store.Close()
+	client := store.Client()
+	result := Result{
+		Provider:    "aws",
+		Bucket:      awscfg.Bucket,
+		Prefix:      awscfg.Prefix,
+		Path:        awscfg.Prefix,
+		Endpoint:    awscfg.Endpoint,
+		Insecure:    awscfg.Insecure,
+		Credentials: summary,
+	}
+
+	if loc, err := client.GetBucketLocation(ctx, &awss3.GetBucketLocationInput{Bucket: aws.String(awscfg.Bucket)}); err == nil {
+		if loc.LocationConstraint != "" && !strings.EqualFold(string(loc.LocationConstraint), awscfg.Region) {
+			result.AdditionalMessage = fmt.Sprintf("Bucket region is %s; set --aws-region, LOCKD_AWS_REGION, or AWS_REGION to match.", loc.LocationConstraint)
+		}
+	}
+
+	run := func(name string, fn func(context.Context) error) {
+		err := fn(ctx)
+		result.Checks = append(result.Checks, CheckResult{Name: name, Err: err})
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	cryptoEnabled := awscfg.Crypto != nil && awscfg.Crypto.Enabled()
+
+	if cryptoEnabled {
+		run("CleanupDiagnostics", func(ctx context.Context) error {
+			return cleanupSyntheticDiagnostics(ctx, store)
+		})
+	}
+
+	verifyPrefix := path.Join(strings.Trim(awscfg.Prefix, "/"), namespaces.Default, "lockd-diagnostics")
+	keyID := uuidv7.NewString()
+	metaObject := path.Join(verifyPrefix, "meta", keyID+".json")
+	stateObject := path.Join(verifyPrefix, "state", keyID+".json")
+	queuePrefix := path.Join(verifyPrefix, "q", keyID, "msg")
+	queueBinaryObject := path.Join(queuePrefix, keyID+".bin")
+	queueIndexObject := path.Join(queuePrefix, keyID+".json")
+
+	run("BucketExists", func(ctx context.Context) error {
+		_, err := client.HeadBucket(ctx, &awss3.HeadBucketInput{Bucket: aws.String(awscfg.Bucket)})
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+
+	run("ListObjects", func(ctx context.Context) error {
+		prefix := path.Join(strings.Trim(awscfg.Prefix, "/"), "meta/")
+		_, err := client.ListObjectsV2(ctx, &awss3.ListObjectsV2Input{
+			Bucket:  aws.String(awscfg.Bucket),
+			Prefix:  aws.String(prefix),
+			MaxKeys: aws.Int32(1),
+		})
+		return err
+	})
+
+	run("PutMeta", func(ctx context.Context) error {
+		if cryptoEnabled {
+			return nil
+		}
+		_, err := client.PutObject(ctx, &awss3.PutObjectInput{
+			Bucket:      aws.String(awscfg.Bucket),
+			Key:         aws.String(metaObject),
+			Body:        strings.NewReader(`{"diagnostic":true}`),
+			ContentType: aws.String(storage.ContentTypeJSON),
+		})
+		return err
+	})
+
+	run("GetMeta", func(ctx context.Context) error {
+		if cryptoEnabled {
+			return nil
+		}
+		_, err := client.HeadObject(ctx, &awss3.HeadObjectInput{Bucket: aws.String(awscfg.Bucket), Key: aws.String(metaObject)})
+		return err
+	})
+
+	run("PutState", func(ctx context.Context) error {
+		if cryptoEnabled {
+			return nil
+		}
+		_, err := client.PutObject(ctx, &awss3.PutObjectInput{
+			Bucket:      aws.String(awscfg.Bucket),
+			Key:         aws.String(stateObject),
+			Body:        strings.NewReader(`{}`),
+			ContentType: aws.String(storage.ContentTypeJSON),
+		})
+		return err
+	})
+
+	run("PutQueueBinary", func(ctx context.Context) error {
+		if cryptoEnabled {
+			return nil
+		}
+		_, err := client.PutObject(ctx, &awss3.PutObjectInput{
+			Bucket:      aws.String(awscfg.Bucket),
+			Key:         aws.String(queueBinaryObject),
+			Body:        strings.NewReader(""),
+			ContentType: aws.String(storage.ContentTypeOctetStream),
+		})
+		return err
+	})
+
+	run("PutQueueIndex", func(ctx context.Context) error {
+		if cryptoEnabled {
+			return nil
+		}
+		_, err := client.PutObject(ctx, &awss3.PutObjectInput{
+			Bucket:      aws.String(awscfg.Bucket),
+			Key:         aws.String(queueIndexObject),
+			Body:        strings.NewReader(`{"diagnostic":true}`),
+			ContentType: aws.String(storage.ContentTypeJSON),
+		})
+		return err
+	})
+
+	if awscfg.Crypto != nil && awscfg.Crypto.Enabled() {
+		run("CryptoMetaStateRoundTrip", func(ctx context.Context) error {
+			return verifyMetaStateDecryption(ctx, store, awscfg.Crypto)
+		})
+		run("CryptoQueueRoundTrip", func(ctx context.Context) error {
+			return verifyQueueEncryption(ctx, store, awscfg.Crypto)
+		})
+
+		run("CleanupDiagnosticsFinal", func(ctx context.Context) error {
+			return cleanupSyntheticDiagnostics(ctx, store)
+		})
+	}
+
+	run("DeleteObjects", func(ctx context.Context) error {
+		if cryptoEnabled {
+			return nil
+		}
+		if _, err := client.DeleteObject(ctx, &awss3.DeleteObjectInput{Bucket: aws.String(awscfg.Bucket), Key: aws.String(metaObject)}); err != nil {
+			return err
+		}
+		if _, err := client.DeleteObject(ctx, &awss3.DeleteObjectInput{Bucket: aws.String(awscfg.Bucket), Key: aws.String(stateObject)}); err != nil {
+			return err
+		}
+		if _, err := client.DeleteObject(ctx, &awss3.DeleteObjectInput{Bucket: aws.String(awscfg.Bucket), Key: aws.String(queueBinaryObject)}); err != nil {
+			return err
+		}
+		if _, err := client.DeleteObject(ctx, &awss3.DeleteObjectInput{Bucket: aws.String(awscfg.Bucket), Key: aws.String(queueIndexObject)}); err != nil {
+			return err
+		}
+		return nil
+	})
+
+	if includePolicy && !result.Passed() {
+		result.RecommendedPolicy = buildAWSPolicy(awscfg.Bucket, awscfg.Prefix)
 	}
 	return result, nil
 }

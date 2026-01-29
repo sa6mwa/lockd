@@ -1,0 +1,175 @@
+189:# HELP lockd_index_flush_duration_ms_milliseconds Index segment flush duration
+190:# TYPE lockd_index_flush_duration_ms_milliseconds histogram
+191:lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="0"} 0
+192:lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="5"} 0
+193:lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="10"} 0
+194:lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="25"} 8
+195:lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="50"} 21
+196:lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="75"} 21
+197:lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="100"} 21
+198:lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="250"} 21
+199:lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="500"} 21
+200:lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="750"} 21
+201:lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="1000"} 21
+202:lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="2500"} 21
+203:lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="5000"} 21
+204:lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="7500"} 21
+205:lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="10000"} 21
+206:lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="+Inf"} 21
+207:lockd_index_flush_duration_ms_milliseconds_sum{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 560
+208:lockd_index_flush_duration_ms_milliseconds_count{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 21
+209:lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="0"} 0
+210:lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="5"} 0
+211:lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="10"} 0
+212:lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="25"} 7
+213:lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="50"} 20
+214:lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="75"} 21
+215:lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="100"} 21
+216:lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="250"} 21
+217:lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="500"} 21
+218:lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="750"} 21
+219:lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="1000"} 21
+220:lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="2500"} 21
+221:lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="5000"} 21
+222:lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="7500"} 21
+223:lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="10000"} 21
+224:lockd_index_flush_duration_ms_milliseconds_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="+Inf"} 21
+225:lockd_index_flush_duration_ms_milliseconds_sum{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 622
+226:lockd_index_flush_duration_ms_milliseconds_count{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 21
+227:# HELP lockd_index_queue_depth Pending documents queued for indexing
+228:# TYPE lockd_index_queue_depth gauge
+229:lockd_index_queue_depth{lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 0
+230:lockd_index_queue_depth{lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 0
+231:# HELP lockd_index_queue_lag_ms_milliseconds Age of the oldest pending indexed document
+232:# TYPE lockd_index_queue_lag_ms_milliseconds gauge
+233:lockd_index_queue_lag_ms_milliseconds{lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 0
+234:lockd_index_queue_lag_ms_milliseconds{lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 0
+235:# HELP lockd_index_segment_docs Document count per index segment
+236:# TYPE lockd_index_segment_docs histogram
+237:lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="0"} 0
+238:lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="5"} 0
+239:lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="10"} 0
+240:lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="25"} 0
+241:lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="50"} 0
+242:lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="75"} 0
+243:lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="100"} 0
+244:lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="250"} 1
+245:lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="500"} 1
+246:lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="750"} 1
+247:lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="1000"} 21
+248:lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="2500"} 21
+249:lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="5000"} 21
+250:lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="7500"} 21
+251:lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="10000"} 21
+252:lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="+Inf"} 21
+253:lockd_index_segment_docs_sum{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 20000
+254:lockd_index_segment_docs_count{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 21
+255:lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="0"} 0
+256:lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="5"} 0
+257:lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="10"} 0
+258:lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="25"} 0
+259:lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="50"} 0
+260:lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="75"} 0
+261:lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="100"} 1
+262:lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="250"} 1
+263:lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="500"} 1
+264:lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="750"} 1
+265:lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="1000"} 21
+266:lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="2500"} 21
+267:lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="5000"} 21
+268:lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="7500"} 21
+269:lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="10000"} 21
+270:lockd_index_segment_docs_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="+Inf"} 21
+271:lockd_index_segment_docs_sum{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 20000
+272:lockd_index_segment_docs_count{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 21
+273:# HELP lockd_index_segment_size_bytes Index segment payload size
+274:# TYPE lockd_index_segment_size_bytes histogram
+275:lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="0"} 0
+276:lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="5"} 0
+277:lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="10"} 0
+278:lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="25"} 0
+279:lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="50"} 0
+280:lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="75"} 0
+281:lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="100"} 0
+282:lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="250"} 0
+283:lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="500"} 0
+284:lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="750"} 0
+285:lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="1000"} 0
+286:lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="2500"} 0
+287:lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="5000"} 0
+288:lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="7500"} 0
+289:lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="10000"} 0
+290:lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="+Inf"} 21
+291:lockd_index_segment_size_bytes_sum{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 1.3167182e+07
+292:lockd_index_segment_size_bytes_count{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 21
+293:lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="0"} 0
+294:lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="5"} 0
+295:lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="10"} 0
+296:lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="25"} 0
+297:lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="50"} 0
+298:lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="75"} 0
+299:lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="100"} 0
+300:lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="250"} 0
+301:lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="500"} 0
+302:lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="750"} 0
+303:lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="1000"} 0
+304:lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="2500"} 0
+305:lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="5000"} 0
+306:lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="7500"} 0
+307:lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="10000"} 0
+308:lockd_index_segment_size_bytes_bucket{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version="",le="+Inf"} 21
+309:lockd_index_segment_size_bytes_sum{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 1.3167182e+07
+310:lockd_index_segment_size_bytes_count{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 21
+311:# HELP lockd_index_segment_written_total Index segments persisted
+312:# TYPE lockd_index_segment_written_total counter
+313:lockd_index_segment_written_total{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160714.907918577z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 21
+314:lockd_index_segment_written_total{lockd_index_flush_result="success",lockd_namespace="bench-20260128t160810.640570478z-0",otel_scope_name="pkt.systems/lockd/index",otel_scope_schema_url="",otel_scope_version=""} 21
+451:# HELP lockd_qrf_decision_total QRF throttle decisions
+452:# TYPE lockd_qrf_decision_total counter
+453:lockd_qrf_decision_total{lockd_qrf_kind="lock",lockd_qrf_state="disengaged",lockd_qrf_throttle="false",otel_scope_name="pkt.systems/lockd/qrf",otel_scope_schema_url="",otel_scope_version=""} 120000
+454:# HELP lockd_qrf_state Current QRF state
+455:# TYPE lockd_qrf_state gauge
+456:lockd_qrf_state{otel_scope_name="pkt.systems/lockd/qrf",otel_scope_schema_url="",otel_scope_version=""} 0
+460:# HELP lockd_sweeper_idle_duration_ms_milliseconds Idle maintenance sweeper duration
+461:# TYPE lockd_sweeper_idle_duration_ms_milliseconds histogram
+462:lockd_sweeper_idle_duration_ms_milliseconds_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="0"} 92
+463:lockd_sweeper_idle_duration_ms_milliseconds_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="5"} 92
+464:lockd_sweeper_idle_duration_ms_milliseconds_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="10"} 92
+465:lockd_sweeper_idle_duration_ms_milliseconds_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="25"} 92
+466:lockd_sweeper_idle_duration_ms_milliseconds_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="50"} 92
+467:lockd_sweeper_idle_duration_ms_milliseconds_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="75"} 92
+468:lockd_sweeper_idle_duration_ms_milliseconds_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="100"} 92
+469:lockd_sweeper_idle_duration_ms_milliseconds_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="250"} 92
+470:lockd_sweeper_idle_duration_ms_milliseconds_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="500"} 92
+471:lockd_sweeper_idle_duration_ms_milliseconds_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="750"} 92
+472:lockd_sweeper_idle_duration_ms_milliseconds_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="1000"} 92
+473:lockd_sweeper_idle_duration_ms_milliseconds_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="2500"} 93
+474:lockd_sweeper_idle_duration_ms_milliseconds_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="5000"} 93
+475:lockd_sweeper_idle_duration_ms_milliseconds_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="7500"} 93
+476:lockd_sweeper_idle_duration_ms_milliseconds_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="10000"} 93
+477:lockd_sweeper_idle_duration_ms_milliseconds_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="+Inf"} 93
+478:lockd_sweeper_idle_duration_ms_milliseconds_sum{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version=""} 1940
+479:lockd_sweeper_idle_duration_ms_milliseconds_count{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version=""} 93
+480:# HELP lockd_sweeper_idle_ops Idle maintenance sweeper operations
+481:# TYPE lockd_sweeper_idle_ops histogram
+482:lockd_sweeper_idle_ops_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="0"} 93
+483:lockd_sweeper_idle_ops_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="5"} 93
+484:lockd_sweeper_idle_ops_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="10"} 93
+485:lockd_sweeper_idle_ops_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="25"} 93
+486:lockd_sweeper_idle_ops_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="50"} 93
+487:lockd_sweeper_idle_ops_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="75"} 93
+488:lockd_sweeper_idle_ops_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="100"} 93
+489:lockd_sweeper_idle_ops_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="250"} 93
+490:lockd_sweeper_idle_ops_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="500"} 93
+491:lockd_sweeper_idle_ops_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="750"} 93
+492:lockd_sweeper_idle_ops_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="1000"} 93
+493:lockd_sweeper_idle_ops_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="2500"} 93
+494:lockd_sweeper_idle_ops_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="5000"} 93
+495:lockd_sweeper_idle_ops_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="7500"} 93
+496:lockd_sweeper_idle_ops_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="10000"} 93
+497:lockd_sweeper_idle_ops_bucket{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version="",le="+Inf"} 93
+498:lockd_sweeper_idle_ops_sum{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version=""} 0
+499:lockd_sweeper_idle_ops_count{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version=""} 93
+500:# HELP lockd_sweeper_idle_run_total Idle maintenance sweeper runs
+501:# TYPE lockd_sweeper_idle_run_total counter
+502:lockd_sweeper_idle_run_total{lockd_sweeper_result="complete",otel_scope_name="pkt.systems/lockd/sweeper",otel_scope_schema_url="",otel_scope_version=""} 93

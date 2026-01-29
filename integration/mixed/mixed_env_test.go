@@ -10,6 +10,7 @@ import (
 
 	"pkt.systems/lockd"
 	"pkt.systems/lockd/integration/internal/cryptotest"
+	"pkt.systems/lockd/integration/internal/storepath"
 	"pkt.systems/lockd/internal/diagnostics/storagecheck"
 )
 
@@ -39,6 +40,7 @@ func loadMixedAWSConfig(tb testing.TB) lockd.Config {
 	if !strings.HasPrefix(store, "aws://") {
 		tb.Fatalf("LOCKD_AWS_STORE must reference an aws:// URI, got %q", store)
 	}
+	store = storepath.Scoped(tb, store, "mixed")
 	cfg := lockd.Config{
 		Store:           store,
 		AWSRegion:       firstEnv("LOCKD_AWS_REGION", "AWS_REGION", "AWS_DEFAULT_REGION"),
@@ -64,6 +66,7 @@ func loadMixedAzureConfig(tb testing.TB) lockd.Config {
 	if !strings.HasPrefix(store, "azure://") {
 		tb.Fatalf("LOCKD_AZURE_STORE must reference an azure:// URI, got %q", store)
 	}
+	store = storepath.Scoped(tb, store, "mixed")
 	cfg := lockd.Config{
 		Store:           store,
 		AzureEndpoint:   firstEnv("LOCKD_AZURE_ENDPOINT"),
@@ -86,4 +89,8 @@ func ensureStoreReady(tb testing.TB, cfg lockd.Config) {
 	if !res.Passed() {
 		tb.Fatalf("store verification failed: %+v", res)
 	}
+}
+
+func appendStorePath(tb testing.TB, store, suffix string) string {
+	return storepath.Append(tb, store, suffix)
 }

@@ -43,6 +43,10 @@ func (s *stubIndexControl) WaitForReadable(ctx context.Context, namespace string
 	return s.waitErr
 }
 
+func (s *stubIndexControl) WarmNamespace(ctx context.Context, namespace string) error {
+	return nil
+}
+
 func TestHandleIndexFlushWaitMode(t *testing.T) {
 	ctrl := &stubIndexControl{manifestSeq: 42}
 	h := &Handler{defaultNamespace: namespaces.Default, indexControl: ctrl}

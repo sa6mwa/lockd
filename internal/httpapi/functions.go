@@ -127,21 +127,43 @@ func (lw *limitedWriter) Write(p []byte) (int, error) {
 
 // ndjsonSink adapts core.DocumentSink to the HTTP NDJSON response writer.
 type ndjsonSink struct {
-	writer  io.Writer
-	flusher http.Flusher
-	logger  pslog.Logger
-	stream  func(w io.Writer, namespace, key string, version int64, doc io.Reader) error
-	ns      string
+	writer     io.Writer
+	flusher    http.Flusher
+	logger     pslog.Logger
+	stream     func(w io.Writer, namespace, key string, version int64, doc io.Reader, copyBuf []byte, rowBuf []byte) ([]byte, error)
+	ns         string
+	copyBuf    []byte
+	rowBuf     []byte
+	flushEvery int
+	sinceFlush int
 }
 
 func (s *ndjsonSink) OnDocument(ctx context.Context, namespace, key string, version int64, reader io.Reader) error {
-	if err := s.stream(s.writer, namespace, key, version, reader); err != nil {
+	var err error
+	s.rowBuf, err = s.stream(s.writer, namespace, key, version, reader, s.copyBuf, s.rowBuf)
+	if err != nil {
 		return err
 	}
 	if s.flusher != nil {
-		s.flusher.Flush()
+		if s.flushEvery <= 1 {
+			s.flusher.Flush()
+		} else {
+			s.sinceFlush++
+			if s.sinceFlush >= s.flushEvery {
+				s.sinceFlush = 0
+				s.flusher.Flush()
+			}
+		}
 	}
 	return nil
+}
+
+func (s *ndjsonSink) Flush() {
+	if s.flusher == nil || s.sinceFlush == 0 {
+		return
+	}
+	s.sinceFlush = 0
+	s.flusher.Flush()
 }
 
 func parseEngineHint(raw string) (search.EngineHint, error) {
@@ -272,13 +294,13 @@ func convertCoreError(err error) error {
 	}
 	if httpErr, ok := transport.ToHTTP(err); ok {
 		return httpError{
-			Status:     httpErr.Status,
-			Code:       httpErr.Code,
-			Detail:     httpErr.Detail,
+			Status:         httpErr.Status,
+			Code:           httpErr.Code,
+			Detail:         httpErr.Detail,
 			LeaderEndpoint: httpErr.LeaderEndpoint,
-			Version:    httpErr.Version,
-			ETag:       httpErr.ETag,
-			RetryAfter: httpErr.RetryAfter,
+			Version:        httpErr.Version,
+			ETag:           httpErr.ETag,
+			RetryAfter:     httpErr.RetryAfter,
 		}
 	}
 	return err

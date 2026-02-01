@@ -45,4 +45,3 @@ func ToGRPC(err error) error {
 	// Additional metadata (retry_after, version, etag) could be attached as details later.
 	return st.Err()
 }
-

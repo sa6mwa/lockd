@@ -11,16 +11,16 @@ import (
 
 func newTestObserver() (*Observer, *qrf.Controller) {
 	ctrl := qrf.NewController(qrf.Config{
-		Enabled:            true,
-		QueueSoftLimit:     10,
-		QueueHardLimit:     20,
-		LockSoftLimit:      10,
-		LockHardLimit:      20,
-		SoftDelay:     50 * time.Millisecond,
-		EngagedDelay:  200 * time.Millisecond,
-		RecoveryDelay: 100 * time.Millisecond,
-		RecoverySamples:    1,
-		Logger:             pslog.NoopLogger(),
+		Enabled:         true,
+		QueueSoftLimit:  10,
+		QueueHardLimit:  20,
+		LockSoftLimit:   10,
+		LockHardLimit:   20,
+		SoftDelay:       50 * time.Millisecond,
+		EngagedDelay:    200 * time.Millisecond,
+		RecoveryDelay:   100 * time.Millisecond,
+		RecoverySamples: 1,
+		Logger:          pslog.NoopLogger(),
 	})
 	obs := NewObserver(Config{Enabled: true, SampleInterval: 10 * time.Millisecond}, ctrl, pslog.NoopLogger())
 	return obs, ctrl

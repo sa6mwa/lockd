@@ -94,7 +94,7 @@ func verifyAzure(ctx context.Context, azureCfg azurestore.Config, crypto *storag
 	run("PutMeta", func(ctx context.Context) error {
 		var err error
 		meta := &storage.Meta{Version: 1}
-	metaETag, err = store.StoreMeta(ctx, namespace, diagKey, meta, "")
+		metaETag, err = store.StoreMeta(ctx, namespace, diagKey, meta, "")
 		return err
 	})
 
@@ -104,7 +104,7 @@ func verifyAzure(ctx context.Context, azureCfg azurestore.Config, crypto *storag
 	})
 
 	run("PutState", func(ctx context.Context) error {
-	res, err := store.WriteState(ctx, namespace, diagKey, strings.NewReader("{}"), storage.PutStateOptions{})
+		res, err := store.WriteState(ctx, namespace, diagKey, strings.NewReader("{}"), storage.PutStateOptions{})
 		if err != nil {
 			return err
 		}
@@ -116,18 +116,18 @@ func verifyAzure(ctx context.Context, azureCfg azurestore.Config, crypto *storag
 
 	if crypto != nil && crypto.Enabled() {
 		run("CryptoMetaStateRoundTrip", func(ctx context.Context) error {
-		return verifyMetaStateDecryption(ctx, store, crypto)
+			return verifyMetaStateDecryption(ctx, store, crypto)
 		})
 		run("CryptoQueueRoundTrip", func(ctx context.Context) error {
-		return verifyQueueEncryption(ctx, store, crypto)
+			return verifyQueueEncryption(ctx, store, crypto)
 		})
 	}
 
 	run("DeleteObjects", func(ctx context.Context) error {
-	if err := store.Remove(ctx, namespace, diagKey, stateETag); err != nil && !errors.Is(err, storage.ErrNotFound) {
+		if err := store.Remove(ctx, namespace, diagKey, stateETag); err != nil && !errors.Is(err, storage.ErrNotFound) {
 			return err
 		}
-	if err := store.DeleteMeta(ctx, namespace, diagKey, metaETag); err != nil && !errors.Is(err, storage.ErrNotFound) {
+		if err := store.DeleteMeta(ctx, namespace, diagKey, metaETag); err != nil && !errors.Is(err, storage.ErrNotFound) {
 			return err
 		}
 		return nil

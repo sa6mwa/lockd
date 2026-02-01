@@ -10,12 +10,12 @@ import (
 // HTTPError converts a core.Failure into an HTTP-aware error struct.
 // Handlers can wrap this in their own response writers.
 type HTTPError struct {
-	Status     int
-	Code       string
-	Detail     string
-	RetryAfter int64
-	Version    int64
-	ETag       string
+	Status         int
+	Code           string
+	Detail         string
+	RetryAfter     int64
+	Version        int64
+	ETag           string
 	LeaderEndpoint string
 }
 
@@ -30,12 +30,12 @@ func ToHTTP(err error) (*HTTPError, bool) {
 		status = http.StatusBadRequest
 	}
 	return &HTTPError{
-		Status:     status,
-		Code:       failure.Code,
-		Detail:     failure.Detail,
-		RetryAfter: failure.RetryAfter,
-		Version:    failure.Version,
-		ETag:       failure.ETag,
+		Status:         status,
+		Code:           failure.Code,
+		Detail:         failure.Detail,
+		RetryAfter:     failure.RetryAfter,
+		Version:        failure.Version,
+		ETag:           failure.ETag,
 		LeaderEndpoint: failure.LeaderEndpoint,
 	}, true
 }

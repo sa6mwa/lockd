@@ -2000,15 +2000,15 @@ func RunQueueTxnMixedKeyRestartScenario(t testing.TB, tc, rm *lockd.TestServer, 
 		replayDeadline = 20 * time.Second
 	}
 
-		assertValue := func(client *lockdclient.Client, key, leaseID, want string) {
-			deadline := time.Now().Add(replayDeadline)
-			for time.Now().Before(deadline) {
-				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-				optsWithLease := []lockdclient.GetOption{
-					lockdclient.WithGetNamespace(namespaces.Default),
-					lockdclient.WithGetLeaseID(leaseID),
-				}
-				res, err := client.Get(ctx, key, optsWithLease...)
+	assertValue := func(client *lockdclient.Client, key, leaseID, want string) {
+		deadline := time.Now().Add(replayDeadline)
+		for time.Now().Before(deadline) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			optsWithLease := []lockdclient.GetOption{
+				lockdclient.WithGetNamespace(namespaces.Default),
+				lockdclient.WithGetLeaseID(leaseID),
+			}
+			res, err := client.Get(ctx, key, optsWithLease...)
 			cancel()
 			if err == nil && res != nil && res.HasState {
 				doc, derr := res.Document()
@@ -2022,12 +2022,12 @@ func RunQueueTxnMixedKeyRestartScenario(t testing.TB, tc, rm *lockd.TestServer, 
 				}
 			}
 
-				ctxPub, cancelPub := context.WithTimeout(context.Background(), time.Second)
-				resPub, errPub := client.Get(ctxPub, key,
-					lockdclient.WithGetNamespace(namespaces.Default),
-					lockdclient.WithGetPublicDisabled(false),
-				)
-				cancelPub()
+			ctxPub, cancelPub := context.WithTimeout(context.Background(), time.Second)
+			resPub, errPub := client.Get(ctxPub, key,
+				lockdclient.WithGetNamespace(namespaces.Default),
+				lockdclient.WithGetPublicDisabled(false),
+			)
+			cancelPub()
 			if errPub == nil && resPub != nil && resPub.HasState {
 				doc, derr := resPub.Document()
 				if derr == nil {
@@ -2043,12 +2043,12 @@ func RunQueueTxnMixedKeyRestartScenario(t testing.TB, tc, rm *lockd.TestServer, 
 		}
 		t.Fatalf("key %s missing expected value %s after %s", key, want, payload.State)
 	}
-		assertAbsent := func(client *lockdclient.Client, key string) {
-			deadline := time.Now().Add(replayDeadline)
-			for time.Now().Before(deadline) {
-				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-				res, err := client.Get(ctx, key, lockdclient.WithGetNamespace(namespaces.Default), lockdclient.WithGetPublicDisabled(true))
-				cancel()
+	assertAbsent := func(client *lockdclient.Client, key string) {
+		deadline := time.Now().Add(replayDeadline)
+		for time.Now().Before(deadline) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			res, err := client.Get(ctx, key, lockdclient.WithGetNamespace(namespaces.Default), lockdclient.WithGetPublicDisabled(true))
+			cancel()
 			if err != nil {
 				var apiErr *lockdclient.APIError
 				if errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound {
@@ -2058,9 +2058,9 @@ func RunQueueTxnMixedKeyRestartScenario(t testing.TB, tc, rm *lockd.TestServer, 
 			if res != nil && res.HasState {
 				t.Fatalf("key %s still has state after rollback", key)
 			}
-				ctxPub, cancelPub := context.WithTimeout(context.Background(), time.Second)
-				resPub, errPub := client.Get(ctxPub, key, lockdclient.WithGetNamespace(namespaces.Default), lockdclient.WithGetPublicDisabled(false))
-				cancelPub()
+			ctxPub, cancelPub := context.WithTimeout(context.Background(), time.Second)
+			resPub, errPub := client.Get(ctxPub, key, lockdclient.WithGetNamespace(namespaces.Default), lockdclient.WithGetPublicDisabled(false))
+			cancelPub()
 			if errPub != nil {
 				var apiErr *lockdclient.APIError
 				if errors.As(errPub, &apiErr) && apiErr.Status == http.StatusNotFound {

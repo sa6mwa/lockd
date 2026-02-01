@@ -177,11 +177,11 @@ func TestSweeperClearsExpiredLeases(t *testing.T) {
 		t.Fatalf("store lease index entry: %v", err)
 	}
 	cfg := Config{
-		Store:              "mem://",
-		SweeperInterval:    time.Second,
-		IdleSweepGrace:     time.Nanosecond,
-		IdleSweepOpDelay:   time.Nanosecond,
-		IdleSweepMaxOps:    10,
+		Store:               "mem://",
+		SweeperInterval:     time.Second,
+		IdleSweepGrace:      time.Nanosecond,
+		IdleSweepOpDelay:    time.Nanosecond,
+		IdleSweepMaxOps:     10,
 		IdleSweepMaxRuntime: time.Second,
 	}
 	if err := cfg.Validate(); err != nil {

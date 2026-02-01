@@ -121,12 +121,12 @@ func TestReadyCacheClearsInflightOnLeaseReset(t *testing.T) {
 		MetadataKey:  "q/q/msg/msg-1.pb",
 		MetadataETag: "etag-1",
 		Document: messageDocument{
-			ID:              "msg-1",
-			Queue:           "q",
-			NotVisibleUntil: now.Add(-time.Second),
-			LeaseID:         "lease-1",
+			ID:                "msg-1",
+			Queue:             "q",
+			NotVisibleUntil:   now.Add(-time.Second),
+			LeaseID:           "lease-1",
 			LeaseFencingToken: 1,
-			LeaseTxnID:      "txn-1",
+			LeaseTxnID:        "txn-1",
 		},
 	}
 	cache.upsert(desc)

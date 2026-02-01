@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"os"
 	"runtime"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
-	"os"
 
 	"pkt.systems/kryptograf"
 	"pkt.systems/kryptograf/keymgmt"

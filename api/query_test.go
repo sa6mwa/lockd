@@ -12,4 +12,3 @@ func TestTermUnmarshalBool(t *testing.T) {
 		t.Fatalf("unexpected term %+v", term)
 	}
 }
-

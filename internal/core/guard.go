@@ -22,4 +22,3 @@ func (s *Service) applyShutdownGuard(kind string) error {
 		HTTPStatus: http.StatusServiceUnavailable,
 	}
 }
-

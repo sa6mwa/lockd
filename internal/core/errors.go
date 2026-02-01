@@ -12,7 +12,7 @@ type Failure struct {
 	ETag       string
 	// LeaderEndpoint provides the current TC leader when relevant.
 	LeaderEndpoint string
-	HTTPStatus int // optional hint for HTTP adapters
+	HTTPStatus     int // optional hint for HTTP adapters
 }
 
 func (f Failure) Error() string {

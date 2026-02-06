@@ -209,10 +209,6 @@ func (s *Service) consumeQueueBatch(ctx context.Context, qsvc *queue.Service, di
 		return []*QueueDelivery{delivery}, nextCursor, nil
 	}
 
-	if pageSize > 1 {
-		pageSize = 1
-	}
-
 	hasWatcher := s.queueHasActiveWatcher(disp, namespace, queueName)
 	fillBudget, retryInterval := queueBatchFillConfig(queueName, hasWatcher, blockSeconds, pageSize)
 	var fillDeadline time.Time

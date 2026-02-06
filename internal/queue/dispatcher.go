@@ -938,9 +938,13 @@ func (qs *queueState) poll() {
 		}
 		reasons := qs.preparePoll()
 		pollTime := time.Now()
-		cand, err := qs.fetch()
+		cand, err := qs.fetchWithContext(qs.pollContext())
 		qs.recordPoll(pollTime, reasons)
 		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				qs.logger.Trace("queue.dispatcher.fetch.context_done", "reasons", reasons, "error", err)
+				continue
+			}
 			if isMissingMetadataError(err) || errors.Is(err, storage.ErrNotFound) {
 				qs.logDiscrepancy(reasons, err)
 				qs.markNeedsPoll("missing_metadata")
@@ -978,43 +982,21 @@ func (qs *queueState) poll() {
 	}
 }
 
-func (qs *queueState) fetch() (*Candidate, error) {
+func (qs *queueState) pollContext() context.Context {
 	qs.mu.Lock()
-	cursor := qs.cursor
-	pageSize := qs.pageSize
-	if pageSize <= 0 {
-		pageSize = defaultQueuePageSize
-	}
-	qs.mu.Unlock()
-	qs.logger.Trace("queue.dispatcher.fetch.start", "cursor", cursor, "page_size", pageSize)
-
-	result, err := qs.dispatcher.svc.NextCandidate(context.Background(), qs.namespace, qs.name, cursor, pageSize)
-	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			qs.logger.Trace("queue.dispatcher.fetch.empty", "cursor", cursor)
-			return nil, nil
+	defer qs.mu.Unlock()
+	for _, w := range qs.waiters {
+		if w == nil || w.ctx == nil || w.ctx.Err() != nil {
+			continue
 		}
-		if !isMissingMetadataError(err) {
-			qs.logger.Warn("queue.dispatcher.fetch.error", "cursor", cursor, "error", err)
-		}
-		return nil, err
+		return w.ctx
 	}
-	desc := result.Descriptor
-	if desc == nil {
-		qs.logger.Trace("queue.dispatcher.fetch.none", "cursor", cursor, "next", result.NextCursor)
-	} else {
-		qs.logger.Trace("queue.dispatcher.fetch.success", "cursor", cursor, "next", result.NextCursor, "mid", desc.Document.ID)
-	}
-	if checker, ok := qs.dispatcher.svc.(messageReadiness); ok {
-		if err := checker.EnsureMessageReady(context.Background(), qs.namespace, desc.Document.Queue, desc.Document.ID); err != nil {
-			return nil, err
-		}
-	}
-	qs.logger.Trace("queue.dispatcher.fetch.success", "mid", desc.Document.ID, "next_cursor", result.NextCursor)
-	return &Candidate{Descriptor: *desc, NextCursor: result.NextCursor}, nil
+	return context.Background()
 }
 
 func (qs *queueState) fetchWithContext(ctx context.Context) (*Candidate, error) {
+	ctx = contextWithDefault(ctx)
+
 	qs.mu.Lock()
 	cursor := qs.cursor
 	pageSize := qs.pageSize
@@ -1022,9 +1004,9 @@ func (qs *queueState) fetchWithContext(ctx context.Context) (*Candidate, error) 
 		pageSize = defaultQueuePageSize
 	}
 	qs.mu.Unlock()
-
 	start := time.Now()
-	result, err := qs.dispatcher.svc.NextCandidate(contextWithDefault(ctx), qs.namespace, qs.name, cursor, pageSize)
+	qs.logger.Trace("queue.dispatcher.fetch.start", "cursor", cursor, "page_size", pageSize)
+	result, err := qs.dispatcher.svc.NextCandidate(ctx, qs.namespace, qs.name, cursor, pageSize)
 	elapsed := time.Since(start)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
@@ -1037,15 +1019,20 @@ func (qs *queueState) fetchWithContext(ctx context.Context) (*Candidate, error) 
 		return nil, err
 	}
 	desc := result.Descriptor
-	cand := &Candidate{Descriptor: *desc, NextCursor: result.NextCursor}
-	qs.mu.Lock()
-	qs.cursor = result.NextCursor
-	qs.mu.Unlock()
+	if desc == nil {
+		qs.logger.Trace("queue.dispatcher.fetch.none", "cursor", cursor, "next", result.NextCursor)
+		return nil, nil
+	}
+	qs.logger.Trace("queue.dispatcher.fetch.success", "cursor", cursor, "next", result.NextCursor, "mid", desc.Document.ID)
 	if checker, ok := qs.dispatcher.svc.(messageReadiness); ok {
 		if err := checker.EnsureMessageReady(ctx, qs.namespace, desc.Document.Queue, desc.Document.ID); err != nil {
 			return nil, err
 		}
 	}
+	qs.mu.Lock()
+	qs.cursor = result.NextCursor
+	qs.mu.Unlock()
+	cand := &Candidate{Descriptor: *desc, NextCursor: result.NextCursor}
 	qs.logger.Trace("queue.dispatcher.fetch.success", "mid", desc.Document.ID, "next_cursor", result.NextCursor, "elapsed", elapsed)
 	return cand, nil
 }

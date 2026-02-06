@@ -2,6 +2,8 @@ package retry
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"time"
 
@@ -10,6 +12,10 @@ import (
 	"pkt.systems/lockd/namespaces"
 	"pkt.systems/pslog"
 )
+
+// ErrNonReplayableBody indicates a write retry could not be attempted because
+// the request body cannot be safely rewound.
+var ErrNonReplayableBody = errors.New("storage retry: non-replayable write body")
 
 // Config controls retry behaviour.
 type Config struct {
@@ -102,9 +108,9 @@ func (b *backend) ReadState(ctx context.Context, namespace, key string) (storage
 
 func (b *backend) WriteState(ctx context.Context, namespace, key string, body io.Reader, opts storage.PutStateOptions) (*storage.PutStateResult, error) {
 	var res *storage.PutStateResult
-	err := b.withRetry(ctx, "write_state", namespace, key, func(ctx context.Context) error {
+	err := b.withRetryBody(ctx, "write_state", namespace, key, body, func(ctx context.Context, reader io.Reader) error {
 		var err error
-		res, err = b.inner.WriteState(ctx, namespace, key, body, opts)
+		res, err = b.inner.WriteState(ctx, namespace, key, reader, opts)
 		return err
 	})
 	return res, err
@@ -138,9 +144,9 @@ func (b *backend) GetObject(ctx context.Context, namespace, key string) (storage
 
 func (b *backend) PutObject(ctx context.Context, namespace, key string, body io.Reader, opts storage.PutObjectOptions) (*storage.ObjectInfo, error) {
 	var info *storage.ObjectInfo
-	err := b.withRetry(ctx, "put_object", namespace, key, func(ctx context.Context) error {
+	err := b.withRetryBody(ctx, "put_object", namespace, key, body, func(ctx context.Context, reader io.Reader) error {
 		var err error
-		info, err = b.inner.PutObject(ctx, namespace, key, body, opts)
+		info, err = b.inner.PutObject(ctx, namespace, key, reader, opts)
 		return err
 	})
 	return info, err
@@ -216,6 +222,77 @@ func (b *backend) withRetry(ctx context.Context, op, namespace, key string, fn f
 		lastErr = err
 		if !storage.IsTransient(err) || attempt == attempts {
 			return err
+		}
+		b.logger.Warn("storage transient error",
+			"operation", op,
+			"namespace", namespace,
+			"key", key,
+			"attempt", attempt,
+			"max_attempts", attempts,
+			"error", err,
+		)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			b.clock.Sleep(delay)
+			next := time.Duration(float64(delay) * b.cfg.Multiplier)
+			if b.cfg.MaxDelay > 0 && next > b.cfg.MaxDelay {
+				next = b.cfg.MaxDelay
+			}
+			delay = next
+		}
+	}
+	return lastErr
+}
+
+func (b *backend) withRetryBody(ctx context.Context, op, namespace, key string, body io.Reader, fn func(context.Context, io.Reader) error) error {
+	attempts := b.cfg.MaxAttempts
+	delay := b.cfg.BaseDelay
+	if attempts <= 1 {
+		return fn(ctx, body)
+	}
+	var (
+		lastErr     error
+		startOffset int64
+		seeker      io.Seeker
+		replayable  bool
+	)
+	if body == nil {
+		replayable = true
+	}
+	if s, ok := body.(io.Seeker); ok {
+		offset, err := s.Seek(0, io.SeekCurrent)
+		if err == nil {
+			startOffset = offset
+			seeker = s
+			replayable = true
+		}
+	}
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if attempt > 1 {
+			if !replayable {
+				return fmt.Errorf("%w: operation=%s namespace=%s key=%s: transient write cannot be retried safely; body must implement io.Seeker or retries must be disabled: %v",
+					ErrNonReplayableBody, op, namespace, key, lastErr)
+			}
+			if seeker != nil {
+				if _, err := seeker.Seek(startOffset, io.SeekStart); err != nil {
+					return fmt.Errorf("%w: operation=%s namespace=%s key=%s: seek failed before retry: %w",
+						ErrNonReplayableBody, op, namespace, key, err)
+				}
+			}
+		}
+		err := fn(ctx, body)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !storage.IsTransient(err) || attempt == attempts {
+			return err
+		}
+		if !replayable {
+			return fmt.Errorf("%w: operation=%s namespace=%s key=%s: transient write cannot be retried safely; body must implement io.Seeker or retries must be disabled: %v",
+				ErrNonReplayableBody, op, namespace, key, lastErr)
 		}
 		b.logger.Warn("storage transient error",
 			"operation", op,

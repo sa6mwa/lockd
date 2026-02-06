@@ -98,10 +98,6 @@ func (s *Service) Update(ctx context.Context, cmd UpdateCommand) (*UpdateResult,
 		}
 		return nil, httpErrorFrom(err)
 	}
-	reader, err := spool.Reader()
-	if err != nil {
-		return nil, err
-	}
 
 	for {
 		plan := s.newWritePlan(ctx)
@@ -168,6 +164,10 @@ func (s *Service) Update(ctx context.Context, cmd UpdateCommand) (*UpdateResult,
 		// Mint staged encryption material using the committed key context so the
 		// ciphertext is already valid for promotion.
 		stageCtx := storage.ContextWithStateObjectContext(commitCtx, storage.StateObjectContext(path.Join(namespace, keyComponent)))
+		reader, err := spool.Reader()
+		if err != nil {
+			return nil, plan.Wait(fmt.Errorf("spool reader: %w", err))
+		}
 		result, err := s.staging.StageState(stageCtx, namespace, keyComponent, cmd.TxnID, reader, storage.PutStateOptions{})
 		if err != nil {
 			return nil, plan.Wait(fmt.Errorf("stage state: %w", err))

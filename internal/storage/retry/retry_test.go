@@ -43,6 +43,14 @@ type stubBackend struct {
 	loadMetaErrs  []error
 	loadMetaCalls int
 	hook          func(int)
+
+	writeStateErrs   []error
+	writeStateCalls  int
+	writeStateBodies []string
+
+	putObjectErrs   []error
+	putObjectCalls  int
+	putObjectBodies []string
 }
 
 func (s *stubBackend) LoadMeta(ctx context.Context, namespace, key string) (storage.LoadMetaResult, error) {
@@ -79,8 +87,28 @@ func (s *stubBackend) ReadState(context.Context, string, string) (storage.ReadSt
 	return storage.ReadStateResult{Reader: io.NopCloser(bytes.NewReader(nil))}, storage.ErrNotImplemented
 }
 
-func (s *stubBackend) WriteState(context.Context, string, string, io.Reader, storage.PutStateOptions) (*storage.PutStateResult, error) {
-	return nil, storage.ErrNotImplemented
+func (s *stubBackend) WriteState(_ context.Context, _ string, _ string, body io.Reader, _ storage.PutStateOptions) (*storage.PutStateResult, error) {
+	s.writeStateCalls++
+	if body != nil {
+		data, err := io.ReadAll(body)
+		if err != nil {
+			return nil, err
+		}
+		s.writeStateBodies = append(s.writeStateBodies, string(data))
+	} else {
+		s.writeStateBodies = append(s.writeStateBodies, "")
+	}
+	var err error
+	if idx := s.writeStateCalls - 1; idx < len(s.writeStateErrs) {
+		err = s.writeStateErrs[idx]
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &storage.PutStateResult{
+		BytesWritten: int64(len(s.writeStateBodies[s.writeStateCalls-1])),
+		NewETag:      fmt.Sprintf("state-etag-%d", s.writeStateCalls),
+	}, nil
 }
 
 func (s *stubBackend) Remove(context.Context, string, string, string) error {
@@ -95,8 +123,29 @@ func (s *stubBackend) GetObject(context.Context, string, string) (storage.GetObj
 	return storage.GetObjectResult{}, storage.ErrNotImplemented
 }
 
-func (s *stubBackend) PutObject(context.Context, string, string, io.Reader, storage.PutObjectOptions) (*storage.ObjectInfo, error) {
-	return nil, storage.ErrNotImplemented
+func (s *stubBackend) PutObject(_ context.Context, _ string, _ string, body io.Reader, _ storage.PutObjectOptions) (*storage.ObjectInfo, error) {
+	s.putObjectCalls++
+	if body != nil {
+		data, err := io.ReadAll(body)
+		if err != nil {
+			return nil, err
+		}
+		s.putObjectBodies = append(s.putObjectBodies, string(data))
+	} else {
+		s.putObjectBodies = append(s.putObjectBodies, "")
+	}
+	var err error
+	if idx := s.putObjectCalls - 1; idx < len(s.putObjectErrs) {
+		err = s.putObjectErrs[idx]
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &storage.ObjectInfo{
+		Key:  "obj",
+		ETag: fmt.Sprintf("obj-etag-%d", s.putObjectCalls),
+		Size: int64(len(s.putObjectBodies[s.putObjectCalls-1])),
+	}, nil
 }
 
 func (s *stubBackend) DeleteObject(context.Context, string, string, storage.DeleteObjectOptions) error {
@@ -203,5 +252,134 @@ func TestLoadMetaRespectsContextCancellation(t *testing.T) {
 	}
 	if len(fc.sleeps) != 0 {
 		t.Fatalf("expected no sleeps when context cancelled, got %v", fc.sleeps)
+	}
+}
+
+func TestWriteStateRetriesReplayableBody(t *testing.T) {
+	t.Parallel()
+
+	back := &stubBackend{
+		writeStateErrs: []error{
+			storage.NewTransientError(errors.New("temporary")),
+			nil,
+		},
+	}
+	fc := &fakeClock{}
+	wrapped := retry.Wrap(back, pslog.NoopLogger(), fc, retry.Config{
+		MaxAttempts: 3,
+		BaseDelay:   5 * time.Millisecond,
+		Multiplier:  2,
+		MaxDelay:    10 * time.Millisecond,
+	})
+
+	body := bytes.NewReader([]byte(`{"v":1}`))
+	res, err := wrapped.WriteState(context.Background(), namespaces.Default, "key", body, storage.PutStateOptions{})
+	if err != nil {
+		t.Fatalf("WriteState returned error: %v", err)
+	}
+	if res == nil || res.NewETag == "" {
+		t.Fatalf("expected write result, got %#v", res)
+	}
+	if back.writeStateCalls != 2 {
+		t.Fatalf("expected 2 write attempts, got %d", back.writeStateCalls)
+	}
+	if len(back.writeStateBodies) != 2 || back.writeStateBodies[0] != `{"v":1}` || back.writeStateBodies[1] != `{"v":1}` {
+		t.Fatalf("unexpected write payloads: %#v", back.writeStateBodies)
+	}
+}
+
+func TestWriteStateFailsFastForNonReplayableBody(t *testing.T) {
+	t.Parallel()
+
+	back := &stubBackend{
+		writeStateErrs: []error{
+			storage.NewTransientError(errors.New("temporary")),
+			nil,
+		},
+	}
+	fc := &fakeClock{}
+	wrapped := retry.Wrap(back, pslog.NoopLogger(), fc, retry.Config{
+		MaxAttempts: 3,
+		BaseDelay:   5 * time.Millisecond,
+	})
+
+	_, err := wrapped.WriteState(context.Background(), namespaces.Default, "key", bytes.NewBufferString(`{"v":1}`), storage.PutStateOptions{})
+	if err == nil {
+		t.Fatal("expected fail-fast error for non-replayable body")
+	}
+	if !errors.Is(err, retry.ErrNonReplayableBody) {
+		t.Fatalf("expected ErrNonReplayableBody, got %v", err)
+	}
+	if back.writeStateCalls != 1 {
+		t.Fatalf("expected single write attempt, got %d", back.writeStateCalls)
+	}
+	if len(back.writeStateBodies) != 1 || back.writeStateBodies[0] != `{"v":1}` {
+		t.Fatalf("unexpected write payloads: %#v", back.writeStateBodies)
+	}
+	if len(fc.sleeps) != 0 {
+		t.Fatalf("expected no sleep before fail-fast, got %d", len(fc.sleeps))
+	}
+}
+
+func TestPutObjectRetriesReplayableBody(t *testing.T) {
+	t.Parallel()
+
+	back := &stubBackend{
+		putObjectErrs: []error{
+			storage.NewTransientError(errors.New("temporary")),
+			nil,
+		},
+	}
+	fc := &fakeClock{}
+	wrapped := retry.Wrap(back, pslog.NoopLogger(), fc, retry.Config{
+		MaxAttempts: 3,
+		BaseDelay:   5 * time.Millisecond,
+	})
+
+	info, err := wrapped.PutObject(context.Background(), namespaces.Default, "obj", bytes.NewReader([]byte("payload")), storage.PutObjectOptions{})
+	if err != nil {
+		t.Fatalf("PutObject returned error: %v", err)
+	}
+	if info == nil || info.ETag == "" {
+		t.Fatalf("expected object info, got %#v", info)
+	}
+	if back.putObjectCalls != 2 {
+		t.Fatalf("expected 2 put attempts, got %d", back.putObjectCalls)
+	}
+	if len(back.putObjectBodies) != 2 || back.putObjectBodies[0] != "payload" || back.putObjectBodies[1] != "payload" {
+		t.Fatalf("unexpected put payloads: %#v", back.putObjectBodies)
+	}
+}
+
+func TestPutObjectFailsFastForNonReplayableBody(t *testing.T) {
+	t.Parallel()
+
+	back := &stubBackend{
+		putObjectErrs: []error{
+			storage.NewTransientError(errors.New("temporary")),
+			nil,
+		},
+	}
+	fc := &fakeClock{}
+	wrapped := retry.Wrap(back, pslog.NoopLogger(), fc, retry.Config{
+		MaxAttempts: 3,
+		BaseDelay:   5 * time.Millisecond,
+	})
+
+	_, err := wrapped.PutObject(context.Background(), namespaces.Default, "obj", bytes.NewBufferString("payload"), storage.PutObjectOptions{})
+	if err == nil {
+		t.Fatal("expected fail-fast error for non-replayable body")
+	}
+	if !errors.Is(err, retry.ErrNonReplayableBody) {
+		t.Fatalf("expected ErrNonReplayableBody, got %v", err)
+	}
+	if back.putObjectCalls != 1 {
+		t.Fatalf("expected single put attempt, got %d", back.putObjectCalls)
+	}
+	if len(back.putObjectBodies) != 1 || back.putObjectBodies[0] != "payload" {
+		t.Fatalf("unexpected put payloads: %#v", back.putObjectBodies)
+	}
+	if len(fc.sleeps) != 0 {
+		t.Fatalf("expected no sleep before fail-fast, got %d", len(fc.sleeps))
 	}
 }

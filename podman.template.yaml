@@ -1,0 +1,42 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: lockd
+  annotations:
+    io.podman.annotations.userns: keep-id
+spec:
+  restartPolicy: Always
+  containers:
+    - name: lockd
+      image: docker.io/pktsystems/lockd:latest
+      imagePullPolicy: IfNotPresent
+      env:
+        - name: LOCKD_STORE
+          value: disk://lockd/.lockd/storage
+        - name: LOCKD_LOG_MODE
+          value: json
+        - name: LOCKD_LOG_LEVEL
+          value: debug
+        - name: LOCKD_METRICS_LISTEN
+          value: ":9464"
+      ports:
+        - containerPort: 9341
+          hostPort: 9341
+          protocol: TCP
+        - containerPort: 9464
+          hostPort: 9464
+          protocol: TCP
+      volumeMounts:
+        - name: lockd-config
+          mountPath: /lockd/.lockd
+        - name: lockd-storage
+          mountPath: /lockd/.lockd/storage
+  volumes:
+    - name: lockd-config
+      hostPath:
+        path: ${HOME}/.lockd
+        type: DirectoryOrCreate
+    - name: lockd-storage
+      hostPath:
+        path: ${HOME}/.lockd/storage
+        type: DirectoryOrCreate

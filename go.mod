@@ -36,8 +36,8 @@ require (
 	gopkg.in/yaml.v3 v3.0.1
 	pkt.systems/jpact v0.1.0
 	pkt.systems/kryptograf v0.5.1
-	pkt.systems/psi v0.2.0
-	pkt.systems/pslog v0.13.0
+	pkt.systems/psi v0.3.0
+	pkt.systems/pslog v0.13.2
 )
 
 require (

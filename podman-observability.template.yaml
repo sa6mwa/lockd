@@ -1,0 +1,63 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: lockd-observability
+  annotations:
+    io.podman.annotations.userns: keep-id
+spec:
+  restartPolicy: Always
+  containers:
+    - name: prometheus
+      image: prom/prometheus:v3.9.1
+      command:
+        - --config.file=/etc/prometheus/prometheus.yml
+        - --storage.tsdb.path=/prometheus
+        - --storage.tsdb.retention.time=7d
+      ports:
+        - containerPort: 9090
+          hostPort: 9090
+          protocol: TCP
+      volumeMounts:
+        - name: prometheus-config
+          mountPath: /etc/prometheus/prometheus.yml
+        - name: prometheus-data
+          mountPath: /prometheus
+    - name: grafana
+      image: grafana/grafana:12.3.1
+      env:
+        - name: GF_SECURITY_ADMIN_USER
+          value: admin
+        - name: GF_SECURITY_ADMIN_PASSWORD
+          value: admin
+      ports:
+        - containerPort: 3000
+          hostPort: 3000
+          protocol: TCP
+      volumeMounts:
+        - name: grafana-datasources
+          mountPath: /etc/grafana/provisioning/datasources
+        - name: grafana-dashboards-provisioning
+          mountPath: /etc/grafana/provisioning/dashboards
+        - name: grafana-dashboards
+          mountPath: /var/lib/grafana/dashboards
+  volumes:
+    - name: prometheus-config
+      hostPath:
+        path: ${PWD}/devenv/prometheus.yaml
+        type: File
+    - name: prometheus-data
+      hostPath:
+        path: ${HOME}/.lockd/prometheus
+        type: DirectoryOrCreate
+    - name: grafana-datasources
+      hostPath:
+        path: ${PWD}/devenv/grafana/provisioning/datasources
+        type: Directory
+    - name: grafana-dashboards-provisioning
+      hostPath:
+        path: ${PWD}/devenv/grafana/provisioning/dashboards
+        type: Directory
+    - name: grafana-dashboards
+      hostPath:
+        path: ${PWD}/devenv/grafana/dashboards
+        type: Directory

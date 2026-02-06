@@ -25,7 +25,7 @@ services:
         condition: service_healthy
 
   etcd:
-    image: quay.io/coreos/etcd:v3.5.13
+    image: quay.io/coreos/etcd:v3.6.7
     command:
       - etcd
       - --name=etcd-1
@@ -47,7 +47,7 @@ services:
       timeout: 3s
       retries: 20
   jaeger:
-    image: jaegertracing/jaeger:latest
+    image: cr.jaegertracing.io/jaegertracing/jaeger:2.14.1
     environment:
       OTLP_GRPC_SERVER_ENABLED: "true"
       OTLP_HTTP_SERVER_ENABLED: "true"
@@ -63,7 +63,7 @@ services:
       retries: 20
 
   minio:
-    image: minio/minio:latest
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER: lockddev
@@ -80,7 +80,7 @@ services:
       retries: 20
 
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.137.0
+    image: otel/opentelemetry-collector-contrib:0.143.0
     command: ["--config=/etc/otel-collector-config.yaml"]
     volumes:
       - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
@@ -98,7 +98,7 @@ services:
       retries: 30
 
   prometheus:
-    image: prom/prometheus:v2.52.0
+    image: prom/prometheus:v3.9.1
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
@@ -118,7 +118,7 @@ services:
       retries: 20
 
   grafana:
-    image: grafana/grafana-oss:10.4.3
+    image: grafana/grafana:12.3.1
     environment:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: admin

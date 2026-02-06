@@ -1468,6 +1468,7 @@ func runDiskAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase fail
 	expectedConflict := phase == failoverAfterSave
 	conflictObserved := false
 	allowAlt503 := false
+	allowAltOKOnRelease := false
 	if err != nil {
 		var apiErr *lockdclient.APIError
 		isExpected := expectedConflict && errors.As(err, &apiErr) && (apiErr.Response.ErrorCode == "version_conflict" || apiErr.Response.ErrorCode == "node_passive")
@@ -1477,6 +1478,9 @@ func runDiskAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase fail
 		}
 		if isExpected {
 			conflictObserved = true
+			if apiErr != nil && apiErr.Response.ErrorCode == "node_passive" {
+				allowAltOKOnRelease = true
+			}
 			t.Logf("phase %s observed expected failover conflict after save: %v", phase, err)
 		} else {
 			t.Fatalf("acquire-for-update callback: %v\n%s", err, clientLogs.Summary())
@@ -1543,10 +1547,12 @@ func runDiskAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase fail
 	paths := []string{"/v1/acquire_for_update", "/v1/update", "/v1/release"}
 	result := assertFailoverLogs(t, clientLogs, activeServer.URL(), standbyServer.URL(), allowAlt503, paths...)
 	if conflictObserved {
+		allowedOK := allowAltOKOnRelease && result.AlternatePath == "/v1/release" && result.AlternateStatus == http.StatusOK
 		if result.AlternatePath != "/v1/release" &&
 			result.AlternateStatus != http.StatusConflict &&
-			(!allowAlt503 || result.AlternateStatus != http.StatusServiceUnavailable) {
-			t.Fatalf("expected HTTP 409 or 503 on alternate endpoint during conflict; got %d\nlogs:\n%s", result.AlternateStatus, clientLogs.Summary())
+			(!allowAlt503 || result.AlternateStatus != http.StatusServiceUnavailable) &&
+			!allowedOK {
+			t.Fatalf("expected HTTP 409/503 on alternate endpoint during conflict (or 200 release on node_passive); got %d\nlogs:\n%s", result.AlternateStatus, clientLogs.Summary())
 		}
 	} else if result.AlternateStatus != http.StatusOK {
 		t.Fatalf("expected HTTP 200 on alternate endpoint; got %d\nlogs:\n%s", result.AlternateStatus, clientLogs.Summary())

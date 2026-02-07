@@ -59,7 +59,7 @@ func (h *Handler) handleAcquire(w http.ResponseWriter, r *http.Request) error {
 	reqBody := http.MaxBytesReader(w, r.Body, h.jsonMaxBytes)
 	defer reqBody.Close()
 	var payload api.AcquireRequest
-	if err := json.NewDecoder(reqBody).Decode(&payload); err != nil {
+	if err := decodeJSONBody(reqBody, &payload, jsonDecodeOptions{disallowUnknowns: true}); err != nil {
 		return httpError{
 			Status: http.StatusBadRequest,
 			Code:   "invalid_body",
@@ -142,7 +142,7 @@ func (h *Handler) handleKeepAlive(w http.ResponseWriter, r *http.Request) error 
 	defer reqBody.Close()
 
 	var payload api.KeepAliveRequest
-	if err := json.NewDecoder(reqBody).Decode(&payload); err != nil {
+	if err := decodeJSONBody(reqBody, &payload, jsonDecodeOptions{disallowUnknowns: true}); err != nil {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_body", Detail: err.Error()}
 	}
 	if payload.Namespace == "" && r.URL.Query().Get("namespace") != "" {
@@ -1131,7 +1131,7 @@ func (h *Handler) handleRelease(w http.ResponseWriter, r *http.Request) error {
 	reqBody := http.MaxBytesReader(w, r.Body, h.jsonMaxBytes)
 	defer reqBody.Close()
 	var payload api.ReleaseRequest
-	if err := json.NewDecoder(reqBody).Decode(&payload); err != nil {
+	if err := decodeJSONBody(reqBody, &payload, jsonDecodeOptions{disallowUnknowns: true}); err != nil {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_body", Detail: err.Error()}
 	}
 	if payload.Namespace == "" && r.URL.Query().Get("namespace") != "" {
@@ -1453,7 +1453,10 @@ func (h *Handler) handleIndexFlush(w http.ResponseWriter, r *http.Request) error
 	reqBody := http.MaxBytesReader(w, r.Body, limit)
 	defer reqBody.Close()
 	var payload api.IndexFlushRequest
-	if err := json.NewDecoder(reqBody).Decode(&payload); err != nil && err != io.EOF {
+	if err := decodeJSONBody(reqBody, &payload, jsonDecodeOptions{
+		allowEmpty:       true,
+		disallowUnknowns: true,
+	}); err != nil {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_body", Detail: fmt.Sprintf("failed to decode request: %v", err)}
 	}
 	query := r.URL.Query()
@@ -2057,7 +2060,10 @@ func (h *Handler) handleQueueDequeue(w http.ResponseWriter, r *http.Request) err
 	reqBody := http.MaxBytesReader(w, r.Body, h.jsonMaxBytes)
 	defer reqBody.Close()
 	var req api.DequeueRequest
-	if err := json.NewDecoder(reqBody).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+	if err := decodeJSONBody(reqBody, &req, jsonDecodeOptions{
+		allowEmpty:       true,
+		disallowUnknowns: true,
+	}); err != nil {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_body", Detail: fmt.Sprintf("failed to parse request: %v", err)}
 	}
 
@@ -2249,7 +2255,10 @@ func (h *Handler) handleQueueDequeueWithState(w http.ResponseWriter, r *http.Req
 	reqBody := http.MaxBytesReader(w, r.Body, h.jsonMaxBytes)
 	defer reqBody.Close()
 	var req api.DequeueRequest
-	if err := json.NewDecoder(reqBody).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+	if err := decodeJSONBody(reqBody, &req, jsonDecodeOptions{
+		allowEmpty:       true,
+		disallowUnknowns: true,
+	}); err != nil {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_body", Detail: fmt.Sprintf("failed to parse request: %v", err)}
 	}
 
@@ -2470,7 +2479,10 @@ func (h *Handler) handleQueueSubscribeInternal(w http.ResponseWriter, r *http.Re
 	defer reqBody.Close()
 
 	var req api.DequeueRequest
-	if err := json.NewDecoder(reqBody).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+	if err := decodeJSONBody(reqBody, &req, jsonDecodeOptions{
+		allowEmpty:       true,
+		disallowUnknowns: true,
+	}); err != nil {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_body", Detail: fmt.Sprintf("failed to parse request: %v", err)}
 	}
 
@@ -2809,7 +2821,7 @@ func (h *Handler) handleQueueAck(w http.ResponseWriter, r *http.Request) error {
 	reqBody := http.MaxBytesReader(w, r.Body, h.jsonMaxBytes)
 	defer reqBody.Close()
 	var req api.AckRequest
-	if err := json.NewDecoder(reqBody).Decode(&req); err != nil {
+	if err := decodeJSONBody(reqBody, &req, jsonDecodeOptions{disallowUnknowns: true}); err != nil {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_body", Detail: fmt.Sprintf("failed to parse request: %v", err)}
 	}
 	namespace := strings.TrimSpace(req.Namespace)
@@ -2905,7 +2917,7 @@ func (h *Handler) handleQueueNack(w http.ResponseWriter, r *http.Request) error 
 	reqBody := http.MaxBytesReader(w, r.Body, h.jsonMaxBytes)
 	defer reqBody.Close()
 	var req api.NackRequest
-	if err := json.NewDecoder(reqBody).Decode(&req); err != nil {
+	if err := decodeJSONBody(reqBody, &req, jsonDecodeOptions{disallowUnknowns: true}); err != nil {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_body", Detail: fmt.Sprintf("failed to parse request: %v", err)}
 	}
 	namespace := strings.TrimSpace(req.Namespace)
@@ -3005,7 +3017,7 @@ func (h *Handler) handleQueueExtend(w http.ResponseWriter, r *http.Request) erro
 	reqBody := http.MaxBytesReader(w, r.Body, h.jsonMaxBytes)
 	defer reqBody.Close()
 	var req api.ExtendRequest
-	if err := json.NewDecoder(reqBody).Decode(&req); err != nil {
+	if err := decodeJSONBody(reqBody, &req, jsonDecodeOptions{disallowUnknowns: true}); err != nil {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_body", Detail: fmt.Sprintf("failed to parse request: %v", err)}
 	}
 	namespace := strings.TrimSpace(req.Namespace)
@@ -3237,7 +3249,7 @@ func (h *Handler) handleNamespaceConfigSet(w http.ResponseWriter, r *http.Reques
 	body := http.MaxBytesReader(w, r.Body, namespaceConfigBodyLimit)
 	defer body.Close()
 	var payload api.NamespaceConfigRequest
-	if err := json.NewDecoder(body).Decode(&payload); err != nil {
+	if err := decodeJSONBody(body, &payload, jsonDecodeOptions{disallowUnknowns: true}); err != nil {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_body", Detail: err.Error()}
 	}
 	if strings.TrimSpace(payload.Namespace) != "" {

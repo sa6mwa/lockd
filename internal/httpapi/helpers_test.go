@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"pkt.systems/lockd/api"
@@ -75,5 +76,57 @@ func TestMetadataAttributesFromMeta(t *testing.T) {
 	attr := metadataAttributesFromMeta(&meta)
 	if attr.QueryHidden == nil || !*attr.QueryHidden {
 		t.Fatalf("expected QueryHidden=true from meta")
+	}
+}
+
+func TestDecodeJSONBodyDisallowUnknowns(t *testing.T) {
+	var payload struct {
+		Key string `json:"key"`
+	}
+	err := decodeJSONBody(strings.NewReader(`{"key":"v","extra":1}`), &payload, jsonDecodeOptions{
+		disallowUnknowns: true,
+	})
+	if err == nil {
+		t.Fatalf("expected unknown field error")
+	}
+}
+
+func TestDecodeJSONBodyAllowUnknowns(t *testing.T) {
+	var payload struct {
+		Key string `json:"key"`
+	}
+	err := decodeJSONBody(strings.NewReader(`{"key":"v","extra":1}`), &payload, jsonDecodeOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if payload.Key != "v" {
+		t.Fatalf("unexpected key %q", payload.Key)
+	}
+}
+
+func TestDecodeJSONBodyRejectsTrailingValue(t *testing.T) {
+	var payload struct {
+		Key string `json:"key"`
+	}
+	err := decodeJSONBody(strings.NewReader(`{"key":"v"}{"extra":1}`), &payload, jsonDecodeOptions{
+		disallowUnknowns: true,
+	})
+	if err == nil {
+		t.Fatalf("expected trailing value error")
+	}
+	if !strings.Contains(err.Error(), "trailing") {
+		t.Fatalf("expected trailing error, got %v", err)
+	}
+}
+
+func TestDecodeJSONBodyAllowEmpty(t *testing.T) {
+	var payload struct {
+		Key string `json:"key"`
+	}
+	err := decodeJSONBody(strings.NewReader(``), &payload, jsonDecodeOptions{
+		allowEmpty: true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

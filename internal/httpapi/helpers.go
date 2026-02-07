@@ -32,6 +32,11 @@ type metadataMutation struct {
 	QueryHidden *bool `json:"query_hidden,omitempty"`
 }
 
+type jsonDecodeOptions struct {
+	allowEmpty       bool
+	disallowUnknowns bool
+}
+
 func (m metadataMutation) empty() bool {
 	return m.QueryHidden == nil
 }
@@ -77,14 +82,39 @@ func decodeMetadataMutation(body io.Reader) (metadataMutation, error) {
 		return metadataMutation{}, nil
 	}
 	limited := io.LimitReader(body, 4<<10)
-	dec := json.NewDecoder(limited)
-	dec.DisallowUnknownFields()
 	var mut metadataMutation
-	if err := dec.Decode(&mut); err != nil {
-		if errors.Is(err, io.EOF) {
-			return metadataMutation{}, nil
-		}
+	if err := decodeJSONBody(limited, &mut, jsonDecodeOptions{
+		allowEmpty:       true,
+		disallowUnknowns: true,
+	}); err != nil {
 		return metadataMutation{}, err
 	}
 	return mut, nil
+}
+
+func decodeJSONBody(body io.Reader, dst any, opts jsonDecodeOptions) error {
+	if body == nil {
+		if opts.allowEmpty {
+			return nil
+		}
+		return io.EOF
+	}
+	dec := json.NewDecoder(body)
+	if opts.disallowUnknowns {
+		dec.DisallowUnknownFields()
+	}
+	if err := dec.Decode(dst); err != nil {
+		if opts.allowEmpty && errors.Is(err, io.EOF) {
+			return nil
+		}
+		return err
+	}
+	var trailing json.RawMessage
+	if err := dec.Decode(&trailing); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return err
+	}
+	return fmt.Errorf("unexpected trailing JSON value")
 }

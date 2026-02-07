@@ -2008,11 +2008,11 @@ func (n *logNamespace) maybeCloseActiveLocked() {
 	if n.syncedEpoch < n.noSyncEpoch {
 		return
 	}
-	if n.store.closeAfterCommit && n.batcher.idle() {
+	if n.store.closeAfterCommit && n.batcher.drained() {
 		_ = n.closeActiveLocked()
 		return
 	}
-	if n.store.segmentSize > 0 && n.active.size >= n.store.segmentSize && n.batcher.idle() {
+	if n.store.segmentSize > 0 && n.active.size >= n.store.segmentSize && n.batcher.drained() {
 		_ = n.closeActiveLocked()
 	}
 }

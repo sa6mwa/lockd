@@ -78,6 +78,15 @@ func (b *fsyncBatcher) idle() bool {
 	return len(b.queue) == 0 && !b.batchRunning
 }
 
+// drained reports whether there is no queued fsync work.
+// This intentionally ignores batchRunning because the loop can still be
+// unwinding after delivering completion to waiters.
+func (b *fsyncBatcher) drained() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.queue) == 0
+}
+
 func (b *fsyncBatcher) batchLoop() {
 	for {
 		b.mu.Lock()

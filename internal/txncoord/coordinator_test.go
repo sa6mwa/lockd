@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -164,5 +165,33 @@ func TestCoordinatorFanoutTreatsTxnConflictAsApplied(t *testing.T) {
 
 	if err := coord.fanout(ctx, "txn-3", core.TxnStateCommit, 1, groups, time.Now().Add(time.Minute).Unix()); err != nil {
 		t.Fatalf("fanout error: %v", err)
+	}
+}
+
+func TestCoordinatorFanoutRejectsInvalidEndpointURL(t *testing.T) {
+	backendHash := "remote-backend"
+	provider := staticEndpointProvider{
+		backendHash: {"https://rm.example.com?x=1"},
+	}
+	coord := newTestCoordinator(t, provider)
+	groups := map[string][]core.TxnParticipant{
+		backendHash: {{Namespace: "default", Key: "k1", BackendHash: backendHash}},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	t.Cleanup(cancel)
+
+	err := coord.fanout(ctx, "txn-4", core.TxnStateCommit, 1, groups, time.Now().Add(time.Minute).Unix())
+	if err == nil {
+		t.Fatalf("expected fanout error")
+	}
+	var fanoutErr *FanoutError
+	if !errors.As(err, &fanoutErr) {
+		t.Fatalf("expected FanoutError, got %T", err)
+	}
+	if len(fanoutErr.Failures) != 1 {
+		t.Fatalf("expected one failure, got %+v", fanoutErr.Failures)
+	}
+	if !strings.Contains(fanoutErr.Failures[0].Err.Error(), "endpoint must not include query or fragment") {
+		t.Fatalf("unexpected failure error: %v", fanoutErr.Failures[0].Err)
 	}
 }

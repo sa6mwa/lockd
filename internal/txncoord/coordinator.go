@@ -14,6 +14,7 @@ import (
 	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/internal/core"
 	"pkt.systems/lockd/internal/tcclient"
+	"pkt.systems/lockd/internal/tccluster"
 	"pkt.systems/pslog"
 )
 
@@ -386,7 +387,10 @@ func (c *Coordinator) applyOnce(ctx context.Context, endpoint, txnID string, sta
 	if state == core.TxnStateRollback {
 		path = rollbackPath
 	}
-	url := joinEndpoint(endpoint, path)
+	url, err := tccluster.JoinEndpoint(endpoint, path)
+	if err != nil {
+		return err
+	}
 	payload := api.TxnDecisionRequest{
 		TxnID:             txnID,
 		State:             string(state),
@@ -439,20 +443,6 @@ func sanitizeEndpoints(endpoints []string) []string {
 		}
 	}
 	return out
-}
-
-func joinEndpoint(base, suffix string) string {
-	base = strings.TrimSpace(base)
-	if base == "" {
-		return suffix
-	}
-	if strings.HasSuffix(base, "/") {
-		base = strings.TrimSuffix(base, "/")
-	}
-	if !strings.HasPrefix(suffix, "/") {
-		suffix = "/" + suffix
-	}
-	return base + suffix
 }
 
 type backendMismatchError struct {

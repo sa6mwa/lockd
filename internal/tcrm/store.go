@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"pkt.systems/lockd/internal/storage"
+	"pkt.systems/lockd/internal/tccluster"
 	"pkt.systems/pslog"
 )
 
@@ -98,16 +99,17 @@ func (s *Store) Load(ctx context.Context) (LoadResult, error) {
 // Register adds or refreshes an RM endpoint for a backend hash.
 func (s *Store) Register(ctx context.Context, backendHash, endpoint string) (UpdateResult, error) {
 	backendHash = strings.TrimSpace(backendHash)
-	endpoint = normalizeEndpoint(endpoint)
+	normalizedEndpoint, endpointErr := tccluster.NormalizeEndpoint(endpoint)
 	if s == nil || s.backend == nil {
 		return UpdateResult{}, errors.New("tcrm: backend not configured")
 	}
 	if backendHash == "" {
 		return UpdateResult{}, errors.New("tcrm: backend hash required")
 	}
-	if endpoint == "" {
-		return UpdateResult{}, errors.New("tcrm: endpoint required")
+	if endpointErr != nil {
+		return UpdateResult{}, fmt.Errorf("tcrm: %w", endpointErr)
 	}
+	endpoint = normalizedEndpoint
 	_, hasDeadline := ctx.Deadline()
 	for attempt := 0; ; attempt++ {
 		if ctx.Err() != nil {
@@ -159,16 +161,17 @@ func (s *Store) Register(ctx context.Context, backendHash, endpoint string) (Upd
 // Unregister removes an RM endpoint from the registry.
 func (s *Store) Unregister(ctx context.Context, backendHash, endpoint string) (UpdateResult, error) {
 	backendHash = strings.TrimSpace(backendHash)
-	endpoint = normalizeEndpoint(endpoint)
+	normalizedEndpoint, endpointErr := tccluster.NormalizeEndpoint(endpoint)
 	if s == nil || s.backend == nil {
 		return UpdateResult{}, errors.New("tcrm: backend not configured")
 	}
 	if backendHash == "" {
 		return UpdateResult{}, errors.New("tcrm: backend hash required")
 	}
-	if endpoint == "" {
-		return UpdateResult{}, errors.New("tcrm: endpoint required")
+	if endpointErr != nil {
+		return UpdateResult{}, fmt.Errorf("tcrm: %w", endpointErr)
 	}
+	endpoint = normalizedEndpoint
 	_, hasDeadline := ctx.Deadline()
 	for attempt := 0; ; attempt++ {
 		if ctx.Err() != nil {
@@ -250,11 +253,11 @@ func (s *Store) Endpoints(ctx context.Context, backendHash string) ([]string, er
 }
 
 func normalizeEndpoint(raw string) string {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
+	normalized, err := tccluster.NormalizeEndpoint(raw)
+	if err != nil {
 		return ""
 	}
-	return strings.TrimSuffix(trimmed, "/")
+	return normalized
 }
 
 func normalizeBackends(backends []BackendMembers) []BackendMembers {

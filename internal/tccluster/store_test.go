@@ -3,6 +3,7 @@ package tccluster
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,5 +106,76 @@ func TestStoreAnnounceIfNotPaused(t *testing.T) {
 	}
 	if len(active.Endpoints) != 0 {
 		t.Fatalf("expected no endpoints, got %+v", active.Endpoints)
+	}
+}
+
+func TestNormalizeEndpoint(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{name: "http", input: "http://example.com/", want: "http://example.com"},
+		{name: "https host port", input: "https://example.com:8443", want: "https://example.com:8443"},
+		{name: "https path", input: "https://example.com/api/", want: "https://example.com/api"},
+		{name: "missing", input: "", wantErr: true},
+		{name: "bad scheme", input: "ftp://example.com", wantErr: true},
+		{name: "has query", input: "https://example.com?x=1", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := NormalizeEndpoint(tc.input)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q", tc.input)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("normalize endpoint: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("expected %q, got %q", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestJoinEndpoint(t *testing.T) {
+	got, err := JoinEndpoint("https://example.com/", "/v1/txn/commit")
+	if err != nil {
+		t.Fatalf("join endpoint: %v", err)
+	}
+	if got != "https://example.com/v1/txn/commit" {
+		t.Fatalf("expected joined URL, got %q", got)
+	}
+	withBasePath, err := JoinEndpoint("https://example.com/path", "/v1/txn/commit")
+	if err != nil {
+		t.Fatalf("join endpoint with base path: %v", err)
+	}
+	if withBasePath != "https://example.com/path/v1/txn/commit" {
+		t.Fatalf("expected joined URL with base path, got %q", withBasePath)
+	}
+	if _, err := JoinEndpoint("https://example.com?x=1", "/v1/txn/commit"); err == nil {
+		t.Fatal("expected invalid base endpoint error")
+	}
+	if _, err := JoinEndpoint("https://example.com", "/v1/txn/commit?x=1"); err == nil {
+		t.Fatal("expected invalid suffix error")
+	}
+}
+
+func TestStoreAnnounceRejectsInvalidEndpoint(t *testing.T) {
+	ctx := context.Background()
+	clk := clock.NewManual(time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC))
+	store := memory.New()
+	cluster := NewStore(store, pslog.NoopLogger(), clk)
+
+	_, err := cluster.Announce(ctx, "id-a", "https://example.com?x=1", 10*time.Second)
+	if err == nil {
+		t.Fatal("expected endpoint validation error")
+	}
+	if !strings.Contains(err.Error(), "endpoint must not include query or fragment") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -290,5 +291,26 @@ func TestReplicatorUnregisterReportsReplicationError(t *testing.T) {
 	}
 	if len(endpoints) != 1 || endpoints[0] != "https://rm-1" {
 		t.Fatalf("expected local registry unchanged, got %+v", endpoints)
+	}
+}
+
+func TestReplicatorRegisterRejectsInvalidRMEndpoint(t *testing.T) {
+	ctx := context.Background()
+	store := memory.New()
+	rmStore := NewStore(store, pslog.NoopLogger())
+	replicator, err := NewReplicator(ReplicatorConfig{
+		Store:       rmStore,
+		DisableMTLS: true,
+		Logger:      pslog.NoopLogger(),
+	})
+	if err != nil {
+		t.Fatalf("new replicator: %v", err)
+	}
+	_, err = replicator.Register(ctx, "hash-1", "https://rm-1?x=1", nil)
+	if err == nil {
+		t.Fatal("expected invalid endpoint error")
+	}
+	if !strings.Contains(err.Error(), "endpoint must not include query or fragment") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

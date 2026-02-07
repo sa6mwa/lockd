@@ -227,7 +227,13 @@ func (r *Replicator) preflight(ctx context.Context, operation string) error {
 			continue
 		}
 		reqCtx, cancel := context.WithTimeout(ctx, timeout)
-		req, reqErr := http.NewRequestWithContext(reqCtx, http.MethodGet, joinEndpoint(target, "/v1/tc/leader"), nil)
+		targetURL, joinErr := tccluster.JoinEndpoint(target, "/v1/tc/leader")
+		if joinErr != nil {
+			cancel()
+			failures = append(failures, ReplicationFailure{Endpoint: target, Err: joinErr})
+			continue
+		}
+		req, reqErr := http.NewRequestWithContext(reqCtx, http.MethodGet, targetURL, nil)
 		if reqErr != nil {
 			cancel()
 			failures = append(failures, ReplicationFailure{Endpoint: target, Err: reqErr})
@@ -297,7 +303,11 @@ func (r *Replicator) post(ctx context.Context, base, path, backendHash, endpoint
 	}
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, joinEndpoint(base, path), bytes.NewReader(body))
+	targetURL, err := tccluster.JoinEndpoint(base, path)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, targetURL, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -323,20 +333,6 @@ func replicationOp(path string) string {
 	default:
 		return path
 	}
-}
-
-func joinEndpoint(base, suffix string) string {
-	base = strings.TrimSpace(base)
-	if base == "" {
-		return suffix
-	}
-	if strings.HasSuffix(base, "/") {
-		base = strings.TrimSuffix(base, "/")
-	}
-	if !strings.HasPrefix(suffix, "/") {
-		suffix = "/" + suffix
-	}
-	return base + suffix
 }
 
 func copyHeader(dst, src http.Header) {

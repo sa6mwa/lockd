@@ -597,14 +597,15 @@ func (h *Handler) handleTCClusterAnnounce(w http.ResponseWriter, r *http.Request
 		}
 	}
 	payload.SelfEndpoint = strings.TrimSpace(payload.SelfEndpoint)
-	if payload.SelfEndpoint == "" {
-		return httpError{Status: http.StatusBadRequest, Code: "missing_self_endpoint", Detail: "self_endpoint is required"}
+	normalizedEndpoint, endpointErr := tccluster.NormalizeEndpoint(payload.SelfEndpoint)
+	if endpointErr != nil {
+		code := "invalid_self_endpoint"
+		if strings.TrimSpace(payload.SelfEndpoint) == "" {
+			code = "missing_self_endpoint"
+		}
+		return httpError{Status: http.StatusBadRequest, Code: code, Detail: endpointErr.Error()}
 	}
-	normalized := tccluster.NormalizeEndpoints([]string{payload.SelfEndpoint})
-	if len(normalized) == 0 {
-		return httpError{Status: http.StatusBadRequest, Code: "missing_self_endpoint", Detail: "self_endpoint is required"}
-	}
-	payload.SelfEndpoint = normalized[0]
+	payload.SelfEndpoint = normalizedEndpoint
 	peerCert := peerCertificate(r)
 	if peerCert == nil {
 		return httpError{Status: http.StatusForbidden, Code: "tc_cluster_identity_missing", Detail: "peer certificate identity required"}
@@ -779,9 +780,15 @@ func (h *Handler) handleTCRMRegister(w http.ResponseWriter, r *http.Request) err
 		return httpError{Status: http.StatusBadRequest, Code: "missing_backend_hash", Detail: "backend_hash is required"}
 	}
 	endpoint := strings.TrimSpace(payload.Endpoint)
-	if endpoint == "" {
-		return httpError{Status: http.StatusBadRequest, Code: "missing_endpoint", Detail: "endpoint is required"}
+	normalizedEndpoint, endpointErr := tccluster.NormalizeEndpoint(endpoint)
+	if endpointErr != nil {
+		code := "invalid_endpoint"
+		if endpoint == "" {
+			code = "missing_endpoint"
+		}
+		return httpError{Status: http.StatusBadRequest, Code: code, Detail: endpointErr.Error()}
 	}
+	endpoint = normalizedEndpoint
 	replica := strings.TrimSpace(r.Header.Get(headerTCReplica)) != ""
 	var updated tcrm.UpdateResult
 	if h.tcRMReplicator != nil {
@@ -845,9 +852,15 @@ func (h *Handler) handleTCRMUnregister(w http.ResponseWriter, r *http.Request) e
 		return httpError{Status: http.StatusBadRequest, Code: "missing_backend_hash", Detail: "backend_hash is required"}
 	}
 	endpoint := strings.TrimSpace(payload.Endpoint)
-	if endpoint == "" {
-		return httpError{Status: http.StatusBadRequest, Code: "missing_endpoint", Detail: "endpoint is required"}
+	normalizedEndpoint, endpointErr := tccluster.NormalizeEndpoint(endpoint)
+	if endpointErr != nil {
+		code := "invalid_endpoint"
+		if endpoint == "" {
+			code = "missing_endpoint"
+		}
+		return httpError{Status: http.StatusBadRequest, Code: code, Detail: endpointErr.Error()}
 	}
+	endpoint = normalizedEndpoint
 	replica := strings.TrimSpace(r.Header.Get(headerTCReplica)) != ""
 	var updated tcrm.UpdateResult
 	if h.tcRMReplicator != nil {

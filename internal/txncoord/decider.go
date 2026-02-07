@@ -14,6 +14,7 @@ import (
 	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/internal/core"
 	"pkt.systems/lockd/internal/tcclient"
+	"pkt.systems/lockd/internal/tccluster"
 	"pkt.systems/lockd/internal/tcleader"
 	"pkt.systems/pslog"
 )
@@ -207,7 +208,11 @@ func (d *Decider) forwardDecide(ctx context.Context, leaderEndpoint string, rec 
 	}
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, joinEndpoint(leaderEndpoint, "/v1/txn/decide"), bytes.NewReader(body))
+	targetURL, err := tccluster.JoinEndpoint(leaderEndpoint, "/v1/txn/decide")
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, targetURL, bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}

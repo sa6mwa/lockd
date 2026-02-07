@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
+	pathpkg "path"
 	"sort"
 	"strings"
 	"sync"
@@ -83,10 +85,11 @@ func (s *Store) announce(ctx context.Context, identity, endpoint string, ttl tim
 	if identity == "" {
 		return LeaseRecord{}, errors.New("tccluster: identity required")
 	}
-	endpoint = normalizeEndpoint(endpoint)
-	if endpoint == "" {
-		return LeaseRecord{}, errors.New("tccluster: endpoint required")
+	normalizedEndpoint, err := NormalizeEndpoint(endpoint)
+	if err != nil {
+		return LeaseRecord{}, fmt.Errorf("tccluster: %w", err)
 	}
+	endpoint = normalizedEndpoint
 	if ttl <= 0 {
 		return LeaseRecord{}, errors.New("tccluster: ttl must be > 0")
 	}
@@ -352,9 +355,78 @@ func ContainsEndpoint(endpoints []string, target string) bool {
 }
 
 func normalizeEndpoint(raw string) string {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
+	normalized, err := NormalizeEndpoint(raw)
+	if err != nil {
 		return ""
 	}
-	return strings.TrimSuffix(trimmed, "/")
+	return normalized
+}
+
+// NormalizeEndpoint canonicalizes and validates a TC/RM endpoint URL.
+func NormalizeEndpoint(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", errors.New("endpoint required")
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("invalid endpoint URL: %w", err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", errors.New("endpoint scheme must be http or https")
+	}
+	if parsed.Host == "" {
+		return "", errors.New("endpoint host required")
+	}
+	if parsed.User != nil {
+		return "", errors.New("endpoint userinfo is not allowed")
+	}
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", errors.New("endpoint must not include query or fragment")
+	}
+	cleanPath := pathpkg.Clean("/" + strings.TrimLeft(parsed.Path, "/"))
+	if cleanPath == "/" {
+		parsed.Path = ""
+		parsed.RawPath = ""
+	} else {
+		parsed.Path = cleanPath
+		parsed.RawPath = ""
+	}
+	return strings.TrimSuffix(parsed.String(), "/"), nil
+}
+
+// JoinEndpoint validates base and appends a cleaned path suffix.
+func JoinEndpoint(base, suffix string) (string, error) {
+	normalized, err := NormalizeEndpoint(base)
+	if err != nil {
+		return "", err
+	}
+	ref, err := url.Parse(strings.TrimSpace(suffix))
+	if err != nil {
+		return "", fmt.Errorf("invalid endpoint suffix: %w", err)
+	}
+	if ref.IsAbs() || ref.Host != "" || ref.Scheme != "" || ref.User != nil {
+		return "", errors.New("endpoint suffix must be a relative path")
+	}
+	if ref.RawQuery != "" || ref.Fragment != "" {
+		return "", errors.New("endpoint suffix must not include query or fragment")
+	}
+	if ref.Path == "" {
+		return "", errors.New("endpoint suffix path required")
+	}
+	baseURL, err := url.Parse(normalized)
+	if err != nil {
+		return "", fmt.Errorf("invalid endpoint URL: %w", err)
+	}
+	basePath := strings.TrimSuffix(baseURL.Path, "/")
+	suffixPath := pathpkg.Clean("/" + strings.TrimLeft(ref.Path, "/"))
+	joinedPath := pathpkg.Clean(basePath + "/" + strings.TrimLeft(suffixPath, "/"))
+	if !strings.HasPrefix(joinedPath, "/") {
+		joinedPath = "/" + joinedPath
+	}
+	baseURL.Path = joinedPath
+	baseURL.RawPath = ""
+	baseURL.RawQuery = ""
+	baseURL.Fragment = ""
+	return baseURL.String(), nil
 }

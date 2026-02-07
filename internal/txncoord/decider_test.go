@@ -125,6 +125,34 @@ func TestDeciderForwardUnreachableReturnsNotLeader(t *testing.T) {
 	}
 }
 
+func TestDeciderForwardInvalidLeaderEndpointReturnsNotLeader(t *testing.T) {
+	leader := newFollowerManager(t, "http://follower", []string{"http://follower", "https://leader.example.com?x=1"}, "https://leader.example.com?x=1", 3)
+	decider, err := NewDecider(DeciderConfig{
+		Coordinator:    &Coordinator{},
+		Leader:         leader,
+		ForwardTimeout: 200 * time.Millisecond,
+		HTTPClient:     &http.Client{Timeout: 100 * time.Millisecond},
+	})
+	if err != nil {
+		t.Fatalf("decider: %v", err)
+	}
+
+	_, err = decider.Decide(context.Background(), core.TxnRecord{
+		TxnID: "txn-forward-invalid-endpoint",
+		State: core.TxnStateCommit,
+	})
+	var failure core.Failure
+	if !errors.As(err, &failure) {
+		t.Fatalf("expected failure, got %v", err)
+	}
+	if failure.Code != "tc_not_leader" {
+		t.Fatalf("expected tc_not_leader, got %q", failure.Code)
+	}
+	if failure.LeaderEndpoint != "https://leader.example.com?x=1" {
+		t.Fatalf("expected leader endpoint to be preserved, got %q", failure.LeaderEndpoint)
+	}
+}
+
 func TestDeciderNoLeaderReturnsUnavailable(t *testing.T) {
 	leader, err := tcleader.NewManager(tcleader.Config{
 		SelfEndpoint: "http://self",

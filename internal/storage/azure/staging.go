@@ -80,12 +80,5 @@ func (s *Store) DiscardStagedState(ctx context.Context, namespace, key, txnID st
 
 // ListStagedState lists staged state keys for a namespace.
 func (s *Store) ListStagedState(ctx context.Context, namespace string, opts storage.ListStagedOptions) (*storage.ListResult, error) {
-	prefix := ".staging/"
-	if opts.TxnPrefix != "" {
-		trimmed := strings.TrimPrefix(opts.TxnPrefix, "/")
-		if trimmed != "" {
-			prefix += trimmed
-		}
-	}
-	return s.ListObjects(ctx, namespace, storage.ListOptions{Prefix: prefix, StartAfter: opts.StartAfter, Limit: opts.Limit})
+	return storage.ListStagedStateFromObjects(ctx, s, namespace, opts)
 }

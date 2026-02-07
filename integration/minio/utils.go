@@ -133,7 +133,7 @@ func CleanupNamespaces(tb testing.TB, cfg lockd.Config, namespaces ...string) {
 func cleanupMinioNamespace(tb testing.TB, store storage.Backend, ctx context.Context, namespace string) {
 	tb.Logf("minio cleanup: sweeping namespace %s", namespace)
 	cleanupMinioIndex(tb, store, ctx, namespace)
-	cleanupMinioPrefix(tb, store, ctx, namespace, ".staging/")
+	cleanupMinioStaging(tb, store, ctx, namespace)
 	keys, err := store.ListMetaKeys(ctx, namespace)
 	if err != nil {
 		tb.Logf("minio cleanup list meta (%s): %v", namespace, err)
@@ -181,6 +181,29 @@ func cleanupMinioPrefix(tb testing.TB, store storage.Backend, ctx context.Contex
 		for _, obj := range res.Objects {
 			if err := store.DeleteObject(ctx, namespace, obj.Key, storage.DeleteObjectOptions{}); err != nil && !errors.Is(err, storage.ErrNotFound) {
 				tb.Logf("minio cleanup delete %s/%s: %v", namespace, obj.Key, err)
+			}
+		}
+		if !res.Truncated || res.NextStartAfter == "" {
+			break
+		}
+		listOpts.StartAfter = res.NextStartAfter
+	}
+}
+
+func cleanupMinioStaging(tb testing.TB, store storage.Backend, ctx context.Context, namespace string) {
+	listOpts := storage.ListOptions{Limit: 1000}
+	for {
+		res, err := store.ListObjects(ctx, namespace, listOpts)
+		if err != nil {
+			tb.Logf("minio cleanup list staging (%s): %v", namespace, err)
+			return
+		}
+		for _, obj := range res.Objects {
+			if !storage.IsStagingObjectKey(obj.Key) {
+				continue
+			}
+			if err := store.DeleteObject(ctx, namespace, obj.Key, storage.DeleteObjectOptions{}); err != nil && !errors.Is(err, storage.ErrNotFound) {
+				tb.Logf("minio cleanup delete staging %s/%s: %v", namespace, obj.Key, err)
 			}
 		}
 		if !res.Truncated || res.NextStartAfter == "" {

@@ -925,7 +925,7 @@ func RunTxnSoak(t *testing.T, factory ServerFactory) {
 		if err := waitForTxnRecordsDecided(waitCtx, ts.Backend()); err != nil {
 			t.Fatalf("txn records leak: %v", err)
 		}
-		if err := waitForBucketEmpty(waitCtx, ts.Backend(), namespaces.Default, ".staging/"); err != nil {
+		if err := waitForStagingEmpty(waitCtx, ts.Backend(), namespaces.Default); err != nil {
 			t.Fatalf("staging leak: %v", err)
 		}
 	})
@@ -1359,6 +1359,35 @@ func waitForBucketEmpty(ctx context.Context, backend storage.Backend, bucket, pr
 		}
 		if ctx.Err() != nil {
 			return fmt.Errorf("bucket %s still has %d object(s) with prefix %q", bucket, len(list.Objects), prefix)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func waitForStagingEmpty(ctx context.Context, backend storage.Backend, namespace string) error {
+	for {
+		startAfter := ""
+		stagedCount := 0
+		for {
+			list, err := backend.ListObjects(ctx, namespace, storage.ListOptions{StartAfter: startAfter, Limit: 256})
+			if err != nil {
+				return err
+			}
+			for _, obj := range list.Objects {
+				if storage.IsStagingObjectKey(obj.Key) {
+					stagedCount++
+				}
+			}
+			if !list.Truncated || list.NextStartAfter == "" {
+				break
+			}
+			startAfter = list.NextStartAfter
+		}
+		if stagedCount == 0 {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return fmt.Errorf("bucket %s still has %d staging object(s)", namespace, stagedCount)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}

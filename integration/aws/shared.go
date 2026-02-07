@@ -402,7 +402,7 @@ func cleanupNamespaceKeys(tb testing.TB, store storage.Backend, ctx context.Cont
 
 func cleanupIndexArtifacts(tb testing.TB, store storage.Backend, ctx context.Context, namespace string) {
 	removePrefix(tb, store, ctx, namespace, "index/")
-	removePrefix(tb, store, ctx, namespace, ".staging/")
+	removeStagingObjects(tb, store, ctx, namespace)
 }
 
 // removePrefix best-effort deletes all objects under the prefix within a namespace.
@@ -418,6 +418,30 @@ func removePrefix(tb testing.TB, store storage.Backend, ctx context.Context, nam
 		for _, obj := range res.Objects {
 			if err := store.DeleteObject(ctx, namespace, obj.Key, storage.DeleteObjectOptions{}); err != nil && !errors.Is(err, storage.ErrNotFound) {
 				tb.Logf("aws cleanup delete %s/%s: %v", namespace, obj.Key, err)
+			}
+		}
+		if !res.Truncated || res.NextStartAfter == "" {
+			break
+		}
+		listOpts.StartAfter = res.NextStartAfter
+	}
+}
+
+func removeStagingObjects(tb testing.TB, store storage.Backend, ctx context.Context, namespace string) {
+	tb.Helper()
+	listOpts := storage.ListOptions{Limit: 1000}
+	for {
+		res, err := store.ListObjects(ctx, namespace, listOpts)
+		if err != nil {
+			tb.Logf("aws cleanup list staging (%s): %v", namespace, err)
+			return
+		}
+		for _, obj := range res.Objects {
+			if !storage.IsStagingObjectKey(obj.Key) {
+				continue
+			}
+			if err := store.DeleteObject(ctx, namespace, obj.Key, storage.DeleteObjectOptions{}); err != nil && !errors.Is(err, storage.ErrNotFound) {
+				tb.Logf("aws cleanup delete staging %s/%s: %v", namespace, obj.Key, err)
 			}
 		}
 		if !res.Truncated || res.NextStartAfter == "" {

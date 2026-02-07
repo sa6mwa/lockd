@@ -67,14 +67,7 @@ func (d *defaultStagingBackend) DiscardStagedState(ctx context.Context, namespac
 }
 
 func (d *defaultStagingBackend) ListStagedState(ctx context.Context, namespace string, opts ListStagedOptions) (*ListResult, error) {
-	prefix := ".staging/"
-	if opts.TxnPrefix != "" {
-		trimmed := strings.TrimPrefix(opts.TxnPrefix, "/")
-		if trimmed != "" {
-			prefix += trimmed
-		}
-	}
-	return d.backend.ListObjects(ctx, namespace, ListOptions{Prefix: prefix, StartAfter: opts.StartAfter, Limit: opts.Limit})
+	return ListStagedStateFromObjects(ctx, d.backend, namespace, opts)
 }
 
 // ErrNoStaging signals that the backend cannot support staging operations.

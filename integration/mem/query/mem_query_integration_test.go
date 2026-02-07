@@ -1214,12 +1214,32 @@ func TestMemQueryRestartRollsBackStaged(t *testing.T) {
 		t.Fatalf("expected no committed state after rollback, got %+v", snap)
 	}
 
-	list, err := backend.ListObjects(ctx, namespaces.Default, storage.ListOptions{Prefix: ".staging/"})
+	stagedCount, err := countStagingObjects(ctx, backend, namespaces.Default)
 	if err != nil {
-		t.Fatalf("list staged: %v", err)
+		t.Fatalf("count staged: %v", err)
 	}
-	if len(list.Objects) != 0 {
-		t.Fatalf("expected staged cleanup, found %d objects", len(list.Objects))
+	if stagedCount != 0 {
+		t.Fatalf("expected staged cleanup, found %d objects", stagedCount)
+	}
+}
+
+func countStagingObjects(ctx context.Context, backend storage.Backend, namespace string) (int, error) {
+	count := 0
+	startAfter := ""
+	for {
+		list, err := backend.ListObjects(ctx, namespace, storage.ListOptions{StartAfter: startAfter, Limit: 256})
+		if err != nil {
+			return 0, err
+		}
+		for _, obj := range list.Objects {
+			if storage.IsStagingObjectKey(obj.Key) {
+				count++
+			}
+		}
+		if !list.Truncated || list.NextStartAfter == "" {
+			return count, nil
+		}
+		startAfter = list.NextStartAfter
 	}
 }
 

@@ -752,8 +752,23 @@ func cloneMeta(meta storage.Meta) storage.Meta {
 		leaseCopy := *meta.Lease
 		clone.Lease = &leaseCopy
 	}
+	if len(meta.Attributes) > 0 {
+		clone.Attributes = make(map[string]string, len(meta.Attributes))
+		for k, v := range meta.Attributes {
+			clone.Attributes[k] = v
+		}
+	}
+	if len(meta.StagedAttributes) > 0 {
+		clone.StagedAttributes = make(map[string]string, len(meta.StagedAttributes))
+		for k, v := range meta.StagedAttributes {
+			clone.StagedAttributes[k] = v
+		}
+	}
 	if len(meta.StateDescriptor) > 0 {
 		clone.StateDescriptor = append([]byte(nil), meta.StateDescriptor...)
+	}
+	if len(meta.StagedStateDescriptor) > 0 {
+		clone.StagedStateDescriptor = append([]byte(nil), meta.StagedStateDescriptor...)
 	}
 	if len(meta.Attachments) > 0 {
 		clone.Attachments = make([]storage.Attachment, len(meta.Attachments))

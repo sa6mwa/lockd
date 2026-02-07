@@ -1058,12 +1058,12 @@ func TestDiskQueryRestartRollsBackStaged(t *testing.T) {
 
 	// No staged objects should remain in storage.
 	backend := ts.Backend()
-	list, err := backend.ListObjects(ctx, namespaces.Default, storage.ListOptions{Prefix: ".staging/"})
+	stagedCount, err := countStagingObjects(ctx, backend, namespaces.Default)
 	if err != nil {
-		t.Fatalf("list staged: %v", err)
+		t.Fatalf("count staged: %v", err)
 	}
-	if len(list.Objects) != 0 {
-		t.Fatalf("expected staged cleanup, found %d objects", len(list.Objects))
+	if stagedCount != 0 {
+		t.Fatalf("expected staged cleanup, found %d objects", stagedCount)
 	}
 	_ = lease2.Release(ctx)
 }
@@ -1084,6 +1084,26 @@ func startDiskQueryServerWithRoot(t testing.TB, root string) *lockd.TestServer {
 		_ = ts.Stop(ctx)
 	})
 	return ts
+}
+
+func countStagingObjects(ctx context.Context, backend storage.Backend, namespace string) (int, error) {
+	count := 0
+	startAfter := ""
+	for {
+		list, err := backend.ListObjects(ctx, namespace, storage.ListOptions{StartAfter: startAfter, Limit: 256})
+		if err != nil {
+			return 0, err
+		}
+		for _, obj := range list.Objects {
+			if storage.IsStagingObjectKey(obj.Key) {
+				count++
+			}
+		}
+		if !list.Truncated || list.NextStartAfter == "" {
+			return count, nil
+		}
+		startAfter = list.NextStartAfter
+	}
 }
 
 func diskQueryConfigWithSweeper(root string, interval time.Duration) lockd.Config {

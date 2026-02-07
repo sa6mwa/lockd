@@ -1074,14 +1074,34 @@ func TestAWSQueryRestartRollsBackStaged(t *testing.T) {
 	cleanupCtx, cleanupCancel := context.WithTimeout(waitCtx, 25*time.Second)
 	defer cleanupCancel()
 	for {
-		list, lerr := backend.ListObjects(cleanupCtx, namespaces.Default, storage.ListOptions{Prefix: ".staging/"})
-		if lerr == nil && len(list.Objects) == 0 {
+		stagedCount, lerr := countStagingObjects(cleanupCtx, backend, namespaces.Default)
+		if lerr == nil && stagedCount == 0 {
 			break
 		}
 		if cleanupCtx.Err() != nil {
 			t.Fatalf("staged objects not cleaned: %v", lerr)
 		}
 		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+func countStagingObjects(ctx context.Context, backend storage.Backend, namespace string) (int, error) {
+	count := 0
+	startAfter := ""
+	for {
+		list, err := backend.ListObjects(ctx, namespace, storage.ListOptions{StartAfter: startAfter, Limit: 256})
+		if err != nil {
+			return 0, err
+		}
+		for _, obj := range list.Objects {
+			if storage.IsStagingObjectKey(obj.Key) {
+				count++
+			}
+		}
+		if !list.Truncated || list.NextStartAfter == "" {
+			return count, nil
+		}
+		startAfter = list.NextStartAfter
 	}
 }
 

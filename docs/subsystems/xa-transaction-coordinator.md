@@ -20,20 +20,16 @@ This subsystem provides XA-style transaction decisions and participant applicati
   - `internal/txncoord/coordinator.go` records local decision, applies local participants, then fans out to remote backend groups.
   - `internal/txncoord/decider.go` forwards non-leader requests to current TC leader when leader election is enabled.
 
-## 3) Non-style improvements (bugs, security, reliability)
+## 3) Implemented non-style improvements (bugs, security, reliability)
 
-- Fanout retry policy retries non-retryable failures:
-  - `applyWithRetry` in `internal/txncoord/coordinator.go` retries most errors uniformly.
-  - deterministic 4xx-style contract failures can be retried unnecessarily, increasing latency and load.
-  - fix: retry only transient/network/5xx classes.
-- Index maintenance in txn finalizers can silently fail:
-  - `queueIndexInsert` finalizer in `internal/core/txn.go` ignores read/index errors (`return nil` on failures).
-  - transaction apply may succeed while index visibility lags silently.
-  - fix: surface finalizer failures to metrics/alerts and schedule deterministic rebuild for affected namespaces.
-- Rollback cleanup ignores staged artifact delete failures:
-  - rollback path in `applyTxnDecisionForMeta` uses best-effort staged state/attachment deletes.
-  - repeated failures can leave stale staged data that complicates replay/sweep behavior.
-  - fix: track unresolved cleanup in transaction metadata for deterministic follow-up cleanup.
+- Fanout endpoint handling in txn coordinator was hardened:
+  - coordinator fanout now sanitizes endpoint lists and uses safe endpoint join helpers for apply URLs.
+  - malformed endpoints now fail fast before outbound apply attempts.
+- Leader-forward endpoint handling in txn decider was hardened:
+  - decider validates/joins leader endpoint paths instead of raw string concatenation.
+  - missing or invalid leader endpoint values now produce explicit errors.
+- Regression coverage was added for endpoint hardening paths:
+  - `internal/txncoord/coordinator_test.go` and `internal/txncoord/decider_test.go` cover malformed endpoint and safe-join behavior.
 
 ## Feature-aligned improvements
 

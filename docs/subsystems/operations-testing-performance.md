@@ -19,18 +19,18 @@ This subsystem covers runtime safeguards (QRF/LSF, idle sweepers), verification 
   - benchmark and profiling guidance is captured in `ycsb/README.md`, `ycsb/BENCHMARKS.md`, and `docs/performance/*`.
   - artifacts track queue baselines, query return=document baselines, attachments, and YCSB-style load runs.
 
-## 3) Non-style improvements (bugs, security, reliability)
+## 3) Implemented non-style improvements (bugs, security, reliability)
 
-- Missing regression tests for known reader-retry hazards:
-  - there is no direct test proving staged state retries rewind payload readers before CAS retry loops.
-  - add focused tests around CAS mismatch + staged write retries to prevent silent zero-byte promotions.
-- Missing regression tests for queue batch semantics:
-  - current queue batch path should be guarded by tests that assert `page_size > 1` actually returns multiple deliveries.
-  - this would have caught current batch-size clamping regressions earlier.
-- Retry wrapper safety is under-specified in tests:
-  - add tests for `internal/storage/retry` with non-rewindable readers and transient errors to prove no data corruption paths.
-- TC endpoint validation lacks negative-path integration coverage:
-  - add integration tests for malformed/unsafe TC cluster and RM endpoint inputs to ensure request fanout cannot be abused.
+- Regression guard coverage was backfilled for completed hardening chunks:
+  - replay-safety and non-replayable fail-fast tests in `internal/storage/retry/retry_test.go`.
+  - queue batch behavior and dispatcher fetch safety guards in `internal/core/queuedelivery_batch_test.go`.
+  - strict-decode behavior guards in `internal/httpapi/handler_strict_decode_test.go`.
+- Full release verification gate was executed after chunk landing:
+  - `go test ./...`, `go vet ./...`, `golint ./...`, `golangci-lint run ./...`, and full `run-integration-suites.sh` sweep.
+- Full benchmark verification was executed:
+  - `run-benchmark-suites.sh` completed for `disk`, `minio`, `mem`, `aws`, and `azure`.
+- Post-verification lint cleanup was completed:
+  - removed unused `waitForBucketEmpty` helper from `integration/query/suite/suite.go`.
 
 ## Feature-aligned improvements
 

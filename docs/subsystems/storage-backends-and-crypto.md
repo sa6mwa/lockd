@@ -22,20 +22,17 @@ This subsystem abstracts persistence across memory, disk/NFS logstore, S3/MinIO,
   - `internal/storage/crypto.go` uses kryptograf materials and per-object context binding (`state`, `attachment`, `queue-meta`, `queue-payload`).
   - descriptors are stored alongside objects/metadata to reconstruct DEKs.
 
-## 3) Non-style improvements (bugs, security, reliability)
+## 3) Implemented non-style improvements (bugs, security, reliability)
 
-- Retry wrapper is unsafe for non-rewindable write bodies:
-  - `WriteState`/`PutObject` retries reuse the same `io.Reader` in `internal/storage/retry/retry.go`.
-  - transient retries can send truncated/empty payloads after first attempt consumes the body.
-  - fix: require replayable readers or buffer once per retry sequence.
-- Retry backoff is not context-responsive during sleep:
-  - `withRetry` checks context before sleeping but uses blocking `clock.Sleep(delay)`.
-  - cancellations during sleep are delayed until wake-up.
-  - fix: replace with context-aware timer select for immediate cancellation.
-- Staged listing prefix is inconsistent with staged key layout:
-  - `ListStagedState` implementations list prefix `.staging/`, but staged keys are generally `<key>/.staging/<txn>`.
-  - this can miss staged artifacts for sweeper/recovery tooling.
-  - fix: use backend scan pattern that matches nested `/.staging/` paths or maintain an explicit staged index.
+- Retry wrapper write-body safety is now enforced:
+  - `internal/storage/retry` detects replayability for write bodies and rewinds seekable readers before retry.
+  - non-replayable bodies now fail fast with `ErrNonReplayableBody` on retryable failures instead of risking truncated writes.
+- Staged state listing/discovery now matches actual key layout:
+  - `ListStagedState` flows now scan object keys and match both root and nested `/.staging/<txn>` forms.
+  - nested staged attachment objects are excluded from staged-state enumeration.
+- Coverage was added for staging and retry edge cases:
+  - `internal/storage/staging_list_test.go` validates filtering/pagination across staged key layouts.
+  - `internal/storage/retry/retry_test.go` validates replayable retries and non-replayable fail-fast behavior.
 
 ## Feature-aligned improvements
 

@@ -22,24 +22,20 @@ The queue subsystem provides at-least-once delivery with visibility timeouts, de
 - Change feed support:
   - queue dispatcher can attach backend watch subscriptions when available; otherwise it polls.
 
-## 3) Non-style improvements (bugs, security, reliability)
+## 3) Implemented non-style improvements (bugs, security, reliability)
 
-- Batch dequeue is effectively disabled by implementation bug:
-  - `consumeQueueBatch` in `internal/core/queuedelivery.go` forces `pageSize` down to `1` when `pageSize > 1`.
-  - this defeats multi-message dequeue behavior and can regress throughput.
-  - fix: remove forced clamp and keep bounded fill behavior.
-- Nil-descriptor panic risk in dispatcher fetch paths:
-  - `internal/queue/dispatcher.go` dereferences `result.Descriptor` in `fetch` and `fetchWithContext` without a hard nil guard.
-  - a nil descriptor from provider/mocks can crash queue consumers.
-  - fix: guard nil descriptors before dereference and treat as no-candidate.
-- Cancellation is not propagated consistently:
-  - `fetch()` and readiness checks call queue service with `context.Background()`.
-  - shutdown/caller cancellation is ignored in those paths, increasing tail latency and hanging risk.
-  - fix: propagate caller/scheduler contexts end-to-end for fetch/readiness calls.
-- Streaming encryption goroutine leak risk:
-  - `preparePayloadReader` and `copyObject` use `io.Pipe` + goroutines.
-  - if downstream write exits early, writer goroutines can block on pipe writes.
-  - fix: cancellation-aware copy and guaranteed pipe shutdown on all consumer error paths.
+- Batch dequeue behavior was restored:
+  - `consumeQueueBatch` no longer clamps `pageSize > 1` down to `1`.
+  - bounded fill heuristics now apply to actual requested batch sizes.
+- Dispatcher fetch safety was hardened:
+  - nil descriptor results are guarded before dereference.
+  - fetch paths handle context cancellation/deadline errors explicitly instead of treating them as generic failures.
+- Context propagation in polling/fetch paths was tightened:
+  - dispatcher polling now fetches with a poll context derived from active waiters when available.
+  - readiness checks in fetch paths run under the same call context.
+- Queue encrypted stream copy paths are now cancellation-aware:
+  - `startEncryptedPipe` in queue service ensures producer shutdown on cancellation/consumer close.
+  - regression guards were added in `internal/queue/service_pipe_test.go`.
 
 ## Feature-aligned improvements
 

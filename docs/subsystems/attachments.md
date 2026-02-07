@@ -20,25 +20,18 @@ Attachments provide binary payload support as first-class lease/transaction arti
   - lease-bound operations enforce `lease_id` + `txn_id` + fencing checks.
   - public reads require published state boundary checks.
 
-## 3) Non-style improvements (bugs, security, reliability)
+## 3) Implemented non-style improvements (bugs, security, reliability)
 
-- Pipe-based encryption writer can leak/block goroutines:
-  - `prepareAttachmentPayload` in `internal/core/attachments.go` uses `io.Pipe` + background `io.Copy`.
-  - if `PutObject` exits early, the producer goroutine can block on writes.
-  - fix: couple pipe writer with request context cancellation and close-on-consumer-failure.
-- Transport-level size guard is weak for uploads:
-  - `handleAttachmentUpload` passes raw `r.Body` directly to core without `http.MaxBytesReader`.
-  - default attachment limit is very large (`DefaultAttachmentMaxBytes` is `1<<40`), enabling long-lived resource-heavy uploads.
-  - fix: enforce conservative HTTP-level limits and require explicit opt-in for very large attachments.
-- Cleanup failures are mostly ignored, causing orphaned objects:
-  - multiple paths in `internal/core/attachments.go` discard delete errors (`_ = s.deleteAttachmentObject(...)`).
-  - repeated delete failures leave orphaned staged blobs and inflate storage.
-  - fix: persist cleanup debt and retry via sweeper, with metrics/alerts on orphan growth.
-- Cross-cutting retry wrapper can corrupt attachment writes:
-  - when `storage/retry.Wrap` retries `PutObject`, non-replayable readers are reused.
-  - attachment upload streams can be retried with consumed readers.
-  - fix: require replayable bodies for retried writes or disable retry for non-rewindable streams.
+- Attachment encrypted stream producers are now cancellation-aware:
+  - `prepareAttachmentPayload` uses `startEncryptedPipe` with request-context cancellation and close propagation.
+  - producer goroutines now stop when consumers exit early, preventing blocked pipe writes and goroutine leaks.
+- Pipe lifecycle regression coverage was added:
+  - `internal/core/attachments_pipe_test.go` validates cancellation and reader-close behavior for encrypted producers.
+- Cross-cutting storage retry safety now protects attachment object writes:
+  - `internal/storage/retry` fail-fasts non-replayable bodies on retryable write paths.
+  - attachment uploads no longer risk retrying consumed bodies and persisting corrupted payloads.
 
 ## Feature-aligned improvements
 
+- Add explicit HTTP-level attachment body limits that are stricter than storage defaults, with per-deployment override.
 - Add a background attachment orphan reconciler keyed by staged object conventions to automatically recover from delete failures after crashes or transient backend faults.

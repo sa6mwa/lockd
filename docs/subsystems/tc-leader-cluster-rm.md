@@ -19,20 +19,17 @@ This subsystem coordinates multi-TC deployments: membership leases, leader elect
   - `server.go` starts membership loops, announce fanout, leave fanout, and periodic RM registration.
   - HTTP handlers in `internal/httpapi/handler_endpoints.go` enforce TC-specific certificate checks for cluster and RM APIs.
 
-## 3) Non-style improvements (bugs, security, reliability)
+## 3) Implemented non-style improvements (bugs, security, reliability)
 
-- Endpoint normalization/assembly is too permissive:
-  - normalization is mostly trim + trailing slash removal (`normalizeEndpoint`), and request URLs are built by string concatenation.
-  - malformed/unsafe endpoint values can slip through and trigger unexpected outbound requests.
-  - fix: strict URL parsing/validation (`https` only unless explicit override), then `url.JoinPath` for path assembly.
-- Membership lease decode failures are silently skipped:
-  - `tccluster.Store.list` logs parse/read errors and continues.
-  - corrupted lease entries can hide cluster state divergence and delay detection.
-  - fix: emit structured health counters and optionally fail closed when malformed lease ratio crosses a threshold.
-- RM replication preflight is all-or-nothing:
-  - `tcrm.Replicator.preflight` fails register/unregister when any peer is unhealthy.
-  - one bad peer can block control-plane updates cluster-wide.
-  - fix: allow quorum/majority policy or degrade to partial replication with explicit error reporting.
+- Endpoint normalization and validation is now strict at TC/RM boundaries:
+  - `tccluster.NormalizeEndpoint` validates URL shape (`http`/`https`, host required, no userinfo/query/fragment).
+  - malformed endpoint inputs are rejected before persistence or replication.
+- Fanout URL assembly is now safe and canonical:
+  - `tccluster.JoinEndpoint` validates relative suffixes and joins paths without fragile string concatenation.
+  - TC cluster and RM fanout paths use joined/validated endpoint URLs.
+- RM registry replication now normalizes endpoint values in store-level register/unregister paths:
+  - registry membership no longer stores multiple syntactic variants of equivalent endpoints.
+  - targeted tests were added in `internal/tccluster/store_test.go`, `internal/tcrm/store_test.go`, and `internal/tcrm/replicator_test.go`.
 
 ## Feature-aligned improvements
 

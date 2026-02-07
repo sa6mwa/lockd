@@ -24,20 +24,17 @@ This subsystem provides key/document query over namespaced state using either fu
   - explicit `/v1/index/flush` endpoint supports synchronous and asynchronous flush modes.
   - warmup/readability hooks reduce stale reads after writes.
 
-## 3) Non-style improvements (bugs, security, reliability)
+## 3) Implemented non-style improvements (bugs, security, reliability)
 
-- Scan path can silently return incomplete results:
-  - `internal/search/scan/adapter.go` logs `LoadMeta`/state errors and continues.
-  - transient backend failures become false negatives instead of surfaced query errors.
-  - fix: fail query on non-`ErrNotFound` read errors, or return explicit partial-result metadata.
-- Index flush endpoint lacks body size limit and can spawn unbounded async work:
-  - `handleIndexFlush` in `internal/httpapi/handler_endpoints.go` decodes from raw `r.Body` and starts one goroutine per async request.
-  - this is a resource exhaustion path under high request volume.
-  - fix: wrap with `http.MaxBytesReader` and enforce per-namespace in-flight dedupe/semaphores.
-- Namespace writer map growth is unbounded:
-  - `index.Manager` stores per-namespace writer instances in process maps with no eviction.
-  - untrusted/high-cardinality namespaces can grow resident memory indefinitely.
-  - fix: add lifecycle/eviction for idle namespace writers.
+- Scan adapter error handling now surfaces real read failures:
+  - non-`ErrNotFound` failures from `LoadMeta`/state reads are returned as query errors.
+  - this removes false-negative query behavior where backend failures were previously logged-and-skipped.
+- Index flush endpoint hardening is now in place:
+  - request body size is bounded with `http.MaxBytesReader`.
+  - async flushes are deduped per namespace and capped globally to prevent unbounded goroutine growth.
+- Targeted regression coverage was added for query/index control-plane behavior:
+  - `internal/search/scan/adapter_test.go` validates error surfacing.
+  - `internal/httpapi/handler_index_test.go` validates async dedupe and in-flight cap behavior.
 
 ## Feature-aligned improvements
 

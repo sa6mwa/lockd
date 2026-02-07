@@ -31,21 +31,18 @@ The core subsystem is the lockd domain engine that enforces lease ownership, fen
 - Helper workflows:
   - acquire-for-update callback flow is implemented client-side, but the server-side contract is enforced here (`txn_id`, lease validity, fencing checks).
 
-## 3) Non-style improvements (bugs, security, reliability)
+## 3) Implemented non-style improvements (bugs, security, reliability)
 
-- Retry correctness bug in staged state updates:
-  - `internal/core/update.go` obtains a single `reader` from spool before the CAS retry loop, then reuses it on retries.
-  - on CAS mismatch retries, the reader may already be at EOF, producing empty/truncated staged payloads.
-  - fix: `Seek(0, io.SeekStart)` before each `StageState` attempt (or recreate reader each loop).
-- Metadata clone is incomplete and can leak mutable map aliasing:
-  - `cloneMeta` in `internal/core/locks.go` deep-copies slices but does not deep-copy map fields like `Attributes` and `StagedAttributes`.
-  - this can cause cross-request mutation bleed and hard-to-debug data races/corruption with cached metadata.
-  - fix: deep-copy all map fields in `cloneMeta`.
-- Acquire wait loop ignores cancellation while sleeping:
-  - blocking acquire backoff in `internal/core/locks.go` uses `s.clock.Sleep(sleep)` directly.
-  - request cancellation/deadline is only observed after sleep completes.
-  - fix: use context-aware sleep (`waitWithContext`) for cancellation responsiveness.
+- Staged state CAS retries are now replay-safe:
+  - `internal/core/update.go` rewinds/recreates staged payload readers before each `StageState` retry attempt.
+  - this prevents empty/truncated staged writes after CAS mismatch retries.
+- Core regression guards now cover staged retry correctness:
+  - `internal/core/update_retry_test.go` exercises forced CAS retry paths and validates payload integrity.
+- Metadata clone safety was hardened in `internal/core/locks.go`:
+  - `cloneMeta` now deep-copies mutable map fields (`Attributes`, `StagedAttributes`) in addition to slices.
+  - `internal/core/locks_clone_test.go` verifies no aliasing bleed across cloned metadata.
 
 ## Feature-aligned improvements
 
+- Make acquire wait backoff fully context-aware so cancellation interrupts sleep immediately in all blocking loops.
 - Add an optional server-side lease operation journal (acquire/renew/release/reject with correlation id) for deterministic postmortems without changing API semantics.

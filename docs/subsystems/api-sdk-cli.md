@@ -18,21 +18,19 @@ This subsystem is lockd’s user-facing control plane: HTTP handlers, Go client,
 - TC-auth surfaces:
   - handler gate methods (`requireTCClient`, `requireTCServer`) enforce mTLS trust roots and EKU checks for coordinator-specific endpoints.
 
-## 3) Non-style improvements (bugs, security, reliability)
+## 3) Implemented non-style improvements (bugs, security, reliability)
 
-- Input decoding is too permissive by default:
-  - most JSON decoders do not call `DisallowUnknownFields`.
-  - misspelled or unsupported fields can be silently ignored, causing unsafe operator assumptions.
-  - fix: enable strict decoding on mutating endpoints and return actionable field errors.
-- Hostname/SAN binding is intentionally bypassed but lacks hardened mode:
-  - SDK/CLI TC HTTP clients use `InsecureSkipVerify` with custom chain validation (host-agnostic trust model).
-  - in environments expecting endpoint identity binding, this increases misrouting/MITM blast radius.
-  - fix: add optional strict hostname/SPIFFE SAN enforcement mode while keeping current mode as explicit opt-in.
-- AcquireForUpdate retry behavior can replay user callback side effects:
-  - retry classification in `client/client.go` includes EOF/timeout classes after handler execution paths.
-  - non-idempotent handlers can be re-run unexpectedly during transient failures.
-  - fix: separate transport retry from user-handler retry, and require explicit opt-in for handler re-execution.
+- Strict JSON decode is now enforced for mutating HTTP endpoints:
+  - shared decode helpers now support unknown-field rejection and trailing-token validation.
+  - mutating handlers use strict decode by default and return actionable `invalid_body` responses.
+- Request-body bounds and async index flush guardrails were hardened:
+  - `/v1/index/flush` now uses explicit body-size limits.
+  - async flushes are deduped per namespace and globally capped, returning `index_flush_busy` on overload instead of spawning unbounded work.
+- TC/RM endpoint input handling at API boundaries is now hardened:
+  - endpoint values are normalized and validated before storage/fanout paths.
+  - malformed endpoint input is rejected early instead of propagating into downstream fanout.
 
 ## Feature-aligned improvements
 
-- Add a client-side idempotency token option for acquire-for-update to make safe callback replay explicit and auditable.
+- Add optional strict hostname/SAN verification mode for TC-facing client transport profiles that require endpoint identity binding.
+- Add a client-side idempotency token option for acquire-for-update so callback replay remains explicit and auditable.

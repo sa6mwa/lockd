@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -168,6 +169,110 @@ func TestScanAdapterCapabilities(t *testing.T) {
 	}
 	if !caps.Scan || caps.Index {
 		t.Fatalf("expected scan-only capabilities, got %+v", caps)
+	}
+}
+
+type metaErrorBackend struct {
+	storage.Backend
+	key string
+	err error
+}
+
+func (b metaErrorBackend) LoadMeta(ctx context.Context, namespace, key string) (storage.LoadMetaResult, error) {
+	if key == b.key {
+		return storage.LoadMetaResult{}, b.err
+	}
+	return b.Backend.LoadMeta(ctx, namespace, key)
+}
+
+type stateErrorBackend struct {
+	storage.Backend
+	key string
+	err error
+}
+
+func (b stateErrorBackend) ReadState(ctx context.Context, namespace, key string) (storage.ReadStateResult, error) {
+	if key == b.key {
+		return storage.ReadStateResult{}, b.err
+	}
+	return b.Backend.ReadState(ctx, namespace, key)
+}
+
+func TestScanAdapterReturnsNonTransientMetaError(t *testing.T) {
+	store := memory.New()
+	ctx := context.Background()
+	writeState(t, store, "default", "orders/1", map[string]any{"status": "open"})
+	writeState(t, store, "default", "orders/2", map[string]any{"status": "open"})
+
+	adapter, err := New(Config{Backend: metaErrorBackend{
+		Backend: store,
+		key:     "orders/1",
+		err:     errors.New("disk read failed"),
+	}})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	_, err = adapter.Query(ctx, search.Request{Namespace: "default", Limit: 10})
+	if err == nil {
+		t.Fatal("expected query error")
+	}
+	if !strings.Contains(err.Error(), "scan: load meta orders/1") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestScanAdapterSkipsTransientMetaError(t *testing.T) {
+	store := memory.New()
+	ctx := context.Background()
+	writeState(t, store, "default", "orders/1", map[string]any{"status": "open"})
+	writeState(t, store, "default", "orders/2", map[string]any{"status": "open"})
+
+	adapter, err := New(Config{Backend: metaErrorBackend{
+		Backend: store,
+		key:     "orders/1",
+		err:     storage.NewTransientError(errors.New("temporary backend issue")),
+	}})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	result, err := adapter.Query(ctx, search.Request{Namespace: "default", Limit: 10})
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(result.Keys) != 1 || result.Keys[0] != "orders/2" {
+		t.Fatalf("expected only non-failing key, got %v", result.Keys)
+	}
+}
+
+func TestScanAdapterReturnsNonTransientStateError(t *testing.T) {
+	store := memory.New()
+	ctx := context.Background()
+	writeState(t, store, "default", "orders/1", map[string]any{"status": "open"})
+	writeState(t, store, "default", "orders/2", map[string]any{"status": "open"})
+
+	sel, err := lql.ParseSelectorString(`and.eq{field=/status,value=open}`)
+	if err != nil || sel.IsEmpty() {
+		t.Fatalf("selector parse: %v", err)
+	}
+
+	adapter, err := New(Config{Backend: stateErrorBackend{
+		Backend: store,
+		key:     "orders/1",
+		err:     errors.New("state read failed"),
+	}})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	_, err = adapter.Query(ctx, search.Request{
+		Namespace: "default",
+		Selector:  sel,
+		Limit:     10,
+	})
+	if err == nil {
+		t.Fatal("expected query error")
+	}
+	if !strings.Contains(err.Error(), "scan: load state orders/1") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

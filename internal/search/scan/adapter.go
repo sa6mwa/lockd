@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -100,8 +101,11 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 		}
 		res, err := a.backend.LoadMeta(ctx, req.Namespace, key)
 		if err != nil {
-			a.logDebug("search.scan.load_meta", "namespace", req.Namespace, "key", key, "error", err)
-			continue
+			if shouldSkipReadError(err) {
+				a.logDebug("search.scan.load_meta", "namespace", req.Namespace, "key", key, "error", err)
+				continue
+			}
+			return search.Result{}, fmt.Errorf("scan: load meta %s: %w", key, err)
 		}
 		meta := res.Meta
 		if meta == nil {
@@ -123,8 +127,11 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 		}
 		doc, err := a.loadDocument(ctx, req.Namespace, key, meta)
 		if err != nil {
-			a.logDebug("search.scan.load_state", "namespace", req.Namespace, "key", key, "error", err)
-			continue
+			if shouldSkipReadError(err) {
+				a.logDebug("search.scan.load_state", "namespace", req.Namespace, "key", key, "error", err)
+				continue
+			}
+			return search.Result{}, fmt.Errorf("scan: load state %s: %w", key, err)
 		}
 		if eval.matches(doc) {
 			matches = append(matches, key)
@@ -227,4 +234,11 @@ func (a *Adapter) logDebug(msg string, fields ...any) {
 		return
 	}
 	a.logger.Debug(msg, fields...)
+}
+
+func shouldSkipReadError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, storage.ErrNotFound) || storage.IsTransient(err)
 }

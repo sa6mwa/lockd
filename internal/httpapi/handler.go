@@ -67,6 +67,8 @@ const queueEnsureTimeoutGrace = 2 * time.Second
 const defaultQueryLimit = 100
 const maxQueryLimit = 1000
 const namespaceConfigBodyLimit = 32 << 10
+const indexFlushBodyLimit = 8 << 10
+const defaultIndexFlushAsyncLimit = 8
 
 const (
 	acquireBackoffStart      = 500 * time.Millisecond
@@ -141,6 +143,9 @@ type Handler struct {
 	tcLeaveFanout          func(context.Context) error
 	tcClusterLeaveSelf     func()
 	tcClusterJoinSelf      func()
+	indexFlushMu           sync.Mutex
+	indexFlushInFlight     map[string]string
+	indexFlushAsyncLimit   int
 }
 
 type indexFlushController interface {
@@ -149,6 +154,48 @@ type indexFlushController interface {
 	ManifestSeq(ctx context.Context, namespace string) (uint64, error)
 	WaitForReadable(ctx context.Context, namespace string) error
 	WarmNamespace(ctx context.Context, namespace string) error
+}
+
+func (h *Handler) reserveAsyncIndexFlush(namespace string) (flushID string, deduped bool, err error) {
+	if h == nil {
+		return "", false, httpError{Status: http.StatusServiceUnavailable, Code: "index_unavailable", Detail: "indexing is disabled"}
+	}
+	h.indexFlushMu.Lock()
+	defer h.indexFlushMu.Unlock()
+	if h.indexFlushInFlight == nil {
+		h.indexFlushInFlight = make(map[string]string)
+	}
+	if existing, ok := h.indexFlushInFlight[namespace]; ok && existing != "" {
+		return existing, true, nil
+	}
+	limit := h.indexFlushAsyncLimit
+	if limit <= 0 {
+		limit = defaultIndexFlushAsyncLimit
+	}
+	if len(h.indexFlushInFlight) >= limit {
+		return "", false, httpError{
+			Status: http.StatusConflict,
+			Code:   "index_flush_busy",
+			Detail: fmt.Sprintf("too many async index flushes in flight (limit %d)", limit),
+		}
+	}
+	flushID = uuidv7.NewString()
+	h.indexFlushInFlight[namespace] = flushID
+	return flushID, false, nil
+}
+
+func (h *Handler) releaseAsyncIndexFlush(namespace, flushID string) {
+	if h == nil {
+		return
+	}
+	h.indexFlushMu.Lock()
+	defer h.indexFlushMu.Unlock()
+	if h.indexFlushInFlight == nil {
+		return
+	}
+	if current, ok := h.indexFlushInFlight[namespace]; ok && current == flushID {
+		delete(h.indexFlushInFlight, namespace)
+	}
 }
 
 // ShutdownState exposes the server's current shutdown posture.
@@ -788,6 +835,8 @@ func New(cfg Config) *Handler {
 		tcLeaveFanout:          cfg.TCLeaveFanout,
 		tcClusterLeaveSelf:     cfg.TCClusterLeaveSelf,
 		tcClusterJoinSelf:      cfg.TCClusterJoinSelf,
+		indexFlushInFlight:     make(map[string]string),
+		indexFlushAsyncLimit:   defaultIndexFlushAsyncLimit,
 	}
 }
 

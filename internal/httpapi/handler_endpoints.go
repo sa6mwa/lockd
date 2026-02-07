@@ -29,7 +29,6 @@ import (
 	"pkt.systems/lockd/internal/tccluster"
 	"pkt.systems/lockd/internal/tcrm"
 	"pkt.systems/lockd/internal/txncoord"
-	"pkt.systems/lockd/internal/uuidv7"
 	"pkt.systems/lockd/namespaces"
 	"pkt.systems/lql"
 	"pkt.systems/pslog"
@@ -1434,9 +1433,14 @@ func (h *Handler) handleIndexFlush(w http.ResponseWriter, r *http.Request) error
 	if h.indexControl == nil {
 		return httpError{Status: http.StatusNotImplemented, Code: "index_unavailable", Detail: "indexing is disabled"}
 	}
-	defer r.Body.Close()
+	limit := int64(indexFlushBodyLimit)
+	if h.jsonMaxBytes > 0 && h.jsonMaxBytes < limit {
+		limit = h.jsonMaxBytes
+	}
+	reqBody := http.MaxBytesReader(w, r.Body, limit)
+	defer reqBody.Close()
 	var payload api.IndexFlushRequest
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil && err != io.EOF {
+	if err := json.NewDecoder(reqBody).Decode(&payload); err != nil && err != io.EOF {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_body", Detail: fmt.Sprintf("failed to decode request: %v", err)}
 	}
 	query := r.URL.Query()
@@ -1462,13 +1466,29 @@ func (h *Handler) handleIndexFlush(w http.ResponseWriter, r *http.Request) error
 	}
 	h.observeNamespace(resolved)
 	if mode == "async" {
-		flushID := uuidv7.NewString()
+		flushID, deduped, reserveErr := h.reserveAsyncIndexFlush(resolved)
+		if reserveErr != nil {
+			return reserveErr
+		}
 		pending := h.indexControl.Pending(resolved)
 		logger := pslog.LoggerFromContext(r.Context())
 		if logger != nil {
-			logger.Debug("index.flush.async_scheduled", "namespace", resolved, "flush_id", flushID)
+			logger.Debug("index.flush.async_scheduled", "namespace", resolved, "flush_id", flushID, "deduped", deduped)
+		}
+		if deduped {
+			resp := api.IndexFlushResponse{
+				Namespace: resolved,
+				Mode:      mode,
+				Accepted:  true,
+				Flushed:   false,
+				Pending:   pending,
+				FlushID:   flushID,
+			}
+			h.writeJSON(w, http.StatusAccepted, resp, nil)
+			return nil
 		}
 		go func(ns, reqID string) {
+			defer h.releaseAsyncIndexFlush(ns, reqID)
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
 			if err := h.indexControl.FlushNamespace(ctx, ns); err != nil {

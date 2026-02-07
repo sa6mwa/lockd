@@ -1348,22 +1348,6 @@ func verifyStateAbsent(ctx context.Context, t testing.TB, cli *lockdclient.Clien
 	}
 }
 
-func waitForBucketEmpty(ctx context.Context, backend storage.Backend, bucket, prefix string) error {
-	for {
-		list, err := backend.ListObjects(ctx, bucket, storage.ListOptions{Prefix: prefix})
-		if err != nil {
-			return err
-		}
-		if len(list.Objects) == 0 {
-			return nil
-		}
-		if ctx.Err() != nil {
-			return fmt.Errorf("bucket %s still has %d object(s) with prefix %q", bucket, len(list.Objects), prefix)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-}
-
 func waitForStagingEmpty(ctx context.Context, backend storage.Backend, namespace string) error {
 	for {
 		startAfter := ""

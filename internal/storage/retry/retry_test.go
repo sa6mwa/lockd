@@ -383,3 +383,105 @@ func TestPutObjectFailsFastForNonReplayableBody(t *testing.T) {
 		t.Fatalf("expected no sleep before fail-fast, got %d", len(fc.sleeps))
 	}
 }
+
+func TestReplayContractTableDriven(t *testing.T) {
+	t.Parallel()
+
+	type opCase struct {
+		name          string
+		op            string
+		call          func(storage.Backend) error
+		expectedCalls int
+		expectErr     error
+	}
+
+	newReplayableBody := func() io.Reader { return bytes.NewReader([]byte(`{"v":1}`)) }
+	newNonReplayableBody := func() io.Reader { return bytes.NewBufferString(`{"v":1}`) }
+	ops := []opCase{
+		{
+			name: "write_state/replayable_retries",
+			op:   "write_state",
+			call: func(backend storage.Backend) error {
+				_, err := backend.WriteState(context.Background(), namespaces.Default, "key", newReplayableBody(), storage.PutStateOptions{})
+				return err
+			},
+			expectedCalls: 2,
+		},
+		{
+			name: "write_state/non_replayable_fail_fast",
+			op:   "write_state",
+			call: func(backend storage.Backend) error {
+				_, err := backend.WriteState(context.Background(), namespaces.Default, "key", newNonReplayableBody(), storage.PutStateOptions{})
+				return err
+			},
+			expectedCalls: 1,
+			expectErr:     retry.ErrNonReplayableBody,
+		},
+		{
+			name: "put_object/replayable_retries",
+			op:   "put_object",
+			call: func(backend storage.Backend) error {
+				_, err := backend.PutObject(context.Background(), namespaces.Default, "obj", newReplayableBody(), storage.PutObjectOptions{})
+				return err
+			},
+			expectedCalls: 2,
+		},
+		{
+			name: "put_object/non_replayable_fail_fast",
+			op:   "put_object",
+			call: func(backend storage.Backend) error {
+				_, err := backend.PutObject(context.Background(), namespaces.Default, "obj", newNonReplayableBody(), storage.PutObjectOptions{})
+				return err
+			},
+			expectedCalls: 1,
+			expectErr:     retry.ErrNonReplayableBody,
+		},
+	}
+
+	for _, tc := range ops {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			back := &stubBackend{
+				writeStateErrs: []error{
+					storage.NewTransientError(errors.New("temporary")),
+					nil,
+				},
+				putObjectErrs: []error{
+					storage.NewTransientError(errors.New("temporary")),
+					nil,
+				},
+			}
+			fc := &fakeClock{}
+			wrapped := retry.Wrap(back, pslog.NoopLogger(), fc, retry.Config{
+				MaxAttempts: 3,
+				BaseDelay:   5 * time.Millisecond,
+			})
+			err := tc.call(wrapped)
+			if tc.expectErr != nil {
+				if !errors.Is(err, tc.expectErr) {
+					t.Fatalf("expected error %v, got %v", tc.expectErr, err)
+				}
+				if len(fc.sleeps) != 0 {
+					t.Fatalf("expected no sleeps for fail-fast, got %v", fc.sleeps)
+				}
+			} else if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			switch tc.op {
+			case "write_state":
+				if back.writeStateCalls != tc.expectedCalls {
+					t.Fatalf("write state calls=%d want=%d", back.writeStateCalls, tc.expectedCalls)
+				}
+			case "put_object":
+				if back.putObjectCalls != tc.expectedCalls {
+					t.Fatalf("put object calls=%d want=%d", back.putObjectCalls, tc.expectedCalls)
+				}
+			default:
+				t.Fatalf("unknown op type %q", tc.op)
+			}
+		})
+	}
+}

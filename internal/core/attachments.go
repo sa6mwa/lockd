@@ -9,6 +9,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
 
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/uuidv7"
@@ -942,23 +943,15 @@ func (s *Service) prepareAttachmentPayload(ctx context.Context, namespace, objec
 		pw.Close()
 		return payload, err
 	}
-	go func() {
-		if _, err := io.Copy(encWriter, reader); err != nil {
-			encWriter.Close()
-			pw.CloseWithError(err)
-			return
-		}
-		if err := encWriter.Close(); err != nil {
-			pw.CloseWithError(err)
-			return
-		}
-		pw.Close()
-	}()
+	startEncryptedPipe(ctx, reader, encWriter, pw)
 	payload.reader = pr
 	return payload, nil
 }
 
 func (s *Service) putAttachmentObject(ctx context.Context, namespace, objectKey string, body io.Reader, contentType string, descriptor []byte) error {
+	if closer, ok := body.(io.ReadCloser); ok && closer != nil {
+		defer closer.Close()
+	}
 	_, err := s.store.PutObject(ctx, namespace, objectKey, body, storage.PutObjectOptions{
 		ContentType: contentType,
 		Descriptor:  descriptor,
@@ -967,6 +960,47 @@ func (s *Service) putAttachmentObject(ctx context.Context, namespace, objectKey 
 		return err
 	}
 	return nil
+}
+
+func startEncryptedPipe(ctx context.Context, src io.Reader, encWriter io.WriteCloser, pw *io.PipeWriter) <-chan struct{} {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	done := make(chan struct{})
+	var closeOnce sync.Once
+	closePipe := func(err error) {
+		closeOnce.Do(func() {
+			if err != nil {
+				_ = pw.CloseWithError(err)
+				return
+			}
+			_ = pw.Close()
+		})
+	}
+	go func() {
+		defer close(done)
+		stopCancel := make(chan struct{})
+		go func() {
+			select {
+			case <-ctx.Done():
+				closePipe(ctx.Err())
+			case <-stopCancel:
+			}
+		}()
+		if _, err := io.Copy(encWriter, src); err != nil {
+			close(stopCancel)
+			_ = encWriter.Close()
+			closePipe(err)
+			return
+		}
+		close(stopCancel)
+		if err := encWriter.Close(); err != nil {
+			closePipe(err)
+			return
+		}
+		closePipe(nil)
+	}()
+	return done
 }
 
 func (s *Service) readAttachmentObject(ctx context.Context, namespace, objectKey, contextKey string, descriptor []byte) (io.ReadCloser, error) {

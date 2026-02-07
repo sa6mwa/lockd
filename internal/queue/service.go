@@ -298,9 +298,12 @@ func (s *Service) Enqueue(ctx context.Context, namespace, queue string, payload 
 		payload = bytes.NewReader(nil)
 	}
 	payloadContentType := contentTypeOrDefault(opts.ContentType)
-	reader, payloadDescriptor, counting, err := s.preparePayloadReader(ns, payloadKey, payload)
+	reader, payloadDescriptor, counting, err := s.preparePayloadReader(ctx, ns, payloadKey, payload)
 	if err != nil {
 		return nil, err
+	}
+	if closer, ok := reader.(io.ReadCloser); ok && closer != nil {
+		defer closer.Close()
 	}
 	payloadOpts := storage.PutObjectOptions{
 		IfNotExists: true,
@@ -439,7 +442,7 @@ func (c *countingReader) Count() int64 {
 	return c.count
 }
 
-func (s *Service) preparePayloadReader(namespace, payloadPath string, payload io.Reader) (io.Reader, []byte, *countingReader, error) {
+func (s *Service) preparePayloadReader(ctx context.Context, namespace, payloadPath string, payload io.Reader) (io.Reader, []byte, *countingReader, error) {
 	counting := &countingReader{r: payload}
 	if s.crypto == nil || !s.crypto.Enabled() {
 		return counting, nil, counting, nil
@@ -456,18 +459,7 @@ func (s *Service) preparePayloadReader(namespace, payloadPath string, payload io
 		pw.Close()
 		return nil, nil, nil, err
 	}
-	go func() {
-		if _, err := io.Copy(encWriter, counting); err != nil {
-			encWriter.Close()
-			pw.CloseWithError(err)
-			return
-		}
-		if err := encWriter.Close(); err != nil {
-			pw.CloseWithError(err)
-			return
-		}
-		pw.Close()
-	}()
+	startEncryptedPipe(ctx, counting, encWriter, pw)
 	return pr, append([]byte(nil), descBytes...), counting, nil
 }
 
@@ -1223,6 +1215,7 @@ func (s *Service) copyObject(ctx context.Context, namespace, srcKey, dstKey stri
 
 	finalReader := plainReader
 	descriptor := []byte(nil)
+	var finalReaderCloser io.ReadCloser
 	if dstContext != "" && s.crypto != nil && s.crypto.Enabled() {
 		minted, err := s.crypto.MintMaterial(dstContext)
 		if err != nil {
@@ -1236,21 +1229,14 @@ func (s *Service) copyObject(ctx context.Context, namespace, srcKey, dstKey stri
 			pw.Close()
 			return err
 		}
-		go func() {
-			if _, err := io.Copy(encWriter, plainReader); err != nil {
-				encWriter.Close()
-				pw.CloseWithError(err)
-				return
-			}
-			if err := encWriter.Close(); err != nil {
-				pw.CloseWithError(err)
-				return
-			}
-			pw.Close()
-		}()
+		startEncryptedPipe(ctx, plainReader, encWriter, pw)
 		finalReader = pr
+		finalReaderCloser = pr
 	} else if info != nil && len(info.Descriptor) > 0 {
 		descriptor = append([]byte(nil), info.Descriptor...)
+	}
+	if finalReaderCloser != nil {
+		defer finalReaderCloser.Close()
 	}
 
 	opts := storage.PutObjectOptions{
@@ -1273,6 +1259,47 @@ func (s *Service) copyObject(ctx context.Context, namespace, srcKey, dstKey stri
 		return err
 	}
 	return nil
+}
+
+func startEncryptedPipe(ctx context.Context, src io.Reader, encWriter io.WriteCloser, pw *io.PipeWriter) <-chan struct{} {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	done := make(chan struct{})
+	var closeOnce sync.Once
+	closePipe := func(err error) {
+		closeOnce.Do(func() {
+			if err != nil {
+				_ = pw.CloseWithError(err)
+				return
+			}
+			_ = pw.Close()
+		})
+	}
+	go func() {
+		defer close(done)
+		stopCancel := make(chan struct{})
+		go func() {
+			select {
+			case <-ctx.Done():
+				closePipe(ctx.Err())
+			case <-stopCancel:
+			}
+		}()
+		if _, err := io.Copy(encWriter, src); err != nil {
+			close(stopCancel)
+			_ = encWriter.Close()
+			closePipe(err)
+			return
+		}
+		close(stopCancel)
+		if err := encWriter.Close(); err != nil {
+			closePipe(err)
+			return
+		}
+		closePipe(nil)
+	}()
+	return done
 }
 
 // DeleteState removes the workflow state document for queue message.

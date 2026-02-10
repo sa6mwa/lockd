@@ -537,6 +537,9 @@ func (s *Service) prepareQueueDelivery(ctx context.Context, qsvc *queue.Service,
 		}
 		return nil, true, errDeliveryRetry
 	}
+	if s.queueDispatcher != nil {
+		s.queueDispatcher.NotifyAt(namespace, queueName, doc.ID, doc.NotVisibleUntil)
+	}
 	now = s.clock.Now()
 	redelivered, previous := recordQueueLeaseDelivery(namespace, queueName, doc.ID, acq.Response.LeaseID, acq.Response.FencingToken, acq.Response.TxnID, newMetaETag, doc.NotVisibleUntil, now, &acq.Meta, acq.MetaETag)
 	if redelivered {

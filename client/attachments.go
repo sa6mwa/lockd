@@ -24,11 +24,17 @@ const (
 
 // AttachmentInfo describes attachment metadata.
 type AttachmentInfo struct {
-	ID            string
-	Name          string
-	Size          int64
-	ContentType   string
+	// ID is the unique identifier for the referenced object.
+	ID string
+	// Name is the human-readable identifier for the referenced object.
+	Name string
+	// Size is the payload size in bytes.
+	Size int64
+	// ContentType is the media type associated with the payload.
+	ContentType string
+	// CreatedAtUnix is the creation timestamp as Unix seconds.
 	CreatedAtUnix int64
+	// UpdatedAtUnix is the last update timestamp as Unix seconds.
 	UpdatedAtUnix int64
 }
 
@@ -73,87 +79,133 @@ func (a *Attachment) Delete(ctx context.Context) error {
 
 // AttachRequest captures parameters for staging an attachment.
 type AttachRequest struct {
-	Namespace        string
-	Key              string
-	LeaseID          string
-	TxnID            string
-	FencingToken     string
-	Name             string
-	Body             io.Reader
-	ContentType      string
-	MaxBytes         *int64
+	// Namespace scopes the request or response to a lockd namespace.
+	Namespace string
+	// Key identifies the lock/state key within the namespace.
+	Key string
+	// LeaseID identifies the active lease required for protected mutations.
+	LeaseID string
+	// TxnID associates the operation with a transaction coordinator record.
+	TxnID string
+	// FencingToken is the monotonic token used to fence stale writers.
+	FencingToken string
+	// Name is the human-readable identifier for the referenced object.
+	Name string
+	// Body provides the request or response payload stream/content.
+	Body io.Reader
+	// ContentType is the media type associated with the payload.
+	ContentType string
+	// MaxBytes optionally enforces an upper bound for attachment payload size in bytes.
+	MaxBytes *int64
+	// PreventOverwrite rejects the request when an attachment with the same selector already exists.
 	PreventOverwrite bool
 }
 
 // AttachResult reports the staged attachment metadata.
 type AttachResult struct {
+	// Attachment contains metadata for the staged or retrieved attachment.
 	Attachment AttachmentInfo
-	Noop       bool
-	Version    int64
+	// Noop is true when attach detected identical existing content and skipped a write.
+	Noop bool
+	// Version is the lockd monotonic version for the target object.
+	Version int64
 }
 
 // AttachmentSelector identifies an attachment by id or name.
 type AttachmentSelector struct {
-	ID   string
+	// ID is the unique identifier for the referenced object.
+	ID string
+	// Name is the human-readable identifier for the referenced object.
 	Name string
 }
 
 // ListAttachmentsRequest lists attachments for a key.
 type ListAttachmentsRequest struct {
-	Namespace    string
-	Key          string
-	LeaseID      string
-	TxnID        string
+	// Namespace scopes the request or response to a lockd namespace.
+	Namespace string
+	// Key identifies the lock/state key within the namespace.
+	Key string
+	// LeaseID identifies the active lease required for protected mutations.
+	LeaseID string
+	// TxnID associates the operation with a transaction coordinator record.
+	TxnID string
+	// FencingToken is the monotonic token used to fence stale writers.
 	FencingToken string
-	Public       bool
+	// Public enables read-only attachment listing without lease credentials when public reads are allowed.
+	Public bool
 }
 
 // AttachmentList collects attachment metadata for a key.
 type AttachmentList struct {
-	Namespace   string
-	Key         string
+	// Namespace scopes the request or response to a lockd namespace.
+	Namespace string
+	// Key identifies the lock/state key within the namespace.
+	Key string
+	// Attachments enumerates attachments associated with the target key.
 	Attachments []AttachmentInfo
 }
 
 // GetAttachmentRequest retrieves a single attachment payload.
 type GetAttachmentRequest struct {
-	Namespace    string
-	Key          string
-	LeaseID      string
-	TxnID        string
+	// Namespace scopes the request or response to a lockd namespace.
+	Namespace string
+	// Key identifies the lock/state key within the namespace.
+	Key string
+	// LeaseID identifies the active lease required for protected mutations.
+	LeaseID string
+	// TxnID associates the operation with a transaction coordinator record.
+	TxnID string
+	// FencingToken is the monotonic token used to fence stale writers.
 	FencingToken string
-	Public       bool
-	Selector     AttachmentSelector
+	// Public enables read-only attachment retrieval without lease credentials when public reads are allowed.
+	Public bool
+	// Selector identifies which attachment to retrieve (by ID, Name, or both).
+	Selector AttachmentSelector
 }
 
 // DeleteAttachmentRequest removes a single attachment.
 type DeleteAttachmentRequest struct {
-	Namespace    string
-	Key          string
-	LeaseID      string
-	TxnID        string
+	// Namespace scopes the request or response to a lockd namespace.
+	Namespace string
+	// Key identifies the lock/state key within the namespace.
+	Key string
+	// LeaseID identifies the active lease required for protected mutations.
+	LeaseID string
+	// TxnID associates the operation with a transaction coordinator record.
+	TxnID string
+	// FencingToken is the monotonic token used to fence stale writers.
 	FencingToken string
-	Selector     AttachmentSelector
+	// Selector identifies which attachment to delete (by ID, Name, or both).
+	Selector AttachmentSelector
 }
 
 // DeleteAllAttachmentsRequest removes all attachments for a key.
 type DeleteAllAttachmentsRequest struct {
-	Namespace    string
-	Key          string
-	LeaseID      string
-	TxnID        string
+	// Namespace scopes the request or response to a lockd namespace.
+	Namespace string
+	// Key identifies the lock/state key within the namespace.
+	Key string
+	// LeaseID identifies the active lease required for protected mutations.
+	LeaseID string
+	// TxnID associates the operation with a transaction coordinator record.
+	TxnID string
+	// FencingToken is the monotonic token used to fence stale writers.
 	FencingToken string
 }
 
 // DeleteAttachmentResult reports delete status for a single attachment.
 type DeleteAttachmentResult struct {
+	// Deleted reports delete results for the requested attachment operation.
 	Deleted bool
+	// Version is the lockd monotonic version for the target object.
 	Version int64
 }
 
 // DeleteAllAttachmentsResult reports delete status for all attachments.
 type DeleteAllAttachmentsResult struct {
+	// Deleted reports delete results for the requested attachment operation.
 	Deleted int
+	// Version is the lockd monotonic version for the target object.
 	Version int64
 }
 

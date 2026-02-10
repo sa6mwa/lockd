@@ -1,6 +1,9 @@
 package lockd
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -129,5 +132,63 @@ func TestConfigValidateJoinSelfOnlyWithoutMTLS(t *testing.T) {
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("expected tc-join self-only to pass without mTLS, got %v", err)
+	}
+}
+
+func TestConfigValidateBundlePathExpandsEnv(t *testing.T) {
+	dir := t.TempDir()
+	bundle := filepath.Join(dir, "server.pem")
+	if err := os.WriteFile(bundle, []byte("pem"), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	t.Setenv("LOCKD_TEST_BUNDLE_DIR", dir)
+	cfg := Config{
+		Store:      "mem://",
+		BundlePath: "$LOCKD_TEST_BUNDLE_DIR/server.pem",
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if cfg.BundlePath != bundle {
+		t.Fatalf("expected expanded bundle path %q, got %q", bundle, cfg.BundlePath)
+	}
+}
+
+func TestConfigValidateBundlePathExpandsHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	bundle := filepath.Join(home, ".lockd", "server.pem")
+	if err := os.MkdirAll(filepath.Dir(bundle), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(bundle, []byte("pem"), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	cfg := Config{
+		Store:      "mem://",
+		BundlePath: "~/.lockd/server.pem",
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if cfg.BundlePath != bundle {
+		t.Fatalf("expected expanded bundle path %q, got %q", bundle, cfg.BundlePath)
+	}
+}
+
+func TestConfigValidateBundlePathDisableExpansion(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("LOCKD_TEST_BUNDLE_DIR", dir)
+	cfg := Config{
+		Store:                      "mem://",
+		BundlePath:                 "$LOCKD_TEST_BUNDLE_DIR/server.pem",
+		BundlePathDisableExpansion: true,
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected validation error for unexpanded bundle path")
+	}
+	if !strings.Contains(err.Error(), "$LOCKD_TEST_BUNDLE_DIR/server.pem") {
+		t.Fatalf("expected literal bundle path in error, got %v", err)
 	}
 }

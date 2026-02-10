@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"pkt.systems/kryptograf/keymgmt"
+	"pkt.systems/lockd/internal/pathutil"
 )
 
 const (
@@ -215,154 +216,275 @@ func isValidJSONUtil(name string) bool {
 
 // Config captures the tunables for a lockd.Server instance.
 type Config struct {
-	Listen                    string
-	ListenProto               string
-	MetricsListen             string
-	MetricsListenSet          bool
-	PprofListen               string
-	PprofListenSet            bool
-	EnableProfilingMetrics    bool
+	// Listen is the server bind address (for example ":9341").
+	Listen string
+	// ListenProto selects listener type (for example "tcp").
+	ListenProto string
+	// MetricsListen is the metrics endpoint bind address; empty disables metrics.
+	MetricsListen string
+	// MetricsListenSet reports whether MetricsListen was explicitly set by caller/flags/env.
+	MetricsListenSet bool
+	// PprofListen is the pprof endpoint bind address; empty disables pprof.
+	PprofListen string
+	// PprofListenSet reports whether PprofListen was explicitly set by caller/flags/env.
+	PprofListenSet bool
+	// EnableProfilingMetrics enables runtime profiling metrics on the metrics endpoint.
+	EnableProfilingMetrics bool
+	// EnableProfilingMetricsSet reports whether profiling metrics toggle was explicitly set.
 	EnableProfilingMetricsSet bool
-	Store                     string
-	HAMode                    string
-	HALeaseTTL                time.Duration
-	DefaultNamespace          string
-	JSONMaxBytes              int64
-	AttachmentMaxBytes        int64
-	JSONUtil                  string
-	SpoolMemoryThreshold      int64
-	DiskRetention             time.Duration
-	DiskJanitorInterval       time.Duration
-	DiskQueueWatch            bool
-	DiskLockFileCacheSize     int
-	LogstoreCommitMaxOps      int
-	LogstoreSegmentSize       int64
-	DisableMemQueueWatch      bool
-	DefaultTTL                time.Duration
-	MaxTTL                    time.Duration
-	AcquireBlock              time.Duration
-	SweeperInterval           time.Duration
-	TxnReplayInterval         time.Duration
-	QueueDecisionCacheTTL     time.Duration
-	QueueDecisionMaxApply     int
+	// Store is the backend DSN (for example mem://, disk://..., s3://..., azure://...).
+	Store string
+	// HAMode controls cluster coordination strategy ("concurrent" or "failover").
+	HAMode string
+	// HALeaseTTL controls leader-lease lifetime in failover mode.
+	HALeaseTTL time.Duration
+	// DefaultNamespace is used when requests omit namespace.
+	DefaultNamespace string
+	// JSONMaxBytes caps incoming JSON payload size.
+	JSONMaxBytes int64
+	// AttachmentMaxBytes caps attachment payload size.
+	AttachmentMaxBytes int64
+	// JSONUtil selects JSON implementation (lockd/jsonv2/stdlib).
+	JSONUtil string
+	// SpoolMemoryThreshold controls memory buffering before payload spill-to-disk.
+	SpoolMemoryThreshold int64
+	// DiskRetention controls retention for disk-backed transient files/log fragments.
+	DiskRetention time.Duration
+	// DiskJanitorInterval controls how often disk retention janitor runs.
+	DiskJanitorInterval time.Duration
+	// DiskQueueWatch enables native filesystem queue-watch acceleration on disk backends.
+	DiskQueueWatch bool
+	// DiskLockFileCacheSize caps cached lock-file descriptors for disk/NFS locking.
+	DiskLockFileCacheSize int
+	// LogstoreCommitMaxOps caps logstore entries committed per fsync batch.
+	LogstoreCommitMaxOps int
+	// LogstoreSegmentSize caps logstore segment size before rolling.
+	LogstoreSegmentSize int64
+	// DisableMemQueueWatch disables in-memory queue watch hints (poll-only fallback).
+	DisableMemQueueWatch bool
+	// DefaultTTL is the default lease TTL for acquire/dequeue operations.
+	DefaultTTL time.Duration
+	// MaxTTL is the maximum allowed lease TTL.
+	MaxTTL time.Duration
+	// AcquireBlock is the default acquire/dequeue blocking window.
+	AcquireBlock time.Duration
+	// SweeperInterval controls maintenance sweep cadence.
+	SweeperInterval time.Duration
+	// TxnReplayInterval controls how often transaction replay scans run.
+	TxnReplayInterval time.Duration
+	// QueueDecisionCacheTTL controls empty decision-cache TTL for queue decision checks.
+	QueueDecisionCacheTTL time.Duration
+	// QueueDecisionMaxApply caps decision records applied per dequeue attempt.
+	QueueDecisionMaxApply int
+	// QueueDecisionApplyTimeout caps dequeue time spent applying queued decisions.
 	QueueDecisionApplyTimeout time.Duration
-	StateCacheBytes           int64
-	StateCacheBytesSet        bool
-	IdleSweepGrace            time.Duration
-	IdleSweepOpDelay          time.Duration
-	IdleSweepMaxOps           int
-	IdleSweepMaxRuntime       time.Duration
-	DrainGrace                time.Duration
-	DrainGraceSet             bool
-	ShutdownTimeout           time.Duration
-	ShutdownTimeoutSet        bool
-	OTLPEndpoint              string
-	DisableHTTPTracing        bool
-	DisableStorageTracing     bool
+	// StateCacheBytes caps in-memory state cache size (0 uses default, negative disables).
+	StateCacheBytes int64
+	// StateCacheBytesSet reports whether StateCacheBytes was explicitly set.
+	StateCacheBytesSet bool
+	// IdleSweepGrace is required idle time before maintenance sweeps begin.
+	IdleSweepGrace time.Duration
+	// IdleSweepOpDelay inserts pacing delay between maintenance operations.
+	IdleSweepOpDelay time.Duration
+	// IdleSweepMaxOps caps maintenance operations per sweep pass.
+	IdleSweepMaxOps int
+	// IdleSweepMaxRuntime caps wall-clock duration of a sweep pass.
+	IdleSweepMaxRuntime time.Duration
+	// DrainGrace is pre-shutdown lease-drain grace period.
+	DrainGrace time.Duration
+	// DrainGraceSet reports whether DrainGrace was explicitly set.
+	DrainGraceSet bool
+	// ShutdownTimeout caps total graceful shutdown duration (drain + HTTP shutdown).
+	ShutdownTimeout time.Duration
+	// ShutdownTimeoutSet reports whether ShutdownTimeout was explicitly set.
+	ShutdownTimeoutSet bool
+	// OTLPEndpoint enables OTLP export to the given collector endpoint.
+	OTLPEndpoint string
+	// DisableHTTPTracing disables OpenTelemetry spans for HTTP handlers.
+	DisableHTTPTracing bool
+	// DisableStorageTracing disables OpenTelemetry spans in storage backends.
+	DisableStorageTracing bool
 
-	// mTLS
-	DisableMTLS  bool
-	BundlePath   string
-	BundlePEM    []byte
+	// DisableMTLS disables mutual TLS on the public HTTP server.
+	DisableMTLS bool
+	// BundlePath points to server PEM bundle (CA + server cert + key + metadata material).
+	BundlePath string
+	// BundlePathDisableExpansion disables env/tilde expansion for BundlePath.
+	BundlePathDisableExpansion bool
+	// BundlePEM provides server bundle bytes directly (takes precedence when non-empty).
+	BundlePEM []byte
+	// DenylistPath points to serial denylist file merged with bundle denylist entries.
 	DenylistPath string
-	// HTTP/2 tuning.
-	HTTP2MaxConcurrentStreams    int
+
+	// HTTP2MaxConcurrentStreams sets HTTP/2 MaxConcurrentStreams; 0 uses default.
+	HTTP2MaxConcurrentStreams int
+	// HTTP2MaxConcurrentStreamsSet reports whether HTTP2MaxConcurrentStreams was explicitly set.
 	HTTP2MaxConcurrentStreamsSet bool
-	// TC federation / auth
-	TCTrustDir       string
-	TCDisableAuth    bool
+
+	// TCTrustDir is directory of trusted CA certs for TC federation calls.
+	TCTrustDir string
+	// TCDisableAuth disables TC peer/client auth checks (testing/isolated setups only).
+	TCDisableAuth bool
+	// TCAllowDefaultCA allows trust fallback to local default CA material when explicit trust is absent.
 	TCAllowDefaultCA bool
-	// TC leader election
-	SelfEndpoint    string
-	TCJoinEndpoints []string // optional seed endpoints for initial TC peer discovery
-	// TC coordinator / fan-out
-	TCFanoutTimeout     time.Duration
+
+	// SelfEndpoint is this node's externally reachable endpoint for TC federation.
+	SelfEndpoint string
+	// TCJoinEndpoints is optional seed endpoint list used for initial TC peer discovery.
+	TCJoinEndpoints []string
+
+	// TCFanoutTimeout caps each remote apply attempt during TC fan-out.
+	TCFanoutTimeout time.Duration
+	// TCFanoutMaxAttempts caps retry attempts for TC fan-out calls.
 	TCFanoutMaxAttempts int
-	TCFanoutBaseDelay   time.Duration
-	TCFanoutMaxDelay    time.Duration
-	TCFanoutMultiplier  float64
+	// TCFanoutBaseDelay is exponential backoff base for TC fan-out retries.
+	TCFanoutBaseDelay time.Duration
+	// TCFanoutMaxDelay caps TC fan-out backoff.
+	TCFanoutMaxDelay time.Duration
+	// TCFanoutMultiplier is exponential growth factor for TC fan-out retries.
+	TCFanoutMultiplier float64
+	// TCDecisionRetention keeps decided transaction records for replay/fan-out recovery.
 	TCDecisionRetention time.Duration
-	TCClientBundlePath  string
-	// Storage encryption
+	// TCClientBundlePath points to TC client bundle used for mTLS fan-out calls.
+	TCClientBundlePath string
+
+	// DisableStorageEncryption disables kryptograf envelope encryption at rest.
 	DisableStorageEncryption bool
-	StorageEncryptionSnappy  bool
-	MetadataRootKey          keymgmt.RootKey
-	MetadataDescriptor       keymgmt.Descriptor
-	MetadataContext          string
-	DisableKryptoPool        bool
+	// StorageEncryptionSnappy enables Snappy compression before encryption.
+	StorageEncryptionSnappy bool
+	// MetadataRootKey is kryptograf root key used to derive metadata/object keys.
+	MetadataRootKey keymgmt.RootKey
+	// MetadataDescriptor is kryptograf descriptor used for metadata encryption context.
+	MetadataDescriptor keymgmt.Descriptor
+	// MetadataContext is CA-derived context identifier used for encryption material lookup.
+	MetadataContext string
+	// DisableKryptoPool disables pooled crypto buffers (diagnostic mode).
+	DisableKryptoPool bool
 
-	// Object-store options.
-	S3SSE                      string
-	S3KMSKeyID                 string
-	AWSKMSKeyID                string
-	S3MaxPartSize              int64
+	// S3SSE controls server-side encryption mode for S3 writes (for example AES256/KMS).
+	S3SSE string
+	// S3KMSKeyID is KMS key identifier for S3 SSE-KMS mode.
+	S3KMSKeyID string
+	// AWSKMSKeyID is AWS KMS key identifier used by lockd's envelope crypto integrations.
+	AWSKMSKeyID string
+	// S3MaxPartSize controls multipart upload part size.
+	S3MaxPartSize int64
+	// S3SmallEncryptBufferBudget caps concurrent small-object encryption buffers.
 	S3SmallEncryptBufferBudget int64
-	AWSRegion                  string
-	S3AccessKeyID              string
-	S3SecretAccessKey          string
-	S3SessionToken             string
+	// AWSRegion sets AWS region for aws:// and related integrations.
+	AWSRegion string
+	// S3AccessKeyID sets static S3 access key credential.
+	S3AccessKeyID string
+	// S3SecretAccessKey sets static S3 secret credential.
+	S3SecretAccessKey string
+	// S3SessionToken sets optional session token for temporary S3 credentials.
+	S3SessionToken string
 
-	// Azure-specific options.
-	AzureAccount    string
+	// AzureAccount is the Azure storage account name.
+	AzureAccount string
+	// AzureAccountKey is the shared-key credential for Azure Blob.
 	AzureAccountKey string
-	AzureEndpoint   string
-	AzureSASToken   string
+	// AzureEndpoint overrides Azure Blob endpoint URL.
+	AzureEndpoint string
+	// AzureSASToken configures SAS-token auth for Azure Blob.
+	AzureSASToken string
 
-	// Storage retry tuning.
+	// StorageRetryMaxAttempts caps transient backend retry attempts.
 	StorageRetryMaxAttempts int
-	StorageRetryBaseDelay   time.Duration
-	StorageRetryMaxDelay    time.Duration
-	StorageRetryMultiplier  float64
+	// StorageRetryBaseDelay is exponential retry base delay for backend operations.
+	StorageRetryBaseDelay time.Duration
+	// StorageRetryMaxDelay caps backend retry backoff.
+	StorageRetryMaxDelay time.Duration
+	// StorageRetryMultiplier is exponential growth factor for backend retries.
+	StorageRetryMultiplier float64
 
-	// Queue dispatcher tuning.
-	QueueMaxConsumers          int
-	QueuePollInterval          time.Duration
-	QueuePollJitter            time.Duration
+	// QueueMaxConsumers caps concurrent queue consumer workers per server.
+	QueueMaxConsumers int
+	// QueuePollInterval controls queue poll cadence when no watch hint exists.
+	QueuePollInterval time.Duration
+	// QueuePollJitter adds random delay to queue polling intervals.
+	QueuePollJitter time.Duration
+	// QueueResilientPollInterval is fallback full-poll cadence to recover missed events.
 	QueueResilientPollInterval time.Duration
-	QueueListPageSize          int
+	// QueueListPageSize caps queue list page size per poll request.
+	QueueListPageSize int
 
-	// Indexer tuning
-	IndexerFlushDocs        int
-	IndexerFlushInterval    time.Duration
-	IndexerFlushDocsSet     bool
+	// IndexerFlushDocs flushes in-memory index docs after this many buffered docs.
+	IndexerFlushDocs int
+	// IndexerFlushInterval flushes in-memory index docs after this wall-clock interval.
+	IndexerFlushInterval time.Duration
+	// IndexerFlushDocsSet reports whether IndexerFlushDocs was explicitly set.
+	IndexerFlushDocsSet bool
+	// IndexerFlushIntervalSet reports whether IndexerFlushInterval was explicitly set.
 	IndexerFlushIntervalSet bool
-	// Query tuning
+
+	// QueryDocPrefetch caps concurrent state fetches for query return=documents.
 	QueryDocPrefetch int
 
-	// Quick Reaction Force (perimeter defense) configuration.
-	QRFDisabled                    bool
-	QRFQueueSoftLimit              int64
-	QRFQueueHardLimit              int64
-	QRFQueueConsumerSoftLimit      int64
-	QRFQueueConsumerHardLimit      int64
-	QRFLockSoftLimit               int64
-	QRFLockHardLimit               int64
-	QRFQuerySoftLimit              int64
-	QRFQueryHardLimit              int64
-	QRFMemorySoftLimitBytes        uint64
-	QRFMemoryHardLimitBytes        uint64
-	QRFMemorySoftLimitPercent      float64
-	QRFMemoryHardLimitPercent      float64
+	// QRFDisabled disables Quick Reaction Force request shaping.
+	QRFDisabled bool
+	// QRFQueueSoftLimit soft-arms QRF when in-flight queue leases exceed this count.
+	QRFQueueSoftLimit int64
+	// QRFQueueHardLimit fully engages QRF when in-flight queue leases exceed this count.
+	QRFQueueHardLimit int64
+	// QRFQueueConsumerSoftLimit soft-arms QRF when active queue consumers exceed this count.
+	QRFQueueConsumerSoftLimit int64
+	// QRFQueueConsumerHardLimit fully engages QRF when active queue consumers exceed this count.
+	QRFQueueConsumerHardLimit int64
+	// QRFLockSoftLimit soft-arms QRF when in-flight lock leases exceed this count.
+	QRFLockSoftLimit int64
+	// QRFLockHardLimit fully engages QRF when in-flight lock leases exceed this count.
+	QRFLockHardLimit int64
+	// QRFQuerySoftLimit soft-arms QRF when concurrent query load exceeds this count.
+	QRFQuerySoftLimit int64
+	// QRFQueryHardLimit fully engages QRF when concurrent query load exceeds this count.
+	QRFQueryHardLimit int64
+	// QRFMemorySoftLimitBytes soft-arms QRF when process memory exceeds this absolute byte threshold.
+	QRFMemorySoftLimitBytes uint64
+	// QRFMemoryHardLimitBytes fully engages QRF when process memory exceeds this absolute byte threshold.
+	QRFMemoryHardLimitBytes uint64
+	// QRFMemorySoftLimitPercent soft-arms QRF when process memory exceeds this percentage.
+	QRFMemorySoftLimitPercent float64
+	// QRFMemoryHardLimitPercent fully engages QRF when process memory exceeds this percentage.
+	QRFMemoryHardLimitPercent float64
+	// QRFMemoryStrictHeadroomPercent reserves this headroom when reclaimable cache is uncertain.
 	QRFMemoryStrictHeadroomPercent float64
-	QRFSwapSoftLimitBytes          uint64
-	QRFSwapHardLimitBytes          uint64
-	QRFSwapSoftLimitPercent        float64
-	QRFSwapHardLimitPercent        float64
-	QRFCPUPercentSoftLimit         float64
-	QRFCPUPercentHardLimit         float64
-	QRFCPUPercentSoftLimitSet      bool
-	QRFCPUPercentHardLimitSet      bool
-	QRFLoadSoftLimitMultiplier     float64
-	QRFLoadHardLimitMultiplier     float64
-	QRFRecoverySamples             int
-	QRFSoftDelay                   time.Duration
-	QRFEngagedDelay                time.Duration
-	QRFRecoveryDelay               time.Duration
-	QRFMaxWait                     time.Duration
+	// QRFSwapSoftLimitBytes soft-arms QRF when swap usage exceeds this absolute byte threshold.
+	QRFSwapSoftLimitBytes uint64
+	// QRFSwapHardLimitBytes fully engages QRF when swap usage exceeds this absolute byte threshold.
+	QRFSwapHardLimitBytes uint64
+	// QRFSwapSoftLimitPercent soft-arms QRF when swap usage exceeds this percentage.
+	QRFSwapSoftLimitPercent float64
+	// QRFSwapHardLimitPercent fully engages QRF when swap usage exceeds this percentage.
+	QRFSwapHardLimitPercent float64
+	// QRFCPUPercentSoftLimit soft-arms QRF when CPU utilization exceeds this percentage.
+	QRFCPUPercentSoftLimit float64
+	// QRFCPUPercentHardLimit fully engages QRF when CPU utilization exceeds this percentage.
+	QRFCPUPercentHardLimit float64
+	// QRFCPUPercentSoftLimitSet reports whether QRFCPUPercentSoftLimit was explicitly set.
+	QRFCPUPercentSoftLimitSet bool
+	// QRFCPUPercentHardLimitSet reports whether QRFCPUPercentHardLimit was explicitly set.
+	QRFCPUPercentHardLimitSet bool
+	// QRFLoadSoftLimitMultiplier soft-arms QRF when load average exceeds this CPU-multiplier.
+	QRFLoadSoftLimitMultiplier float64
+	// QRFLoadHardLimitMultiplier fully engages QRF when load average exceeds this CPU-multiplier.
+	QRFLoadHardLimitMultiplier float64
+	// QRFRecoverySamples is number of healthy samples required to disengage/recover.
+	QRFRecoverySamples int
+	// QRFSoftDelay is per-request pacing delay while soft-armed.
+	QRFSoftDelay time.Duration
+	// QRFEngagedDelay is per-request pacing delay while engaged.
+	QRFEngagedDelay time.Duration
+	// QRFRecoveryDelay is per-request pacing delay while recovering.
+	QRFRecoveryDelay time.Duration
+	// QRFMaxWait caps total time a request may wait under QRF pacing.
+	QRFMaxWait time.Duration
 
-	// Local Security Force configuration.
+	// LSFSampleInterval controls Local Security Force sample cadence.
 	LSFSampleInterval time.Duration
-	LSFLogInterval    time.Duration
+	// LSFLogInterval controls cadence of lockd.lsf.sample telemetry logs.
+	LSFLogInterval time.Duration
+	// LSFLogIntervalSet reports whether LSFLogInterval was explicitly set.
 	LSFLogIntervalSet bool
 }
 
@@ -774,6 +896,13 @@ func (c *Config) Validate() error {
 				path, err := DefaultBundlePath()
 				if err != nil {
 					return fmt.Errorf("config: resolve bundle path: %w", err)
+				}
+				c.BundlePath = path
+			}
+			if !c.BundlePathDisableExpansion {
+				path, err := pathutil.ExpandUserAndEnv(c.BundlePath)
+				if err != nil {
+					return fmt.Errorf("config: expand bundle path: %w", err)
 				}
 				c.BundlePath = path
 			}

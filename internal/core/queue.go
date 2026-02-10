@@ -74,7 +74,7 @@ func (s *Service) Enqueue(ctx context.Context, cmd QueueEnqueueCommand) (*QueueE
 		return nil, waitErr
 	}
 	if s.queueDispatcher != nil {
-		s.queueDispatcher.Notify(ns, cmd.Queue)
+		s.queueDispatcher.NotifyAt(ns, cmd.Queue, msg.ID, msg.NotVisibleUntil)
 	}
 	if s.queueMetrics != nil {
 		duration := s.clock.Now().Sub(start)

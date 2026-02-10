@@ -13,12 +13,18 @@ import (
 // Document models a lockd state document with helper methods for JSON-pointer
 // mutations and streaming interop.
 type Document struct {
+	// Namespace scopes the request or response to a lockd namespace.
 	Namespace string
-	Key       string
-	Version   string
-	ETag      string
-	Metadata  map[string]string
+	// Key identifies the lock/state key within the namespace.
+	Key string
+	// Version is the lockd monotonic version for the target object.
+	Version string
+	// ETag is the entity tag used for optimistic concurrency and cache validation.
+	ETag string
+	// Metadata carries metadata values returned by the server for this object.
+	Metadata map[string]string
 
+	// Body holds the mutable JSON document content.
 	Body map[string]any
 }
 

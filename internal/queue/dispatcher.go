@@ -1,6 +1,7 @@
 package queue
 
 import (
+	"container/heap"
 	"context"
 	"errors"
 	"math/rand"
@@ -82,6 +83,13 @@ type Dispatcher struct {
 	logger                pslog.Logger
 	resilientPollInterval time.Duration
 	metrics               *dispatcherMetrics
+
+	dueMu         sync.Mutex
+	dueEntries    map[string]*dueNotification
+	dueHeap       dueNotificationHeap
+	dueWake       chan struct{}
+	dueLoopOnce   sync.Once
+	dueLoopLogger pslog.Logger
 }
 
 // DispatcherOption customises Dispatcher behaviour.
@@ -176,6 +184,53 @@ func dispatcherQueueKey(namespace, queue string) string {
 	return namespace + "/" + queue
 }
 
+func dueMessageKey(namespace, queue, messageID string) string {
+	return dispatcherQueueKey(namespace, queue) + "/" + messageID
+}
+
+type dueNotification struct {
+	key       string
+	namespace string
+	queue     string
+	messageID string
+	due       time.Time
+	index     int
+}
+
+type queueTarget struct {
+	namespace string
+	queue     string
+}
+
+type dueNotificationHeap []*dueNotification
+
+func (h dueNotificationHeap) Len() int { return len(h) }
+
+func (h dueNotificationHeap) Less(i, j int) bool {
+	return h[i].due.Before(h[j].due)
+}
+
+func (h dueNotificationHeap) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+	h[i].index = i
+	h[j].index = j
+}
+
+func (h *dueNotificationHeap) Push(x any) {
+	entry := x.(*dueNotification)
+	entry.index = len(*h)
+	*h = append(*h, entry)
+}
+
+func (h *dueNotificationHeap) Pop() any {
+	old := *h
+	n := len(old)
+	entry := old[n-1]
+	entry.index = -1
+	*h = old[:n-1]
+	return entry
+}
+
 // NewDispatcher builds a dispatcher.
 func NewDispatcher(svc candidateProvider, opts ...DispatcherOption) *Dispatcher {
 	d := &Dispatcher{
@@ -187,6 +242,8 @@ func NewDispatcher(svc candidateProvider, opts ...DispatcherOption) *Dispatcher 
 		queues:                make(map[string]*queueState),
 		wake:                  make(chan struct{}, 1),
 		resilientPollInterval: 5 * time.Minute,
+		dueEntries:            make(map[string]*dueNotification),
+		dueWake:               make(chan struct{}, 1),
 	}
 	for _, opt := range opts {
 		opt(d)
@@ -194,6 +251,7 @@ func NewDispatcher(svc candidateProvider, opts ...DispatcherOption) *Dispatcher 
 	if d.logger == nil {
 		d.logger = pslog.NoopLogger()
 	}
+	d.dueLoopLogger = d.logger.With("component", "due_notifier")
 	if d.resilientPollInterval <= 0 {
 		d.resilientPollInterval = 5 * time.Minute
 	}
@@ -323,6 +381,81 @@ func (d *Dispatcher) Notify(namespace, queue string) {
 	}
 	d.ensureScheduler()
 	d.wakeScheduler()
+}
+
+// NotifyAt schedules a queue wake-up for messageID at due time. This is the
+// in-process fast path for delayed visibility transitions; polling/watch
+// remains the fallback for missed events and cross-node updates.
+func (d *Dispatcher) NotifyAt(namespace, queue, messageID string, due time.Time) {
+	if d == nil {
+		return
+	}
+	id := strings.TrimSpace(messageID)
+	if id == "" {
+		d.Notify(namespace, queue)
+		return
+	}
+	name, err := sanitizeQueueName(queue)
+	if err != nil {
+		return
+	}
+	ns, err := sanitizeNamespace(namespace)
+	if err != nil {
+		return
+	}
+	now := time.Now()
+	if due.IsZero() || !due.After(now) {
+		d.CancelNotify(ns, name, id)
+		d.Notify(ns, name)
+		return
+	}
+
+	key := dueMessageKey(ns, name, id)
+	d.dueMu.Lock()
+	if existing, ok := d.dueEntries[key]; ok {
+		existing.due = due
+		heap.Fix(&d.dueHeap, existing.index)
+	} else {
+		entry := &dueNotification{
+			key:       key,
+			namespace: ns,
+			queue:     name,
+			messageID: id,
+			due:       due,
+		}
+		heap.Push(&d.dueHeap, entry)
+		d.dueEntries[key] = entry
+	}
+	d.dueMu.Unlock()
+	d.ensureDueLoop()
+	d.wakeDueLoop()
+}
+
+// CancelNotify removes a scheduled NotifyAt wake-up for a message.
+func (d *Dispatcher) CancelNotify(namespace, queue, messageID string) {
+	if d == nil {
+		return
+	}
+	id := strings.TrimSpace(messageID)
+	if id == "" {
+		return
+	}
+	name, err := sanitizeQueueName(queue)
+	if err != nil {
+		return
+	}
+	ns, err := sanitizeNamespace(namespace)
+	if err != nil {
+		return
+	}
+	key := dueMessageKey(ns, name, id)
+	d.dueMu.Lock()
+	if entry, ok := d.dueEntries[key]; ok {
+		heap.Remove(&d.dueHeap, entry.index)
+		delete(d.dueEntries, key)
+	}
+	d.dueMu.Unlock()
+	d.wakeDueLoop()
 }
 
 // QueueStats returns a snapshot of dispatcher metrics for the given queue.
@@ -521,6 +654,81 @@ func (d *Dispatcher) wakeScheduler() {
 			if d.logger != nil {
 				d.logger.Trace("queue.dispatcher.wake.skip", "reason", "buffer_full")
 			}
+		}
+	}
+}
+
+func (d *Dispatcher) ensureDueLoop() {
+	d.dueLoopOnce.Do(func() {
+		go d.runDueLoop()
+	})
+}
+
+func (d *Dispatcher) wakeDueLoop() {
+	select {
+	case d.dueWake <- struct{}{}:
+	default:
+	}
+}
+
+func (d *Dispatcher) nextDueLocked() (time.Time, bool) {
+	if len(d.dueHeap) == 0 {
+		return time.Time{}, false
+	}
+	return d.dueHeap[0].due, true
+}
+
+func (d *Dispatcher) popDueTargets(now time.Time) []queueTarget {
+	targetSet := make(map[string]queueTarget)
+	d.dueMu.Lock()
+	for len(d.dueHeap) > 0 {
+		next := d.dueHeap[0]
+		if next.due.After(now) {
+			break
+		}
+		entry := heap.Pop(&d.dueHeap).(*dueNotification)
+		delete(d.dueEntries, entry.key)
+		qkey := dispatcherQueueKey(entry.namespace, entry.queue)
+		targetSet[qkey] = queueTarget{namespace: entry.namespace, queue: entry.queue}
+	}
+	d.dueMu.Unlock()
+	if len(targetSet) == 0 {
+		return nil
+	}
+	targets := make([]queueTarget, 0, len(targetSet))
+	for _, target := range targetSet {
+		targets = append(targets, target)
+	}
+	return targets
+}
+
+func (d *Dispatcher) runDueLoop() {
+	for {
+		d.dueMu.Lock()
+		nextDue, hasDue := d.nextDueLocked()
+		d.dueMu.Unlock()
+		if !hasDue {
+			<-d.dueWake
+			continue
+		}
+
+		wait := time.Until(nextDue)
+		if wait < 0 {
+			wait = 0
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-d.dueWake:
+			if !timer.Stop() {
+				<-timer.C
+			}
+			continue
+		case <-timer.C:
+		}
+
+		targets := d.popDueTargets(time.Now())
+		for _, target := range targets {
+			d.Notify(target.namespace, target.queue)
 		}
 	}
 }

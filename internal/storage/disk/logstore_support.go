@@ -72,12 +72,6 @@ func (b *fsyncBatcher) enqueue(file *os.File) <-chan error {
 	return ch
 }
 
-func (b *fsyncBatcher) idle() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return len(b.queue) == 0 && !b.batchRunning
-}
-
 // drained reports whether there is no queued fsync work.
 // This intentionally ignores batchRunning because the loop can still be
 // unwinding after delivering completion to waiters.

@@ -153,6 +153,293 @@ func QueueOwner(prefix string) string {
 	return fmt.Sprintf("%s-%s", prefix, uniqueSuffix())
 }
 
+// StartConsumerSmokeOptions configures RunStartConsumerSmoke.
+type StartConsumerSmokeOptions struct {
+	// Label scopes generated queue/consumer names.
+	Label string
+	// Timeout bounds the full smoke scenario runtime.
+	Timeout time.Duration
+	// SharedMessages controls how many messages are enqueued into the shared queue.
+	SharedMessages int
+	// QueueSetup runs after queue names are generated, before enqueue/consume starts.
+	QueueSetup func(sharedQueue, queueA, queueB string)
+}
+
+// StartConsumerStateSaveRegressionOptions configures RunStartConsumerStateSaveRegression.
+type StartConsumerStateSaveRegressionOptions struct {
+	// Label scopes generated queue/consumer names.
+	Label string
+	// Timeout bounds the full regression scenario runtime.
+	Timeout time.Duration
+	// QueueSetup runs after queue name generation, before enqueue/consume starts.
+	QueueSetup func(queue string)
+}
+
+// RunStartConsumerSmoke verifies StartConsumer across mixed queue configs:
+// two consumers on one shared queue, plus one consumer each on two distinct
+// queues (one stateful). The test cancels context after each handler observes at
+// least one message and asserts StartConsumer returns nil on expected shutdown.
+func RunStartConsumerSmoke(t testing.TB, cli *lockdclient.Client, opts StartConsumerSmokeOptions) {
+	t.Helper()
+	if cli == nil {
+		t.Fatalf("client required")
+	}
+	label := strings.TrimSpace(opts.Label)
+	if label == "" {
+		label = "start-consumer-smoke"
+	}
+	timeout := opts.Timeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	sharedMessages := opts.SharedMessages
+	if sharedMessages < 8 {
+		sharedMessages = 8
+	}
+
+	sharedQueue := QueueName(label + "-shared")
+	queueA := QueueName(label + "-a")
+	queueB := QueueName(label + "-b")
+	if opts.QueueSetup != nil {
+		opts.QueueSetup(sharedQueue, queueA, queueB)
+	}
+
+	for i := 0; i < sharedMessages; i++ {
+		MustEnqueueBytes(t, cli, sharedQueue, []byte(fmt.Sprintf("shared-%02d", i)))
+	}
+	MustEnqueueBytes(t, cli, queueA, []byte("queue-a"))
+	MustEnqueueBytes(t, cli, queueB, []byte("queue-b"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	type consumerCheck struct {
+		queue     string
+		withState bool
+	}
+	checks := map[string]consumerCheck{
+		"shared-1": {queue: sharedQueue, withState: false},
+		"shared-2": {queue: sharedQueue, withState: false},
+		"queue-a":  {queue: queueA, withState: false},
+		"queue-b":  {queue: queueB, withState: true},
+	}
+
+	hits := make(map[string]int, len(checks))
+	var (
+		mu        sync.Mutex
+		cancelOne sync.Once
+		completed atomic.Bool
+	)
+	allSatisfied := func() bool {
+		for name := range checks {
+			if hits[name] < 1 {
+				return false
+			}
+		}
+		return true
+	}
+	makeHandler := func(name string) lockdclient.ConsumerMessageHandler {
+		check := checks[name]
+		return func(_ context.Context, cm lockdclient.ConsumerMessage) error {
+			if cm.Client != cli {
+				return fmt.Errorf("consumer %s: unexpected client pointer", name)
+			}
+			if cm.Queue != check.queue {
+				return fmt.Errorf("consumer %s: queue mismatch got=%q want=%q", name, cm.Queue, check.queue)
+			}
+			if cm.WithState != check.withState {
+				return fmt.Errorf("consumer %s: withState mismatch got=%v want=%v", name, cm.WithState, check.withState)
+			}
+			if cm.Message == nil {
+				return fmt.Errorf("consumer %s: nil message", name)
+			}
+			if check.withState && cm.State == nil {
+				return fmt.Errorf("consumer %s: expected state handle", name)
+			}
+			if !check.withState && cm.State != nil {
+				return fmt.Errorf("consumer %s: unexpected state handle", name)
+			}
+			defer cm.Message.Close()
+			if err := cm.Message.ClosePayload(); err != nil {
+				return fmt.Errorf("consumer %s: close payload: %w", name, err)
+			}
+			ackCtx, ackCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err := cm.Message.Ack(ackCtx)
+			ackCancel()
+			if err != nil {
+				return fmt.Errorf("consumer %s: ack: %w", name, err)
+			}
+			// Shared queue consumers briefly yield to reduce scheduling skew.
+			if check.queue == sharedQueue {
+				time.Sleep(5 * time.Millisecond)
+			}
+			mu.Lock()
+			hits[name]++
+			done := allSatisfied()
+			mu.Unlock()
+			if done {
+				completed.Store(true)
+				cancelOne.Do(cancel)
+			}
+			return nil
+		}
+	}
+
+	err := cli.StartConsumer(ctx, []lockdclient.ConsumerConfig{
+		{
+			Name:           label + "-shared-1",
+			Queue:          sharedQueue,
+			Options:        lockdclient.SubscribeOptions{Owner: QueueOwner(label + "-shared-owner-1"), Prefetch: 1, BlockSeconds: 3},
+			MessageHandler: makeHandler("shared-1"),
+		},
+		{
+			Name:           label + "-shared-2",
+			Queue:          sharedQueue,
+			Options:        lockdclient.SubscribeOptions{Owner: QueueOwner(label + "-shared-owner-2"), Prefetch: 1, BlockSeconds: 3},
+			MessageHandler: makeHandler("shared-2"),
+		},
+		{
+			Name:           label + "-queue-a",
+			Queue:          queueA,
+			Options:        lockdclient.SubscribeOptions{Owner: QueueOwner(label + "-owner-a"), Prefetch: 1, BlockSeconds: 3},
+			MessageHandler: makeHandler("queue-a"),
+		},
+		{
+			Name:           label + "-queue-b",
+			Queue:          queueB,
+			WithState:      true,
+			Options:        lockdclient.SubscribeOptions{Owner: QueueOwner(label + "-owner-b"), Prefetch: 1, BlockSeconds: 3},
+			MessageHandler: makeHandler("queue-b"),
+		},
+	}...)
+	if err != nil {
+		t.Fatalf("start consumer smoke: %v", err)
+	}
+	if !completed.Load() {
+		mu.Lock()
+		snapshot := make(map[string]int, len(hits))
+		for k, v := range hits {
+			snapshot[k] = v
+		}
+		mu.Unlock()
+		t.Fatalf("start consumer smoke did not satisfy all handlers before context done: hits=%v", snapshot)
+	}
+}
+
+// RunStartConsumerStateSaveRegression verifies the stateful StartConsumer path can:
+// 1) load empty state successfully,
+// 2) perform the first Save without etag conflicts,
+// 3) read back the updated state in the same handler,
+// 4) ack and exit cleanly after context cancellation.
+func RunStartConsumerStateSaveRegression(t testing.TB, cli *lockdclient.Client, opts StartConsumerStateSaveRegressionOptions) {
+	t.Helper()
+	if cli == nil {
+		t.Fatalf("client required")
+	}
+	label := strings.TrimSpace(opts.Label)
+	if label == "" {
+		label = "start-consumer-state-save-regression"
+	}
+	timeout := opts.Timeout
+	if timeout <= 0 {
+		timeout = 20 * time.Second
+	}
+
+	queue := QueueName(label + "-queue")
+	if opts.QueueSetup != nil {
+		opts.QueueSetup(queue)
+	}
+	MustEnqueueBytes(t, cli, queue, []byte(`{"hello":"world"}`))
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	var (
+		handled      atomic.Bool
+		loadedEmpty  atomic.Bool
+		savedState   atomic.Bool
+		reloadedSave atomic.Bool
+	)
+
+	err := cli.StartConsumer(ctx, lockdclient.ConsumerConfig{
+		Name:      label + "-consumer",
+		Queue:     queue,
+		WithState: true,
+		Options: lockdclient.SubscribeOptions{
+			Owner:        QueueOwner(label + "-owner"),
+			Prefetch:     1,
+			BlockSeconds: 3,
+		},
+		MessageHandler: func(handlerCtx context.Context, cm lockdclient.ConsumerMessage) error {
+			if cm.Message == nil {
+				return fmt.Errorf("nil queue message")
+			}
+			if cm.State == nil {
+				return fmt.Errorf("state handle is required for stateful consumer")
+			}
+			defer cm.Message.Close()
+
+			var current struct {
+				Counter int `json:"counter"`
+			}
+			if err := cm.State.Load(handlerCtx, &current); err != nil {
+				return fmt.Errorf("load initial state: %w", err)
+			}
+			if current.Counter != 0 {
+				return fmt.Errorf("expected empty initial state counter, got %d", current.Counter)
+			}
+			loadedEmpty.Store(true)
+
+			current.Counter = 1
+			if err := cm.State.Save(handlerCtx, &current); err != nil {
+				return fmt.Errorf("save initial state: %w", err)
+			}
+			savedState.Store(true)
+
+			var verify struct {
+				Counter int `json:"counter"`
+			}
+			if err := cm.State.Load(handlerCtx, &verify); err != nil {
+				return fmt.Errorf("reload state: %w", err)
+			}
+			if verify.Counter != 1 {
+				return fmt.Errorf("expected reloaded state counter=1, got %d", verify.Counter)
+			}
+			reloadedSave.Store(true)
+
+			ackCtx, ackCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer ackCancel()
+			if err := cm.Message.Ack(ackCtx); err != nil {
+				return fmt.Errorf("ack: %w", err)
+			}
+			handled.Store(true)
+			cancel()
+			return nil
+		},
+		ErrorHandler: func(_ context.Context, event lockdclient.ConsumerError) error {
+			return event.Err
+		},
+	})
+	if err != nil {
+		t.Fatalf("start consumer state save regression: %v", err)
+	}
+
+	if !loadedEmpty.Load() {
+		t.Fatalf("state regression scenario did not observe empty initial state")
+	}
+	if !savedState.Load() {
+		t.Fatalf("state regression scenario did not save state")
+	}
+	if !reloadedSave.Load() {
+		t.Fatalf("state regression scenario did not reload saved state")
+	}
+	if !handled.Load() {
+		t.Fatalf("state regression scenario did not handle and ack message")
+	}
+
+	EnsureQueueEmpty(t, cli, queue)
+}
+
 func replayDeadlineForStore(store string) time.Duration {
 	store = strings.ToLower(strings.TrimSpace(store))
 	switch {

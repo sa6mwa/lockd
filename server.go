@@ -148,8 +148,13 @@ type options struct {
 }
 
 // WithLogger supplies a custom logger.
+// Passing nil falls back to pslog.NoopLogger().
 func WithLogger(l pslog.Logger) Option {
 	return func(o *options) {
+		if l == nil {
+			o.Logger = pslog.NoopLogger()
+			return
+		}
 		o.Logger = l
 	}
 }
@@ -1724,7 +1729,7 @@ func (s *Server) ShutdownWithOptions(ctx context.Context, opts ...CloseOption) e
 		s.lsfObserver.Wait()
 	}
 	if l := s.listener; l != nil {
-		if err := l.Close(); err != nil {
+		if err := l.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 			s.logger.Warn("shutdown.listener.close_error", "error", err)
 		}
 		s.listener = nil
@@ -1826,7 +1831,8 @@ func (s *Server) Abort(ctx context.Context) error {
 	return nil
 }
 
-// WaitUntilReady blocks until the server listener is initialized or context ends.
+// WaitUntilReady blocks until the server listener is initialized or context
+// ends.
 func (s *Server) WaitUntilReady(ctx context.Context) error {
 	select {
 	case <-s.readyCh:

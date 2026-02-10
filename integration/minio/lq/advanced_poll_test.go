@@ -501,12 +501,22 @@ func runMinioQueueQRFThrottling(t *testing.T) {
 	cfg.QRFQueueHardLimit = 3
 	cfg.QRFLockSoftLimit = 1
 	cfg.QRFLockHardLimit = 2
-	cfg.QRFMemorySoftLimitPercent = 70
-	cfg.QRFMemoryHardLimitPercent = 80
-	cfg.QRFMemorySoftLimitBytes = 0
-	cfg.QRFMemoryHardLimitBytes = 0
-	cfg.QRFLoadSoftLimitMultiplier = 2
-	cfg.QRFLoadHardLimitMultiplier = 4
+	// Keep host-derived thresholds effectively disabled so this test remains
+	// deterministic and only validates queue-driven QRF transitions.
+	cfg.QRFMemorySoftLimitPercent = 1000
+	cfg.QRFMemoryHardLimitPercent = 1000
+	cfg.QRFMemorySoftLimitBytes = uint64(1) << 62
+	cfg.QRFMemoryHardLimitBytes = uint64(1) << 62
+	cfg.QRFCPUPercentSoftLimit = 0
+	cfg.QRFCPUPercentHardLimit = 0
+	cfg.QRFCPUPercentSoftLimitSet = true
+	cfg.QRFCPUPercentHardLimitSet = true
+	cfg.QRFSwapSoftLimitPercent = 0
+	cfg.QRFSwapHardLimitPercent = 0
+	cfg.QRFSwapSoftLimitBytes = 0
+	cfg.QRFSwapHardLimitBytes = 0
+	cfg.QRFLoadSoftLimitMultiplier = 1_000_000
+	cfg.QRFLoadHardLimitMultiplier = 1_000_000
 	cfg.QRFSoftDelay = 40 * time.Millisecond
 	cfg.QRFEngagedDelay = 200 * time.Millisecond
 	cfg.QRFRecoveryDelay = 120 * time.Millisecond

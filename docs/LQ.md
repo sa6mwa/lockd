@@ -237,6 +237,11 @@ and retry loops stay linked to the originating enqueue.
   issues a nack with the optional `OnCloseDelay` from `DequeueOptions`.
 - `QueueAck`, `QueueNack`, and `QueueExtend` remain available on the client for
   tooling that operates purely on exported metadata.
+- `StartConsumer` provides a worker-runner abstraction over
+  `Subscribe` and `SubscribeWithState`. It runs one goroutine per
+  `ConsumerConfig`, auto-generates `Options.Owner` when empty, applies
+  restart backoff via `ConsumerRestartPolicy`, and routes panics in handlers
+  and lifecycle hooks through the same restart/error path.
 
 ### CLI (`lockd client queue …`)
 

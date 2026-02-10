@@ -1072,6 +1072,14 @@ func runMemAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase failo
 				lockd.WithDrainLeases(8*time.Second),
 				lockd.WithShutdownTimeout(10*time.Second),
 			)
+			if shutdownErr != nil {
+				return
+			}
+			waitCtx, waitCancel := context.WithTimeout(context.Background(), 12*time.Second)
+			defer waitCancel()
+			if err := hatest.WaitForActive(waitCtx, standbyServer); err != nil {
+				shutdownErr = fmt.Errorf("standby activation: %w", err)
+			}
 		})
 		return shutdownErr
 	}

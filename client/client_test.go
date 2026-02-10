@@ -3,6 +3,8 @@ package client_test
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +15,7 @@ import (
 	"net/http/httptest"
 	"net/textproto"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -25,6 +28,7 @@ import (
 	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/client"
 	"pkt.systems/lockd/namespaces"
+	"pkt.systems/lockd/tlsutil"
 	"pkt.systems/pslog"
 )
 
@@ -335,6 +339,140 @@ func TestClientDefaultSchemeInsecure(t *testing.T) {
 	}
 	if !hit {
 		t.Fatal("expected server to receive request")
+	}
+}
+
+func TestClientWithBundlePathMTLS(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	ca, err := tlsutil.GenerateCA("lockd-sdk-test-ca", time.Hour)
+	if err != nil {
+		t.Fatalf("generate ca: %v", err)
+	}
+	serverIssued, err := ca.IssueServer([]string{"127.0.0.1", "localhost"}, "lockd-sdk-test-server", time.Hour)
+	if err != nil {
+		t.Fatalf("issue server cert: %v", err)
+	}
+	clientIssued, err := ca.IssueClient(tlsutil.ClientCertRequest{
+		CommonName: "lockd-sdk-test-client",
+		Validity:   time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("issue client cert: %v", err)
+	}
+
+	clientBundlePEM, err := tlsutil.EncodeClientBundle(ca.CertPEM, clientIssued.CertPEM, clientIssued.KeyPEM)
+	if err != nil {
+		t.Fatalf("encode client bundle: %v", err)
+	}
+	bundlePath := filepath.Join(t.TempDir(), "client.pem")
+	if err := os.WriteFile(bundlePath, clientBundlePEM, 0o600); err != nil {
+		t.Fatalf("write client bundle: %v", err)
+	}
+
+	serverCert, err := tls.X509KeyPair(serverIssued.CertPEM, serverIssued.KeyPEM)
+	if err != nil {
+		t.Fatalf("load server keypair: %v", err)
+	}
+	clientCAs := x509.NewCertPool()
+	if !clientCAs.AppendCertsFromPEM(ca.CertPEM) {
+		t.Fatal("append ca cert")
+	}
+
+	var hit bool
+	ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/describe" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if len(r.TLS.PeerCertificates) == 0 {
+			t.Fatal("expected peer client certificate")
+		}
+		hit = true
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"key":"demo","version":1}`)
+	}))
+	ts.TLS = &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{serverCert},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    clientCAs,
+	}
+	ts.StartTLS()
+	defer ts.Close()
+
+	cli, err := client.New(ts.URL, client.WithBundlePath(bundlePath))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	resp, err := cli.Describe(ctx, "demo")
+	if err != nil {
+		t.Fatalf("describe: %v", err)
+	}
+	if resp == nil || resp.Key != "demo" {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+	if !hit {
+		t.Fatal("expected server to receive request")
+	}
+}
+
+func TestClientWithBundlePathInvalid(t *testing.T) {
+	_, err := client.New("https://127.0.0.1:9341", client.WithBundlePath(filepath.Join(t.TempDir(), "missing-client.pem")))
+	if err == nil {
+		t.Fatal("expected error for missing bundle")
+	}
+	if !strings.Contains(err.Error(), "load client bundle") {
+		t.Fatalf("expected load client bundle error, got %v", err)
+	}
+}
+
+func TestClientWithBundlePathExpandsEnv(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("LOCKD_TEST_BUNDLE_DIR", dir)
+	missing := filepath.Join(dir, "missing-client.pem")
+	_, err := client.New("https://127.0.0.1:9341", client.WithBundlePath("$LOCKD_TEST_BUNDLE_DIR/missing-client.pem"))
+	if err == nil {
+		t.Fatal("expected error for missing bundle")
+	}
+	if !strings.Contains(err.Error(), missing) {
+		t.Fatalf("expected expanded bundle path %q in error, got %v", missing, err)
+	}
+	if strings.Contains(err.Error(), "$LOCKD_TEST_BUNDLE_DIR") {
+		t.Fatalf("expected env var to be expanded, got %v", err)
+	}
+}
+
+func TestClientWithBundlePathExpandsHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	missing := filepath.Join(home, ".lockd", "missing-client.pem")
+	_, err := client.New("https://127.0.0.1:9341", client.WithBundlePath("~/.lockd/missing-client.pem"))
+	if err == nil {
+		t.Fatal("expected error for missing bundle")
+	}
+	if !strings.Contains(err.Error(), missing) {
+		t.Fatalf("expected expanded home bundle path %q in error, got %v", missing, err)
+	}
+	if strings.Contains(err.Error(), "~/.lockd") {
+		t.Fatalf("expected home path to be expanded, got %v", err)
+	}
+}
+
+func TestClientWithBundlePathDisableExpansion(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("LOCKD_TEST_BUNDLE_DIR", dir)
+	literal := "$LOCKD_TEST_BUNDLE_DIR/missing-client.pem"
+	_, err := client.New(
+		"https://127.0.0.1:9341",
+		client.WithBundlePath(literal),
+		client.WithBundlePathDisableExpansion(),
+	)
+	if err == nil {
+		t.Fatal("expected error for missing bundle")
+	}
+	if !strings.Contains(err.Error(), literal) {
+		t.Fatalf("expected literal bundle path %q in error, got %v", literal, err)
 	}
 }
 
@@ -1457,6 +1595,7 @@ func TestTestServerChaosProxy(t *testing.T) {
 }
 
 type testQueueMessage struct {
+	Namespace                string         `json:"namespace,omitempty"`
 	Queue                    string         `json:"queue"`
 	MessageID                string         `json:"message_id"`
 	Attempts                 int            `json:"attempts"`
@@ -1474,6 +1613,7 @@ type testQueueMessage struct {
 	StateLeaseID             string         `json:"state_lease_id,omitempty"`
 	StateFencingToken        int64          `json:"state_fencing_token,omitempty"`
 	StateLeaseExpiresAtUnix  int64          `json:"state_lease_expires_at_unix,omitempty"`
+	StateTxnID               string         `json:"state_txn_id,omitempty"`
 	CorrelationID            string         `json:"correlation_id,omitempty"`
 }
 
@@ -2046,6 +2186,444 @@ func TestClientDequeueWithState(t *testing.T) {
 	}
 }
 
+func TestQueueStateHandleHelpers(t *testing.T) {
+	now := time.Now().Unix()
+	message := testQueueMessage{
+		Namespace:                "default",
+		Queue:                    "workflow",
+		MessageID:                "msg-stateful-helpers",
+		Attempts:                 1,
+		MaxAttempts:              4,
+		NotVisibleUntilUnix:      now,
+		VisibilityTimeoutSeconds: 10,
+		PayloadContentType:       "application/json",
+		PayloadBytes:             2,
+		LeaseID:                  "lease-msg",
+		LeaseExpiresAtUnix:       now + 20,
+		FencingToken:             11,
+		MetaETag:                 "meta-stateful",
+		StateETag:                "etag-initial",
+		StateLeaseID:             "lease-state",
+		StateFencingToken:        17,
+		StateLeaseExpiresAtUnix:  now + 20,
+		StateTxnID:               "state-txn-1",
+		CorrelationID:            "cid-state-handle",
+	}
+	const expectedKey = "q/workflow/state/msg-stateful-helpers"
+
+	type observed struct {
+		Key           string
+		Namespace     string
+		LeaseID       string
+		TxnID         string
+		IfETag        string
+		IfVersion     string
+		FencingToken  string
+		CorrelationID string
+		Body          map[string]any
+	}
+
+	var (
+		mu          sync.Mutex
+		getReq      observed
+		updateReq   observed
+		metadataReq observed
+		removeReq   observed
+		nackReq     api.NackRequest
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		record := func() observed {
+			return observed{
+				Key:           r.URL.Query().Get("key"),
+				Namespace:     r.URL.Query().Get("namespace"),
+				LeaseID:       r.Header.Get("X-Lease-ID"),
+				TxnID:         r.Header.Get("X-Txn-ID"),
+				IfETag:        r.Header.Get("X-If-State-ETag"),
+				IfVersion:     r.Header.Get("X-If-Version"),
+				FencingToken:  r.Header.Get("X-Fencing-Token"),
+				CorrelationID: r.Header.Get("X-Correlation-Id"),
+			}
+		}
+
+		switch r.URL.Path {
+		case "/v1/queue/dequeueWithState":
+			mw := multipart.NewWriter(w)
+			w.Header().Set("Content-Type", "multipart/related; boundary="+mw.Boundary())
+			metaHeader := textproto.MIMEHeader{}
+			metaHeader.Set("Content-Type", "application/json")
+			metaHeader.Set("Content-Disposition", `form-data; name="meta"`)
+			metaPart, err := mw.CreatePart(metaHeader)
+			if err != nil {
+				t.Fatalf("create meta part: %v", err)
+			}
+			if err := json.NewEncoder(metaPart).Encode(map[string]any{"message": message}); err != nil {
+				t.Fatalf("encode meta: %v", err)
+			}
+			payloadHeader := textproto.MIMEHeader{}
+			payloadHeader.Set("Content-Type", message.PayloadContentType)
+			payloadHeader.Set("Content-Disposition", `form-data; name="payload"`)
+			payloadPart, err := mw.CreatePart(payloadHeader)
+			if err != nil {
+				t.Fatalf("create payload part: %v", err)
+			}
+			if _, err := payloadPart.Write([]byte("{}")); err != nil {
+				t.Fatalf("write payload: %v", err)
+			}
+			if err := mw.Close(); err != nil {
+				t.Fatalf("close multipart: %v", err)
+			}
+		case "/v1/get":
+			obs := record()
+			mu.Lock()
+			getReq = obs
+			mu.Unlock()
+			w.Header().Set("ETag", `"etag-after-get"`)
+			w.Header().Set("X-Key-Version", "8")
+			w.Header().Set("X-Fencing-Token", "19")
+			w.Header().Set("X-Correlation-Id", "cid-state-handle-get")
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"step":"one"}`)
+		case "/v1/update":
+			obs := record()
+			if err := json.NewDecoder(r.Body).Decode(&obs.Body); err != nil {
+				t.Fatalf("decode update body: %v", err)
+			}
+			mu.Lock()
+			updateReq = obs
+			mu.Unlock()
+			w.Header().Set("X-Fencing-Token", "21")
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"new_version":9,"new_state_etag":"etag-after-update","bytes":14}`)
+		case "/v1/metadata":
+			obs := record()
+			if err := json.NewDecoder(r.Body).Decode(&obs.Body); err != nil {
+				t.Fatalf("decode metadata body: %v", err)
+			}
+			mu.Lock()
+			metadataReq = obs
+			mu.Unlock()
+			w.Header().Set("X-Fencing-Token", "22")
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"version":10,"metadata":{"query_hidden":true}}`)
+		case "/v1/remove":
+			obs := record()
+			mu.Lock()
+			removeReq = obs
+			mu.Unlock()
+			w.Header().Set("X-Fencing-Token", "23")
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"removed":true,"new_version":11}`)
+		case "/v1/queue/nack":
+			var req api.NackRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode nack: %v", err)
+			}
+			mu.Lock()
+			nackReq = req
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"nacked":true}`)
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	cli, err := client.New(srv.URL, client.WithDisableMTLS(true), client.WithEndpointShuffle(false))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	msg, err := cli.DequeueWithState(context.Background(), "workflow", client.DequeueOptions{
+		Namespace: "default",
+		Owner:     "worker-helpers",
+	})
+	if err != nil {
+		t.Fatalf("dequeue with state: %v", err)
+	}
+	state := msg.StateHandle()
+	if state == nil {
+		t.Fatalf("expected state handle")
+	}
+	if state.ETag() != "" {
+		t.Fatalf("expected empty initial workflow etag, got %q", state.ETag())
+	}
+
+	var loaded struct {
+		Step string `json:"step"`
+	}
+	if err := state.Load(context.Background(), &loaded); err != nil {
+		t.Fatalf("state load: %v", err)
+	}
+	if loaded.Step != "one" {
+		t.Fatalf("unexpected loaded state: %+v", loaded)
+	}
+	if state.ETag() != "etag-after-get" {
+		t.Fatalf("expected refreshed etag, got %q", state.ETag())
+	}
+
+	if err := state.Save(context.Background(), map[string]any{"step": "two"}); err != nil {
+		t.Fatalf("state save: %v", err)
+	}
+	if state.ETag() != "etag-after-update" {
+		t.Fatalf("expected updated etag, got %q", state.ETag())
+	}
+
+	metaRes, err := state.UpdateMetadata(context.Background(), client.MetadataOptions{QueryHidden: client.Bool(true)})
+	if err != nil {
+		t.Fatalf("state update metadata: %v", err)
+	}
+	if metaRes == nil || metaRes.Version != 10 {
+		t.Fatalf("unexpected metadata response: %+v", metaRes)
+	}
+
+	removeRes, err := state.Remove(context.Background())
+	if err != nil {
+		t.Fatalf("state remove: %v", err)
+	}
+	if removeRes == nil || !removeRes.Removed || removeRes.NewVersion != 11 {
+		t.Fatalf("unexpected remove response: %+v", removeRes)
+	}
+	if state.ETag() != "" {
+		t.Fatalf("expected etag cleared after remove, got %q", state.ETag())
+	}
+	if err := msg.Close(); err != nil {
+		t.Fatalf("close message: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if getReq.Key != expectedKey || getReq.Namespace != "default" {
+		t.Fatalf("unexpected get query: %+v", getReq)
+	}
+	if getReq.LeaseID != "lease-state" || getReq.FencingToken != "17" || getReq.CorrelationID != "cid-state-handle" {
+		t.Fatalf("unexpected get headers: %+v", getReq)
+	}
+
+	if updateReq.Key != expectedKey || updateReq.Namespace != "default" {
+		t.Fatalf("unexpected update query: %+v", updateReq)
+	}
+	if updateReq.IfETag != "etag-after-get" || updateReq.IfVersion != "8" {
+		t.Fatalf("unexpected update conditionals: %+v", updateReq)
+	}
+	if updateReq.FencingToken != "19" || updateReq.TxnID != "state-txn-1" {
+		t.Fatalf("unexpected update lease/txn headers: %+v", updateReq)
+	}
+	if updateReq.CorrelationID != "cid-state-handle" {
+		t.Fatalf("unexpected update correlation id: %+v", updateReq)
+	}
+	if step, ok := updateReq.Body["step"].(string); !ok || step != "two" {
+		t.Fatalf("unexpected update payload: %+v", updateReq.Body)
+	}
+
+	if metadataReq.Key != expectedKey || metadataReq.Namespace != "default" {
+		t.Fatalf("unexpected metadata query: %+v", metadataReq)
+	}
+	if metadataReq.IfVersion != "9" || metadataReq.FencingToken != "21" || metadataReq.TxnID != "state-txn-1" {
+		t.Fatalf("unexpected metadata headers: %+v", metadataReq)
+	}
+	if metadataReq.CorrelationID != "cid-state-handle" {
+		t.Fatalf("unexpected metadata correlation id: %+v", metadataReq)
+	}
+	if hidden, ok := metadataReq.Body["query_hidden"].(bool); !ok || !hidden {
+		t.Fatalf("unexpected metadata payload: %+v", metadataReq.Body)
+	}
+
+	if removeReq.Key != expectedKey || removeReq.Namespace != "default" {
+		t.Fatalf("unexpected remove query: %+v", removeReq)
+	}
+	if removeReq.IfETag != "etag-after-update" || removeReq.IfVersion != "9" {
+		t.Fatalf("unexpected remove conditionals: %+v", removeReq)
+	}
+	if removeReq.FencingToken != "22" || removeReq.TxnID != "state-txn-1" {
+		t.Fatalf("unexpected remove lease/txn headers: %+v", removeReq)
+	}
+	if removeReq.CorrelationID != "cid-state-handle" {
+		t.Fatalf("unexpected remove correlation id: %+v", removeReq)
+	}
+
+	if nackReq.StateLeaseID != "lease-state" {
+		t.Fatalf("expected state lease in nack: %+v", nackReq)
+	}
+}
+
+func TestQueueStateHandleHelperOverrides(t *testing.T) {
+	now := time.Now().Unix()
+	message := testQueueMessage{
+		Namespace:                "default",
+		Queue:                    "workflow",
+		MessageID:                "msg-stateful-overrides",
+		Attempts:                 1,
+		MaxAttempts:              4,
+		NotVisibleUntilUnix:      now,
+		VisibilityTimeoutSeconds: 10,
+		PayloadContentType:       "application/json",
+		PayloadBytes:             2,
+		LeaseID:                  "lease-msg",
+		LeaseExpiresAtUnix:       now + 20,
+		FencingToken:             11,
+		MetaETag:                 "meta-stateful",
+		StateETag:                "etag-initial",
+		StateLeaseID:             "lease-state",
+		StateFencingToken:        17,
+		StateLeaseExpiresAtUnix:  now + 20,
+		StateTxnID:               "state-txn-1",
+	}
+
+	type observed struct {
+		Key       string
+		Namespace string
+		TxnID     string
+		IfETag    string
+		IfVersion string
+		Token     string
+	}
+
+	var (
+		mu          sync.Mutex
+		updateReq   observed
+		removeReq   observed
+		seenNack    bool
+		seenDequeue bool
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/queue/dequeueWithState":
+			mu.Lock()
+			seenDequeue = true
+			mu.Unlock()
+			mw := multipart.NewWriter(w)
+			w.Header().Set("Content-Type", "multipart/related; boundary="+mw.Boundary())
+			metaHeader := textproto.MIMEHeader{}
+			metaHeader.Set("Content-Type", "application/json")
+			metaHeader.Set("Content-Disposition", `form-data; name="meta"`)
+			metaPart, err := mw.CreatePart(metaHeader)
+			if err != nil {
+				t.Fatalf("create meta part: %v", err)
+			}
+			if err := json.NewEncoder(metaPart).Encode(map[string]any{"message": message}); err != nil {
+				t.Fatalf("encode meta: %v", err)
+			}
+			payloadHeader := textproto.MIMEHeader{}
+			payloadHeader.Set("Content-Type", message.PayloadContentType)
+			payloadHeader.Set("Content-Disposition", `form-data; name="payload"`)
+			payloadPart, err := mw.CreatePart(payloadHeader)
+			if err != nil {
+				t.Fatalf("create payload part: %v", err)
+			}
+			if _, err := payloadPart.Write([]byte("{}")); err != nil {
+				t.Fatalf("write payload: %v", err)
+			}
+			if err := mw.Close(); err != nil {
+				t.Fatalf("close multipart: %v", err)
+			}
+		case "/v1/update":
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode update body: %v", err)
+			}
+			mu.Lock()
+			updateReq = observed{
+				Key:       r.URL.Query().Get("key"),
+				Namespace: r.URL.Query().Get("namespace"),
+				TxnID:     r.Header.Get("X-Txn-ID"),
+				IfETag:    r.Header.Get("X-If-State-ETag"),
+				IfVersion: r.Header.Get("X-If-Version"),
+				Token:     r.Header.Get("X-Fencing-Token"),
+			}
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"new_version":2,"new_state_etag":"etag-override","bytes":2}`)
+		case "/v1/remove":
+			mu.Lock()
+			removeReq = observed{
+				Key:       r.URL.Query().Get("key"),
+				Namespace: r.URL.Query().Get("namespace"),
+				TxnID:     r.Header.Get("X-Txn-ID"),
+				IfETag:    r.Header.Get("X-If-State-ETag"),
+				IfVersion: r.Header.Get("X-If-Version"),
+				Token:     r.Header.Get("X-Fencing-Token"),
+			}
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"removed":true,"new_version":3}`)
+		case "/v1/queue/nack":
+			mu.Lock()
+			seenNack = true
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"nacked":true}`)
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	cli, err := client.New(srv.URL, client.WithDisableMTLS(true), client.WithEndpointShuffle(false))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	msg, err := cli.DequeueWithState(context.Background(), "workflow", client.DequeueOptions{
+		Namespace: "default",
+		Owner:     "worker-overrides",
+	})
+	if err != nil {
+		t.Fatalf("dequeue with state: %v", err)
+	}
+	state := msg.StateHandle()
+	if state == nil {
+		t.Fatalf("expected state handle")
+	}
+
+	if _, err := state.UpdateWithOptions(context.Background(), strings.NewReader(`{"ok":true}`), client.UpdateOptions{
+		Namespace:    "override-ns",
+		TxnID:        "override-update-txn",
+		IfETag:       "override-etag",
+		IfVersion:    "42",
+		FencingToken: "777",
+	}); err != nil {
+		t.Fatalf("update with options: %v", err)
+	}
+
+	if _, err := state.RemoveWithOptions(context.Background(), client.RemoveOptions{
+		Namespace:    "override-ns",
+		TxnID:        "override-remove-txn",
+		IfETag:       "override-remove-etag",
+		IfVersion:    "43",
+		FencingToken: "778",
+	}); err != nil {
+		t.Fatalf("remove with options: %v", err)
+	}
+	if err := msg.Close(); err != nil {
+		t.Fatalf("close message: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !seenDequeue {
+		t.Fatalf("expected dequeue with state request")
+	}
+	if !seenNack {
+		t.Fatalf("expected close to nack message")
+	}
+	if updateReq.Key != "q/workflow/state/msg-stateful-overrides" || updateReq.Namespace != "override-ns" {
+		t.Fatalf("unexpected update query: %+v", updateReq)
+	}
+	if updateReq.TxnID != "override-update-txn" || updateReq.IfETag != "override-etag" || updateReq.IfVersion != "42" || updateReq.Token != "777" {
+		t.Fatalf("unexpected update override headers: %+v", updateReq)
+	}
+	if removeReq.Key != "q/workflow/state/msg-stateful-overrides" || removeReq.Namespace != "override-ns" {
+		t.Fatalf("unexpected remove query: %+v", removeReq)
+	}
+	if removeReq.TxnID != "override-remove-txn" || removeReq.IfETag != "override-remove-etag" || removeReq.IfVersion != "43" || removeReq.Token != "778" {
+		t.Fatalf("unexpected remove override headers: %+v", removeReq)
+	}
+}
+
 func TestClientSubscribe(t *testing.T) {
 	now := time.Now().Unix()
 	messages := []testQueueMessage{
@@ -2251,6 +2829,1166 @@ func TestClientSubscribeWithState(t *testing.T) {
 	}
 	if stateLease, ok := ackReq["state_lease_id"].(string); !ok || stateLease != "lease-state" {
 		t.Fatalf("expected state lease in ack: %+v", ackReq)
+	}
+}
+
+func TestClientSubscribeWithStateAutoExtendsDuringHandler(t *testing.T) {
+	now := time.Now().Unix()
+	message := testQueueMessage{
+		Queue:                    "workflow",
+		MessageID:                "msg-state-extend",
+		Attempts:                 1,
+		MaxAttempts:              5,
+		NotVisibleUntilUnix:      now,
+		VisibilityTimeoutSeconds: 1,
+		PayloadContentType:       "application/json",
+		PayloadBytes:             2,
+		LeaseID:                  "lease-msg",
+		LeaseExpiresAtUnix:       now + 5,
+		FencingToken:             13,
+		MetaETag:                 "meta-before",
+		StateETag:                "state-etag",
+		StateLeaseID:             "lease-state",
+		StateLeaseExpiresAtUnix:  now + 5,
+		StateFencingToken:        19,
+	}
+
+	var (
+		mu         sync.Mutex
+		extendReqs []api.ExtendRequest
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/queue/subscribeWithState":
+			mw := multipart.NewWriter(w)
+			w.Header().Set("Content-Type", "multipart/related; boundary="+mw.Boundary())
+			w.WriteHeader(http.StatusOK)
+
+			metaHeader := textproto.MIMEHeader{}
+			metaHeader.Set("Content-Type", "application/json")
+			metaHeader.Set("Content-Disposition", `form-data; name="meta"`)
+			metaPart, err := mw.CreatePart(metaHeader)
+			if err != nil {
+				t.Fatalf("create meta part: %v", err)
+			}
+			if err := json.NewEncoder(metaPart).Encode(map[string]any{
+				"message":     message,
+				"next_cursor": "cursor-1",
+			}); err != nil {
+				t.Fatalf("encode meta: %v", err)
+			}
+
+			payloadHeader := textproto.MIMEHeader{}
+			payloadHeader.Set("Content-Type", message.PayloadContentType)
+			payloadHeader.Set("Content-Disposition", `form-data; name="payload"`)
+			payloadPart, err := mw.CreatePart(payloadHeader)
+			if err != nil {
+				t.Fatalf("create payload part: %v", err)
+			}
+			if _, err := payloadPart.Write([]byte("{}")); err != nil {
+				t.Fatalf("write payload: %v", err)
+			}
+
+			if err := mw.Close(); err != nil {
+				t.Fatalf("close multipart: %v", err)
+			}
+		case "/v1/queue/extend":
+			var req api.ExtendRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode extend: %v", err)
+			}
+			mu.Lock()
+			extendReqs = append(extendReqs, req)
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"lease_expires_at_unix":       now + 30,
+				"visibility_timeout_seconds":  1,
+				"meta_etag":                   "meta-after",
+				"state_lease_expires_at_unix": now + 30,
+			})
+		case "/v1/queue/ack":
+			_ = json.NewEncoder(w).Encode(map[string]any{"acked": true})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	cli, err := client.New(srv.URL, client.WithDisableMTLS(true), client.WithEndpointShuffle(false))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := cli.SubscribeWithState(ctx, "workflow", client.SubscribeOptions{Owner: "worker-a"}, func(handlerCtx context.Context, msg *client.QueueMessage, state *client.QueueStateHandle) error {
+		defer msg.Close()
+		if state == nil {
+			return fmt.Errorf("expected state handle")
+		}
+		select {
+		case <-time.After(1200 * time.Millisecond):
+		case <-handlerCtx.Done():
+			return handlerCtx.Err()
+		}
+		return msg.Ack(handlerCtx)
+	}); err != nil {
+		t.Fatalf("subscribe with state: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(extendReqs) == 0 {
+		t.Fatalf("expected implicit queue extend during long-running handler")
+	}
+	if extendReqs[0].StateLeaseID != "lease-state" {
+		t.Fatalf("expected state lease in extend request, got %+v", extendReqs[0])
+	}
+}
+
+func TestClientStartConsumerValidation(t *testing.T) {
+	var nilClient *client.Client
+	if err := nilClient.StartConsumer(context.Background(), client.ConsumerConfig{}); err == nil || !strings.Contains(err.Error(), "client is nil") {
+		t.Fatalf("expected nil client validation error, got %v", err)
+	}
+
+	cli, err := client.New("http://127.0.0.1", client.WithDisableMTLS(true))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	var nilCtx context.Context
+	if err := cli.StartConsumer(nilCtx, client.ConsumerConfig{}); err == nil || !strings.Contains(err.Error(), "context is required") {
+		t.Fatalf("expected nil context validation error, got %v", err)
+	}
+	if err := cli.StartConsumer(context.Background()); err == nil || !strings.Contains(err.Error(), "at least one consumer config") {
+		t.Fatalf("expected empty config validation error, got %v", err)
+	}
+	if err := cli.StartConsumer(context.Background(), []client.ConsumerConfig{{
+		Queue:          "orders",
+		Options:        client.SubscribeOptions{Owner: "worker-a"},
+		MessageHandler: nil,
+	}}...); err == nil || !strings.Contains(err.Error(), "message handler is required") {
+		t.Fatalf("expected message handler validation error, got %v", err)
+	}
+	if err := cli.StartConsumer(context.Background(), []client.ConsumerConfig{{
+		Queue:          " ",
+		Options:        client.SubscribeOptions{Owner: "worker-a"},
+		MessageHandler: func(context.Context, client.ConsumerMessage) error { return nil },
+	}}...); err == nil || !strings.Contains(err.Error(), "queue is required") {
+		t.Fatalf("expected queue validation error, got %v", err)
+	}
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := cli.StartConsumer(canceledCtx, []client.ConsumerConfig{{
+		Queue:          "orders",
+		Options:        client.SubscribeOptions{},
+		MessageHandler: func(context.Context, client.ConsumerMessage) error { return nil },
+	}}...); err != nil {
+		t.Fatalf("expected nil on canceled context with default owner, got %v", err)
+	}
+}
+
+func TestClientStartConsumerDefaultsOwnerWhenEmpty(t *testing.T) {
+	now := time.Now().Unix()
+	var (
+		mu           sync.Mutex
+		owners       []string
+		subscribeSeq int
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/queue/subscribe":
+			var req api.DequeueRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode subscribe request: %v", err)
+			}
+			mu.Lock()
+			owners = append(owners, req.Owner)
+			subscribeSeq++
+			seq := subscribeSeq
+			mu.Unlock()
+
+			msg := testQueueMessage{
+				Namespace:                "default",
+				Queue:                    req.Queue,
+				MessageID:                fmt.Sprintf("msg-%d", seq),
+				Attempts:                 1,
+				MaxAttempts:              5,
+				NotVisibleUntilUnix:      now,
+				VisibilityTimeoutSeconds: 10,
+				PayloadContentType:       "application/json",
+				PayloadBytes:             2,
+				LeaseID:                  fmt.Sprintf("lease-%d", seq),
+				LeaseExpiresAtUnix:       now + 30,
+				FencingToken:             int64(seq),
+				MetaETag:                 fmt.Sprintf("etag-%d", seq),
+			}
+
+			mw := multipart.NewWriter(w)
+			w.Header().Set("Content-Type", "multipart/related; boundary="+mw.Boundary())
+			w.WriteHeader(http.StatusOK)
+
+			metaHeader := textproto.MIMEHeader{}
+			metaHeader.Set("Content-Type", "application/json")
+			metaHeader.Set("Content-Disposition", `form-data; name="meta"`)
+			metaPart, err := mw.CreatePart(metaHeader)
+			if err != nil {
+				t.Fatalf("create meta part: %v", err)
+			}
+			if err := json.NewEncoder(metaPart).Encode(map[string]any{
+				"message":     msg,
+				"next_cursor": fmt.Sprintf("cursor-%d", seq),
+			}); err != nil {
+				t.Fatalf("encode subscribe meta: %v", err)
+			}
+
+			payloadHeader := textproto.MIMEHeader{}
+			payloadHeader.Set("Content-Type", "application/json")
+			payloadHeader.Set("Content-Disposition", `form-data; name="payload"`)
+			payloadPart, err := mw.CreatePart(payloadHeader)
+			if err != nil {
+				t.Fatalf("create payload part: %v", err)
+			}
+			if _, err := payloadPart.Write([]byte("{}")); err != nil {
+				t.Fatalf("write payload: %v", err)
+			}
+			if err := mw.Close(); err != nil {
+				t.Fatalf("close multipart: %v", err)
+			}
+		case "/v1/queue/ack":
+			_ = json.NewEncoder(w).Encode(map[string]any{"acked": true})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	cli, err := client.New(srv.URL, client.WithDisableMTLS(true), client.WithEndpointShuffle(false))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	runCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var handled atomic.Int32
+	err = cli.StartConsumer(runCtx,
+		client.ConsumerConfig{
+			Queue: "orders",
+			Options: client.SubscribeOptions{
+				Owner: "",
+			},
+			MessageHandler: func(ctx context.Context, cm client.ConsumerMessage) error {
+				defer cm.Message.Close()
+				if err := cm.Message.Ack(ctx); err != nil {
+					return err
+				}
+				if handled.Add(1) == 2 {
+					cancel()
+				}
+				return nil
+			},
+		},
+		client.ConsumerConfig{
+			Queue: "orders",
+			Options: client.SubscribeOptions{
+				Owner: "",
+			},
+			MessageHandler: func(ctx context.Context, cm client.ConsumerMessage) error {
+				defer cm.Message.Close()
+				if err := cm.Message.Ack(ctx); err != nil {
+					return err
+				}
+				if handled.Add(1) == 2 {
+					cancel()
+				}
+				return nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("expected nil shutdown, got %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(owners) < 2 {
+		t.Fatalf("expected at least 2 subscribe owners, got %d", len(owners))
+	}
+	if strings.TrimSpace(owners[0]) == "" || strings.TrimSpace(owners[1]) == "" {
+		t.Fatalf("expected non-empty generated owners, got %+v", owners)
+	}
+	if owners[0] == owners[1] {
+		t.Fatalf("expected unique generated owners, got %+v", owners)
+	}
+}
+
+func TestClientStartConsumerSharedMessageHandler(t *testing.T) {
+	now := time.Now().Unix()
+	queueMessages := map[string]testQueueMessage{
+		"queue-a": {
+			Queue:                    "queue-a",
+			MessageID:                "msg-a",
+			Attempts:                 1,
+			MaxAttempts:              4,
+			NotVisibleUntilUnix:      now,
+			VisibilityTimeoutSeconds: 15,
+			PayloadContentType:       "text/plain",
+			PayloadBytes:             5,
+			LeaseID:                  "lease-a",
+			LeaseExpiresAtUnix:       now + 30,
+			FencingToken:             11,
+		},
+		"queue-b": {
+			Queue:                    "queue-b",
+			MessageID:                "msg-b",
+			Attempts:                 1,
+			MaxAttempts:              4,
+			NotVisibleUntilUnix:      now,
+			VisibilityTimeoutSeconds: 15,
+			PayloadContentType:       "text/plain",
+			PayloadBytes:             5,
+			LeaseID:                  "lease-b",
+			LeaseExpiresAtUnix:       now + 30,
+			FencingToken:             12,
+		},
+	}
+	payloads := map[string][]byte{
+		"queue-a": []byte("alpha"),
+		"queue-b": []byte("bravo"),
+	}
+
+	var (
+		ackCount atomic.Int32
+		seenMu   sync.Mutex
+		seen     = map[string]bool{}
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/queue/subscribe":
+			var req api.DequeueRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode subscribe: %v", err)
+			}
+			msg, ok := queueMessages[req.Queue]
+			if !ok {
+				t.Fatalf("unexpected queue %q", req.Queue)
+			}
+			mw := multipart.NewWriter(w)
+			w.Header().Set("Content-Type", "multipart/related; boundary="+mw.Boundary())
+			w.WriteHeader(http.StatusOK)
+
+			metaHeader := textproto.MIMEHeader{}
+			metaHeader.Set("Content-Type", "application/json")
+			metaHeader.Set("Content-Disposition", `form-data; name="meta"`)
+			metaPart, err := mw.CreatePart(metaHeader)
+			if err != nil {
+				t.Fatalf("create meta part: %v", err)
+			}
+			if err := json.NewEncoder(metaPart).Encode(map[string]any{"message": msg, "next_cursor": "cursor"}); err != nil {
+				t.Fatalf("encode meta: %v", err)
+			}
+			payloadHeader := textproto.MIMEHeader{}
+			payloadHeader.Set("Content-Type", msg.PayloadContentType)
+			payloadHeader.Set("Content-Disposition", `form-data; name="payload"`)
+			payloadPart, err := mw.CreatePart(payloadHeader)
+			if err != nil {
+				t.Fatalf("create payload part: %v", err)
+			}
+			if _, err := payloadPart.Write(payloads[req.Queue]); err != nil {
+				t.Fatalf("write payload: %v", err)
+			}
+			if err := mw.Close(); err != nil {
+				t.Fatalf("close multipart: %v", err)
+			}
+		case "/v1/queue/ack":
+			ackCount.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]any{"acked": true})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	cli, err := client.New(srv.URL, client.WithDisableMTLS(true), client.WithEndpointShuffle(false))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	handler := func(_ context.Context, cm client.ConsumerMessage) error {
+		defer cm.Message.Close()
+		if cm.Client != cli {
+			return fmt.Errorf("handler received unexpected client pointer")
+		}
+		if cm.Logger == nil {
+			return fmt.Errorf("handler received nil logger")
+		}
+		if cm.Name() != cm.Queue {
+			return fmt.Errorf("expected default consumer name %q, got %q", cm.Queue, cm.Name())
+		}
+		if cm.WithState {
+			return fmt.Errorf("expected non-stateful message")
+		}
+		if cm.State != nil {
+			return fmt.Errorf("expected nil state handle")
+		}
+		body, err := io.ReadAll(cm.Message)
+		if err != nil {
+			return err
+		}
+		if string(body) != string(payloads[cm.Queue]) {
+			return fmt.Errorf("unexpected payload for %s: %q", cm.Queue, body)
+		}
+		if err := cm.Message.Ack(context.Background()); err != nil {
+			return err
+		}
+		seenMu.Lock()
+		seen[cm.Queue] = true
+		gotBoth := seen["queue-a"] && seen["queue-b"]
+		seenMu.Unlock()
+		if gotBoth {
+			cancel()
+		}
+		return nil
+	}
+
+	err = cli.StartConsumer(ctx, []client.ConsumerConfig{
+		{
+			Queue:          "queue-a",
+			Options:        client.SubscribeOptions{Owner: "worker-a"},
+			MessageHandler: handler,
+		},
+		{
+			Queue:          "queue-b",
+			Options:        client.SubscribeOptions{Owner: "worker-b"},
+			MessageHandler: handler,
+		},
+	}...)
+	if err != nil {
+		t.Fatalf("start consumer: %v", err)
+	}
+
+	seenMu.Lock()
+	gotQueueA := seen["queue-a"]
+	gotQueueB := seen["queue-b"]
+	seenMu.Unlock()
+	if !gotQueueA || !gotQueueB {
+		t.Fatalf("expected both queues to be handled, got queue-a=%v queue-b=%v", gotQueueA, gotQueueB)
+	}
+	if ackCount.Load() < 2 {
+		t.Fatalf("expected at least 2 ack requests, got %d", ackCount.Load())
+	}
+}
+
+func TestClientStartConsumerWithStateMessage(t *testing.T) {
+	now := time.Now().Unix()
+	message := testQueueMessage{
+		Queue:                    "workflow",
+		MessageID:                "msg-state",
+		Attempts:                 1,
+		MaxAttempts:              5,
+		NotVisibleUntilUnix:      now,
+		VisibilityTimeoutSeconds: 20,
+		PayloadContentType:       "application/json",
+		PayloadBytes:             2,
+		LeaseID:                  "lease-msg",
+		LeaseExpiresAtUnix:       now + 40,
+		FencingToken:             21,
+		StateETag:                "state-etag",
+		StateLeaseID:             "lease-state",
+		StateLeaseExpiresAtUnix:  now + 40,
+		StateFencingToken:        31,
+	}
+
+	var ackReq map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/queue/subscribeWithState":
+			mw := multipart.NewWriter(w)
+			w.Header().Set("Content-Type", "multipart/related; boundary="+mw.Boundary())
+			w.WriteHeader(http.StatusOK)
+			metaHeader := textproto.MIMEHeader{}
+			metaHeader.Set("Content-Type", "application/json")
+			metaHeader.Set("Content-Disposition", `form-data; name="meta"`)
+			metaPart, err := mw.CreatePart(metaHeader)
+			if err != nil {
+				t.Fatalf("create meta part: %v", err)
+			}
+			if err := json.NewEncoder(metaPart).Encode(map[string]any{
+				"message":     message,
+				"next_cursor": "cursor-1",
+			}); err != nil {
+				t.Fatalf("encode meta: %v", err)
+			}
+			payloadHeader := textproto.MIMEHeader{}
+			payloadHeader.Set("Content-Type", message.PayloadContentType)
+			payloadHeader.Set("Content-Disposition", `form-data; name="payload"`)
+			payloadPart, err := mw.CreatePart(payloadHeader)
+			if err != nil {
+				t.Fatalf("create payload part: %v", err)
+			}
+			if _, err := payloadPart.Write([]byte("{}")); err != nil {
+				t.Fatalf("write payload: %v", err)
+			}
+			if err := mw.Close(); err != nil {
+				t.Fatalf("close multipart: %v", err)
+			}
+		case "/v1/queue/ack":
+			if err := json.NewDecoder(r.Body).Decode(&ackReq); err != nil {
+				t.Fatalf("decode ack: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"acked": true})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	cli, err := client.New(srv.URL, client.WithDisableMTLS(true), client.WithEndpointShuffle(false))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	err = cli.StartConsumer(ctx, []client.ConsumerConfig{
+		{
+			Queue:     "workflow",
+			WithState: true,
+			Options:   client.SubscribeOptions{Owner: "state-worker"},
+			MessageHandler: func(_ context.Context, cm client.ConsumerMessage) error {
+				defer cm.Message.Close()
+				if !cm.WithState {
+					return fmt.Errorf("expected stateful delivery")
+				}
+				if cm.State == nil {
+					return fmt.Errorf("expected state handle")
+				}
+				if cm.State.LeaseID() != "lease-state" {
+					return fmt.Errorf("unexpected state lease id %q", cm.State.LeaseID())
+				}
+				if err := cm.Message.Ack(context.Background()); err != nil {
+					return err
+				}
+				cancel()
+				return nil
+			},
+		},
+	}...)
+	if err != nil {
+		t.Fatalf("start consumer: %v", err)
+	}
+	if ackReq == nil {
+		t.Fatalf("expected ack request")
+	}
+	if stateLease, ok := ackReq["state_lease_id"].(string); !ok || stateLease != "lease-state" {
+		t.Fatalf("expected state lease in ack: %+v", ackReq)
+	}
+}
+
+func TestClientStartConsumerRestartsAndCallsErrorHandler(t *testing.T) {
+	now := time.Now().Unix()
+	message := testQueueMessage{
+		Queue:                    "orders",
+		MessageID:                "msg-retry",
+		Attempts:                 1,
+		MaxAttempts:              4,
+		NotVisibleUntilUnix:      now,
+		VisibilityTimeoutSeconds: 15,
+		PayloadContentType:       "text/plain",
+		PayloadBytes:             5,
+		LeaseID:                  "lease-retry",
+		LeaseExpiresAtUnix:       now + 30,
+		FencingToken:             41,
+	}
+	var subscribeCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/queue/subscribe":
+			call := subscribeCalls.Add(1)
+			if call <= 2 {
+				http.Error(w, "temporary failure", http.StatusInternalServerError)
+				return
+			}
+			mw := multipart.NewWriter(w)
+			w.Header().Set("Content-Type", "multipart/related; boundary="+mw.Boundary())
+			w.WriteHeader(http.StatusOK)
+			metaHeader := textproto.MIMEHeader{}
+			metaHeader.Set("Content-Type", "application/json")
+			metaHeader.Set("Content-Disposition", `form-data; name="meta"`)
+			metaPart, err := mw.CreatePart(metaHeader)
+			if err != nil {
+				t.Fatalf("create meta part: %v", err)
+			}
+			if err := json.NewEncoder(metaPart).Encode(map[string]any{
+				"message":     message,
+				"next_cursor": "cursor-1",
+			}); err != nil {
+				t.Fatalf("encode meta: %v", err)
+			}
+			payloadHeader := textproto.MIMEHeader{}
+			payloadHeader.Set("Content-Type", message.PayloadContentType)
+			payloadHeader.Set("Content-Disposition", `form-data; name="payload"`)
+			payloadPart, err := mw.CreatePart(payloadHeader)
+			if err != nil {
+				t.Fatalf("create payload part: %v", err)
+			}
+			if _, err := payloadPart.Write([]byte("ready")); err != nil {
+				t.Fatalf("write payload: %v", err)
+			}
+			if err := mw.Close(); err != nil {
+				t.Fatalf("close multipart: %v", err)
+			}
+		case "/v1/queue/ack":
+			_ = json.NewEncoder(w).Encode(map[string]any{"acked": true})
+		case "/v1/queue/nack":
+			_ = json.NewEncoder(w).Encode(map[string]any{"nacked": true})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	cli, err := client.New(srv.URL, client.WithDisableMTLS(true), client.WithEndpointShuffle(false))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var (
+		mu         sync.Mutex
+		errorCalls []client.ConsumerError
+	)
+	start := time.Now()
+	err = cli.StartConsumer(ctx, []client.ConsumerConfig{
+		{
+			Name:    "orders-worker",
+			Queue:   "orders",
+			Options: client.SubscribeOptions{Owner: "worker-retry"},
+			RestartPolicy: client.ConsumerRestartPolicy{
+				ImmediateRetries: 1,
+				BaseDelay:        20 * time.Millisecond,
+				MaxDelay:         20 * time.Millisecond,
+				Multiplier:       2.0,
+			},
+			MessageHandler: func(_ context.Context, cm client.ConsumerMessage) error {
+				defer cm.Message.Close()
+				if cm.Name() != "orders-worker" {
+					return fmt.Errorf("unexpected consumer name %q", cm.Name())
+				}
+				if err := cm.Message.Ack(context.Background()); err != nil {
+					return err
+				}
+				cancel()
+				return nil
+			},
+			ErrorHandler: func(_ context.Context, event client.ConsumerError) error {
+				mu.Lock()
+				errorCalls = append(errorCalls, event)
+				mu.Unlock()
+				return nil
+			},
+		},
+	}...)
+	if err != nil {
+		t.Fatalf("start consumer: %v", err)
+	}
+	if subscribeCalls.Load() < 3 {
+		t.Fatalf("expected at least 3 subscribe attempts, got %d", subscribeCalls.Load())
+	}
+	elapsed := time.Since(start)
+	if elapsed < 18*time.Millisecond {
+		t.Fatalf("expected delayed retry, elapsed=%s", elapsed)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(errorCalls) != 2 {
+		t.Fatalf("expected 2 error handler calls, got %d", len(errorCalls))
+	}
+	if errorCalls[0].Attempt != 1 || errorCalls[0].RestartIn != 0 {
+		t.Fatalf("unexpected first error event: %+v", errorCalls[0])
+	}
+	if errorCalls[0].Name != "orders-worker" {
+		t.Fatalf("unexpected consumer name in first error event: %+v", errorCalls[0])
+	}
+	if errorCalls[1].Attempt != 2 || errorCalls[1].RestartIn < 20*time.Millisecond {
+		t.Fatalf("unexpected second error event: %+v", errorCalls[1])
+	}
+}
+
+func TestClientStartConsumerLifecycleHooks(t *testing.T) {
+	now := time.Now().Unix()
+	message := testQueueMessage{
+		Queue:                    "orders",
+		MessageID:                "msg-hooks",
+		Attempts:                 1,
+		MaxAttempts:              3,
+		NotVisibleUntilUnix:      now,
+		VisibilityTimeoutSeconds: 15,
+		PayloadContentType:       "text/plain",
+		PayloadBytes:             2,
+		LeaseID:                  "lease-hooks",
+		LeaseExpiresAtUnix:       now + 30,
+		FencingToken:             51,
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/queue/subscribe":
+			mw := multipart.NewWriter(w)
+			w.Header().Set("Content-Type", "multipart/related; boundary="+mw.Boundary())
+			w.WriteHeader(http.StatusOK)
+			metaHeader := textproto.MIMEHeader{}
+			metaHeader.Set("Content-Type", "application/json")
+			metaHeader.Set("Content-Disposition", `form-data; name="meta"`)
+			metaPart, err := mw.CreatePart(metaHeader)
+			if err != nil {
+				t.Fatalf("create meta part: %v", err)
+			}
+			if err := json.NewEncoder(metaPart).Encode(map[string]any{
+				"message":     message,
+				"next_cursor": "cursor-hooks",
+			}); err != nil {
+				t.Fatalf("encode meta: %v", err)
+			}
+			payloadHeader := textproto.MIMEHeader{}
+			payloadHeader.Set("Content-Type", message.PayloadContentType)
+			payloadHeader.Set("Content-Disposition", `form-data; name="payload"`)
+			payloadPart, err := mw.CreatePart(payloadHeader)
+			if err != nil {
+				t.Fatalf("create payload part: %v", err)
+			}
+			if _, err := payloadPart.Write([]byte("ok")); err != nil {
+				t.Fatalf("write payload: %v", err)
+			}
+			if err := mw.Close(); err != nil {
+				t.Fatalf("close multipart: %v", err)
+			}
+		case "/v1/queue/ack":
+			_ = json.NewEncoder(w).Encode(map[string]any{"acked": true})
+		case "/v1/queue/nack":
+			_ = json.NewEncoder(w).Encode(map[string]any{"nacked": true})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	cli, err := client.New(srv.URL, client.WithDisableMTLS(true), client.WithEndpointShuffle(false))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var (
+		mu        sync.Mutex
+		startSeen []client.ConsumerLifecycleEvent
+		stopSeen  []client.ConsumerLifecycleEvent
+	)
+	err = cli.StartConsumer(ctx, []client.ConsumerConfig{
+		{
+			Name:    "orders-consumer",
+			Queue:   "orders",
+			Options: client.SubscribeOptions{Owner: "worker-hooks"},
+			OnStart: func(_ context.Context, event client.ConsumerLifecycleEvent) {
+				mu.Lock()
+				startSeen = append(startSeen, event)
+				mu.Unlock()
+			},
+			OnStop: func(_ context.Context, event client.ConsumerLifecycleEvent) {
+				mu.Lock()
+				stopSeen = append(stopSeen, event)
+				mu.Unlock()
+			},
+			MessageHandler: func(_ context.Context, cm client.ConsumerMessage) error {
+				defer cm.Message.Close()
+				if err := cm.Message.Ack(context.Background()); err != nil {
+					return err
+				}
+				cancel()
+				return nil
+			},
+		},
+	}...)
+	if err != nil {
+		t.Fatalf("start consumer: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(startSeen) == 0 {
+		t.Fatalf("expected onStart hook to be called")
+	}
+	if len(stopSeen) == 0 {
+		t.Fatalf("expected onStop hook to be called")
+	}
+	if startSeen[0].Name != "orders-consumer" || startSeen[0].Queue != "orders" || startSeen[0].Attempt < 1 {
+		t.Fatalf("unexpected onStart event: %+v", startSeen[0])
+	}
+	if stopSeen[0].Name != "orders-consumer" || stopSeen[0].Queue != "orders" || stopSeen[0].Attempt < 1 {
+		t.Fatalf("unexpected onStop event: %+v", stopSeen[0])
+	}
+}
+
+func TestClientStartConsumerRecoversMessageHandlerPanic(t *testing.T) {
+	now := time.Now().Unix()
+	message := testQueueMessage{
+		Queue:                    "orders",
+		MessageID:                "msg-panic",
+		Attempts:                 1,
+		MaxAttempts:              3,
+		NotVisibleUntilUnix:      now,
+		VisibilityTimeoutSeconds: 15,
+		PayloadContentType:       "text/plain",
+		PayloadBytes:             2,
+		LeaseID:                  "lease-panic",
+		LeaseExpiresAtUnix:       now + 30,
+		FencingToken:             61,
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/queue/subscribe":
+			mw := multipart.NewWriter(w)
+			w.Header().Set("Content-Type", "multipart/related; boundary="+mw.Boundary())
+			w.WriteHeader(http.StatusOK)
+			metaHeader := textproto.MIMEHeader{}
+			metaHeader.Set("Content-Type", "application/json")
+			metaHeader.Set("Content-Disposition", `form-data; name="meta"`)
+			metaPart, err := mw.CreatePart(metaHeader)
+			if err != nil {
+				t.Fatalf("create meta part: %v", err)
+			}
+			if err := json.NewEncoder(metaPart).Encode(map[string]any{
+				"message":     message,
+				"next_cursor": "cursor-panic",
+			}); err != nil {
+				t.Fatalf("encode meta: %v", err)
+			}
+			payloadHeader := textproto.MIMEHeader{}
+			payloadHeader.Set("Content-Type", message.PayloadContentType)
+			payloadHeader.Set("Content-Disposition", `form-data; name="payload"`)
+			payloadPart, err := mw.CreatePart(payloadHeader)
+			if err != nil {
+				t.Fatalf("create payload part: %v", err)
+			}
+			if _, err := payloadPart.Write([]byte("ok")); err != nil {
+				t.Fatalf("write payload: %v", err)
+			}
+			if err := mw.Close(); err != nil {
+				t.Fatalf("close multipart: %v", err)
+			}
+		case "/v1/queue/ack":
+			_ = json.NewEncoder(w).Encode(map[string]any{"acked": true})
+		case "/v1/queue/nack":
+			_ = json.NewEncoder(w).Encode(map[string]any{"nacked": true})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	cli, err := client.New(srv.URL, client.WithDisableMTLS(true), client.WithEndpointShuffle(false))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var (
+		handlerCalls atomic.Int32
+		errorEvents  []client.ConsumerError
+		mu           sync.Mutex
+	)
+	err = cli.StartConsumer(ctx, []client.ConsumerConfig{
+		{
+			Name:    "panic-consumer",
+			Queue:   "orders",
+			Options: client.SubscribeOptions{Owner: "worker-panic"},
+			RestartPolicy: client.ConsumerRestartPolicy{
+				ImmediateRetries: 1,
+				BaseDelay:        20 * time.Millisecond,
+				MaxDelay:         20 * time.Millisecond,
+				Multiplier:       2.0,
+			},
+			MessageHandler: func(_ context.Context, cm client.ConsumerMessage) error {
+				defer cm.Message.Close()
+				if handlerCalls.Add(1) == 1 {
+					panic("boom")
+				}
+				if err := cm.Message.Ack(context.Background()); err != nil {
+					return err
+				}
+				cancel()
+				return nil
+			},
+			ErrorHandler: func(_ context.Context, event client.ConsumerError) error {
+				mu.Lock()
+				errorEvents = append(errorEvents, event)
+				mu.Unlock()
+				return nil
+			},
+		},
+	}...)
+	if err != nil {
+		t.Fatalf("start consumer: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(errorEvents) == 0 {
+		t.Fatalf("expected at least one consumer error event from panic")
+	}
+	if errorEvents[0].Name != "panic-consumer" {
+		t.Fatalf("expected consumer name in error event, got %+v", errorEvents[0])
+	}
+	if !strings.Contains(errorEvents[0].Err.Error(), "panic") || !strings.Contains(errorEvents[0].Err.Error(), "boom") {
+		t.Fatalf("expected panic details in error event, got %v", errorEvents[0].Err)
+	}
+}
+
+func TestClientStartConsumerRecoversLifecycleHookPanic(t *testing.T) {
+	cli, err := client.New("http://127.0.0.1", client.WithDisableMTLS(true))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var (
+		mu         sync.Mutex
+		errorCalls []client.ConsumerError
+	)
+	err = cli.StartConsumer(ctx, []client.ConsumerConfig{
+		{
+			Name:    "hook-panic-consumer",
+			Queue:   "orders",
+			Options: client.SubscribeOptions{Owner: "worker-hook-panic"},
+			OnStart: func(context.Context, client.ConsumerLifecycleEvent) {
+				panic("hook exploded")
+			},
+			MessageHandler: func(context.Context, client.ConsumerMessage) error {
+				return nil
+			},
+			ErrorHandler: func(_ context.Context, event client.ConsumerError) error {
+				mu.Lock()
+				errorCalls = append(errorCalls, event)
+				mu.Unlock()
+				cancel()
+				return nil
+			},
+		},
+	}...)
+	if err != nil {
+		t.Fatalf("expected nil error after context cancellation, got %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(errorCalls) == 0 {
+		t.Fatalf("expected error handler to receive lifecycle hook panic")
+	}
+	if !strings.Contains(errorCalls[0].Err.Error(), "lifecycle hook") || !strings.Contains(errorCalls[0].Err.Error(), "hook exploded") {
+		t.Fatalf("unexpected lifecycle panic error: %v", errorCalls[0].Err)
+	}
+}
+
+func TestClientStartConsumerStopsWhenErrorHandlerFails(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/queue/subscribe":
+			http.Error(w, "temporary failure", http.StatusInternalServerError)
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	cli, err := client.New(srv.URL, client.WithDisableMTLS(true), client.WithEndpointShuffle(false))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	stopErr := errors.New("stop consumer")
+	err = cli.StartConsumer(context.Background(), []client.ConsumerConfig{
+		{
+			Queue:   "orders",
+			Options: client.SubscribeOptions{Owner: "worker-stop"},
+			RestartPolicy: client.ConsumerRestartPolicy{
+				ImmediateRetries: 0,
+				BaseDelay:        10 * time.Millisecond,
+				MaxDelay:         10 * time.Millisecond,
+				Multiplier:       2.0,
+			},
+			MessageHandler: func(context.Context, client.ConsumerMessage) error { return nil },
+			ErrorHandler: func(context.Context, client.ConsumerError) error {
+				return stopErr
+			},
+		},
+	}...)
+	if err == nil {
+		t.Fatalf("expected start consumer error")
+	}
+	if !strings.Contains(err.Error(), stopErr.Error()) {
+		t.Fatalf("expected wrapped error handler failure, got %v", err)
+	}
+}
+
+func TestClientStartConsumerReturnsNilOnContextCancel(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/queue/subscribe":
+			http.Error(w, "temporary failure", http.StatusInternalServerError)
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	cli, err := client.New(srv.URL, client.WithDisableMTLS(true), client.WithEndpointShuffle(false))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		cancel()
+	}()
+	err = cli.StartConsumer(ctx, []client.ConsumerConfig{
+		{
+			Queue:   "orders",
+			Options: client.SubscribeOptions{Owner: "worker-cancel"},
+			RestartPolicy: client.ConsumerRestartPolicy{
+				ImmediateRetries: 0,
+				BaseDelay:        100 * time.Millisecond,
+				MaxDelay:         100 * time.Millisecond,
+				Multiplier:       2.0,
+			},
+			MessageHandler: func(context.Context, client.ConsumerMessage) error { return nil },
+		},
+	}...)
+	if err != nil {
+		t.Fatalf("expected nil error on context cancellation, got %v", err)
+	}
+}
+
+func TestClientStartConsumerAutoExtendErrorDoesNotDeadlock(t *testing.T) {
+	now := time.Now().Unix()
+	message := testQueueMessage{
+		Queue:                    "orders",
+		MessageID:                "msg-extend-deadlock",
+		Attempts:                 1,
+		MaxAttempts:              3,
+		NotVisibleUntilUnix:      now,
+		VisibilityTimeoutSeconds: 1,
+		PayloadContentType:       "text/plain",
+		PayloadBytes:             4,
+		LeaseID:                  "lease-extend-deadlock",
+		LeaseExpiresAtUnix:       now + 30,
+		FencingToken:             71,
+	}
+
+	var extendCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/queue/subscribe":
+			mw := multipart.NewWriter(w)
+			w.Header().Set("Content-Type", "multipart/related; boundary="+mw.Boundary())
+			w.WriteHeader(http.StatusOK)
+			metaHeader := textproto.MIMEHeader{}
+			metaHeader.Set("Content-Type", "application/json")
+			metaHeader.Set("Content-Disposition", `form-data; name="meta"`)
+			metaPart, err := mw.CreatePart(metaHeader)
+			if err != nil {
+				t.Fatalf("create meta part: %v", err)
+			}
+			if err := json.NewEncoder(metaPart).Encode(map[string]any{
+				"message":     message,
+				"next_cursor": "cursor-extend",
+			}); err != nil {
+				t.Fatalf("encode meta: %v", err)
+			}
+			payloadHeader := textproto.MIMEHeader{}
+			payloadHeader.Set("Content-Type", message.PayloadContentType)
+			payloadHeader.Set("Content-Disposition", `form-data; name="payload"`)
+			payloadPart, err := mw.CreatePart(payloadHeader)
+			if err != nil {
+				t.Fatalf("create payload part: %v", err)
+			}
+			if _, err := payloadPart.Write([]byte("work")); err != nil {
+				t.Fatalf("write payload: %v", err)
+			}
+			if err := mw.Close(); err != nil {
+				t.Fatalf("close multipart: %v", err)
+			}
+		case "/v1/queue/extend":
+			extendCalls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(api.ErrorResponse{
+				ErrorCode: "lease_conflict",
+				Detail:    "simulated extend conflict",
+			})
+		case "/v1/queue/nack":
+			_ = json.NewEncoder(w).Encode(map[string]any{"nacked": true})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	cli, err := client.New(srv.URL, client.WithDisableMTLS(true), client.WithEndpointShuffle(false))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stopErr := errors.New("stop on extend error")
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- cli.StartConsumer(ctx, client.ConsumerConfig{
+			Name:    "extend-deadlock",
+			Queue:   "orders",
+			Options: client.SubscribeOptions{Owner: "worker-extend"},
+			RestartPolicy: client.ConsumerRestartPolicy{
+				ImmediateRetries: 0,
+				BaseDelay:        10 * time.Millisecond,
+				MaxDelay:         10 * time.Millisecond,
+				Multiplier:       2.0,
+			},
+			MessageHandler: func(handlerCtx context.Context, cm client.ConsumerMessage) error {
+				defer cm.Message.Close()
+				select {
+				case <-handlerCtx.Done():
+					return nil
+				case <-time.After(2 * time.Second):
+					return nil
+				}
+			},
+			ErrorHandler: func(_ context.Context, event client.ConsumerError) error {
+				if event.Name != "extend-deadlock" {
+					return fmt.Errorf("unexpected consumer name %q", event.Name)
+				}
+				return stopErr
+			},
+		})
+	}()
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatalf("expected start consumer error")
+		}
+		if !strings.Contains(err.Error(), stopErr.Error()) {
+			t.Fatalf("expected wrapped stop error, got %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatalf("start consumer hung waiting for auto-extend shutdown")
+	}
+
+	if extendCalls.Load() == 0 {
+		t.Fatalf("expected at least one /v1/queue/extend call")
 	}
 }
 

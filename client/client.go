@@ -3,6 +3,8 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +18,9 @@ import (
 	"net/http/httptrace"
 	"net/textproto"
 	"net/url"
+	"os"
+	"path"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -24,50 +29,197 @@ import (
 	"time"
 
 	"pkt.systems/lockd/api"
+	"pkt.systems/lockd/internal/pathutil"
 	"pkt.systems/lockd/internal/svcfields"
 	"pkt.systems/lockd/namespaces"
+	"pkt.systems/lockd/tlsutil"
 	"pkt.systems/lql"
 	"pkt.systems/pslog"
 )
 
 // EnqueueOptions controls enqueue behaviour.
 type EnqueueOptions struct {
-	Namespace   string
-	Delay       time.Duration
-	Visibility  time.Duration
-	TTL         time.Duration
+	// Namespace scopes the queue operation. Empty uses the client's default namespace.
+	Namespace string
+	// Delay postpones first visibility after enqueue.
+	Delay time.Duration
+	// Visibility controls how long a dequeued message stays hidden before it can be redelivered.
+	Visibility time.Duration
+	// TTL sets message retention. Zero uses server defaults.
+	TTL time.Duration
+	// MaxAttempts limits delivery attempts before dead-letter handling.
 	MaxAttempts int
-	Attributes  map[string]any
+	// Attributes stores arbitrary JSON-serializable metadata on the message.
+	Attributes map[string]any
+	// ContentType is sent as the payload media type. Empty defaults to application/octet-stream.
 	ContentType string
 }
 
 // DequeueOptions guides dequeue behaviour.
 type DequeueOptions struct {
-	Namespace    string
-	Owner        string
-	TxnID        string
-	Visibility   time.Duration
-	BlockSeconds int64 // set to BlockNoWait (-1) for immediate return, 0 for forever, >0 to wait seconds
-	PageSize     int
-	StartAfter   string
-	OnCloseDelay time.Duration // optional delay applied when QueueMessage.Close auto-nacks the lease
+	// Namespace scopes the queue operation. Empty uses the client's default namespace.
+	Namespace string
+	// Owner identifies the worker/consumer acquiring the queue lease.
+	Owner string
+	// TxnID binds queue state operations to an existing transaction when required.
+	TxnID string
+	// Visibility controls the message lease timeout returned by dequeue.
+	Visibility time.Duration
+	// BlockSeconds controls long-poll behavior: BlockNoWait (-1) for immediate return,
+	// 0 to wait indefinitely, and >0 to wait up to that many seconds.
+	BlockSeconds int64
+	// PageSize caps batched dequeue result size (for APIs that support multi-message responses).
+	PageSize int
+	// StartAfter resumes dequeue scanning from a server-issued cursor.
+	StartAfter string
+	// OnCloseDelay applies a delay before auto-nack when QueueMessage.Close is called without ack.
+	OnCloseDelay time.Duration
 }
 
 // SubscribeOptions configures continuous streaming consumption via Subscribe.
 type SubscribeOptions struct {
-	Namespace    string
-	Owner        string
-	Visibility   time.Duration
+	// Namespace scopes the queue operation. Empty uses the client's default namespace.
+	Namespace string
+	// Owner identifies the worker/consumer processing streamed deliveries.
+	// For direct Subscribe calls, this is required. StartConsumer auto-fills a
+	// generated unique owner when left empty.
+	Owner string
+	// Visibility controls per-message lease timeout for streamed deliveries.
+	Visibility time.Duration
+	// BlockSeconds controls server-side wait behavior between deliveries.
 	BlockSeconds int64
-	Prefetch     int
-	StartAfter   string
+	// Prefetch controls how many messages the server may pipeline before handler ack/nack.
+	Prefetch int
+	// StartAfter resumes a previous subscription stream from a cursor.
+	StartAfter string
+	// OnCloseDelay applies a delay before auto-nack when handlers close without ack.
 	OnCloseDelay time.Duration
+}
+
+// ConsumerMessage bundles the runtime context provided to ConsumerMessageHandler.
+// The same handler can be reused across multiple ConsumerConfig entries and inspect
+// Queue/WithState to branch behavior.
+type ConsumerMessage struct {
+	// Client is the active SDK client used by StartConsumer, allowing handlers to
+	// perform additional lockd operations (enqueue, acquire, queries, etc.)
+	// without constructing a second client.
+	Client *Client
+	// Logger is the client logger configured via WithLogger.
+	// It is always non-nil (defaults to pslog.NoopLogger()).
+	Logger pslog.Base
+	// Queue is the subscribed queue name for this delivery.
+	Queue string
+	// WithState indicates whether this delivery came from a stateful subscription.
+	WithState bool
+	// Message is the leased queue delivery payload/metadata wrapper.
+	Message *QueueMessage
+	// State is the workflow state lease handle for stateful subscriptions.
+	// It is nil when WithState is false.
+	State *QueueStateHandle
+
+	consumerName string
+}
+
+// Name returns the logical consumer name resolved from ConsumerConfig.Name,
+// defaulting to Queue when no explicit name was configured.
+func (m ConsumerMessage) Name() string {
+	name := strings.TrimSpace(m.consumerName)
+	if name != "" {
+		return name
+	}
+	return strings.TrimSpace(m.Queue)
+}
+
+// ConsumerMessageHandler handles one queue delivery produced by StartConsumer.
+type ConsumerMessageHandler func(context.Context, ConsumerMessage) error
+
+// ConsumerError describes a recoverable consumer loop failure before restart.
+type ConsumerError struct {
+	// Name is the logical consumer name from ConsumerConfig.
+	Name string
+	// Queue is the queue whose consume loop failed.
+	Queue string
+	// WithState indicates whether the failed loop used SubscribeWithState.
+	WithState bool
+	// Attempt is the current consecutive failure count for this consumer.
+	Attempt int
+	// RestartIn is the delay before the next subscribe attempt.
+	RestartIn time.Duration
+	// Err is the underlying failure returned by Subscribe/SubscribeWithState.
+	Err error
+}
+
+// ConsumerErrorHandler is invoked when a consume loop fails and is about to be
+// restarted. Returning nil continues restart handling. Returning a non-nil error
+// stops StartConsumer and returns that error (wrapped with queue context).
+type ConsumerErrorHandler func(context.Context, ConsumerError) error
+
+// ConsumerLifecycleEvent describes lifecycle transitions for one consumer.
+type ConsumerLifecycleEvent struct {
+	// Name is the logical consumer name from ConsumerConfig.
+	Name string
+	// Queue is the queue this lifecycle event belongs to.
+	Queue string
+	// WithState indicates whether this consumer uses SubscribeWithState.
+	WithState bool
+	// Attempt is the 1-based subscribe attempt sequence for this consumer.
+	Attempt int
+	// Err is the terminal error for the attempt. It is nil for OnStart and for
+	// clean attempt completion.
+	Err error
+}
+
+// ConsumerRestartPolicy configures restart behavior for failed consume loops.
+type ConsumerRestartPolicy struct {
+	// ImmediateRetries is the number of consecutive failures retried with zero
+	// delay before exponential backoff starts.
+	ImmediateRetries int
+	// BaseDelay is the first delayed retry duration once immediate retries are exhausted.
+	BaseDelay time.Duration
+	// MaxDelay caps the restart delay.
+	MaxDelay time.Duration
+	// Multiplier controls exponential growth between delayed retries.
+	Multiplier float64
+	// Jitter randomizes delay by +/- Jitter to reduce synchronized retries.
+	Jitter time.Duration
+	// MaxFailures optionally stops the consumer after N consecutive failures.
+	// Zero or negative means retry forever.
+	MaxFailures int
+}
+
+// ConsumerConfig describes one queue consumer managed by StartConsumer.
+type ConsumerConfig struct {
+	// Name labels this consumer in logs and lifecycle/error callbacks.
+	// Empty defaults to Queue.
+	Name string
+	// Queue is the queue name to subscribe to.
+	Queue string
+	// Options configures subscription behavior (namespace, owner, prefetch, etc.).
+	// When Options.Owner is empty, StartConsumer generates a unique owner value.
+	Options SubscribeOptions
+	// WithState switches between Subscribe (false) and SubscribeWithState (true).
+	WithState bool
+	// MessageHandler processes each delivered message.
+	MessageHandler ConsumerMessageHandler
+	// ErrorHandler observes subscribe failures before restart.
+	// When nil, StartConsumer logs and continues.
+	ErrorHandler ConsumerErrorHandler
+	// OnStart runs when a consumer subscribe attempt starts.
+	OnStart func(context.Context, ConsumerLifecycleEvent)
+	// OnStop runs when a consumer subscribe attempt stops (success, context
+	// cancellation, or error).
+	OnStop func(context.Context, ConsumerLifecycleEvent)
+	// RestartPolicy controls retry/backoff behavior after failures.
+	RestartPolicy ConsumerRestartPolicy
 }
 
 // DequeueResult captures the outcome of a dequeue request.
 type DequeueResult struct {
-	Message    *QueueMessageHandle
-	Messages   []*QueueMessageHandle
+	// Message is the primary dequeued message handle for single-message consumption paths.
+	Message *QueueMessageHandle
+	// Messages contains all dequeued message handles when batch dequeue is requested.
+	Messages []*QueueMessageHandle
+	// NextCursor is the server cursor for continuing dequeue scans.
 	NextCursor string
 }
 
@@ -99,13 +251,19 @@ type QueueMessageHandle struct {
 // QueueStateHandle exposes the workflow state lease associated with a stateful dequeue.
 type QueueStateHandle struct {
 	client         *Client
+	namespace      string
+	stateKey       string
 	queue          string
 	messageID      string
 	leaseID        string
+	txnID          string
 	fencingToken   int64
 	leaseExpiresAt int64
+	queueStateETag string
 	stateETag      string
+	version        int64
 	correlationID  string
+	mu             sync.Mutex
 }
 
 // Queue returns the queue name.
@@ -348,10 +506,11 @@ func (h *QueueMessageHandle) Ack(ctx context.Context) error {
 		StateETag:    h.msg.StateETag,
 	}
 	if h.state != nil {
-		req.StateLeaseID = h.state.leaseID
-		req.StateFencingToken = h.state.fencingToken
-		if h.state.stateETag != "" {
-			req.StateETag = h.state.stateETag
+		stateLeaseID, stateFencingToken, stateETag := h.state.stateForQueueOps()
+		req.StateLeaseID = stateLeaseID
+		req.StateFencingToken = stateFencingToken
+		if stateETag != "" {
+			req.StateETag = stateETag
 		}
 	}
 	h.mu.Unlock()
@@ -405,8 +564,9 @@ func (h *QueueMessageHandle) Nack(ctx context.Context, delay time.Duration, last
 		LastError:    lastErr,
 	}
 	if h.state != nil {
-		req.StateLeaseID = h.state.leaseID
-		req.StateFencingToken = h.state.fencingToken
+		stateLeaseID, stateFencingToken, _ := h.state.stateForQueueOps()
+		req.StateLeaseID = stateLeaseID
+		req.StateFencingToken = stateFencingToken
 	}
 	h.mu.Unlock()
 	corr := h.msg.CorrelationID
@@ -461,8 +621,9 @@ func (h *QueueMessageHandle) Extend(ctx context.Context, extendBy time.Duration)
 		ExtendBySeconds: secondsFromDuration(extendBy),
 	}
 	if h.state != nil {
-		req.StateLeaseID = h.state.leaseID
-		req.StateFencingToken = h.state.fencingToken
+		stateLeaseID, stateFencingToken, _ := h.state.stateForQueueOps()
+		req.StateLeaseID = stateLeaseID
+		req.StateFencingToken = stateFencingToken
 	}
 	h.mu.Unlock()
 	corr := h.msg.CorrelationID
@@ -489,7 +650,7 @@ func (h *QueueMessageHandle) Extend(ctx context.Context, extendBy time.Duration)
 			h.msg.LeaseExpiresAtUnix = res.LeaseExpiresAtUnix
 		}
 		if h.state != nil && res.StateLeaseExpiresAtUnix > 0 {
-			h.state.leaseExpiresAt = res.StateLeaseExpiresAtUnix
+			h.state.setLeaseExpiresAt(res.StateLeaseExpiresAtUnix)
 		}
 	}
 	return nil
@@ -711,15 +872,30 @@ func (m *QueueMessage) PayloadReader() (io.ReadCloser, error) {
 	return reader, nil
 }
 
-// WritePayloadTo streams the payload into w.
+// WritePayloadTo streams the payload into w and closes the payload afterwards.
 func (m *QueueMessage) WritePayloadTo(w io.Writer) (int64, error) {
-	return io.Copy(w, m)
+	if m == nil {
+		return 0, fmt.Errorf("lockd: nil queue message")
+	}
+	reader, err := m.PayloadReader()
+	if err != nil {
+		return 0, err
+	}
+	defer reader.Close()
+	return io.Copy(w, reader)
 }
 
-// DecodePayloadJSON decodes the payload JSON into v.
+// DecodePayloadJSON decodes the payload JSON into v and closes the payload afterwards.
 func (m *QueueMessage) DecodePayloadJSON(v any) error {
-	decoder := json.NewDecoder(io.NopCloser(m))
-	return decoder.Decode(v)
+	if m == nil {
+		return fmt.Errorf("lockd: nil queue message")
+	}
+	reader, err := m.PayloadReader()
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+	return json.NewDecoder(reader).Decode(v)
 }
 
 // ClosePayload releases the underlying payload stream without altering the lease state.
@@ -794,6 +970,8 @@ func (s *QueueStateHandle) Queue() string {
 	if s == nil {
 		return ""
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.queue
 }
 
@@ -802,6 +980,8 @@ func (s *QueueStateHandle) MessageID() string {
 	if s == nil {
 		return ""
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.messageID
 }
 
@@ -810,6 +990,8 @@ func (s *QueueStateHandle) LeaseID() string {
 	if s == nil {
 		return ""
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.leaseID
 }
 
@@ -818,6 +1000,8 @@ func (s *QueueStateHandle) FencingToken() int64 {
 	if s == nil {
 		return 0
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.fencingToken
 }
 
@@ -826,6 +1010,8 @@ func (s *QueueStateHandle) LeaseExpiresAt() int64 {
 	if s == nil {
 		return 0
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.leaseExpiresAt
 }
 
@@ -834,6 +1020,8 @@ func (s *QueueStateHandle) ETag() string {
 	if s == nil {
 		return ""
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.stateETag
 }
 
@@ -842,7 +1030,348 @@ func (s *QueueStateHandle) CorrelationID() string {
 	if s == nil {
 		return ""
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.correlationID
+}
+
+func queueStateKey(queue, messageID string) string {
+	queue = strings.TrimSpace(queue)
+	messageID = strings.TrimSpace(messageID)
+	if queue == "" || messageID == "" {
+		return ""
+	}
+	return path.Join("q", queue, "state", messageID)
+}
+
+func (s *QueueStateHandle) snapshot() (*Client, string, string, string, string, string, string, int64, error) {
+	if s == nil {
+		return nil, "", "", "", "", "", "", 0, fmt.Errorf("lockd: nil queue state handle")
+	}
+	s.mu.Lock()
+	cli := s.client
+	namespace := strings.TrimSpace(s.namespace)
+	key := strings.TrimSpace(s.stateKey)
+	if key == "" {
+		key = queueStateKey(s.queue, s.messageID)
+	}
+	leaseID := strings.TrimSpace(s.leaseID)
+	txnID := strings.TrimSpace(s.txnID)
+	correlationID := strings.TrimSpace(s.correlationID)
+	stateETag := strings.TrimSpace(s.stateETag)
+	version := s.version
+	s.mu.Unlock()
+	if cli == nil {
+		return nil, "", "", "", "", "", "", 0, fmt.Errorf("lockd: queue state client nil")
+	}
+	if namespace == "" {
+		namespace = cli.Namespace()
+	}
+	if key == "" {
+		return nil, "", "", "", "", "", "", 0, fmt.Errorf("lockd: queue state key required")
+	}
+	if leaseID == "" {
+		return nil, "", "", "", "", "", "", 0, fmt.Errorf("lockd: queue state lease_id required")
+	}
+	return cli, namespace, key, leaseID, txnID, correlationID, stateETag, version, nil
+}
+
+func (s *QueueStateHandle) setLeaseExpiresAt(leaseExpiresAt int64) {
+	if s == nil || leaseExpiresAt <= 0 {
+		return
+	}
+	s.mu.Lock()
+	s.leaseExpiresAt = leaseExpiresAt
+	s.mu.Unlock()
+}
+
+func (s *QueueStateHandle) stateForQueueOps() (string, int64, string) {
+	if s == nil {
+		return "", 0, ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.leaseID, s.fencingToken, s.queueStateETag
+}
+
+func (s *QueueStateHandle) updateAfterMutation(newStateETag string, newVersion int64) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	if newStateETag != "" {
+		s.stateETag = newStateETag
+	}
+	if newVersion > 0 {
+		s.version = newVersion
+	}
+	s.mu.Unlock()
+}
+
+func (s *QueueStateHandle) clearStateAfterRemove(newVersion int64) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	if newVersion > 0 {
+		s.version = newVersion
+	}
+	s.stateETag = ""
+	s.mu.Unlock()
+}
+
+func (s *QueueStateHandle) syncFencingToken() string {
+	if s == nil || s.client == nil {
+		return ""
+	}
+	leaseID := s.LeaseID()
+	if leaseID == "" {
+		return ""
+	}
+	token, err := s.client.fencingToken(leaseID, "")
+	if err != nil {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.fencingToken <= 0 {
+			return ""
+		}
+		return strconv.FormatInt(s.fencingToken, 10)
+	}
+	if parsed, parseErr := strconv.ParseInt(token, 10, 64); parseErr == nil {
+		s.mu.Lock()
+		s.fencingToken = parsed
+		s.mu.Unlock()
+	}
+	return token
+}
+
+// Get reads the current workflow state snapshot for the message's state lease.
+func (s *QueueStateHandle) Get(ctx context.Context) (*StateSnapshot, error) {
+	cli, namespace, key, leaseID, _, corr, _, _, err := s.snapshot()
+	if err != nil {
+		return nil, err
+	}
+	ctx = WithCorrelationID(ctx, corr)
+	resp, err := cli.Get(ctx, key,
+		WithGetNamespace(namespace),
+		WithGetLeaseID(leaseID),
+		WithGetPublicDisabled(true),
+	)
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil {
+		return nil, nil
+	}
+	defer resp.Close()
+	reader := resp.detachReader()
+	etag := resp.ETag
+	snap := &StateSnapshot{Reader: reader, ETag: etag, HasState: resp.HasState || etag != ""}
+	if ver := strings.TrimSpace(resp.Version); ver != "" {
+		if v, parseErr := strconv.ParseInt(ver, 10, 64); parseErr == nil {
+			snap.Version = v
+		}
+		if snap.Version > 0 {
+			snap.HasState = true
+		}
+	}
+	if snap.HasState {
+		s.updateAfterMutation(etag, snap.Version)
+	} else {
+		s.clearStateAfterRemove(snap.Version)
+	}
+	s.syncFencingToken()
+	return snap, nil
+}
+
+// GetBytes returns the current workflow state payload as bytes.
+func (s *QueueStateHandle) GetBytes(ctx context.Context) ([]byte, error) {
+	snap, err := s.Get(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if snap == nil || !snap.HasState {
+		return nil, nil
+	}
+	defer snap.Close()
+	return snap.Bytes()
+}
+
+// Load unmarshals the current workflow state into v.
+func (s *QueueStateHandle) Load(ctx context.Context, v any) error {
+	if v == nil {
+		return nil
+	}
+	snap, err := s.Get(ctx)
+	if err != nil {
+		return err
+	}
+	if snap == nil || !snap.HasState {
+		return nil
+	}
+	defer snap.Close()
+	return snap.Decode(v)
+}
+
+// Update streams new workflow state JSON while preserving the state lease.
+func (s *QueueStateHandle) Update(ctx context.Context, body io.Reader, opts ...UpdateOption) (*UpdateResult, error) {
+	_, _, _, _, _, _, etag, version, err := s.snapshot()
+	if err != nil {
+		return nil, err
+	}
+	options := UpdateOptions{
+		IfETag: etag,
+	}
+	if version > 0 {
+		options.IfVersion = strconv.FormatInt(version, 10)
+	}
+	options.FencingToken = s.syncFencingToken()
+	if len(opts) > 0 {
+		options = applyUpdateOptions(options, opts)
+	}
+	return s.UpdateWithOptions(ctx, body, options)
+}
+
+// UpdateBytes is a convenience wrapper around Update for in-memory payloads.
+func (s *QueueStateHandle) UpdateBytes(ctx context.Context, body []byte, opts ...UpdateOption) (*UpdateResult, error) {
+	return s.Update(ctx, bytes.NewReader(body), opts...)
+}
+
+// UpdateWithOptions updates workflow state while allowing conditional/header overrides.
+func (s *QueueStateHandle) UpdateWithOptions(ctx context.Context, body io.Reader, opts UpdateOptions) (*UpdateResult, error) {
+	cli, namespace, key, leaseID, txnID, corr, etag, version, err := s.snapshot()
+	if err != nil {
+		return nil, err
+	}
+	ctx = WithCorrelationID(ctx, corr)
+	if opts.IfETag == "" {
+		opts.IfETag = etag
+	}
+	if opts.IfVersion == "" && version > 0 {
+		opts.IfVersion = strconv.FormatInt(version, 10)
+	}
+	if opts.FencingToken == "" {
+		opts.FencingToken = s.syncFencingToken()
+	}
+	if opts.Namespace == "" {
+		opts.Namespace = namespace
+	}
+	if opts.TxnID == "" {
+		opts.TxnID = txnID
+	}
+	res, err := cli.Update(ctx, key, leaseID, body, opts)
+	if err != nil {
+		return nil, err
+	}
+	if res != nil {
+		s.updateAfterMutation(res.NewStateETag, res.NewVersion)
+	}
+	s.syncFencingToken()
+	return res, nil
+}
+
+// Save marshals v as JSON and updates workflow state through the state lease.
+func (s *QueueStateHandle) Save(ctx context.Context, v any, opts ...UpdateOption) error {
+	var body io.Reader
+	switch src := v.(type) {
+	case *Document:
+		if src == nil {
+			return fmt.Errorf("lockd: document nil")
+		}
+		data, err := src.Bytes()
+		if err != nil {
+			return err
+		}
+		body = bytes.NewReader(data)
+	case io.Reader:
+		body = src
+	default:
+		data, err := json.Marshal(v)
+		if err != nil {
+			return err
+		}
+		body = bytes.NewReader(data)
+	}
+	_, err := s.Update(ctx, body, opts...)
+	return err
+}
+
+// UpdateMetadata mutates metadata for the workflow state key.
+func (s *QueueStateHandle) UpdateMetadata(ctx context.Context, meta MetadataOptions) (*MetadataResult, error) {
+	if meta.empty() {
+		return nil, fmt.Errorf("lockd: metadata options required")
+	}
+	cli, namespace, key, leaseID, txnID, corr, _, version, err := s.snapshot()
+	if err != nil {
+		return nil, err
+	}
+	ctx = WithCorrelationID(ctx, corr)
+	opts := UpdateOptions{
+		Namespace: namespace,
+		Metadata:  meta,
+	}
+	if opts.TxnID == "" {
+		opts.TxnID = txnID
+	}
+	if version > 0 {
+		opts.IfVersion = strconv.FormatInt(version, 10)
+	}
+	opts.FencingToken = s.syncFencingToken()
+	res, err := cli.UpdateMetadata(ctx, key, leaseID, opts)
+	if err != nil {
+		return nil, err
+	}
+	s.syncFencingToken()
+	return res, nil
+}
+
+// Remove deletes workflow state while preserving queue lease lifecycle semantics.
+func (s *QueueStateHandle) Remove(ctx context.Context) (*api.RemoveResponse, error) {
+	_, _, _, _, _, _, etag, version, err := s.snapshot()
+	if err != nil {
+		return nil, err
+	}
+	opts := RemoveOptions{
+		IfETag: etag,
+	}
+	if version > 0 {
+		opts.IfVersion = strconv.FormatInt(version, 10)
+	}
+	opts.FencingToken = s.syncFencingToken()
+	return s.RemoveWithOptions(ctx, opts)
+}
+
+// RemoveWithOptions deletes workflow state with optional conditional overrides.
+func (s *QueueStateHandle) RemoveWithOptions(ctx context.Context, opts RemoveOptions) (*api.RemoveResponse, error) {
+	cli, namespace, key, leaseID, txnID, corr, etag, version, err := s.snapshot()
+	if err != nil {
+		return nil, err
+	}
+	ctx = WithCorrelationID(ctx, corr)
+	if opts.IfETag == "" {
+		opts.IfETag = etag
+	}
+	if opts.IfVersion == "" && version > 0 {
+		opts.IfVersion = strconv.FormatInt(version, 10)
+	}
+	if opts.FencingToken == "" {
+		opts.FencingToken = s.syncFencingToken()
+	}
+	if opts.Namespace == "" {
+		opts.Namespace = namespace
+	}
+	if opts.TxnID == "" {
+		opts.TxnID = txnID
+	}
+	res, err := cli.Remove(ctx, key, leaseID, opts)
+	if err != nil {
+		return nil, err
+	}
+	if res != nil {
+		s.clearStateAfterRemove(res.NewVersion)
+	}
+	s.syncFencingToken()
+	return res, nil
 }
 
 const headerFencingToken = "X-Fencing-Token"
@@ -854,6 +1383,11 @@ const headerQueryReturn = "X-Lockd-Query-Return"
 const contentTypeNDJSON = "application/x-ndjson"
 const headerShutdownImminent = "Shutdown-Imminent"
 const (
+	minQueueAutoExtendInterval = 250 * time.Millisecond
+	maxQueueAutoExtendInterval = 30 * time.Second
+	defaultQueueAutoExtendTick = 15 * time.Second
+)
+const (
 	headerCorrelationID       = "X-Correlation-Id"
 	headerMetadataQueryHidden = "X-Lockd-Meta-Query-Hidden"
 )
@@ -862,8 +1396,9 @@ const (
 var ErrMissingFencingToken = errors.New("lockd: fencing token required")
 
 var (
-	acquireRandMu sync.Mutex
-	acquireRand   = rand.New(rand.NewSource(time.Now().UnixNano()))
+	acquireRandMu    sync.Mutex
+	acquireRand      = rand.New(rand.NewSource(time.Now().UnixNano()))
+	consumerOwnerSeq atomic.Uint64
 )
 
 const defaultEndpointPort = "9341"
@@ -1058,6 +1593,9 @@ func prepareHTTPResources(endpoints []string) (*http.Client, []string, error) {
 }
 
 func (c *Client) initialize(endpoints []string) error {
+	if c.logger == nil {
+		c.logger = pslog.NoopLogger()
+	}
 	httpClient, normalized, err := prepareHTTPResources(endpoints)
 	if err != nil {
 		return err
@@ -1079,6 +1617,27 @@ func (c *Client) initialize(endpoints []string) error {
 		if tr, ok := c.httpClient.Transport.(*http.Transport); ok {
 			applyDefaultTransportTuning(tr)
 		}
+	}
+	if !c.disableMTLS && strings.TrimSpace(c.bundlePath) != "" {
+		bundlePath := c.bundlePath
+		if !c.bundlePathDisableExpansion {
+			bundlePath, err = pathutil.ExpandUserAndEnv(bundlePath)
+			if err != nil {
+				return fmt.Errorf("lockd: expand client bundle path %q: %w", c.bundlePath, err)
+			}
+			c.bundlePath = bundlePath
+		}
+		clientBundle, err := tlsutil.LoadClientBundle(bundlePath)
+		if err != nil {
+			return fmt.Errorf("lockd: load client bundle %s: %w", bundlePath, err)
+		}
+		tr, ok := c.httpClient.Transport.(*http.Transport)
+		if !ok || tr == nil {
+			return fmt.Errorf("lockd: with bundle path requires *http.Transport, got %T", c.httpClient.Transport)
+		}
+		cloned := tr.Clone()
+		cloned.TLSClientConfig = buildClientTLS(clientBundle)
+		c.httpClient.Transport = cloned
 	}
 	if c.httpClient.Timeout != 0 {
 		c.httpClient.Timeout = 0
@@ -1138,6 +1697,17 @@ const (
 	DefaultAcquireJitter         = 100 * time.Millisecond
 	DefaultFailureRetries        = 5
 	DefaultAcquireFailureRetries = DefaultFailureRetries
+	// DefaultConsumerImmediateRetries controls how many consecutive consumer
+	// failures are retried without delay before backoff starts.
+	DefaultConsumerImmediateRetries = 3
+	// DefaultConsumerBaseDelay is the first delayed retry duration after immediate retries.
+	DefaultConsumerBaseDelay = 250 * time.Millisecond
+	// DefaultConsumerMaxDelay caps consumer restart backoff growth.
+	DefaultConsumerMaxDelay = 5 * time.Minute
+	// DefaultConsumerMultiplier is the exponential growth factor for restart delay.
+	DefaultConsumerMultiplier = 2.0
+	// DefaultConsumerJitter randomizes restart delay by +/- this duration.
+	DefaultConsumerJitter = 0 * time.Second
 )
 
 const (
@@ -1194,6 +1764,7 @@ type LeaseSession struct {
 
 // ReleaseOptions controls commit vs rollback semantics during lease release.
 type ReleaseOptions struct {
+	// Rollback discards staged state/attachments instead of committing them.
 	Rollback bool
 }
 
@@ -1204,8 +1775,10 @@ type AcquireForUpdateHandler func(context.Context, *AcquireForUpdateContext) err
 // AcquireForUpdateContext exposes the active lease session and the snapshot that
 // was read before the handler executed.
 type AcquireForUpdateContext struct {
+	// Session is the active lease context used for updates/removals/metadata changes.
 	Session *LeaseSession
-	State   *StateSnapshot
+	// State is the pre-handler snapshot fetched after acquire and before user logic runs.
+	State *StateSnapshot
 }
 
 func (a *AcquireForUpdateContext) session() (*LeaseSession, error) {
@@ -1298,9 +1871,13 @@ func (a *AcquireForUpdateContext) RemoveWithOptions(ctx context.Context, opts Re
 
 // StateSnapshot represents the current JSON state and metadata for a lease.
 type StateSnapshot struct {
-	Reader   io.ReadCloser
-	ETag     string
-	Version  int64
+	// Reader streams the state payload. It may be nil when HasState is false.
+	Reader io.ReadCloser
+	// ETag is the backend entity tag for CAS-protected writes/deletes.
+	ETag string
+	// Version is lockd's monotonic version counter for the key.
+	Version int64
+	// HasState reports whether the key currently has a committed JSON document.
 	HasState bool
 }
 
@@ -1754,14 +2331,19 @@ func (c *cancelReadCloser) Close() error {
 
 // GetResponse encapsulates the payload and headers returned by Client.Get.
 type GetResponse struct {
+	// Namespace scopes the request or response to a lockd namespace.
 	Namespace string
-	Key       string
-	ETag      string
-	Version   string
-	HasState  bool
-	reader    io.ReadCloser
-	client    *Client
-	public    bool
+	// Key identifies the lock/state key within the namespace.
+	Key string
+	// ETag is the entity tag used for optimistic concurrency and cache validation.
+	ETag string
+	// Version is the server version header for the returned key state.
+	Version string
+	// HasState reports whether the requested key currently has committed state.
+	HasState bool
+	reader   io.ReadCloser
+	client   *Client
+	public   bool
 }
 
 // QueryReturn describes the payload mode exposed by /v1/query.
@@ -1791,10 +2373,14 @@ func (mode QueryReturn) normalize() QueryReturn {
 
 // QueryResponse describes the result set returned by Client.Query.
 type QueryResponse struct {
+	// Namespace scopes the request or response to a lockd namespace.
 	Namespace string
-	Cursor    string
-	IndexSeq  uint64
-	Metadata  map[string]string
+	// Cursor is the pagination cursor returned by the query engine.
+	Cursor string
+	// IndexSeq is the index sequence observed by the query execution.
+	IndexSeq uint64
+	// Metadata carries metadata values returned by the server for this object.
+	Metadata map[string]string
 
 	mode    QueryReturn
 	keys    []string
@@ -1993,10 +2579,13 @@ func parseQueryMetadataHeader(raw string) map[string]string {
 
 // QueryRow represents a single row returned from /v1/query.
 type QueryRow struct {
+	// Namespace scopes the request or response to a lockd namespace.
 	Namespace string
-	Key       string
-	Version   int64
-	doc       *streamDocumentHandle
+	// Key identifies the lock/state key within the namespace.
+	Key string
+	// Version is the key version associated with this query row.
+	Version int64
+	doc     *streamDocumentHandle
 }
 
 // HasDocument reports whether the row was populated with a document payload.
@@ -2114,15 +2703,19 @@ func (gr *GetResponse) detachReader() io.ReadCloser {
 
 // GetOptions tweaks the behaviour of Client.Get / Client.Load.
 type GetOptions struct {
-	Namespace     string
-	LeaseID       string
+	// Namespace scopes the read. Empty uses the client's default namespace.
+	Namespace string
+	// LeaseID enforces lease-bound reads when provided.
+	LeaseID string
+	// DisablePublic forces authenticated/lease-backed reads instead of public fast-path reads.
 	DisablePublic bool
 }
 
 // GetOption applies custom behaviour to Client.Get.
 type GetOption func(*GetOptions)
 
-// WithGetNamespace overrides the namespace used for the request.
+// WithGetNamespace overrides namespace for Get.
+// Empty values are normalized by server/client defaults.
 func WithGetNamespace(ns string) GetOption {
 	return func(opts *GetOptions) {
 		if opts != nil {
@@ -2131,7 +2724,8 @@ func WithGetNamespace(ns string) GetOption {
 	}
 }
 
-// WithGetLeaseID sets the lease identifier to use for the request.
+// WithGetLeaseID sets lease id used for lease-bound reads.
+// Leave unset for public/read-only snapshots when allowed.
 func WithGetLeaseID(id string) GetOption {
 	return func(opts *GetOptions) {
 		if opts != nil {
@@ -2140,7 +2734,7 @@ func WithGetLeaseID(id string) GetOption {
 	}
 }
 
-// WithGetPublicDisabled forces lease-backed reads even when no lease is provided.
+// WithGetPublicDisabled disables public-read fallback and requires lease-backed semantics.
 func WithGetPublicDisabled(disable bool) GetOption {
 	return func(opts *GetOptions) {
 		if opts != nil {
@@ -2151,13 +2745,14 @@ func WithGetPublicDisabled(disable bool) GetOption {
 
 // LoadOptions mirrors GetOptions for Client.Load.
 type LoadOptions struct {
+	// GetOptions carries namespace/lease/public-read behavior for Load.
 	GetOptions
 }
 
 // LoadOption customises Client.Load.
 type LoadOption func(*LoadOptions)
 
-// WithLoadNamespace overrides the namespace used for Client.Load.
+// WithLoadNamespace overrides namespace for Load.
 func WithLoadNamespace(ns string) LoadOption {
 	return func(opts *LoadOptions) {
 		if opts != nil {
@@ -2166,7 +2761,7 @@ func WithLoadNamespace(ns string) LoadOption {
 	}
 }
 
-// WithLoadLeaseID sets the lease identifier used by Client.Load.
+// WithLoadLeaseID sets lease id for Load when lease-bound reads are required.
 func WithLoadLeaseID(id string) LoadOption {
 	return func(opts *LoadOptions) {
 		if opts != nil {
@@ -2175,7 +2770,7 @@ func WithLoadLeaseID(id string) LoadOption {
 	}
 }
 
-// WithLoadPublicDisabled forces lease-backed loads even when no lease is provided.
+// WithLoadPublicDisabled disables public-read fallback for Load.
 func WithLoadPublicDisabled(disable bool) LoadOption {
 	return func(opts *LoadOptions) {
 		if opts != nil {
@@ -2206,26 +2801,38 @@ func applyLoadOptions(optFns []LoadOption) LoadOptions {
 
 // UpdateResult captures the response from Update.
 type UpdateResult struct {
-	NewVersion   int64                  `json:"new_version"`
-	NewStateETag string                 `json:"new_state_etag"`
-	BytesWritten int64                  `json:"bytes"`
-	Metadata     api.MetadataAttributes `json:"metadata,omitempty"`
+	// NewVersion is the updated monotonic version after a successful mutation.
+	NewVersion int64 `json:"new_version"`
+	// NewStateETag is the updated state entity tag after a successful mutation.
+	NewStateETag string `json:"new_state_etag"`
+	// BytesWritten is the number of state bytes accepted by the update.
+	BytesWritten int64 `json:"bytes"`
+	// Metadata carries metadata values returned by the server for this object.
+	Metadata api.MetadataAttributes `json:"metadata,omitempty"`
 }
 
 // MetadataResult captures metadata-only mutation outcomes.
 type MetadataResult struct {
-	Version  int64
+	// Version is the new metadata version after mutation.
+	Version int64
+	// Metadata is the server's effective metadata document after mutation.
 	Metadata api.MetadataAttributes
 }
 
 // UpdateOptions controls conditional update semantics.
 type UpdateOptions struct {
-	IfETag       string
-	IfVersion    string
+	// IfETag sets a conditional ETag guard (maps to If-Match semantics).
+	IfETag string
+	// IfVersion sets a conditional version guard (X-If-Version).
+	IfVersion string
+	// FencingToken provides explicit fencing when not already registered on the client.
 	FencingToken string
-	Namespace    string
-	Metadata     MetadataOptions
-	TxnID        string
+	// Namespace scopes the mutation. Empty uses the client's default namespace.
+	Namespace string
+	// Metadata applies metadata mutations alongside the state update.
+	Metadata MetadataOptions
+	// TxnID binds the mutation to a transaction coordinator record.
+	TxnID string
 }
 
 // UpdateOption customizes update behaviour.
@@ -2239,7 +2846,8 @@ func (f updateOptionFunc) apply(opts *UpdateOptions) {
 	f(opts)
 }
 
-// WithTxnID binds an update (or metadata mutation) to a transaction id.
+// WithTxnID binds an update/metadata mutation to a transaction coordinator id.
+// The value is copied to UpdateOptions.TxnID and MetadataOptions.TxnID.
 func WithTxnID(txnID string) UpdateOption {
 	return updateOptionFunc(func(opts *UpdateOptions) {
 		opts.TxnID = txnID
@@ -2249,19 +2857,19 @@ func WithTxnID(txnID string) UpdateOption {
 	})
 }
 
-// WithMetadata attaches metadata mutations to an update.
+// WithMetadata attaches metadata mutations to the same request as the state update.
 func WithMetadata(meta MetadataOptions) UpdateOption {
 	return updateOptionFunc(func(opts *UpdateOptions) {
 		opts.Metadata = meta
 	})
 }
 
-// WithQueryHidden marks the key as hidden from /v1/query after the update.
+// WithQueryHidden marks the key hidden from /v1/query after the update commits.
 func WithQueryHidden() UpdateOption {
 	return WithMetadata(MetadataOptions{QueryHidden: Bool(true)})
 }
 
-// WithQueryVisible clears the hidden flag on the key after the update.
+// WithQueryVisible clears the query-hidden metadata flag after update commit.
 func WithQueryVisible() UpdateOption {
 	val := Bool(false)
 	return WithMetadata(MetadataOptions{QueryHidden: val})
@@ -2269,31 +2877,35 @@ func WithQueryVisible() UpdateOption {
 
 // MetadataOptions captures metadata mutations attached to updates.
 type MetadataOptions struct {
+	// QueryHidden marks a key hidden/visible from query results when non-nil.
 	QueryHidden *bool
-	TxnID       string
+	// TxnID binds metadata-only mutations to a transaction.
+	TxnID string
 }
 
 // NamespaceConfigOptions controls concurrency for namespace configuration mutations.
 type NamespaceConfigOptions struct {
+	// IfMatch enforces optimistic concurrency against the current namespace-config ETag.
 	IfMatch string
 }
 
 // FlushIndexOptions customises index flush behaviour.
 type FlushIndexOptions struct {
+	// Mode accepts "async" (default) or "wait" for synchronous completion.
 	Mode string
 }
 
 // FlushOption customises FlushIndex behaviour.
 type FlushOption func(*FlushIndexOptions)
 
-// WithFlushModeWait forces FlushIndex to run synchronously.
+// WithFlushModeWait forces FlushIndex to block until indexing catches up.
 func WithFlushModeWait() FlushOption {
 	return func(opts *FlushIndexOptions) {
 		opts.Mode = "wait"
 	}
 }
 
-// WithFlushModeAsync schedules the flush asynchronously (default).
+// WithFlushModeAsync schedules FlushIndex asynchronously and returns immediately.
 func WithFlushModeAsync() FlushOption {
 	return func(opts *FlushIndexOptions) {
 		opts.Mode = "async"
@@ -2332,11 +2944,16 @@ func applyUpdateOptions(base UpdateOptions, opts []UpdateOption) UpdateOptions {
 
 // RemoveOptions controls conditional delete semantics.
 type RemoveOptions struct {
-	IfETag       string
-	IfVersion    string
+	// IfETag sets a conditional ETag guard (maps to If-Match semantics).
+	IfETag string
+	// IfVersion sets a conditional version guard (X-If-Version).
+	IfVersion string
+	// FencingToken provides explicit fencing when not already registered on the client.
 	FencingToken string
-	Namespace    string
-	TxnID        string
+	// Namespace scopes the delete. Empty uses the client's default namespace.
+	Namespace string
+	// TxnID binds the delete to a transaction coordinator record.
+	TxnID string
 }
 
 type correlationTransport struct {
@@ -2393,25 +3010,27 @@ func CorrelationIDFromResponse(resp *http.Response) string {
 
 // Client is a convenience wrapper around the lockd HTTP API.
 type Client struct {
-	endpoints          []string
-	lastEndpoint       string
-	shuffleEndpoints   bool
-	httpClient         *http.Client
-	httpTraceEnabled   bool
-	leaseTokens        sync.Map
-	sessions           sync.Map
-	httpTimeout        time.Duration
-	closeTimeout       time.Duration
-	keepAliveTimeout   time.Duration
-	forUpdateTimeout   time.Duration
-	disableMTLS        bool
-	logger             pslog.Base
-	failureRetries     int
-	drainAwareShutdown bool
-	shutdownNotified   atomic.Bool
-	defaultsMu         sync.RWMutex
-	defaultNamespace   string
-	defaultLeaseID     string
+	endpoints                  []string
+	lastEndpoint               string
+	shuffleEndpoints           bool
+	httpClient                 *http.Client
+	httpTraceEnabled           bool
+	leaseTokens                sync.Map
+	sessions                   sync.Map
+	httpTimeout                time.Duration
+	closeTimeout               time.Duration
+	keepAliveTimeout           time.Duration
+	forUpdateTimeout           time.Duration
+	disableMTLS                bool
+	bundlePath                 string
+	bundlePathDisableExpansion bool
+	logger                     pslog.Base
+	failureRetries             int
+	drainAwareShutdown         bool
+	shutdownNotified           atomic.Bool
+	defaultsMu                 sync.RWMutex
+	defaultNamespace           string
+	defaultLeaseID             string
 
 	closeOnce sync.Once
 }
@@ -2814,7 +3433,9 @@ func (c *Client) forUpdateContext(parent context.Context) (context.Context, cont
 // Option customises client construction.
 type Option func(*Client)
 
-// WithHTTPClient supplies a custom HTTP client.
+// WithHTTPClient supplies a custom HTTP client/transport stack.
+// Use this when you need custom TLS roots, proxies, tracing round-trippers, or
+// connection pooling behavior not covered by SDK defaults.
 func WithHTTPClient(cli *http.Client) Option {
 	return func(c *Client) {
 		if cli != nil {
@@ -2823,11 +3444,12 @@ func WithHTTPClient(cli *http.Client) Option {
 	}
 }
 
-// WithLogger supplies a logger for client diagnostics. Passing nil disables logging.
+// WithLogger supplies a logger for client diagnostics.
+// Passing nil falls back to pslog.NoopLogger().
 func WithLogger(logger pslog.Base) Option {
 	return func(c *Client) {
 		if logger == nil {
-			c.logger = nil
+			c.logger = pslog.NoopLogger()
 			return
 		}
 		if full, ok := logger.(pslog.Logger); ok {
@@ -2856,7 +3478,24 @@ func WithDisableMTLS(disable bool) Option {
 	}
 }
 
-// WithDefaultNamespace overrides the namespace applied when requests leave it unspecified.
+// WithBundlePath configures an mTLS client bundle PEM (CA cert + client cert + key).
+// By default, "$VARS" and leading "~/" are expanded before loading.
+// Use WithBundlePathDisableExpansion() to treat the path literally.
+func WithBundlePath(path string) Option {
+	return func(c *Client) {
+		c.bundlePath = strings.TrimSpace(path)
+	}
+}
+
+// WithBundlePathDisableExpansion disables env/tilde expansion for WithBundlePath.
+func WithBundlePathDisableExpansion() Option {
+	return func(c *Client) {
+		c.bundlePathDisableExpansion = true
+	}
+}
+
+// WithDefaultNamespace overrides the namespace applied when request payloads/options
+// omit Namespace.
 func WithDefaultNamespace(ns string) Option {
 	return func(c *Client) {
 		c.defaultNamespace = ns
@@ -2871,7 +3510,9 @@ func WithFailureRetries(n int) Option {
 	}
 }
 
-// WithHTTPTimeout overrides the default HTTP client timeout.
+// WithHTTPTimeout overrides per-request timeout used by SDK-issued HTTP calls.
+// This timeout does not apply to acquire/dequeue wait-forever calls that intentionally
+// hold long-poll requests open.
 func WithHTTPTimeout(d time.Duration) Option {
 	return func(c *Client) {
 		if d > 0 {
@@ -2880,7 +3521,7 @@ func WithHTTPTimeout(d time.Duration) Option {
 	}
 }
 
-// WithCloseTimeout overrides the timeout used when auto-releasing leases during Close().
+// WithCloseTimeout overrides timeout used when Close() auto-releases tracked leases.
 func WithCloseTimeout(d time.Duration) Option {
 	return func(c *Client) {
 		if d > 0 {
@@ -2889,7 +3530,7 @@ func WithCloseTimeout(d time.Duration) Option {
 	}
 }
 
-// WithKeepAliveTimeout overrides the timeout used for keepalive requests.
+// WithKeepAliveTimeout overrides timeout used for lease keepalive requests.
 func WithKeepAliveTimeout(d time.Duration) Option {
 	return func(c *Client) {
 		if d > 0 {
@@ -2898,21 +3539,24 @@ func WithKeepAliveTimeout(d time.Duration) Option {
 	}
 }
 
-// WithHTTPTrace enables HTTP client tracing (net/http/httptrace hooks).
+// WithHTTPTrace enables net/http/httptrace diagnostics on SDK requests.
+// Traces are emitted through the configured client logger.
 func WithHTTPTrace() Option {
 	return func(c *Client) {
 		c.httpTraceEnabled = true
 	}
 }
 
-// WithDrainAwareShutdown toggles automatic lease releases when the server signals shutdown.
+// WithDrainAwareShutdown toggles automatic lease release when server responses
+// include Shutdown-Imminent drain signaling.
 func WithDrainAwareShutdown(enabled bool) Option {
 	return func(c *Client) {
 		c.drainAwareShutdown = enabled
 	}
 }
 
-// WithForUpdateTimeout overrides the timeout used for acquire-for-update requests.
+// WithForUpdateTimeout overrides timeout bound for AcquireForUpdate orchestration.
+// Handler execution still follows the caller's context deadline/cancellation.
 func WithForUpdateTimeout(d time.Duration) Option {
 	return func(c *Client) {
 		if d > 0 {
@@ -2947,6 +3591,7 @@ func New(baseURL string, opts ...Option) (*Client, error) {
 		failureRetries:     DefaultFailureRetries,
 		drainAwareShutdown: true,
 		defaultNamespace:   namespaces.Default,
+		logger:             pslog.NoopLogger(),
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -2973,6 +3618,7 @@ func NewWithEndpoints(endpoints []string, opts ...Option) (*Client, error) {
 		failureRetries:     DefaultFailureRetries,
 		drainAwareShutdown: true,
 		defaultNamespace:   namespaces.Default,
+		logger:             pslog.NoopLogger(),
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -2989,10 +3635,15 @@ func NewWithEndpoints(endpoints []string, opts ...Option) (*Client, error) {
 
 // AcquireConfig controls the client-side retry and backoff behaviour for Acquire and AcquireForUpdate.
 type AcquireConfig struct {
-	BaseDelay      time.Duration
-	MaxDelay       time.Duration
-	Multiplier     float64
-	Jitter         time.Duration
+	// BaseDelay is the starting backoff delay after retryable failures.
+	BaseDelay time.Duration
+	// MaxDelay caps exponential backoff growth.
+	MaxDelay time.Duration
+	// Multiplier is the exponential growth factor applied between retries.
+	Multiplier float64
+	// Jitter randomizes capped delays by +/- Jitter to reduce thundering herds.
+	Jitter time.Duration
+	// FailureRetries controls retries for non-conflict transient failures; <0 means unbounded.
 	FailureRetries int
 	randInt63n     func(int64) int64
 }
@@ -3761,8 +4412,10 @@ func (c *Client) Describe(ctx context.Context, key string) (*api.DescribeRespons
 
 // NamespaceConfigResult captures a namespace config document and its ETag.
 type NamespaceConfigResult struct {
+	// Config is the effective namespace configuration document returned by the server.
 	Config *api.NamespaceConfigResponse
-	ETag   string
+	// ETag is the namespace configuration ETag for optimistic concurrency control.
+	ETag string
 }
 
 // GetNamespaceConfig returns the namespace configuration document and its ETag.
@@ -3911,9 +4564,12 @@ func (c *Client) FlushIndex(ctx context.Context, namespace string, optFns ...Flu
 
 // QueryOptions controls /v1/query execution hints.
 type QueryOptions struct {
-	request  api.QueryRequest
-	Engine   string
-	Refresh  string
+	request api.QueryRequest
+	// Engine forces execution strategy ("auto", "index", "scan").
+	Engine string
+	// Refresh controls visibility semantics (for example "wait_for").
+	Refresh string
+	// Return controls payload shape (keys or streamed documents).
 	Return   QueryReturn
 	parseErr error
 }
@@ -3943,6 +4599,7 @@ func cloneQueryRequest(req api.QueryRequest) api.QueryRequest {
 }
 
 // WithQueryRequest copies a full QueryRequest into the option set.
+// Subsequent WithQuery* options can override individual fields.
 func WithQueryRequest(req *api.QueryRequest) QueryOption {
 	return func(opts *QueryOptions) {
 		if opts == nil || req == nil {
@@ -3952,7 +4609,7 @@ func WithQueryRequest(req *api.QueryRequest) QueryOption {
 	}
 }
 
-// WithQueryNamespace overrides the namespace used for the query.
+// WithQueryNamespace overrides namespace used for query execution.
 func WithQueryNamespace(ns string) QueryOption {
 	return func(opts *QueryOptions) {
 		if opts == nil {
@@ -3962,7 +4619,7 @@ func WithQueryNamespace(ns string) QueryOption {
 	}
 }
 
-// WithQueryLimit caps the number of results returned by the server.
+// WithQueryLimit caps number of rows returned by the server.
 func WithQueryLimit(limit int) QueryOption {
 	return func(opts *QueryOptions) {
 		if opts == nil {
@@ -3975,7 +4632,7 @@ func WithQueryLimit(limit int) QueryOption {
 	}
 }
 
-// WithQueryCursor resumes a previous query using the provided cursor token.
+// WithQueryCursor resumes a previous query page using server-provided cursor token.
 func WithQueryCursor(cursor string) QueryOption {
 	return func(opts *QueryOptions) {
 		if opts == nil {
@@ -3985,7 +4642,7 @@ func WithQueryCursor(cursor string) QueryOption {
 	}
 }
 
-// WithQueryFields sets the request field projections.
+// WithQueryFields sets field projection map passed to query execution.
 func WithQueryFields(fields map[string]any) QueryOption {
 	return func(opts *QueryOptions) {
 		if opts == nil {
@@ -4005,6 +4662,7 @@ func WithQueryFields(fields map[string]any) QueryOption {
 }
 
 // WithQuery parses an LQL expression and sets the selector for the request.
+// Parse errors are surfaced when Query executes.
 func WithQuery(expr string) QueryOption {
 	return func(opts *QueryOptions) {
 		if opts == nil {
@@ -4031,7 +4689,8 @@ func WithQuery(expr string) QueryOption {
 	}
 }
 
-// WithQuerySelector installs an already-parsed selector (useful when callers build the AST themselves).
+// WithQuerySelector installs an already-parsed selector (useful when callers
+// construct selector ASTs directly).
 func WithQuerySelector(sel api.Selector) QueryOption {
 	return func(opts *QueryOptions) {
 		if opts == nil {
@@ -4041,7 +4700,7 @@ func WithQuerySelector(sel api.Selector) QueryOption {
 	}
 }
 
-// WithQueryEngine forces a specific query engine (auto, index, or scan).
+// WithQueryEngine forces query execution engine ("auto", "index", or "scan").
 func WithQueryEngine(engine string) QueryOption {
 	return func(opts *QueryOptions) {
 		if opts == nil {
@@ -4073,7 +4732,8 @@ func WithQueryEngineScan() QueryOption {
 	return WithQueryEngine("scan")
 }
 
-// WithQueryRefresh selects the refresh policy ("wait_for" waits for visible index docs).
+// WithQueryRefresh selects refresh policy (for example "wait_for" to block
+// until indexed visibility).
 func WithQueryRefresh(mode string) QueryOption {
 	return func(opts *QueryOptions) {
 		if opts == nil {
@@ -4105,7 +4765,7 @@ func WithQueryBlock() QueryOption {
 	return WithQueryRefreshWaitFor()
 }
 
-// WithQueryReturn selects the payload mode for /v1/query ("keys" or "documents").
+// WithQueryReturn selects payload mode for /v1/query ("keys" or "documents").
 func WithQueryReturn(mode QueryReturn) QueryOption {
 	return func(opts *QueryOptions) {
 		if opts == nil {
@@ -4743,11 +5403,16 @@ func (c *Client) txnDecision(ctx context.Context, path string, req api.TxnDecisi
 
 // APIError describes an error response from lockd.
 type APIError struct {
-	Status     int
-	Response   api.ErrorResponse
-	Body       []byte
+	// Status is the HTTP status code returned by the server.
+	Status int
+	// Response is the decoded lockd error envelope, when available.
+	Response api.ErrorResponse
+	// Body contains the raw response body bytes for additional diagnostics.
+	Body []byte
+	// RetryAfter is the parsed retry delay hint from headers, when provided.
 	RetryAfter time.Duration
-	QRFState   string
+	// QRFState carries queue-resilience-fallback diagnostics surfaced by the server.
+	QRFState string
 }
 
 func (e *APIError) Error() string {
@@ -5300,15 +5965,18 @@ func (c *Client) dequeueInternal(ctx context.Context, queue string, opts Dequeue
 		if stateful && handle.msg.StateLeaseID != "" {
 			handle.state = &QueueStateHandle{
 				client:         c,
-				queue:          queue,
+				namespace:      handle.msg.Namespace,
+				stateKey:       queueStateKey(handle.msg.Queue, handle.msg.MessageID),
+				queue:          handle.msg.Queue,
 				messageID:      handle.msg.MessageID,
 				leaseID:        handle.msg.StateLeaseID,
+				txnID:          handle.msg.StateTxnID,
 				fencingToken:   handle.msg.StateFencingToken,
 				leaseExpiresAt: handle.msg.StateLeaseExpiresAtUnix,
-				stateETag:      handle.msg.StateETag,
+				queueStateETag: handle.msg.StateETag,
 				correlationID:  handle.msg.CorrelationID,
 			}
-			c.RegisterLeaseToken(handle.state.leaseID, strconv.FormatInt(handle.state.fencingToken, 10))
+			c.RegisterLeaseToken(handle.state.LeaseID(), strconv.FormatInt(handle.state.FencingToken(), 10))
 		}
 		handles = append(handles, handle)
 		lastCursor = apiResp.NextCursor
@@ -5532,6 +6200,8 @@ func (c *Client) DequeueWithState(ctx context.Context, queue string, opts Dequeu
 }
 
 // Subscribe streams queue messages continuously and invokes handler for each delivery.
+// While the handler runs, the client renews the in-flight queue lease implicitly
+// via QueueExtend to reduce timeout risk for long-running handlers.
 func (c *Client) Subscribe(ctx context.Context, queue string, opts SubscribeOptions, handler MessageHandler) error {
 	if handler == nil {
 		return fmt.Errorf("lockd: message handler required")
@@ -5540,6 +6210,8 @@ func (c *Client) Subscribe(ctx context.Context, queue string, opts SubscribeOpti
 }
 
 // SubscribeWithState streams queue messages with workflow state and invokes handler for each delivery.
+// While the handler runs, the client renews both the message lease and the
+// associated state lease implicitly via QueueExtend.
 func (c *Client) SubscribeWithState(ctx context.Context, queue string, opts SubscribeOptions, handler MessageHandlerWithState) error {
 	if handler == nil {
 		return fmt.Errorf("lockd: message handler required")
@@ -5767,23 +6439,30 @@ func (c *Client) subscribe(ctx context.Context, queue string, opts SubscribeOpti
 			if stateful && handle.msg.StateLeaseID != "" {
 				handle.state = &QueueStateHandle{
 					client:         c,
-					queue:          queue,
+					namespace:      handle.msg.Namespace,
+					stateKey:       queueStateKey(handle.msg.Queue, handle.msg.MessageID),
+					queue:          handle.msg.Queue,
 					messageID:      handle.msg.MessageID,
 					leaseID:        handle.msg.StateLeaseID,
+					txnID:          handle.msg.StateTxnID,
 					fencingToken:   handle.msg.StateFencingToken,
 					leaseExpiresAt: handle.msg.StateLeaseExpiresAtUnix,
-					stateETag:      handle.msg.StateETag,
+					queueStateETag: handle.msg.StateETag,
 					correlationID:  handle.msg.CorrelationID,
 				}
-				c.RegisterLeaseToken(handle.state.leaseID, strconv.FormatInt(handle.state.fencingToken, 10))
+				c.RegisterLeaseToken(handle.state.LeaseID(), strconv.FormatInt(handle.state.FencingToken(), 10))
 			}
 
 			msg := newQueueMessage(handle, nil, opts.OnCloseDelay)
 			var handlerErr error
 			if stateful {
-				handlerErr = stateHandler(ctx, msg, msg.StateHandle())
+				handlerErr = c.runQueueHandlerWithAutoExtend(ctx, msg, func(handlerCtx context.Context) error {
+					return stateHandler(handlerCtx, msg, msg.StateHandle())
+				})
 			} else {
-				handlerErr = handler(ctx, msg)
+				handlerErr = c.runQueueHandlerWithAutoExtend(ctx, msg, func(handlerCtx context.Context) error {
+					return handler(handlerCtx, msg)
+				})
 			}
 			if handlerErr != nil {
 				resp.Body.Close()
@@ -5805,6 +6484,508 @@ func (c *Client) subscribe(ctx context.Context, queue string, opts SubscribeOpti
 		cancel()
 		return nil
 	}
+}
+
+func queueAutoExtendDelay(visibility time.Duration) time.Duration {
+	if visibility <= 0 {
+		return defaultQueueAutoExtendTick
+	}
+	delay := visibility / 2
+	if delay < minQueueAutoExtendInterval {
+		delay = minQueueAutoExtendInterval
+	}
+	if delay > maxQueueAutoExtendInterval {
+		delay = maxQueueAutoExtendInterval
+	}
+	return delay
+}
+
+func queueAutoExtendBy(visibility time.Duration) time.Duration {
+	if visibility <= 0 {
+		return 0
+	}
+	return visibility
+}
+
+func queueMessageClosed(msg *QueueMessage) bool {
+	if msg == nil || msg.handle == nil {
+		return true
+	}
+	msg.handle.mu.Lock()
+	defer msg.handle.mu.Unlock()
+	return msg.handle.done
+}
+
+func (c *Client) autoExtendQueueMessage(ctx context.Context, msg *QueueMessage, stop <-chan struct{}) error {
+	for {
+		delay := queueAutoExtendDelay(msg.VisibilityTimeout())
+		timer := time.NewTimer(delay)
+		select {
+		case <-stop:
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return nil
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return nil
+		case <-timer.C:
+		}
+		if queueMessageClosed(msg) {
+			return nil
+		}
+		extendBy := queueAutoExtendBy(msg.VisibilityTimeout())
+		if err := msg.Extend(ctx, extendBy); err != nil {
+			if ctx.Err() != nil || queueMessageClosed(msg) {
+				return nil
+			}
+			return fmt.Errorf("lockd: queue lease auto-extend failed: %w", err)
+		}
+	}
+}
+
+func (c *Client) runQueueHandlerWithAutoExtend(ctx context.Context, msg *QueueMessage, handler func(context.Context) error) error {
+	if msg == nil || msg.handle == nil || handler == nil {
+		if handler == nil {
+			return nil
+		}
+		return handler(ctx)
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	handlerDone := make(chan error, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				handlerDone <- consumerPanicError("message handler", r)
+			}
+		}()
+		handlerDone <- handler(runCtx)
+	}()
+
+	stopExtend := make(chan struct{})
+	extendDone := make(chan error, 1)
+	go func() {
+		extendDone <- c.autoExtendQueueMessage(runCtx, msg, stopExtend)
+	}()
+
+	var extendErr error
+	extendSettled := false
+	for {
+		select {
+		case err := <-handlerDone:
+			cancel()
+			close(stopExtend)
+			if !extendSettled {
+				if e := <-extendDone; e != nil {
+					extendErr = e
+				}
+			}
+			if err != nil && extendErr != nil {
+				return errors.Join(err, extendErr)
+			}
+			if err != nil {
+				return err
+			}
+			return extendErr
+		case err := <-extendDone:
+			extendSettled = true
+			if err == nil {
+				continue
+			}
+			extendErr = err
+			cancel()
+		}
+	}
+}
+
+type consumerRuntimeConfig struct {
+	name           string
+	queue          string
+	options        SubscribeOptions
+	withState      bool
+	messageHandler ConsumerMessageHandler
+	errorHandler   ConsumerErrorHandler
+	onStart        func(context.Context, ConsumerLifecycleEvent)
+	onStop         func(context.Context, ConsumerLifecycleEvent)
+	restartPolicy  ConsumerRestartPolicy
+}
+
+func defaultConsumerRestartPolicy() ConsumerRestartPolicy {
+	return ConsumerRestartPolicy{
+		ImmediateRetries: DefaultConsumerImmediateRetries,
+		BaseDelay:        DefaultConsumerBaseDelay,
+		MaxDelay:         DefaultConsumerMaxDelay,
+		Multiplier:       DefaultConsumerMultiplier,
+		Jitter:           DefaultConsumerJitter,
+	}
+}
+
+func normalizeConsumerRestartPolicy(policy ConsumerRestartPolicy) ConsumerRestartPolicy {
+	defaults := defaultConsumerRestartPolicy()
+	if policy.ImmediateRetries < 0 {
+		policy.ImmediateRetries = 0
+	}
+	if policy.BaseDelay <= 0 {
+		policy.BaseDelay = defaults.BaseDelay
+	}
+	if policy.MaxDelay <= 0 {
+		policy.MaxDelay = defaults.MaxDelay
+	}
+	if policy.BaseDelay > policy.MaxDelay {
+		policy.BaseDelay = policy.MaxDelay
+	}
+	if policy.Multiplier <= 1 {
+		policy.Multiplier = defaults.Multiplier
+	}
+	if policy.Jitter < 0 {
+		policy.Jitter = 0
+	}
+	if policy.MaxFailures < 0 {
+		policy.MaxFailures = 0
+	}
+	return policy
+}
+
+func normalizeConsumerConfigs(consumers []ConsumerConfig) ([]consumerRuntimeConfig, error) {
+	if len(consumers) == 0 {
+		return nil, fmt.Errorf("lockd: at least one consumer config is required")
+	}
+	normalized := make([]consumerRuntimeConfig, 0, len(consumers))
+	for idx, cfg := range consumers {
+		name := strings.TrimSpace(cfg.Name)
+		queue := strings.TrimSpace(cfg.Queue)
+		if queue == "" {
+			return nil, fmt.Errorf("lockd: consumer config[%d] queue is required", idx)
+		}
+		if name == "" {
+			name = queue
+		}
+		if cfg.MessageHandler == nil {
+			return nil, fmt.Errorf("lockd: consumer config[%d] message handler is required", idx)
+		}
+		opts := cfg.Options
+		opts.Owner = strings.TrimSpace(opts.Owner)
+		if opts.Owner == "" {
+			opts.Owner = defaultConsumerOwner(name)
+		}
+		normalized = append(normalized, consumerRuntimeConfig{
+			name:           name,
+			queue:          queue,
+			options:        opts,
+			withState:      cfg.WithState,
+			messageHandler: cfg.MessageHandler,
+			errorHandler:   cfg.ErrorHandler,
+			onStart:        cfg.OnStart,
+			onStop:         cfg.OnStop,
+			restartPolicy:  normalizeConsumerRestartPolicy(cfg.RestartPolicy),
+		})
+	}
+	return normalized, nil
+}
+
+func sanitizeConsumerOwnerToken(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	lastDash := false
+	for _, r := range s {
+		allowed := (r >= 'a' && r <= 'z') ||
+			(r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') ||
+			r == '-' || r == '_' || r == '.'
+		if !allowed {
+			if !lastDash {
+				b.WriteByte('-')
+				lastDash = true
+			}
+			continue
+		}
+		b.WriteRune(r)
+		lastDash = r == '-'
+	}
+	token := strings.Trim(b.String(), "-")
+	return token
+}
+
+func defaultConsumerOwner(name string) string {
+	base := sanitizeConsumerOwnerToken(name)
+	if base == "" {
+		base = "consumer"
+	}
+	host, err := os.Hostname()
+	if err != nil {
+		host = ""
+	}
+	host = sanitizeConsumerOwnerToken(host)
+	if host == "" {
+		host = "unknown-host"
+	}
+	seq := consumerOwnerSeq.Add(1)
+	return fmt.Sprintf("consumer-%s-%s-%d-%d", base, host, os.Getpid(), seq)
+}
+
+func consumerRestartDelay(failures int, policy ConsumerRestartPolicy) time.Duration {
+	if failures <= 0 {
+		return 0
+	}
+	if failures <= policy.ImmediateRetries {
+		return 0
+	}
+	delayedAttempt := failures - policy.ImmediateRetries
+	delay := policy.BaseDelay
+	for i := 1; i < delayedAttempt; i++ {
+		next := time.Duration(float64(delay) * policy.Multiplier)
+		if next <= delay {
+			next = policy.MaxDelay
+		}
+		delay = next
+		if delay >= policy.MaxDelay {
+			delay = policy.MaxDelay
+			break
+		}
+	}
+	if delay > policy.MaxDelay {
+		delay = policy.MaxDelay
+	}
+	if policy.Jitter <= 0 || delay <= 0 {
+		return delay
+	}
+	j := policy.Jitter
+	if delay < j {
+		j = delay
+	}
+	if j <= 0 {
+		return delay
+	}
+	span := int64(j)*2 + 1
+	if span <= 0 {
+		return delay
+	}
+	delay += time.Duration(rand.Int63n(span)) - j
+	if delay < 0 {
+		delay = 0
+	}
+	if delay > policy.MaxDelay {
+		delay = policy.MaxDelay
+	}
+	return delay
+}
+
+func consumerPanicError(component string, recovered any) error {
+	stack := strings.TrimSpace(string(debug.Stack()))
+	if stack == "" {
+		return fmt.Errorf("lockd: consumer %s panic: %v", component, recovered)
+	}
+	return fmt.Errorf("lockd: consumer %s panic: %v\n%s", component, recovered, stack)
+}
+
+func invokeConsumerLifecycleHook(ctx context.Context, hook func(context.Context, ConsumerLifecycleEvent), event ConsumerLifecycleEvent) (err error) {
+	if hook == nil {
+		return nil
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = consumerPanicError("lifecycle hook", r)
+		}
+	}()
+	hook(ctx, event)
+	return nil
+}
+
+func invokeConsumerErrorHandler(ctx context.Context, handler ConsumerErrorHandler, event ConsumerError) (err error) {
+	if handler == nil {
+		return nil
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = consumerPanicError("error handler", r)
+		}
+	}()
+	return handler(ctx, event)
+}
+
+func (c *Client) runConsumerAttemptRecover(ctx context.Context, cfg consumerRuntimeConfig) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = consumerPanicError("message handler", r)
+		}
+	}()
+	return c.runConsumerAttempt(ctx, cfg)
+}
+
+func (c *Client) runConsumerLoop(ctx context.Context, cfg consumerRuntimeConfig) error {
+	attempt := 0
+	failures := 0
+	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+		attempt++
+		if hookErr := invokeConsumerLifecycleHook(ctx, cfg.onStart, ConsumerLifecycleEvent{
+			Name:      cfg.name,
+			Queue:     cfg.queue,
+			WithState: cfg.withState,
+			Attempt:   attempt,
+		}); hookErr != nil {
+			if err := c.handleConsumerFailure(ctx, cfg, &failures, hookErr); err != nil {
+				return err
+			}
+			continue
+		}
+
+		err := c.runConsumerAttemptRecover(ctx, cfg)
+		stopErr := invokeConsumerLifecycleHook(ctx, cfg.onStop, ConsumerLifecycleEvent{
+			Name:      cfg.name,
+			Queue:     cfg.queue,
+			WithState: cfg.withState,
+			Attempt:   attempt,
+			Err:       err,
+		})
+		if stopErr != nil {
+			err = errors.Join(err, stopErr)
+		}
+		if err == nil {
+			failures = 0
+			continue
+		}
+		if err := c.handleConsumerFailure(ctx, cfg, &failures, err); err != nil {
+			return err
+		}
+	}
+}
+
+func (c *Client) handleConsumerFailure(ctx context.Context, cfg consumerRuntimeConfig, failures *int, runErr error) error {
+	if runErr == nil {
+		return nil
+	}
+	if ctx.Err() != nil {
+		return nil
+	}
+	if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
+		if ctx.Err() != nil {
+			return nil
+		}
+	}
+	*failures = *failures + 1
+	if cfg.restartPolicy.MaxFailures > 0 && *failures > cfg.restartPolicy.MaxFailures {
+		return fmt.Errorf("lockd: consumer %q queue %q exceeded max failures (%d): %w", cfg.name, cfg.queue, cfg.restartPolicy.MaxFailures, runErr)
+	}
+	delay := consumerRestartDelay(*failures, cfg.restartPolicy)
+	event := ConsumerError{
+		Name:      cfg.name,
+		Queue:     cfg.queue,
+		WithState: cfg.withState,
+		Attempt:   *failures,
+		RestartIn: delay,
+		Err:       runErr,
+	}
+	if cfg.errorHandler != nil {
+		if handlerErr := invokeConsumerErrorHandler(ctx, cfg.errorHandler, event); handlerErr != nil {
+			return fmt.Errorf("lockd: consumer %q queue %q error handler: %w", cfg.name, cfg.queue, handlerErr)
+		}
+	} else {
+		c.logWarnCtx(ctx,
+			"client.consumer.restart",
+			"consumer", cfg.name,
+			"queue", cfg.queue,
+			"stateful", cfg.withState,
+			"attempt", *failures,
+			"restart_in", delay,
+			"error", runErr,
+		)
+	}
+	if delay <= 0 {
+		return nil
+	}
+	select {
+	case <-ctx.Done():
+		return nil
+	case <-time.After(delay):
+	}
+	return nil
+}
+
+func (c *Client) runConsumerAttempt(ctx context.Context, cfg consumerRuntimeConfig) error {
+	if cfg.withState {
+		return c.SubscribeWithState(ctx, cfg.queue, cfg.options, func(handlerCtx context.Context, msg *QueueMessage, state *QueueStateHandle) error {
+			return cfg.messageHandler(handlerCtx, ConsumerMessage{
+				Client:       c,
+				Logger:       c.logger,
+				Queue:        cfg.queue,
+				WithState:    true,
+				Message:      msg,
+				State:        state,
+				consumerName: cfg.name,
+			})
+		})
+	}
+	return c.Subscribe(ctx, cfg.queue, cfg.options, func(handlerCtx context.Context, msg *QueueMessage) error {
+		return cfg.messageHandler(handlerCtx, ConsumerMessage{
+			Client:       c,
+			Logger:       c.logger,
+			Queue:        cfg.queue,
+			WithState:    false,
+			Message:      msg,
+			consumerName: cfg.name,
+		})
+	})
+}
+
+// StartConsumer starts one or more long-running queue consumers and blocks until
+// they terminate. Each ConsumerConfig runs in its own goroutine and restarts on
+// failure according to RestartPolicy. Panics from message handlers, lifecycle
+// hooks, and error handlers are recovered and treated as consume-loop failures.
+// Cancel ctx to stop all consumers; context cancellation returns nil.
+func (c *Client) StartConsumer(ctx context.Context, consumers ...ConsumerConfig) error {
+	if c == nil {
+		return fmt.Errorf("lockd: client is nil")
+	}
+	if ctx == nil {
+		return fmt.Errorf("lockd: context is required")
+	}
+	normalized, err := normalizeConsumerConfigs(consumers)
+	if err != nil {
+		return err
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	errCh := make(chan error, len(normalized))
+	var wg sync.WaitGroup
+	for _, cfg := range normalized {
+		cfg := cfg
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if runErr := c.runConsumerLoop(runCtx, cfg); runErr != nil {
+				select {
+				case errCh <- runErr:
+				default:
+				}
+				cancel()
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(errCh)
+	var firstErr error
+	for runErr := range errCh {
+		if runErr != nil && firstErr == nil {
+			firstErr = runErr
+		}
+	}
+	if firstErr != nil {
+		return firstErr
+	}
+	return nil
 }
 
 func buildHTTPClient(rawBase string) (*http.Client, string, error) {
@@ -5857,4 +7038,44 @@ func newUnixHTTPClient(raw string) (*http.Client, string, error) {
 		base += basePath
 	}
 	return client, base, nil
+}
+
+func buildClientTLS(bundle *tlsutil.ClientBundle) *tls.Config {
+	return &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		Certificates:       []tls.Certificate{bundle.Certificate},
+		RootCAs:            bundle.CAPool,
+		InsecureSkipVerify: true,
+		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			return verifyServerCertificate(rawCerts, bundle.CAPool)
+		},
+	}
+}
+
+func verifyServerCertificate(rawCerts [][]byte, roots *x509.CertPool) error {
+	if len(rawCerts) == 0 {
+		return errors.New("mtls: missing server certificate")
+	}
+	certs := make([]*x509.Certificate, 0, len(rawCerts))
+	for _, raw := range rawCerts {
+		cert, err := x509.ParseCertificate(raw)
+		if err != nil {
+			return fmt.Errorf("mtls: parse server certificate: %w", err)
+		}
+		certs = append(certs, cert)
+	}
+	leaf := certs[0]
+	opts := x509.VerifyOptions{
+		Roots:         roots,
+		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		Intermediates: x509.NewCertPool(),
+		CurrentTime:   time.Now(),
+	}
+	for _, cert := range certs[1:] {
+		opts.Intermediates.AddCert(cert)
+	}
+	if _, err := leaf.Verify(opts); err != nil {
+		return fmt.Errorf("mtls: verify server certificate: %w", err)
+	}
+	return nil
 }

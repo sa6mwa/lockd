@@ -224,5 +224,5 @@ pkt.systems/kryptograf v0.5.1 h1:LNEnbYkHeHXNNaZG5QcGd6O4joIt8UyL7foaoTtbOqQ=
 pkt.systems/kryptograf v0.5.1/go.mod h1:thyyuqeBvwXKyOp/VrF1+UMe7ldoHwGgdn5iZB2eFnc=
 pkt.systems/lql v0.5.0 h1:yey+deDa+Uh0M96R8EvLU/6Wii7/z5VJiAjYLVgJgR8=
 pkt.systems/lql v0.5.0/go.mod h1:+xNSyfRNa2aP+I0h/sQi1bBqVtDDRolJ+lvU0T3O0xo=
-pkt.systems/pslog v0.13.0 h1:WlvThje0apw2jepMOBX6x9r1e2cBZSYsdVH4v2iyk3Y=
-pkt.systems/pslog v0.13.0/go.mod h1:S+5Ri+lfl32YYEnzTbMoLWQCY1B+OvydAtgItH+/rPQ=
+pkt.systems/pslog v0.14.0 h1:KSFw+Shz1kqdvn0tU726pN6+bdBTyOtZkTtU8pRsQ5I=
+pkt.systems/pslog v0.14.0/go.mod h1:IgOWabWv+AG1vEbHJYYitGwHykhCqZ75flTn2sdWKZU=

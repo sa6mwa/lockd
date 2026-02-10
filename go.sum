@@ -298,5 +298,5 @@ pkt.systems/lql v0.5.0 h1:yey+deDa+Uh0M96R8EvLU/6Wii7/z5VJiAjYLVgJgR8=
 pkt.systems/lql v0.5.0/go.mod h1:+xNSyfRNa2aP+I0h/sQi1bBqVtDDRolJ+lvU0T3O0xo=
 pkt.systems/psi v0.3.0 h1:09CWw0EvBZkB+BuTPSsvkvLhnTHTWkj2Kf5pSVAKPiE=
 pkt.systems/psi v0.3.0/go.mod h1:0orsp6x9pcwiEkYm3AUtweTin9LXzA/DwuVdeMiCDh4=
-pkt.systems/pslog v0.13.2 h1:Y9AzcI2BgK7ZU/Twp7d4RXrb50fzkeZqdVbLNNn593U=
-pkt.systems/pslog v0.13.2/go.mod h1:S+5Ri+lfl32YYEnzTbMoLWQCY1B+OvydAtgItH+/rPQ=
+pkt.systems/pslog v0.14.0 h1:KSFw+Shz1kqdvn0tU726pN6+bdBTyOtZkTtU8pRsQ5I=
+pkt.systems/pslog v0.14.0/go.mod h1:IgOWabWv+AG1vEbHJYYitGwHykhCqZ75flTn2sdWKZU=

@@ -10,7 +10,7 @@ This directory contains subsystem-level analysis synthesized from repository doc
 - `ARCHIPELAGO.md` -> `xa-transaction-coordinator.md`, `tc-leader-cluster-rm.md`
 - `DESIGN_NOTES_NAMESPACE_AND_QUERY.md` -> `search-and-index.md`
 - `TESTING.md` -> `operations-testing-performance.md`
-- `client/README.md` -> `api-sdk-cli.md`, `attachments.md`, `queue-lq.md`
+- `client/doc.go` -> `api-sdk-cli.md`, `attachments.md`, `queue-lq.md`
 - `docs/ATTACHMENTS.md` -> `attachments.md`
 - `docs/BATCHING.md` -> `storage-backends-and-crypto.md`
 - `docs/LEADERELECTION.md` -> `tc-leader-cluster-rm.md`

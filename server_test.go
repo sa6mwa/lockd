@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"path"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -111,6 +113,24 @@ func (h *httpShutdownCapture) Deadline() (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return h.ctx.Deadline()
+}
+
+type listenerCloseCapture struct {
+	closeErr   error
+	closeCalls int
+}
+
+func (l *listenerCloseCapture) Accept() (net.Conn, error) {
+	return nil, errors.New("accept not supported in test listener")
+}
+
+func (l *listenerCloseCapture) Close() error {
+	l.closeCalls++
+	return l.closeErr
+}
+
+func (l *listenerCloseCapture) Addr() net.Addr {
+	return &net.TCPAddr{}
 }
 
 func newShutdownHarness(t *testing.T) (*Server, *drainCapture, *httpShutdownCapture) {
@@ -396,5 +416,28 @@ func TestShutdownTimeoutDisabled(t *testing.T) {
 	}
 	if _, ok := httpCap.Deadline(); ok {
 		t.Fatalf("did not expect http shutdown deadline when timeout disabled")
+	}
+}
+
+func TestShutdownIgnoresClosedListenerError(t *testing.T) {
+	srv, _, _ := newShutdownHarness(t)
+	var logBuf bytes.Buffer
+	srv.logger = pslog.NewWithOptions(&logBuf, pslog.Options{
+		Mode:             pslog.ModeStructured,
+		DisableTimestamp: true,
+		NoColor:          true,
+		MinLevel:         pslog.DebugLevel,
+	})
+	listener := &listenerCloseCapture{closeErr: net.ErrClosed}
+	srv.listener = listener
+
+	if err := srv.ShutdownWithOptions(context.Background()); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+	if listener.closeCalls != 1 {
+		t.Fatalf("expected listener to be closed once, got %d", listener.closeCalls)
+	}
+	if strings.Contains(logBuf.String(), "shutdown.listener.close_error") {
+		t.Fatalf("expected no warning for net.ErrClosed listener close: %s", logBuf.String())
 	}
 }

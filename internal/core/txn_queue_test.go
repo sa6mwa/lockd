@@ -895,6 +895,12 @@ func (s *queueDispatcherSpy) Notify(namespace, queue string) {
 	s.mu.Unlock()
 }
 
+func (s *queueDispatcherSpy) NotifyAt(namespace, queue, messageID string, due time.Time) {
+	s.Notify(namespace, queue)
+}
+
+func (s *queueDispatcherSpy) CancelNotify(namespace, queue, messageID string) {}
+
 func (s *queueDispatcherSpy) Try(ctx context.Context, namespace, queue string) (*queue.Candidate, error) {
 	return nil, nil
 }

@@ -269,7 +269,12 @@ func (s *Service) Ack(ctx context.Context, cmd QueueAckCommand) (*QueueAckResult
 					if stateMeta.Lease.ExpiresAtUnix <= now.Unix() {
 						_, _, _ = s.clearExpiredLease(commitCtx, namespace, stateRel, stateMeta, stateMetaETag, now, sweepModeTransparent, false)
 					} else if err := validateLease(stateMeta, cmd.StateLeaseID, cmd.StateFencingToken, stateTxn, now); err == nil {
-						_ = s.releaseLeaseWithMeta(commitCtx, namespace, stateRel, cmd.StateLeaseID, stateMeta, stateMetaETag)
+						// Ack finalizes processing, so any staged queue-state changes are discarded.
+						if stateTxn != "" {
+							_ = s.applyTxnDecisionForMeta(commitCtx, namespace, stateRel, stateTxn, false, stateMeta, stateMetaETag)
+						} else {
+							_ = s.releaseLeaseWithMeta(commitCtx, namespace, stateRel, cmd.StateLeaseID, stateMeta, stateMetaETag)
+						}
 					}
 				}
 			}
@@ -280,6 +285,7 @@ func (s *Service) Ack(ctx context.Context, cmd QueueAckCommand) (*QueueAckResult
 		}
 
 		if s.queueDispatcher != nil {
+			s.queueDispatcher.CancelNotify(namespace, cmd.Queue, cmd.MessageID)
 			s.queueDispatcher.Notify(namespace, cmd.Queue)
 		}
 
@@ -445,6 +451,9 @@ func (s *Service) Nack(ctx context.Context, cmd QueueNackCommand) (*QueueNackRes
 				return nil, plan.Wait(err)
 			}
 			metaETag = newETag
+			if s.queueDispatcher != nil && docRes.Document != nil {
+				s.queueDispatcher.NotifyAt(namespace, cmd.Queue, docRes.Document.ID, docRes.Document.NotVisibleUntil)
+			}
 		}
 		if waitErr := plan.Wait(nil); waitErr != nil {
 			return nil, waitErr
@@ -480,7 +489,12 @@ func (s *Service) Nack(ctx context.Context, cmd QueueNackCommand) (*QueueNackRes
 				if stateMeta.Lease.ExpiresAtUnix <= now.Unix() {
 					_, _, _ = s.clearExpiredLease(commitCtx, namespace, stateRel, stateMeta, stateMetaETag, now, sweepModeTransparent, false)
 				} else if err := validateLease(stateMeta, cmd.StateLeaseID, cmd.StateFencingToken, stateTxn, now); err == nil {
-					_ = s.releaseLeaseWithMeta(commitCtx, namespace, stateRel, cmd.StateLeaseID, stateMeta, stateMetaETag)
+					// Nack should preserve queue-state progress across retries.
+					if stateTxn != "" {
+						_ = s.applyTxnDecisionForMeta(commitCtx, namespace, stateRel, stateTxn, true, stateMeta, stateMetaETag)
+					} else {
+						_ = s.releaseLeaseWithMeta(commitCtx, namespace, stateRel, cmd.StateLeaseID, stateMeta, stateMetaETag)
+					}
 				}
 			}
 		}
@@ -490,8 +504,8 @@ func (s *Service) Nack(ctx context.Context, cmd QueueNackCommand) (*QueueNackRes
 		return nil, waitErr
 	}
 
-	if s.queueDispatcher != nil && delay <= 0 {
-		s.queueDispatcher.Notify(namespace, cmd.Queue)
+	if s.queueDispatcher != nil {
+		s.queueDispatcher.NotifyAt(namespace, cmd.Queue, doc.ID, doc.NotVisibleUntil)
 	}
 
 	return &QueueNackResult{
@@ -682,6 +696,10 @@ func (s *Service) Extend(ctx context.Context, cmd QueueExtendCommand) (*QueueExt
 
 	if waitErr := plan.Wait(nil); waitErr != nil {
 		return nil, waitErr
+	}
+
+	if s.queueDispatcher != nil {
+		s.queueDispatcher.NotifyAt(namespace, cmd.Queue, doc.ID, doc.NotVisibleUntil)
 	}
 
 	return &QueueExtendResult{

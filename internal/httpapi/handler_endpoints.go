@@ -2008,7 +2008,7 @@ func (h *Handler) handleQueueEnqueue(w http.ResponseWriter, r *http.Request) err
 		return err
 	}
 	if h.queueDisp != nil {
-		h.queueDisp.Notify(resolvedNamespace, msg.Queue)
+		h.queueDisp.NotifyAt(resolvedNamespace, msg.Queue, msg.ID, msg.NotVisibleUntil)
 	}
 	enqueueLogger.Debug("queue.enqueue.success",
 		"message_id", msg.ID,

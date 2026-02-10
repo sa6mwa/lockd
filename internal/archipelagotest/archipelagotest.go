@@ -643,7 +643,8 @@ func summarizeLeaderStatuses(t testing.TB, servers []*lockd.TestServer, clientFn
 
 func leaderExpirySlack(t testing.TB, servers []*lockd.TestServer, clientFn HTTPClientFunc, prev string) time.Duration {
 	t.Helper()
-	if strings.TrimSpace(prev) == "" {
+	prev = strings.TrimSpace(prev)
+	if prev == "" {
 		return 0
 	}
 	now := time.Now().UnixMilli()
@@ -656,7 +657,12 @@ func leaderExpirySlack(t testing.TB, servers []*lockd.TestServer, clientFn HTTPC
 		if err != nil {
 			continue
 		}
-		if strings.TrimSpace(resp.LeaderEndpoint) != strings.TrimSpace(prev) {
+		leader := strings.TrimSpace(resp.LeaderEndpoint)
+		// After removing the old leader from membership, peers can report an
+		// empty leader endpoint while the previous lease/term is still expiring.
+		// Treat both "still old leader" and "temporarily no leader" as transition
+		// slack so membership churn tests wait long enough on slower backends.
+		if leader != prev && leader != "" {
 			continue
 		}
 		if resp.ExpiresAtUnix <= now {
@@ -1366,7 +1372,6 @@ func RunLeaderFailoverScenarioMulti(t testing.TB, tcs []*lockd.TestServer, islan
 	clients, hashes, keys := collectIslandInputs(ctx, t, islands, tcs, tcHTTP)
 	keyByHash := make(map[string]string, len(hashes))
 	clientByHash := make(map[string]*lockdclient.Client, len(hashes))
-	clientByKey := make(map[string]*lockdclient.Client, len(keys))
 	for i, hash := range hashes {
 		if strings.TrimSpace(hash) == "" {
 			t.Fatalf("scenario: backend hash missing for key %q", keys[i])
@@ -1376,7 +1381,6 @@ func RunLeaderFailoverScenarioMulti(t testing.TB, tcs []*lockd.TestServer, islan
 		}
 		keyByHash[hash] = keys[i]
 		clientByHash[hash] = clients[i]
-		clientByKey[keys[i]] = clients[i]
 	}
 	const scenarioTTLSeconds = 90
 
@@ -1544,11 +1548,20 @@ func RunLeaderFailoverScenarioMulti(t testing.TB, tcs []*lockd.TestServer, islan
 		if key == "" {
 			t.Fatalf("scenario: missing key for backend %q", hash)
 		}
-		cli := clientByKey[key]
-		if cli == nil {
-			t.Fatalf("scenario: missing client for backend %q", hash)
+		candidates := serversForBackendHash(alive, hash)
+		if len(candidates) == 0 {
+			candidates = serversForBackendHash(tcs, hash)
 		}
-		WaitForState(t, cli, key, true, 20*time.Second)
+		if len(candidates) == 0 {
+			t.Fatalf("scenario: missing state verification servers for backend %q", hash)
+		}
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), 45*time.Second)
+		activeServer := findActiveServer(waitCtx, candidates)
+		waitCancel()
+		if activeServer == nil {
+			t.Fatalf("scenario: no active server for backend %q while verifying committed state", hash)
+		}
+		WaitForState(t, ensureClient(t, activeServer), key, true, 60*time.Second)
 	}
 	if len(pendingLeases) > 0 {
 		for _, pending := range pendingLeases {
@@ -2091,8 +2104,10 @@ func RunTCMembershipChurnScenario(t testing.TB, tcs []*lockd.TestServer, tcHTTP 
 	WaitForLeaderUnavailable(t, leaderTS, tcHTTP, leaderDisableTimeout)
 
 	if slack := leaderExpirySlack(t, remaining, tcHTTP, leaderEndpoint); slack > 0 {
-		extended := slack + 5*time.Second
-		maxExtended := scale(60 * time.Second)
+		// Cloud/object-store backends can lag while converging leader lease
+		// visibility after membership churn. Allow a larger, bounded buffer.
+		extended := slack + 15*time.Second
+		maxExtended := scale(3 * time.Minute)
 		if extended > maxExtended {
 			extended = maxExtended
 		}
@@ -3202,11 +3217,17 @@ func RunLeaderDecisionFanoutInterruptedScenario(t testing.TB, tcs []*lockd.TestS
 	}
 
 	for i, hash := range hashes {
-		aliveServer := serverForHash(alive, hash)
-		if aliveServer == nil {
+		candidates := serversForBackendHash(alive, hash)
+		if len(candidates) == 0 {
 			t.Fatalf("scenario: missing live server for backend %q", hash)
 		}
-		WaitForState(t, ensureClient(t, aliveServer), keys[i], true, 20*time.Second)
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), 45*time.Second)
+		activeServer := findActiveServer(waitCtx, candidates)
+		waitCancel()
+		if activeServer == nil {
+			t.Fatalf("scenario: no active server for backend %q after leader failover", hash)
+		}
+		WaitForState(t, ensureClient(t, activeServer), keys[i], true, 60*time.Second)
 	}
 	if restarts != nil {
 		leaderIndex := indexOfServer(tcs, leaderTS)
@@ -3581,18 +3602,17 @@ func serverForHash(servers []*lockd.TestServer, backendHash string) *lockd.TestS
 	if backendHash == "" {
 		return nil
 	}
-	for _, ts := range servers {
-		if ts == nil || ts.Backend() == nil {
-			continue
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		hash, err := ts.Backend().BackendHash(ctx)
-		cancel()
-		if err == nil && strings.TrimSpace(hash) == backendHash {
-			return ts
-		}
+	candidates := serversForBackendHash(servers, backendHash)
+	if len(candidates) == 0 {
+		return nil
 	}
-	return nil
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	active := findActiveServer(ctx, candidates)
+	cancel()
+	if active != nil {
+		return active
+	}
+	return candidates[0]
 }
 
 func normalizeEndpoints(list []string) []string {

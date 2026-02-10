@@ -88,6 +88,7 @@ func (s *Service) applyTxnDecisionQueueMessage(ctx context.Context, namespace, q
 			return err
 		}
 		if s.queueDispatcher != nil {
+			s.queueDispatcher.CancelNotify(namespace, queueName, messageID)
 			s.queueDispatcher.Notify(namespace, queueName)
 		}
 	} else {
@@ -101,7 +102,7 @@ func (s *Service) applyTxnDecisionQueueMessage(ctx context.Context, namespace, q
 			return err
 		}
 		if s.queueDispatcher != nil {
-			s.queueDispatcher.Notify(namespace, queueName)
+			s.queueDispatcher.NotifyAt(namespace, queueName, doc.ID, doc.NotVisibleUntil)
 		}
 	}
 	if !commit {

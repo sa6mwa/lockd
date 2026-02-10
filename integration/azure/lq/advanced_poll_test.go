@@ -398,12 +398,22 @@ func runAzureQueueQRFThrottling(t *testing.T) {
 	cfg.QRFQueueHardLimit = 16
 	cfg.QRFLockSoftLimit = 4
 	cfg.QRFLockHardLimit = 8
-	cfg.QRFMemorySoftLimitPercent = 70
-	cfg.QRFMemoryHardLimitPercent = 85
-	cfg.QRFMemorySoftLimitBytes = 0
-	cfg.QRFMemoryHardLimitBytes = 0
-	cfg.QRFLoadSoftLimitMultiplier = 3
-	cfg.QRFLoadHardLimitMultiplier = 6
+	// Keep host-derived thresholds effectively disabled so this test remains
+	// deterministic and only validates queue-driven QRF transitions.
+	cfg.QRFMemorySoftLimitPercent = 1000
+	cfg.QRFMemoryHardLimitPercent = 1000
+	cfg.QRFMemorySoftLimitBytes = uint64(1) << 62
+	cfg.QRFMemoryHardLimitBytes = uint64(1) << 62
+	cfg.QRFCPUPercentSoftLimit = 0
+	cfg.QRFCPUPercentHardLimit = 0
+	cfg.QRFCPUPercentSoftLimitSet = true
+	cfg.QRFCPUPercentHardLimitSet = true
+	cfg.QRFSwapSoftLimitPercent = 0
+	cfg.QRFSwapHardLimitPercent = 0
+	cfg.QRFSwapSoftLimitBytes = 0
+	cfg.QRFSwapHardLimitBytes = 0
+	cfg.QRFLoadSoftLimitMultiplier = 1_000_000
+	cfg.QRFLoadHardLimitMultiplier = 1_000_000
 	cfg.QRFSoftDelay = 60 * time.Millisecond
 	cfg.QRFEngagedDelay = 220 * time.Millisecond
 	cfg.QRFRecoveryDelay = 150 * time.Millisecond

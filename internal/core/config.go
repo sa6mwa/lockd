@@ -76,6 +76,8 @@ type QueueProvider interface{}
 // QueueDispatcher represents the optional dispatcher used for watcher notifications.
 type QueueDispatcher interface {
 	Notify(namespace, queue string)
+	NotifyAt(namespace, queue, messageID string, due time.Time)
+	CancelNotify(namespace, queue, messageID string)
 	Try(ctx context.Context, namespace, queue string) (*queue.Candidate, error)
 	Wait(ctx context.Context, namespace, queue string) (*queue.Candidate, error)
 	HasActiveWatcher(namespace, queue string) bool

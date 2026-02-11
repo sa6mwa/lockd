@@ -300,3 +300,5 @@ pkt.systems/psi v0.3.0 h1:09CWw0EvBZkB+BuTPSsvkvLhnTHTWkj2Kf5pSVAKPiE=
 pkt.systems/psi v0.3.0/go.mod h1:0orsp6x9pcwiEkYm3AUtweTin9LXzA/DwuVdeMiCDh4=
 pkt.systems/pslog v0.14.0 h1:KSFw+Shz1kqdvn0tU726pN6+bdBTyOtZkTtU8pRsQ5I=
 pkt.systems/pslog v0.14.0/go.mod h1:IgOWabWv+AG1vEbHJYYitGwHykhCqZ75flTn2sdWKZU=
+pkt.systems/version v0.4.0 h1:UBIdsvKM3Lrzk4c7RtzhBVbmYt37TfzmXOiDZ/LlsPg=
+pkt.systems/version v0.4.0/go.mod h1:ktfpP3nZ1t2/Ua0kYCVksBpP6Za+OSMJ3O/IWzSf5Ak=

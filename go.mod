@@ -40,6 +40,8 @@ require (
 	pkt.systems/pslog v0.14.0
 )
 
+require pkt.systems/version v0.4.0 // indirect
+
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/internal v1.11.2 // indirect
 	github.com/KyleBanks/depth v1.2.1 // indirect

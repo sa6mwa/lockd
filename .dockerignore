@@ -1,0 +1,27 @@
+# VCS metadata
+.git
+
+# Local environment files
+.env
+.env.*
+
+# Local build/test artifacts
+*.pprof
+*.test
+*.log
+coverage.out
+
+# Local binaries
+lockd
+lockd-bench
+
+# Local runtime/debug artifacts
+benchmark-logs/
+integration-logs/
+stash/
+examples/
+devenv/
+benchmark/
+bin/
+docs/
+10x.png

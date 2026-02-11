@@ -43,7 +43,6 @@ import (
 var (
 	propertyFiles  []string
 	propertyValues []string
-	dbName         string
 	tableName      string
 
 	globalContext context.Context
@@ -98,7 +97,7 @@ func setupGlobal(dbName string, props *properties.Properties) {
 		util.Fatalf("create workload/db failed %v", err)
 	}
 	globalWorkload = workload
-	globalDB = client.DbWrapper{db}
+	globalDB = client.DbWrapper{DB: db}
 }
 
 func buildContext(dbName string, props *properties.Properties) (ycsb.Workload, ycsb.DB, error) {
@@ -117,7 +116,7 @@ func buildContext(dbName string, props *properties.Properties) (ycsb.Workload, y
 	if err != nil {
 		return nil, nil, err
 	}
-	return workload, client.DbWrapper{db}, nil
+	return workload, client.DbWrapper{DB: db}, nil
 }
 
 func main() {

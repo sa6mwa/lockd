@@ -1,7 +1,7 @@
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 
-FROM golang:1.25.5 AS build
+FROM golang:1.25.7 AS build
 WORKDIR /src/lockd
 COPY go.mod go.sum ./
 RUN go mod download
@@ -19,4 +19,5 @@ ENV LOCKD_CONFIG_DIR=/config \
 WORKDIR /
 VOLUME ["/config", "/storage"]
 EXPOSE 9341
+EXPOSE 9464
 ENTRYPOINT ["/lockd","--bootstrap","/config"]

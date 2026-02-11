@@ -631,6 +631,7 @@ func loadClientMaterial(path string) (*tls.Certificate, *x509.CertPool, error) {
 	var (
 		clientPEM []byte
 		keyPEM    []byte
+		hasCA     bool
 	)
 	pool := x509.NewCertPool()
 	rest := data
@@ -649,6 +650,7 @@ func loadClientMaterial(path string) (*tls.Certificate, *x509.CertPool, error) {
 			}
 			if cert.IsCA {
 				pool.AddCert(cert)
+				hasCA = true
 			} else {
 				clientPEM = append(clientPEM, pemBytes...)
 			}
@@ -664,7 +666,7 @@ func loadClientMaterial(path string) (*tls.Certificate, *x509.CertPool, error) {
 	if len(keyPEM) == 0 {
 		return nil, nil, fmt.Errorf("lockd ycsb: client key not found in %s", path)
 	}
-	if pool == nil || len(pool.Subjects()) == 0 {
+	if !hasCA {
 		return nil, nil, fmt.Errorf("lockd ycsb: CA certificate required in %s", path)
 	}
 	cert, err := tls.X509KeyPair(clientPEM, keyPEM)

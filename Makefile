@@ -7,9 +7,13 @@ BIN_PATH ?= $(BIN_DIR)/$(TARGET)
 CGO_ENABLED = 0
 SUDO ?= sudo
 SHELL := /bin/bash
+CONTAINER_BUILDER ?= $(shell command -v podman || command -v nerdctl || command -v docker)
+IMAGE ?= docker.io/pktsystems/lockd
+LOCKD_VERSION ?= $(shell $(GO) run ./cmd/lockd version --version)
+LOCKD_SEMVER ?= $(shell $(GO) run ./cmd/lockd version --semver)
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-integration bench diagrams swagger build clean install
+.PHONY: help test test-integration bench diagrams swagger build container push-container clean install
 
 help:
 	@echo "Available targets:"
@@ -19,6 +23,8 @@ help:
 	@echo "  make swagger                 # regenerate Swagger/OpenAPI artifacts"
 	@echo "  make diagrams                # render PlantUML sequence diagrams to JPEG"
 	@echo "  make build                   # build ./cmd/lockd into $(BIN_PATH)"
+	@echo "  make container               # build container image (podman/nerdctl/docker)"
+	@echo "  make push-container          # push version + latest container tags"
 	@echo "  make clean                   # remove $(BIN_DIR)/"
 	@echo "  make install                 # install $(BIN_PATH) into $(BINDIR)"
 
@@ -42,8 +48,9 @@ define RUN_WITH_ENV
 endef
 
 test:
-	@echo "Running unit tests"
-	@go test ./...
+	go test -v -count=1 -cover ./...
+	cd ycsb && go test -v -count=1 -cover ./...
+	cd exmaples && -v -count=1 -cover ./...
 
 test-integration:
 	@if [[ -z "$(SUITES)" ]]; then \
@@ -83,9 +90,25 @@ tidy:
 	cd devenv/assure && $(GO) mod tidy
 	cd ycsb && $(GO) mod tidy
 
-build:
-	@mkdir -p $(BIN_DIR)
+$(BIN_PATH):
 	CGO_ENABLED=$(CGO_ENABLED) $(GO) build -o $(BIN_PATH) -trimpath -ldflags '-s -w' ./cmd/lockd
+
+build: $(BIN_PATH)
+
+podman.yaml:
+	envsubst < podman.template.yaml > podman.yaml
+
+container:
+	@if [ -z "$(CONTAINER_BUILDER)" ]; then \
+		echo "Error: no container builder found (podman, nerdctl, docker)." >&2; \
+		exit 1; \
+	fi
+	$(CONTAINER_BUILDER) build -f Containerfile --build-arg TARGETOS=$(shell $(GO) env GOOS) --build-arg TARGETARCH=$(shell $(GO) env GOARCH) -t $(IMAGE):$(LOCKD_VERSION) .
+	$(CONTAINER_BUILDER) tag $(IMAGE):$(LOCKD_VERSION) $(IMAGE):latest
+
+push-container:
+	$(CONTAINER_BUILDER) push $(IMAGE):$(LOCKD_VERSION)
+	$(CONTAINER_BUILDER) push $(IMAGE):latest
 
 clean:
 	rm -rf $(BIN_DIR)

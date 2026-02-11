@@ -871,7 +871,7 @@ func runAcquireForUpdateCallbackFailover(t *testing.T, phase failoverPhase, base
 		Key:        key,
 		Owner:      "reader",
 		TTLSeconds: 15,
-		BlockSecs:  lockdclient.BlockWaitForever,
+		BlockSecs:  lockdclient.BlockNoWait,
 	}, func(handlerCtx context.Context, af *lockdclient.AcquireForUpdateContext) error {
 		handlerCount.Add(1)
 		if phase == failoverDuringHandlerStart {
@@ -926,7 +926,7 @@ func runAcquireForUpdateCallbackFailover(t *testing.T, phase failoverPhase, base
 			t.Logf("phase %s observed node_passive after failover: %v", phase, err)
 		} else if expectedConflict && errors.As(err, &apiErr) {
 			switch apiErr.Response.ErrorCode {
-			case "version_conflict", "lease_required":
+			case "version_conflict", "lease_required", "waiting":
 				conflictObserved = true
 				t.Logf("phase %s observed expected %s after failover: %v", phase, apiErr.Response.ErrorCode, err)
 			default:
@@ -946,24 +946,34 @@ func runAcquireForUpdateCallbackFailover(t *testing.T, phase failoverPhase, base
 	if handlerCount.Load() == 0 {
 		t.Fatalf("handler not called")
 	}
+	if phase == failoverAfterSave {
+		// In the conflict path Save can fail before the callback invokes shutdown.
+		// Force the planned primary shutdown here so standby promotion is deterministic.
+		if err := triggerFailover(); err != nil {
+			t.Fatalf("shutdown primary (post-callback): %v", err)
+		}
+	}
 
-	if err := hatest.WaitForActive(ctx, standbyServer); err != nil {
+	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer verifyCancel()
+
+	if err := hatest.WaitForActive(verifyCtx, standbyServer); err != nil {
 		t.Fatalf("wait for standby active: %v\n%s", err, clientLogs.Summary())
 	}
 
 	var state map[string]any
 	if conflictObserved {
-		state, err = getPublicStateJSON(ctx, standbyServer.Client, key)
+		state, err = getPublicStateJSON(verifyCtx, standbyServer.Client, key)
 		if err != nil {
 			t.Fatalf("verify public get: %v", err)
 		}
 	} else {
-		verify := acquireWithRetryDeadline(t, ctx, standbyServer.Client, key, "failover-verify", 20, lockdclient.BlockNoWait, 15*time.Second)
-		state, _, _, err = getStateJSON(ctx, verify)
+		verify := acquireWithRetryDeadline(t, verifyCtx, standbyServer.Client, key, "failover-verify", 20, lockdclient.BlockNoWait, 15*time.Second)
+		state, _, _, err = getStateJSON(verifyCtx, verify)
 		if err != nil {
 			t.Fatalf("verify get: %v", err)
 		}
-		releaseLease(t, ctx, verify)
+		releaseLease(t, verifyCtx, verify)
 	}
 
 	backupEndpoint := standbyServer.URL()

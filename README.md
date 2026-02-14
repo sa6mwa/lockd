@@ -119,6 +119,8 @@ code paths. The primary production subsystems are:
   also emits `api.http.router.<operation>` (for example `api.http.router.acquire`,
   `api.http.router.queue.enqueue`, `api.http.router.query`).
 - `control.lsf.observer` – Host sampling loop that feeds the QRF controller.
+- `control.connguard` – Listener-level filtering for suspicious TLS and
+  plain-TCP handshakes.
 - `control.qrf.controller` – Applies throttling/Retry-After headers and exposes
   demand metrics to HTTP handlers.
 - `server.lifecycle.core` – Supervises background loops (sweeper, telemetry,
@@ -959,6 +961,14 @@ mTLS is **enabled by default**. `lockd` looks for a bundle at
 `$HOME/.lockd/server.pem` unless `--bundle` points elsewhere. Disable with
 `--disable-mtls` / `LOCKD_DISABLE_MTLS=1` (testing only).
 
+Lockd also enforces a listener-level connection guard by default via a dedicated
+`control.connguard` component. It
+classifies suspicious connection attempts (for example bad TLS handshakes or
+zero-byte/probe-timeout plain-TCP attempts) before the HTTP handler layer and can
+temporarily block a source IP. This behavior is controlled by `connguard-*` flags
+and `LOCKD_CONNGUARD_*` environment variables; the full matrix is documented in
+`docs/QRF.md`.
+
 Bundle format (PEM concatenated):
 
 1. CA certificate (trust anchor)
@@ -1176,12 +1186,20 @@ printf 'payload stored at %s\n' "$LOCKD_QUEUE_PAYLOAD_PATH"
 # Use the exported metadata to ack/nack/extend
 lockd client queue ack
 lockd client queue nack --delay 15s --reason "upstream retry"
+lockd client queue nack --intent defer --delay 15s
 lockd client queue extend --extend 45s
 ```
 
 `queue dequeue` supports a `--stateful` flag which acquires both the message
 and workflow state leases; the exported `LOCKD_QUEUE_STATE_*` variables align
 with the fields consumed by `queue ack`/`nack`/`extend`.
+
+`queue nack` supports `--intent` (`-i`) with two values:
+- `failure` (default): records a failed processing attempt, increments `failure_attempts`, and counts toward `max_attempts`.
+- `defer`: intentional requeue for non-failure workflow waits; does not increment `failure_attempts` and does not consume the `max_attempts` failure budget.
+
+Use `defer` when work should be retried later without being treated as a processing failure.
+`--reason` is only valid with `--intent failure`.
 
 > Custom clients must send `/v1/queue/enqueue` as `multipart/form-data` (or
 > `multipart/related`) with two parts named **`meta`** and **`payload`**. The

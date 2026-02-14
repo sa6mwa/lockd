@@ -251,3 +251,88 @@ func TestStartConsumerStatePersistsAcrossNackMem(t *testing.T) {
 		t.Fatalf("expected persisted counter >= 2, got %d", finalCounter.Load())
 	}
 }
+
+func TestStartConsumerStatePersistsAcrossDeferMem(t *testing.T) {
+	ts := lockd.StartTestServer(t)
+	cli := ts.Client
+	if cli == nil {
+		t.Fatalf("test server did not provide client")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	queue := fmt.Sprintf("start-consumer-state-defer-%d", time.Now().UnixNano())
+	if _, err := cli.EnqueueBytes(ctx, queue, []byte(`{"kind":"retry-state"}`), client.EnqueueOptions{MaxAttempts: 1}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	var (
+		deliveries   atomic.Int32
+		finalCounter atomic.Int32
+		acked        atomic.Bool
+	)
+
+	err := cli.StartConsumer(ctx, client.ConsumerConfig{
+		Name:      "state-persist-defer",
+		Queue:     queue,
+		WithState: true,
+		Options: client.SubscribeOptions{
+			Owner:        "worker-state-persist-defer",
+			Prefetch:     1,
+			BlockSeconds: 5,
+		},
+		MessageHandler: func(handlerCtx context.Context, cm client.ConsumerMessage) error {
+			if cm.Message == nil || cm.State == nil {
+				return fmt.Errorf("expected message and state handle")
+			}
+			defer cm.Message.Close()
+
+			deliveries.Add(1)
+
+			var state struct {
+				Counter int `json:"counter"`
+			}
+			if err := cm.State.Load(handlerCtx, &state); err != nil {
+				return fmt.Errorf("load state: %w", err)
+			}
+			if state.Counter >= 2 {
+				finalCounter.Store(int32(state.Counter))
+				ackCtx, ackCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer ackCancel()
+				if err := cm.Message.Ack(ackCtx); err != nil {
+					return fmt.Errorf("ack: %w", err)
+				}
+				acked.Store(true)
+				cancel()
+				return nil
+			}
+
+			state.Counter++
+			if err := cm.State.Save(handlerCtx, &state); err != nil {
+				return fmt.Errorf("save state: %w", err)
+			}
+			deferCtx, deferCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer deferCancel()
+			return cm.Message.Defer(deferCtx, 100*time.Millisecond)
+		},
+		ErrorHandler: func(_ context.Context, event client.ConsumerError) error {
+			if errors.Is(event.Err, context.Canceled) || errors.Is(event.Err, context.DeadlineExceeded) {
+				return nil
+			}
+			return event.Err
+		},
+	})
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("start consumer: %v", err)
+	}
+	if !acked.Load() {
+		t.Fatalf("expected message to be acked after defer retries")
+	}
+	if deliveries.Load() < 3 {
+		t.Fatalf("expected at least 3 deliveries, got %d", deliveries.Load())
+	}
+	if finalCounter.Load() < 2 {
+		t.Fatalf("expected persisted counter >= 2, got %d", finalCounter.Load())
+	}
+}

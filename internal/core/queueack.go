@@ -313,6 +313,74 @@ func isRetryableQueueLeaseMismatch(err error) bool {
 	}
 }
 
+func normalizeQueueNackIntent(intent QueueNackIntent) (QueueNackIntent, error) {
+	normalized := QueueNackIntent(strings.ToLower(strings.TrimSpace(string(intent))))
+	switch normalized {
+	case "":
+		return QueueNackIntentFailure, nil
+	case QueueNackIntentFailure, QueueNackIntentDefer:
+		return normalized, nil
+	default:
+		return "", fmt.Errorf("invalid queue nack intent %q", intent)
+	}
+}
+
+func queueNackLastErrorForIntent(intent QueueNackIntent, lastErr any) any {
+	if intent == QueueNackIntentFailure {
+		return lastErr
+	}
+	return nil
+}
+
+func applyQueueNackIntent(doc *queue.MessageDocument, intent QueueNackIntent, lastErr any) {
+	if doc == nil {
+		return
+	}
+	if intent == QueueNackIntentFailure {
+		doc.FailureAttempts++
+	}
+	doc.LastError = lastErr
+}
+
+func (s *Service) persistQueueNackIntentForTC(
+	ctx context.Context,
+	qsvc *queue.Service,
+	namespace string,
+	queueName string,
+	messageID string,
+	intent QueueNackIntent,
+	persistLastErr any,
+	delay time.Duration,
+) (*queue.MessageDocument, string, error) {
+	docRes, err := qsvc.GetMessage(ctx, namespace, queueName, messageID)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, "", Failure{Code: "not_found", Detail: "message not found", HTTPStatus: 404}
+		}
+		return nil, "", err
+	}
+	applyQueueNackIntent(docRes.Document, intent, persistLastErr)
+	if delay > 0 {
+		newETag, err := qsvc.Reschedule(ctx, namespace, queueName, docRes.Document, docRes.ETag, delay)
+		if err != nil {
+			if errors.Is(err, storage.ErrCASMismatch) {
+				return nil, "", Failure{Code: "cas_mismatch", Detail: "message metadata changed", HTTPStatus: 409}
+			}
+			return nil, "", err
+		}
+		return docRes.Document, newETag, nil
+	}
+	docRes.Document.UpdatedAt = s.clock.Now().UTC()
+	newETag, err := qsvc.SaveMessageDocument(ctx, namespace, queueName, messageID, docRes.Document, docRes.ETag)
+	if err != nil {
+		if errors.Is(err, storage.ErrCASMismatch) {
+			return nil, "", Failure{Code: "cas_mismatch", Detail: "message metadata changed", HTTPStatus: 409}
+		}
+		return nil, "", err
+	}
+	return docRes.Document, newETag, nil
+}
+
 // Nack requeues a delivery with optional delay and last error.
 func (s *Service) Nack(ctx context.Context, cmd QueueNackCommand) (*QueueNackResult, error) {
 	if err := s.maybeThrottleQueue(ctx, qrf.KindQueueAck); err != nil {
@@ -331,6 +399,17 @@ func (s *Service) Nack(ctx context.Context, cmd QueueNackCommand) (*QueueNackRes
 	namespace, err := s.resolveNamespace(cmd.Namespace)
 	if err != nil {
 		return nil, Failure{Code: "invalid_namespace", Detail: err.Error(), HTTPStatus: 400}
+	}
+	intent, err := normalizeQueueNackIntent(cmd.Intent)
+	if err != nil {
+		return nil, Failure{Code: "invalid_nack_intent", Detail: err.Error(), HTTPStatus: 400}
+	}
+	if intent == QueueNackIntentDefer && cmd.LastError != nil {
+		return nil, Failure{
+			Code:       "invalid_nack_last_error",
+			Detail:     "last_error is only supported when intent=failure",
+			HTTPStatus: 400,
+		}
 	}
 	s.observeNamespace(namespace)
 
@@ -434,40 +513,29 @@ func (s *Service) Nack(ctx context.Context, cmd QueueNackCommand) (*QueueNackRes
 		if state == TxnStatePending {
 			return nil, plan.Wait(Failure{Code: "txn_pending", Detail: "transaction decision not recorded", HTTPStatus: 409})
 		}
-		metaETag := cmd.MetaETag
-		if cmd.Delay > 0 {
-			docRes, err := qsvc.GetMessage(commitCtx, namespace, cmd.Queue, cmd.MessageID)
-			if err != nil {
-				if errors.Is(err, storage.ErrNotFound) {
-					return nil, plan.Wait(Failure{Code: "not_found", Detail: "message not found", HTTPStatus: 404})
-				}
-				return nil, plan.Wait(err)
-			}
-			newETag, err := qsvc.Reschedule(commitCtx, namespace, cmd.Queue, docRes.Document, docRes.ETag, cmd.Delay)
-			if err != nil {
-				if errors.Is(err, storage.ErrCASMismatch) {
-					return nil, plan.Wait(Failure{Code: "cas_mismatch", Detail: "message metadata changed", HTTPStatus: 409})
-				}
-				return nil, plan.Wait(err)
-			}
-			metaETag = newETag
-			if s.queueDispatcher != nil && docRes.Document != nil {
-				s.queueDispatcher.NotifyAt(namespace, cmd.Queue, docRes.Document.ID, docRes.Document.NotVisibleUntil)
-			}
+		persistLastErr := queueNackLastErrorForIntent(intent, cmd.LastError)
+		docAfterWrite, newETag, err := s.persistQueueNackIntentForTC(commitCtx, qsvc, namespace, cmd.Queue, cmd.MessageID, intent, persistLastErr, cmd.Delay)
+		if err != nil {
+			return nil, plan.Wait(err)
+		}
+		if cmd.Delay > 0 && s.queueDispatcher != nil && docAfterWrite != nil {
+			s.queueDispatcher.NotifyAt(namespace, cmd.Queue, docAfterWrite.ID, docAfterWrite.NotVisibleUntil)
 		}
 		if waitErr := plan.Wait(nil); waitErr != nil {
 			return nil, waitErr
 		}
 		return &QueueNackResult{
 			Requeued:      true,
-			MetaETag:      metaETag,
+			MetaETag:      newETag,
 			CorrelationID: corr,
 			TxnID:         leaseTxn,
 		}, nil
 	}
 
 	delay := cmd.Delay
-	newMetaETag, err := qsvc.Nack(commitCtx, namespace, cmd.Queue, doc, cmd.MetaETag, delay, cmd.LastError)
+	persistLastErr := queueNackLastErrorForIntent(intent, cmd.LastError)
+	applyQueueNackIntent(doc, intent, persistLastErr)
+	newMetaETag, err := qsvc.Nack(commitCtx, namespace, cmd.Queue, doc, cmd.MetaETag, delay, persistLastErr)
 	if err != nil {
 		if errors.Is(err, storage.ErrCASMismatch) {
 			return nil, plan.Wait(Failure{Code: "cas_mismatch", Detail: "message metadata changed", HTTPStatus: 409})

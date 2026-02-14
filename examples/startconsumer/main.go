@@ -1,7 +1,7 @@
 // Command startconsumer is an example where a consumer worker rolls over a
 // single stateful message three times incrementing a counter on the stateful
-// object. If the condition (3) is not met, the MessageHandler returns Nack
-// (negative acknowledgment), handing the message back onto the queue. Next
+// object. If the condition (3) is not met, the MessageHandler returns Defer
+// (intentional requeue), handing the message back onto the queue. Next
 // dequeue loads the stateful object and increments the counter. Only when the
 // condition is met (3) does the MessageHandler return ACK (nil error) and the
 // workflow (if you will) is complete. This example starts an in-process lockd
@@ -110,7 +110,7 @@ func main() {
 		Queue:     "testing",
 		WithState: true,
 		MessageHandler: func(mctx context.Context, c client.ConsumerMessage) error {
-			c.Logger.Info("consumer", "name", c.Name(), "with_state", c.WithState, "msg", c.Message.MessageID(), "payload_size", c.Message.PayloadSize())
+			c.Logger.Info("consumer", "name", c.Name(), "with_state", c.WithState, "msg", c.Message.MessageID(), "payload_size", c.Message.PayloadSize(), "attempts", c.Message.Attempts(), "failure_attempts", c.Message.FailureAttempts())
 			var v struct {
 				Hello string `json:"hello"`
 			}
@@ -136,7 +136,7 @@ func main() {
 					return err
 				}
 				counts = append(counts, count)
-				return c.Message.Nack(mctx, 1*time.Second, nil)
+				return c.Message.Defer(mctx, 1*time.Second)
 			}
 			return nil
 		},

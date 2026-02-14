@@ -13,6 +13,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 
 FROM scratch
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=build /usr/share/zoneinfo /usr/share/zoneinfo
 COPY --from=build /out/lockd /lockd
 ENV LOCKD_CONFIG_DIR=/config \
     LOCKD_STORE=disk:///storage

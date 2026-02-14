@@ -5,6 +5,16 @@ import (
 	"time"
 )
 
+// QueueNackIntent describes how a negative acknowledgement should be accounted.
+type QueueNackIntent string
+
+const (
+	// QueueNackIntentFailure consumes failure budget for the message.
+	QueueNackIntentFailure QueueNackIntent = "failure"
+	// QueueNackIntentDefer requeues intentionally without consuming failure budget.
+	QueueNackIntentDefer QueueNackIntent = "defer"
+)
+
 // QueueDequeueCommand requests deliveries from a queue.
 type QueueDequeueCommand struct {
 	Namespace    string
@@ -37,6 +47,7 @@ type QueueMessage struct {
 	MessageID                string
 	Attempts                 int
 	MaxAttempts              int
+	FailureAttempts          int
 	NotVisibleUntilUnix      int64
 	VisibilityTimeoutSeconds int64
 	Attributes               map[string]any
@@ -87,6 +98,7 @@ type QueueNackCommand struct {
 	StateLeaseID      string
 	Stateful          bool
 	Delay             time.Duration
+	Intent            QueueNackIntent
 	LastError         any
 	FencingToken      int64
 	StateFencingToken int64

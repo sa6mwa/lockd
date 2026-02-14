@@ -1089,6 +1089,22 @@ func (t *downTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return nil, fmt.Errorf("connect: refused")
 }
 
+type certFailureTransport struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (t *certFailureTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.calls++
+	return nil, &url.Error{
+		Op:  req.Method,
+		URL: req.URL.String(),
+		Err: fmt.Errorf("mtls: verify server certificate: %w", x509.UnknownAuthorityError{}),
+	}
+}
+
 type acquireBlockSecsTransport struct {
 	t         *testing.T
 	blockSecs int64
@@ -1140,6 +1156,46 @@ func TestClientAcquireAllEndpointsDown(t *testing.T) {
 	transport.mu.Unlock()
 	if callCount < len(endpoints) {
 		t.Fatalf("expected at least %d attempts, got %d", len(endpoints), callCount)
+	}
+}
+
+func TestClientAcquireFatalTLSFailureNoRetry(t *testing.T) {
+	transport := &certFailureTransport{}
+	httpClient := &http.Client{Transport: transport}
+	endpoints := []string{"https://hosta:9341"}
+	cli, err := client.NewWithEndpoints(endpoints,
+		client.WithDisableMTLS(true),
+		client.WithHTTPClient(httpClient),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err = cli.Acquire(ctx, api.AcquireRequest{
+		Key:        "orders",
+		Owner:      "worker",
+		TTLSeconds: 5,
+		BlockSecs:  client.BlockWaitForever,
+	},
+		client.WithAcquireFailureRetries(1),
+		client.WithAcquireBackoff(time.Millisecond, time.Millisecond, 1),
+		client.WithAcquireJitter(0),
+	)
+	if err == nil {
+		t.Fatal("expected acquire to fail with certificate verification error")
+	}
+	var unknownAuthErr x509.UnknownAuthorityError
+	if !errors.As(err, &unknownAuthErr) {
+		t.Fatalf("expected x509.UnknownAuthorityError, got %T: %v", err, err)
+	}
+
+	transport.mu.Lock()
+	callCount := transport.calls
+	transport.mu.Unlock()
+	if callCount != 1 {
+		t.Fatalf("expected exactly one attempt on fatal TLS error, got %d", callCount)
 	}
 }
 
@@ -1765,6 +1821,101 @@ func TestClientTxnCommit(t *testing.T) {
 	}
 }
 
+type txnCommitRetryTransport struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (t *txnCommitRetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Method != http.MethodPost || req.URL.Path != "/v1/txn/decide" {
+		return newJSONResponse(req, http.StatusNotFound, `{"error":"not_found"}`), nil
+	}
+	t.mu.Lock()
+	t.calls++
+	call := t.calls
+	t.mu.Unlock()
+	if call == 1 {
+		return nil, &url.Error{
+			Op:  "Post",
+			URL: req.URL.String(),
+			Err: io.ErrUnexpectedEOF,
+		}
+	}
+	return newJSONResponse(req, http.StatusOK, `{"txn_id":"abc123","state":"commit"}`), nil
+}
+
+func TestClientTxnCommitRetriesRetryableTransportError(t *testing.T) {
+	transport := &txnCommitRetryTransport{}
+	httpClient := &http.Client{Transport: transport}
+	cli, err := client.NewWithEndpoints([]string{"http://retry:9341"},
+		client.WithDisableMTLS(true),
+		client.WithHTTPClient(httpClient),
+		client.WithEndpointShuffle(false),
+		client.WithFailureRetries(2),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	resp, err := cli.TxnCommit(context.Background(), api.TxnDecisionRequest{TxnID: "abc123"})
+	if err != nil {
+		t.Fatalf("txn commit: %v", err)
+	}
+	if resp == nil || resp.TxnID != "abc123" || resp.State != "commit" {
+		t.Fatalf("unexpected response %+v", resp)
+	}
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+	if calls < 2 {
+		t.Fatalf("expected retry after transport error, calls=%d", calls)
+	}
+}
+
+type txnCommitFatalTransport struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (t *txnCommitFatalTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Method != http.MethodPost || req.URL.Path != "/v1/txn/decide" {
+		return newJSONResponse(req, http.StatusNotFound, `{"error":"not_found"}`), nil
+	}
+	t.mu.Lock()
+	t.calls++
+	t.mu.Unlock()
+	return nil, &url.Error{
+		Op:  "Post",
+		URL: req.URL.String(),
+		Err: x509.UnknownAuthorityError{},
+	}
+}
+
+func TestClientTxnCommitDoesNotRetryFatalTransportError(t *testing.T) {
+	transport := &txnCommitFatalTransport{}
+	httpClient := &http.Client{Transport: transport}
+	cli, err := client.NewWithEndpoints([]string{"http://retry:9341"},
+		client.WithDisableMTLS(true),
+		client.WithHTTPClient(httpClient),
+		client.WithEndpointShuffle(false),
+		client.WithFailureRetries(5),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	_, err = cli.TxnCommit(context.Background(), api.TxnDecisionRequest{TxnID: "abc123"})
+	if err == nil {
+		t.Fatal("expected fatal transport error")
+	}
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("fatal error must not retry, calls=%d", calls)
+	}
+}
+
 func TestClientTxnReplay(t *testing.T) {
 	var got api.TxnReplayRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1907,6 +2058,9 @@ func TestClientDequeueHandlesLifecycle(t *testing.T) {
 	if nackReq["delay_seconds"].(float64) != 5 {
 		t.Fatalf("unexpected nack delay: %+v", nackReq)
 	}
+	if nackReq["intent"] != string(api.NackIntentFailure) {
+		t.Fatalf("unexpected nack intent: %+v", nackReq)
+	}
 	if err := msg.Ack(context.Background()); err == nil {
 		t.Fatalf("expected ack after nack to fail")
 	}
@@ -1926,6 +2080,78 @@ func TestClientDequeueHandlesLifecycle(t *testing.T) {
 	}
 	if err := msg.Ack(context.Background()); err == nil {
 		t.Fatalf("expected double ack error")
+	}
+}
+
+func TestQueueMessageDeferUsesDeferIntent(t *testing.T) {
+	t.Parallel()
+
+	var nackReq map[string]any
+	payloadBody := []byte("payload")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/queue/dequeue":
+			w.Header().Set("Content-Type", "multipart/form-data; boundary=zzz")
+			mw := multipart.NewWriter(w)
+			if err := mw.SetBoundary("zzz"); err != nil {
+				t.Fatalf("boundary: %v", err)
+			}
+			metaPart, _ := mw.CreatePart(textproto.MIMEHeader{
+				"Content-Disposition": []string{`form-data; name="meta"`},
+				"Content-Type":        []string{"application/json"},
+			})
+			meta := api.DequeueResponse{Message: &api.Message{
+				Namespace:                "default",
+				Queue:                    "orders",
+				MessageID:                "msg-99",
+				Attempts:                 1,
+				MaxAttempts:              5,
+				NotVisibleUntilUnix:      time.Now().Add(30 * time.Second).Unix(),
+				VisibilityTimeoutSeconds: 30,
+				LeaseID:                  "lease-99",
+				LeaseExpiresAtUnix:       time.Now().Add(30 * time.Second).Unix(),
+				FencingToken:             9,
+				TxnID:                    "txn-99",
+				MetaETag:                 "meta-99",
+				PayloadBytes:             int64(len(payloadBody)),
+			}}
+			if err := json.NewEncoder(metaPart).Encode(meta); err != nil {
+				t.Fatalf("encode meta: %v", err)
+			}
+			payloadPart, _ := mw.CreatePart(textproto.MIMEHeader{
+				"Content-Disposition": []string{`form-data; name="payload"`},
+				"Content-Type":        []string{"application/octet-stream"},
+			})
+			if _, err := payloadPart.Write(payloadBody); err != nil {
+				t.Fatalf("write payload: %v", err)
+			}
+			if err := mw.Close(); err != nil {
+				t.Fatalf("close multipart: %v", err)
+			}
+		case "/v1/queue/nack":
+			if err := json.NewDecoder(r.Body).Decode(&nackReq); err != nil {
+				t.Fatalf("decode nack: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"requeued": true, "meta_etag": "meta-deferred"})
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	cli, err := client.New(srv.URL, client.WithDisableMTLS(true), client.WithEndpointShuffle(false))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	msg, err := cli.Dequeue(context.Background(), "orders", client.DequeueOptions{Owner: "worker-1"})
+	if err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if err := msg.Defer(context.Background(), 2*time.Second); err != nil {
+		t.Fatalf("defer: %v", err)
+	}
+	if nackReq["intent"] != string(api.NackIntentDefer) {
+		t.Fatalf("unexpected defer intent payload: %+v", nackReq)
 	}
 }
 
@@ -2909,6 +3135,8 @@ func TestClientSubscribeWithStateAutoExtendsDuringHandler(t *testing.T) {
 			})
 		case "/v1/queue/ack":
 			_ = json.NewEncoder(w).Encode(map[string]any{"acked": true})
+		case "/v1/queue/nack":
+			_ = json.NewEncoder(w).Encode(map[string]any{"requeued": true})
 		default:
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}

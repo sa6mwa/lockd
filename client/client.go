@@ -47,7 +47,7 @@ type EnqueueOptions struct {
 	Visibility time.Duration
 	// TTL sets message retention. Zero uses server defaults.
 	TTL time.Duration
-	// MaxAttempts limits delivery attempts before dead-letter handling.
+	// MaxAttempts limits failed attempts before dead-letter handling.
 	MaxAttempts int
 	// Attributes stores arbitrary JSON-serializable metadata on the message.
 	Attributes map[string]any
@@ -290,12 +290,20 @@ func (h *QueueMessageHandle) Attempts() int {
 	return h.msg.Attempts
 }
 
-// MaxAttempts returns the configured maximum attempts for the message.
+// MaxAttempts returns the configured maximum failed attempts for the message.
 func (h *QueueMessageHandle) MaxAttempts() int {
 	if h == nil {
 		return 0
 	}
 	return h.msg.MaxAttempts
+}
+
+// FailureAttempts returns the recorded failed attempts for the message.
+func (h *QueueMessageHandle) FailureAttempts() int {
+	if h == nil {
+		return 0
+	}
+	return h.msg.FailureAttempts
 }
 
 // NotVisibleUntil reports when the message becomes visible again.
@@ -544,6 +552,15 @@ func (h *QueueMessageHandle) Ack(ctx context.Context) error {
 
 // Nack releases the message with an optional delay and error payload.
 func (h *QueueMessageHandle) Nack(ctx context.Context, delay time.Duration, lastErr any) error {
+	return h.nackWithIntent(ctx, delay, api.NackIntentFailure, lastErr)
+}
+
+// Defer releases the message with an optional delay without consuming failure budget.
+func (h *QueueMessageHandle) Defer(ctx context.Context, delay time.Duration) error {
+	return h.nackWithIntent(ctx, delay, api.NackIntentDefer, nil)
+}
+
+func (h *QueueMessageHandle) nackWithIntent(ctx context.Context, delay time.Duration, intent api.NackIntent, lastErr any) error {
 	if h == nil {
 		return fmt.Errorf("lockd: nil queue handle")
 	}
@@ -561,6 +578,7 @@ func (h *QueueMessageHandle) Nack(ctx context.Context, delay time.Duration, last
 		FencingToken: h.msg.FencingToken,
 		MetaETag:     h.msg.MetaETag,
 		DelaySeconds: secondsFromDuration(delay),
+		Intent:       intent,
 		LastError:    lastErr,
 	}
 	if h.state != nil {
@@ -718,12 +736,20 @@ func (m *QueueMessage) Attempts() int {
 	return m.handle.Attempts()
 }
 
-// MaxAttempts returns the configured maximum delivery attempts.
+// MaxAttempts returns the configured maximum failed attempts.
 func (m *QueueMessage) MaxAttempts() int {
 	if m == nil || m.handle == nil {
 		return 0
 	}
 	return m.handle.MaxAttempts()
+}
+
+// FailureAttempts returns the recorded failed attempts.
+func (m *QueueMessage) FailureAttempts() int {
+	if m == nil || m.handle == nil {
+		return 0
+	}
+	return m.handle.FailureAttempts()
 }
 
 // NotVisibleUntil reports when the message will become visible again.
@@ -955,6 +981,14 @@ func (m *QueueMessage) Nack(ctx context.Context, delay time.Duration, lastErr an
 		return fmt.Errorf("lockd: nil queue message")
 	}
 	return m.handle.Nack(ctx, delay, lastErr)
+}
+
+// Defer releases the lease and requeues intentionally without consuming failure budget.
+func (m *QueueMessage) Defer(ctx context.Context, delay time.Duration) error {
+	if m == nil {
+		return fmt.Errorf("lockd: nil queue message")
+	}
+	return m.handle.Defer(ctx, delay)
 }
 
 // Extend pushes the lease and visibility timeout forward.
@@ -3420,6 +3454,60 @@ func isTransportError(err error) bool {
 	return true
 }
 
+func isFatalTransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var certVerifyErr *tls.CertificateVerificationError
+	if errors.As(err, &certVerifyErr) {
+		return true
+	}
+
+	var unknownAuthErr *x509.UnknownAuthorityError
+	if errors.As(err, &unknownAuthErr) {
+		return true
+	}
+	var unknownAuthErrValue x509.UnknownAuthorityError
+	if errors.As(err, &unknownAuthErrValue) {
+		return true
+	}
+	var hostnameErr *x509.HostnameError
+	if errors.As(err, &hostnameErr) {
+		return true
+	}
+	var hostnameErrValue x509.HostnameError
+	if errors.As(err, &hostnameErrValue) {
+		return true
+	}
+	var certInvalidErr *x509.CertificateInvalidError
+	if errors.As(err, &certInvalidErr) {
+		return true
+	}
+	var certInvalidErrValue x509.CertificateInvalidError
+	if errors.As(err, &certInvalidErrValue) {
+		return true
+	}
+	var systemRootsErr *x509.SystemRootsError
+	if errors.As(err, &systemRootsErr) {
+		return true
+	}
+	var systemRootsErrValue x509.SystemRootsError
+	if errors.As(err, &systemRootsErrValue) {
+		return true
+	}
+	var constraintErr *x509.ConstraintViolationError
+	if errors.As(err, &constraintErr) {
+		return true
+	}
+	var constraintErrValue x509.ConstraintViolationError
+	if errors.As(err, &constraintErrValue) {
+		return true
+	}
+
+	return false
+}
+
 func (c *Client) forUpdateContext(parent context.Context) (context.Context, context.CancelFunc) {
 	if parent == nil {
 		parent = context.Background()
@@ -3829,6 +3917,11 @@ func (c *Client) Acquire(ctx context.Context, req api.AcquireRequest, opts ...Ac
 			}
 		}
 
+		if isFatalTransportError(err) {
+			c.logErrorCtx(ctx, "client.acquire.fatal_transport_error", "key", req.Key, "error", err, "attempt", attempt)
+			return nil, err
+		}
+
 		if oneShot {
 			c.logErrorCtx(ctx, "client.acquire.failure", "key", req.Key, "error", err, "attempt", attempt)
 			return nil, err
@@ -4114,7 +4207,7 @@ func (c *Client) AcquireForUpdate(ctx context.Context, req api.AcquireRequest, h
 		}
 
 		releaseErr := sess.Release(ctx)
-		keepRetryable := keepErr == nil || isNodePassiveError(keepErr) || isTransportError(keepErr)
+		keepRetryable := keepErr == nil || isNodePassiveError(keepErr) || (isTransportError(keepErr) && !isFatalTransportError(keepErr))
 		if releaseErr != nil && isNodePassiveError(releaseErr) && handlerErr == nil && keepRetryable {
 			retryCount := 0
 			delay := cfg.BaseDelay
@@ -4142,7 +4235,7 @@ func (c *Client) AcquireForUpdate(ctx context.Context, req api.AcquireRequest, h
 				nextErr := sess.Release(ctx)
 				if nextErr == nil || isLeaseRequiredError(nextErr) {
 					releaseErr = nil
-					if keepErr != nil && (isNodePassiveError(keepErr) || isTransportError(keepErr)) {
+					if keepErr != nil && (isNodePassiveError(keepErr) || (isTransportError(keepErr) && !isFatalTransportError(keepErr))) {
 						keepErr = nil
 					}
 					break
@@ -5141,7 +5234,7 @@ func (c *Client) updateWithPreferred(ctx context.Context, key, leaseID string, b
 				cancel()
 			}
 			c.logErrorCtx(ctx, "client.update.transport_error", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", endpoint, "fencing_token", token, "error", err)
-			if retries == 0 || !isTransportError(err) {
+			if retries == 0 || !isTransportError(err) || isFatalTransportError(err) {
 				return nil, err
 			}
 			if retries > 0 {
@@ -5383,7 +5476,7 @@ func (c *Client) TxnReplay(ctx context.Context, txnID string) (*api.TxnReplayRes
 		return nil, fmt.Errorf("lockd: txn_id is required")
 	}
 	var resp api.TxnReplayResponse
-	if _, err := c.postJSON(ctx, "/v1/txn/replay", payload, &resp, nil, ""); err != nil {
+	if err := c.postTxnJSONWithRetry(ctx, "/v1/txn/replay", payload, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -5395,10 +5488,53 @@ func (c *Client) txnDecision(ctx context.Context, path string, req api.TxnDecisi
 		return nil, fmt.Errorf("lockd: txn_id is required")
 	}
 	var resp api.TxnDecisionResponse
-	if _, err := c.postJSON(ctx, path, req, &resp, nil, ""); err != nil {
+	if err := c.postTxnJSONWithRetry(ctx, path, req, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
+}
+
+func (c *Client) postTxnJSONWithRetry(ctx context.Context, path string, payload any, out any) error {
+	retries := c.failureRetries
+	delay := 10 * time.Millisecond
+	maxRetryDelay := 500 * time.Millisecond
+	for {
+		_, err := c.postJSON(ctx, path, payload, out, nil, "")
+		if err == nil {
+			return nil
+		}
+		if retries == 0 {
+			return err
+		}
+		if isFatalTransportError(err) {
+			return err
+		}
+		// Txn decision/replay is idempotent by txn_id, so retry transport/passive failures.
+		if !isTransportError(err) && !isNodePassiveError(err) {
+			return err
+		}
+		if retries > 0 {
+			retries--
+		}
+		sleep := delay
+		if retryHint := retryAfterFromError(err); retryHint > sleep {
+			sleep = retryHint
+		}
+		if sleep > maxRetryDelay {
+			sleep = maxRetryDelay
+		}
+		c.logWarnCtx(ctx, "client.txn.retry", "path", path, "delay", sleep, "retry_after", retryAfterFromError(err), "qrf_state", qrfStateFromError(err), "error", err)
+		if sleep > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(sleep):
+			}
+		}
+		if delay < time.Second {
+			delay *= 2
+		}
+	}
 }
 
 // APIError describes an error response from lockd.
@@ -5694,6 +5830,9 @@ func (c *Client) QueueNack(ctx context.Context, req api.NackRequest) (*api.NackR
 	}
 	cidCtx := CorrelationIDFromContext(ctx)
 	startFields := []any{"queue", req.Queue, "mid", req.MessageID, "delay_seconds", req.DelaySeconds}
+	if req.Intent != "" {
+		startFields = append(startFields, "intent", req.Intent)
+	}
 	if cidCtx != "" {
 		startFields = append(startFields, "cid", cidCtx)
 	}
@@ -5736,6 +5875,9 @@ func (c *Client) QueueNack(ctx context.Context, req api.NackRequest) (*api.NackR
 		}
 	}
 	successFields := []any{"queue", req.Queue, "mid", req.MessageID, "endpoint", endpoint, "delay_seconds", req.DelaySeconds}
+	if req.Intent != "" {
+		successFields = append(successFields, "intent", req.Intent)
+	}
 	if res.CorrelationID != "" {
 		successFields = append(successFields, "cid", res.CorrelationID)
 	}

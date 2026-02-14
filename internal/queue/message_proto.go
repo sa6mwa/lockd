@@ -34,6 +34,7 @@ func marshalMessageDocument(doc *messageDocument) ([]byte, error) {
 		LeaseId:                  doc.LeaseID,
 		LeaseFencingToken:        doc.LeaseFencingToken,
 		LeaseTxnId:               doc.LeaseTxnID,
+		FailureAttempts:          proto.Int32(int32(doc.FailureAttempts)),
 	}
 	if len(doc.PayloadDescriptor) > 0 {
 		msg.PayloadDescriptor = append([]byte(nil), doc.PayloadDescriptor...)
@@ -89,6 +90,12 @@ func unmarshalMessageDocument(payload []byte) (*messageDocument, error) {
 		LeaseID:            meta.GetLeaseId(),
 		LeaseFencingToken:  meta.GetLeaseFencingToken(),
 		LeaseTxnID:         meta.GetLeaseTxnId(),
+	}
+	if meta.FailureAttempts != nil {
+		doc.FailureAttempts = int(meta.GetFailureAttempts())
+	} else {
+		// Backward compatibility for metadata written before failure_attempts existed.
+		doc.FailureAttempts = doc.Attempts
 	}
 	if meta.GetAttributes() != nil {
 		doc.Attributes = meta.GetAttributes().AsMap()

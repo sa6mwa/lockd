@@ -27,16 +27,11 @@ func submain(ctx context.Context) int {
 		pslog.WithEnvWriter(os.Stderr),
 	).With("app", "lockd")
 	cmd := newRootCommand(baseLogger)
-	targetCmd := cmd
-	if len(os.Args) > 1 {
-		if found, _, err := cmd.Find(os.Args[1:]); err == nil && found != nil {
-			targetCmd = found
-		}
-	}
+	rootInvocation := invocationTargetsRootCommand(cmd, os.Args[1:])
 	ctx = withSignalCancel(ctx)
-	if err := cmd.ExecuteContext(ctx); err != nil {
+	if _, err := cmd.ExecuteContextC(ctx); err != nil {
 		if err != context.Canceled {
-			if targetCmd == cmd {
+			if rootInvocation {
 				svcfields.WithSubsystem(baseLogger, "cli.root").Error("command failed", "error", err)
 			} else {
 				fmt.Fprintf(os.Stderr, "%s\n", err)
@@ -45,6 +40,80 @@ func submain(ctx context.Context) int {
 		return 1
 	}
 	return 0
+}
+
+func invocationTargetsRootCommand(root *cobra.Command, args []string) bool {
+	if len(args) == 0 {
+		return true
+	}
+	remainingHasSubcommand := func(rest []string) bool {
+		for _, tok := range rest {
+			if !isSubcommandToken(root, tok) {
+				continue
+			}
+			return true
+		}
+		return false
+	}
+	for i := 0; i < len(args); {
+		arg := args[i]
+		if arg == "--" {
+			return true
+		}
+		if strings.HasPrefix(arg, "--") && arg != "--" {
+			if eq := strings.IndexByte(arg, '='); eq >= 0 {
+				i++
+				continue
+			}
+			name := strings.TrimPrefix(arg, "--")
+			flag := root.Flags().Lookup(name)
+			if flag == nil {
+				return !remainingHasSubcommand(args[i+1:])
+			}
+			i++
+			if flag.NoOptDefVal == "" && i < len(args) {
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "-") && arg != "-" {
+			sh := strings.TrimPrefix(arg, "-")
+			consumeNext := false
+			for idx, ch := range sh {
+				flag := root.Flags().ShorthandLookup(string(ch))
+				if flag == nil {
+					return !remainingHasSubcommand(args[i+1:])
+				}
+				if flag.NoOptDefVal == "" {
+					if idx == len(sh)-1 {
+						consumeNext = true
+					}
+					break
+				}
+			}
+			i++
+			if consumeNext && i < len(args) {
+				i++
+			}
+			continue
+		}
+		return !isSubcommandToken(root, arg)
+	}
+	return true
+}
+
+func isSubcommandToken(root *cobra.Command, token string) bool {
+	for _, sub := range root.Commands() {
+		if token == sub.Name() {
+			return true
+		}
+		for _, alias := range sub.Aliases {
+			if token == alias {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func humanizeBytes(n int64) string {
@@ -117,11 +186,29 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 	var logLevel string
 	var bootstrapDir string
 	var bootstrapRan bool
+	runBootstrap := func(baseLogger pslog.Logger) error {
+		if bootstrapDir == "" || bootstrapRan {
+			return nil
+		}
+		bootstrapRan = true
+		abs, err := filepath.Abs(bootstrapDir)
+		if err != nil {
+			return fmt.Errorf("resolve --bootstrap path: %w", err)
+		}
+		if os.Getenv("LOCKD_CONFIG_DIR") == "" {
+			if err := os.Setenv("LOCKD_CONFIG_DIR", abs); err != nil {
+				return fmt.Errorf("set LOCKD_CONFIG_DIR: %w", err)
+			}
+		}
+		logger := svcfields.WithSubsystem(baseLogger, "cli.bootstrap")
+		return bootstrapConfigDir(abs, logger)
+	}
 
 	cmd := &cobra.Command{
-		Use:           "lockd",
-		Short:         "lockd is a single-binary coordination service with exclusive leases, atomic JSON state, and an at-least-once queue",
-		SilenceErrors: true,
+		Use:              "lockd",
+		Short:            "lockd is a single-binary coordination service with exclusive leases, atomic JSON state, and an at-least-once queue",
+		SilenceErrors:    true,
+		TraverseChildren: true,
 		Example: `
   # AWS S3 backend (expects AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY)
   LOCKD_STORE=aws://my-bucket/prefix LOCKD_AWS_REGION=us-west-2 lockd
@@ -143,6 +230,16 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 			cliLogger := svcfields.WithSubsystem(logger, "cli.root")
 			ctx := cmd.Context()
 			cmd.SilenceUsage = true
+			svcfields.WithSubsystem(logger, "server.lifecycle.init").WithLogLevel().Info(
+				"welcome to lockd",
+				"app", "lockd",
+				"pid", os.Getpid(),
+				"uid", os.Getuid(),
+				"gid", os.Getgid(),
+			)
+			if err := runBootstrap(baseLogger); err != nil {
+				return err
+			}
 
 			configFile, err := loadConfigFile()
 			if err != nil {
@@ -174,7 +271,6 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 				logger = logger.LogLevel(level)
 				cliLogger = svcfields.WithSubsystem(logger, "cli.root")
 			}
-			cliLogger.Info("starting lockd", "store", cfg.Store, "listen", cfg.Listen, "mtls", !cfg.DisableMTLS, "default_namespace", cfg.DefaultNamespace)
 
 			server, err := lockd.NewServer(cfg, lockd.WithLogger(logger))
 			if err != nil {
@@ -202,24 +298,6 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 			}
 			return nil
 		},
-	}
-
-	cmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
-		if bootstrapDir == "" || bootstrapRan {
-			return nil
-		}
-		bootstrapRan = true
-		abs, err := filepath.Abs(bootstrapDir)
-		if err != nil {
-			return fmt.Errorf("resolve --bootstrap path: %w", err)
-		}
-		if os.Getenv("LOCKD_CONFIG_DIR") == "" {
-			if err := os.Setenv("LOCKD_CONFIG_DIR", abs); err != nil {
-				return fmt.Errorf("set LOCKD_CONFIG_DIR: %w", err)
-			}
-		}
-		logger := svcfields.WithSubsystem(baseLogger, "cli.bootstrap")
-		return bootstrapConfigDir(abs, logger)
 	}
 
 	cmd.PersistentFlags().StringVar(&bootstrapDir, "bootstrap", "", "initialize certificates + config under this directory before running (idempotent)")
@@ -310,6 +388,11 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 	flags.Int("indexer-flush-docs", lockd.DefaultIndexerFlushDocs, "flush index segments after this many documents")
 	flags.Duration("indexer-flush-interval", lockd.DefaultIndexerFlushInterval, "maximum duration to buffer index postings before flushing")
 	flags.Int("query-doc-prefetch", lockd.DefaultQueryDocPrefetch, "prefetch depth for query return=documents (1 disables parallelism)")
+	flags.Bool("connguard-enabled", true, "enable listener-level connection guarding")
+	flags.Int("connguard-failure-threshold", lockd.DefaultConnguardFailureThreshold, "number of suspicious connection failures before hard-blocking an IP")
+	flags.Duration("connguard-failure-window", lockd.DefaultConnguardFailureWindow, "window used to count suspicious connection failures")
+	flags.Duration("connguard-block-duration", lockd.DefaultConnguardBlockDuration, "time to block an IP after reaching failure threshold")
+	flags.Duration("connguard-probe-timeout", lockd.DefaultConnguardProbeTimeout, "timeout for classification of suspicious plain-TCP attempts")
 	flags.Duration("lsf-sample-interval", lockd.DefaultLSFSampleInterval, "sampling interval for the local security force (LSF)")
 	flags.Duration("lsf-log-interval", lockd.DefaultLSFLogInterval, "interval between LSF telemetry logs (set 0 to disable)")
 	flags.Bool("qrf-disabled", false, "disable perimeter defence quick reaction force (QRF)")
@@ -365,6 +448,7 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 		"queue-max-consumers", "queue-poll-interval", "queue-poll-jitter", "queue-resilient-poll-interval",
 		"indexer-flush-docs", "indexer-flush-interval",
 		"query-doc-prefetch",
+		"connguard-enabled", "connguard-failure-threshold", "connguard-failure-window", "connguard-block-duration", "connguard-probe-timeout",
 		"disk-queue-watch", "disable-mem-queue-watch", "disable-storage-encryption", "storage-encryption-snappy", "disable-krypto-pool",
 		"lsf-sample-interval", "lsf-log-interval",
 		"qrf-disabled", "qrf-queue-soft-limit", "qrf-queue-hard-limit", "qrf-queue-consumer-soft-limit", "qrf-queue-consumer-hard-limit", "qrf-lock-soft-limit", "qrf-lock-hard-limit", "qrf-query-soft-limit", "qrf-query-hard-limit",
@@ -384,12 +468,12 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 
 	cmd.AddCommand(newVerifyCommand(svcfields.WithSubsystem(baseLogger, "cli.verify")))
 	cmd.AddCommand(newAuthCommand())
-	cmd.AddCommand(newClientCommand())
-	cmd.AddCommand(newNamespaceCommand())
-	cmd.AddCommand(newIndexCommand())
+	cmd.AddCommand(newClientCommand(baseLogger))
+	cmd.AddCommand(newNamespaceCommand(baseLogger))
+	cmd.AddCommand(newIndexCommand(baseLogger))
 	cmd.AddCommand(newConfigCommand())
 	cmd.AddCommand(newVersionCommand())
-	cmd.AddCommand(newTxnRootCommand())
+	cmd.AddCommand(newTxnRootCommand(baseLogger))
 	cmd.AddCommand(newTCCommand())
 
 	return cmd
@@ -544,6 +628,12 @@ func bindConfig(cfg *lockd.Config) error {
 		cfg.IndexerFlushInterval = lockd.DefaultIndexerFlushInterval
 	}
 	cfg.QueryDocPrefetch = viper.GetInt("query-doc-prefetch")
+	cfg.ConnguardEnabled = viper.GetBool("connguard-enabled")
+	cfg.ConnguardEnabledSet = viper.IsSet("connguard-enabled")
+	cfg.ConnguardFailureThreshold = viper.GetInt("connguard-failure-threshold")
+	cfg.ConnguardFailureWindow = viper.GetDuration("connguard-failure-window")
+	cfg.ConnguardBlockDuration = viper.GetDuration("connguard-block-duration")
+	cfg.ConnguardProbeTimeout = viper.GetDuration("connguard-probe-timeout")
 	cfg.LSFSampleInterval = viper.GetDuration("lsf-sample-interval")
 	cfg.LSFLogInterval = viper.GetDuration("lsf-log-interval")
 	cfg.LSFLogIntervalSet = true

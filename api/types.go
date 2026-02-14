@@ -199,7 +199,7 @@ type EnqueueRequest struct {
 	VisibilityTimeoutSeconds int64 `json:"visibility_timeout_seconds,omitempty"`
 	// TTLSeconds is a duration in seconds.
 	TTLSeconds int64 `json:"ttl_seconds,omitempty"`
-	// MaxAttempts caps how many delivery attempts are allowed before terminal handling.
+	// MaxAttempts caps how many failed attempts are allowed before terminal handling.
 	MaxAttempts int `json:"max_attempts,omitempty"`
 	// Attributes carries arbitrary JSON metadata associated with the message or request.
 	Attributes map[string]any `json:"attributes,omitempty"`
@@ -217,8 +217,10 @@ type EnqueueResponse struct {
 	MessageID string `json:"message_id"`
 	// Attempts is the number of delivery attempts observed so far.
 	Attempts int `json:"attempts"`
-	// MaxAttempts caps how many delivery attempts are allowed before terminal handling.
+	// MaxAttempts caps how many failed attempts are allowed before terminal handling.
 	MaxAttempts int `json:"max_attempts"`
+	// FailureAttempts is the number of failed attempts observed so far.
+	FailureAttempts int `json:"failure_attempts,omitempty"`
 	// NotVisibleUntilUnix is when the message becomes visible for delivery again, as Unix seconds.
 	NotVisibleUntilUnix int64 `json:"not_visible_until_unix"`
 	// VisibilityTimeoutSeconds controls how long a leased message remains invisible, in seconds.
@@ -259,8 +261,10 @@ type Message struct {
 	MessageID string `json:"message_id"`
 	// Attempts is the number of delivery attempts observed so far.
 	Attempts int `json:"attempts"`
-	// MaxAttempts caps how many delivery attempts are allowed before terminal handling.
+	// MaxAttempts caps how many failed attempts are allowed before terminal handling.
 	MaxAttempts int `json:"max_attempts"`
+	// FailureAttempts is the number of failed attempts observed so far.
+	FailureAttempts int `json:"failure_attempts,omitempty"`
 	// NotVisibleUntilUnix is when the message becomes visible again, as a Unix timestamp in seconds.
 	NotVisibleUntilUnix int64 `json:"not_visible_until_unix"`
 	// VisibilityTimeoutSeconds controls how long a leased message remains invisible, in seconds.
@@ -335,6 +339,16 @@ type AckResponse struct {
 	CorrelationID string `json:"correlation_id,omitempty"`
 }
 
+// NackIntent describes how a negative acknowledgement should be accounted.
+type NackIntent string
+
+const (
+	// NackIntentFailure records a failed processing attempt.
+	NackIntentFailure NackIntent = "failure"
+	// NackIntentDefer requeues intentionally without consuming failure budget.
+	NackIntentDefer NackIntent = "defer"
+)
+
 // NackRequest re-queues a message with optional delay.
 type NackRequest struct {
 	// Namespace scopes the request or response to a lockd namespace.
@@ -355,7 +369,9 @@ type NackRequest struct {
 	StateETag string `json:"state_etag,omitempty"`
 	// DelaySeconds postpones message visibility by the specified number of seconds.
 	DelaySeconds int64 `json:"delay_seconds,omitempty"`
-	// LastError carries optional error metadata persisted with the negative acknowledgement.
+	// Intent controls whether the requeue counts against max_attempts.
+	Intent NackIntent `json:"intent,omitempty"`
+	// LastError carries optional error metadata persisted for intent=failure.
 	LastError any `json:"last_error,omitempty"`
 	// StateLeaseID identifies the associated workflow state lease.
 	StateLeaseID string `json:"state_lease_id,omitempty"`

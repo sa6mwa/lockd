@@ -176,6 +176,14 @@ const (
 	DefaultQRFLoadHardLimitMultiplier = 8.0
 	// DefaultQRFQueueConsumerSoftLimitRatio controls the default soft ceiling for concurrent queue consumers.
 	DefaultQRFQueueConsumerSoftLimitRatio = 0.75
+	// DefaultConnguardFailureThreshold is the number of suspicious connection events required before hard-blocking an IP.
+	DefaultConnguardFailureThreshold = 5
+	// DefaultConnguardFailureWindow is the rolling window for suspicious connect attempts.
+	DefaultConnguardFailureWindow = 30 * time.Second
+	// DefaultConnguardBlockDuration controls how long an IP remains blocked.
+	DefaultConnguardBlockDuration = 5 * time.Minute
+	// DefaultConnguardProbeTimeout bounds the wait for early classification on plain TCP connections.
+	DefaultConnguardProbeTimeout = 250 * time.Millisecond
 	// DefaultLSFSampleInterval configures how frequently the LSF observer samples system metrics.
 	DefaultLSFSampleInterval = 200 * time.Millisecond
 	// DefaultLSFLogInterval controls how often the LSF emits lockd.lsf.sample telemetry logs.
@@ -486,6 +494,19 @@ type Config struct {
 	LSFLogInterval time.Duration
 	// LSFLogIntervalSet reports whether LSFLogInterval was explicitly set.
 	LSFLogIntervalSet bool
+
+	// ConnguardEnabled enables suspicious-connection protection in the listener path.
+	ConnguardEnabled bool
+	// ConnguardEnabledSet reports whether ConnguardEnabled was explicitly set.
+	ConnguardEnabledSet bool
+	// ConnguardFailureThreshold controls how many suspicious connection events trigger a hard block.
+	ConnguardFailureThreshold int
+	// ConnguardFailureWindow is the rolling window used to count suspicious connection events.
+	ConnguardFailureWindow time.Duration
+	// ConnguardBlockDuration controls how long a suspicious source IP is blocked.
+	ConnguardBlockDuration time.Duration
+	// ConnguardProbeTimeout controls how long non-TLS connections are probed before classification.
+	ConnguardProbeTimeout time.Duration
 }
 
 // MTLSEnabled reports whether mutual TLS is active.
@@ -692,6 +713,36 @@ func (c *Config) Validate() error {
 	}
 	if !c.LSFLogIntervalSet {
 		c.LSFLogInterval = DefaultLSFLogInterval
+	}
+	if !c.ConnguardEnabledSet {
+		c.ConnguardEnabled = true
+	}
+	if c.ConnguardFailureThreshold < 0 {
+		return fmt.Errorf("config: connguard failure threshold must be >= 0")
+	}
+	if c.ConnguardFailureThreshold == 0 {
+		c.ConnguardFailureThreshold = DefaultConnguardFailureThreshold
+	}
+	if c.ConnguardFailureWindow < 0 {
+		return fmt.Errorf("config: connguard failure window must be >= 0")
+	}
+	if c.ConnguardFailureWindow == 0 {
+		c.ConnguardFailureWindow = DefaultConnguardFailureWindow
+	}
+	if c.ConnguardBlockDuration < 0 {
+		return fmt.Errorf("config: connguard block duration must be >= 0")
+	}
+	if c.ConnguardBlockDuration == 0 {
+		c.ConnguardBlockDuration = DefaultConnguardBlockDuration
+	}
+	if c.ConnguardProbeTimeout < 0 {
+		return fmt.Errorf("config: connguard probe timeout must be >= 0")
+	}
+	if c.ConnguardProbeTimeout == 0 {
+		c.ConnguardProbeTimeout = DefaultConnguardProbeTimeout
+	}
+	if c.ConnguardFailureThreshold < 2 {
+		return fmt.Errorf("config: connguard failure threshold must be >= 2")
 	}
 	if c.TCTrustDir == "" {
 		dir, err := DefaultTCTrustDir()

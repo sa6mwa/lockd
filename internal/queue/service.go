@@ -190,6 +190,7 @@ type Message struct {
 	Visibility       time.Duration
 	MaxAttempts      int
 	Attempts         int
+	FailureAttempts  int
 	TTLDeadline      time.Time
 	PayloadBytes     int64
 	PayloadContent   string
@@ -259,6 +260,7 @@ type MessageDocument struct {
 	EnqueuedAt         time.Time      `json:"enqueued_at"`
 	UpdatedAt          time.Time      `json:"updated_at"`
 	Attempts           int            `json:"attempts"`
+	FailureAttempts    int            `json:"failure_attempts,omitempty"`
 	NotVisibleUntil    time.Time      `json:"not_visible_until"`
 	MaxAttempts        int            `json:"max_attempts"`
 	Attributes         map[string]any `json:"attributes,omitempty"`
@@ -415,6 +417,7 @@ func (s *Service) Enqueue(ctx context.Context, namespace, queue string, payload 
 		Visibility:      visibility,
 		MaxAttempts:     maxAttempts,
 		Attempts:        0,
+		FailureAttempts: 0,
 		PayloadBytes:    payloadBytes,
 		PayloadContent:  opts.ContentType,
 		MetadataObject:  metaKey,

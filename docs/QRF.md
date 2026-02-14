@@ -34,6 +34,48 @@ recover.
 * Emits debug samples using the `lockd.lsf.sample` log event (default cadence: every 15 s; tune with `--lsf-log-interval`, set `0` to disable).
 * Forwards snapshots to the QRF controller.
 
+### Connection Guard
+
+`control.connguard` is a dedicated connection-guard component that runs
+**before** HTTP routing.
+When enabled, it classifies suspicious connection patterns and can hard-block a
+source IP before the request is decoded by the HTTP layer. This is primarily
+intended to dampen obvious scanning and exploit attempts that happen at the TCP/TLS
+handshake boundary.
+
+`control.connguard` tracks rolling connection failures per source IP:
+
+* failed TLS handshakes (wrong certs, protocol mismatches, malformed handshakes)
+* plain-TCP sockets that close or send no bytes during the probe window
+
+After the configured number of suspicious events (`--connguard-failure-threshold`)
+occur within the configured window (`--connguard-failure-window`), the remote IP is
+blocked for `--connguard-block-duration`. The block is enforced on the listener
+before HTTP routing, so blocked sockets are not handed to mux handlers.
+
+Defaults:
+
+* `connguard-enabled=true`
+* `connguard-failure-threshold=5`
+* `connguard-failure-window=30s`
+* `connguard-block-duration=5m`
+* `connguard-probe-timeout=250ms`
+
+Set `--connguard-probe-timeout=0` to disable pre-classification probing on
+non-TLS listeners. The first suspicious bytes on a plain TCP connection are still
+forwarded into HTTP after classification succeeds.
+
+Connguard emits lifecycle logs so operators can correlate engagement and recovery:
+
+* `lockd.connguard.suspicious` – suspicious connection attempt observed but below threshold.
+* `lockd.connguard.engaged` – connection guard block rule entered for a source IP.
+* `lockd.connguard.blocked` – same event context when a source IP is blocked.
+* `lockd.connguard.disengaged` – hard block expired and handling is restored.
+* `lockd.connguard.rejected` – blocked socket dropped before HTTP handling.
+* `lockd.connguard.deadline` – listener probe deadline could not be configured.
+
+The guard logs remain under the `control.connguard` subsystem.
+
 ### Quick Reaction Force (QRF)
 
 * Evaluates each snapshot and maintains a state machine:
@@ -112,6 +154,11 @@ corresponding environment variable, and a short description:
 | `--qrf-engaged-delay` | `LOCKD_QRF_ENGAGED_DELAY` | Base delay used while the QRF is fully engaged. |
 | `--qrf-recovery-delay` | `LOCKD_QRF_RECOVERY_DELAY` | Base delay used while the QRF is recovering. |
 | `--qrf-max-wait` | `LOCKD_QRF_MAX_WAIT` | Maximum delay applied before returning HTTP 429. |
+| `--connguard-enabled` | `LOCKD_CONNGUARD_ENABLED` | Enable listener-level connection guarding before HTTP handling (default: true). |
+| `--connguard-failure-threshold` | `LOCKD_CONNGUARD_FAILURE_THRESHOLD` | Suspicious connection failures required before blocking a source IP (default: 5). |
+| `--connguard-failure-window` | `LOCKD_CONNGUARD_FAILURE_WINDOW` | Rolling window to count suspicious failures (default: 30s). |
+| `--connguard-block-duration` | `LOCKD_CONNGUARD_BLOCK_DURATION` | How long to block a suspicious source IP (default: 5m). |
+| `--connguard-probe-timeout` | `LOCKD_CONNGUARD_PROBE_TIMEOUT` | Probe timeout for plain-TCP classification (default: 250ms). |
 | `--lsf-sample-interval` | `LOCKD_LSF_SAMPLE_INTERVAL` | Override the Local Security Force sampling cadence (default: 200 ms). |
 | `--lsf-log-interval` | `LOCKD_LSF_LOG_INTERVAL` | Interval between `lockd.lsf.sample` logs; set `0` to disable (default: 15 s). |
 
@@ -131,6 +178,8 @@ queue by running multiple lockd deployments with different configuration.
 * **Logs**:
   * `lockd.lsf.sample` – periodic snapshots with memory, CPU, and load metrics.
   * `lockd.qrf.soft_arm`, `lockd.qrf.engaged`, `lockd.qrf.recovery`, `lockd.qrf.disengaged` – posture changes with reason and latest snapshot details.
+  * `lockd.connguard.suspicious`, `lockd.connguard.engaged`,
+    `lockd.connguard.disengaged` – listener defense lifecycle and suspicious events.
   * `queue.dispatcher.qrf_throttle` (and similar) – per-request decisions.
 * **Runtime inspection**:
   * `Server.QRFState()` returns the current posture.

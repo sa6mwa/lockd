@@ -9,15 +9,16 @@ import (
 
 	"pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
+	"pkt.systems/pslog"
 )
 
-func newNamespaceCommand() *cobra.Command {
+func newNamespaceCommand(baseLogger pslog.Logger) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "namespace",
 		Aliases: []string{"ns"},
 		Short:   "Inspect and update namespace configuration",
 	}
-	cfg := addClientConnectionFlags(cmd, false)
+	cfg := addClientConnectionFlags(cmd, false, baseLogger)
 	cmd.AddCommand(
 		newNamespaceGetCommand(cfg),
 		newNamespaceSetCommand(cfg),

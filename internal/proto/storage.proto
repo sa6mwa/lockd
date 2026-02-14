@@ -95,4 +95,5 @@ message QueueMessageMeta {
   string lease_id = 18;
   int64 lease_fencing_token = 19;
   string lease_txn_id = 20;
+  optional int32 failure_attempts = 21;
 }

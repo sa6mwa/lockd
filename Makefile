@@ -13,13 +13,14 @@ LOCKD_VERSION ?= $(shell $(GO) run ./cmd/lockd version --version)
 LOCKD_SEMVER ?= $(shell $(GO) run ./cmd/lockd version --semver)
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-integration bench diagrams swagger build container push-container clean install
+.PHONY: help test test-integration bench fuzz diagrams swagger build container push-container clean install
 
 help:
 	@echo "Available targets:"
 	@echo "  make test                    # run unit tests"
 	@echo "  make test-integration        # run integration suites (pass SUITES=...)"
 	@echo "  make bench                   # run benchmark suites (pass SUITES=...)"
+	@echo "  make fuzz                    # run all fuzzers (default 15s each, override FUZZ_TIME=...)"
 	@echo "  make swagger                 # regenerate Swagger/OpenAPI artifacts"
 	@echo "  make diagrams                # render PlantUML sequence diagrams to JPEG"
 	@echo "  make build                   # build ./cmd/lockd into $(BIN_PATH)"
@@ -69,6 +70,31 @@ bench:
 		echo "Running benchmark suites: $(SUITES)"; \
 		./run-benchmark-suites.sh $(SUITES); \
 	fi
+
+FUZZ_TIME ?= 15s
+
+fuzz:
+	@set -euo pipefail; \
+	fuzzers=( \
+		". FuzzAuthenticatedAPISurfaceNoServerError" \
+		". FuzzDiskNamespaceAndPathContainment" \
+		"./internal/httpapi FuzzCompactJSON" \
+		"./internal/jsonutil FuzzCompactWriter" \
+		"./internal/jsonutilv2 FuzzCompactWriter" \
+		"./internal/connguard FuzzConnectionGuardPortRotationStillBlocks" \
+		"./internal/connguard FuzzConnectionGuardExpiryAndIsolation" \
+		"./internal/connguard FuzzPrefixedConnReadConsistency" \
+	); \
+	failed=0; \
+	for entry in "$${fuzzers[@]}"; do \
+		pkg="$${entry%% *}"; \
+		name="$${entry#* }"; \
+		echo "==> go test $$pkg -run=^$$ -fuzz=$$name -fuzztime=$(FUZZ_TIME)"; \
+		if ! $(GO) test "$$pkg" -run=^$$ -fuzz="$$name" -fuzztime="$(FUZZ_TIME)"; then \
+			failed=1; \
+		fi; \
+	done; \
+	exit "$$failed"
 
 PLANTUML_SOURCES := $(wildcard docs/diagrams/*.puml)
 PLANTUML_OUT_SVG := $(PLANTUML_SOURCES:.puml=.svg)

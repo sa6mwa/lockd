@@ -285,6 +285,278 @@ func TestQueueNackClearsLease(t *testing.T) {
 	}
 }
 
+func TestQueueNackFailureIntentIncrementsFailureAttempts(t *testing.T) {
+	ctx := context.Background()
+	coreSvc, qsvc := newQueueCoreForTest(t)
+
+	msg, err := qsvc.Enqueue(ctx, "default", "q2-failure", strings.NewReader("payload"), queue.EnqueueOptions{})
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	acq, err := coreSvc.Acquire(ctx, AcquireCommand{
+		Namespace:    "default",
+		Key:          relativeKey("default", msgLeaseKey(t, "default", "q2-failure", msg.ID)),
+		Owner:        "worker",
+		TTLSeconds:   30,
+		BlockSeconds: apiBlockNoWait,
+	})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	docRes, err := qsvc.GetMessage(ctx, "default", "q2-failure", msg.ID)
+	if err != nil {
+		t.Fatalf("get message: %v", err)
+	}
+	doc := docRes.Document
+	metaETag := docRes.ETag
+	doc.LeaseID = acq.LeaseID
+	doc.LeaseFencingToken = acq.FencingToken
+	doc.LeaseTxnID = acq.TxnID
+	metaETag, err = qsvc.SaveMessageDocument(ctx, "default", "q2-failure", doc.ID, doc, metaETag)
+	if err != nil {
+		t.Fatalf("save message: %v", err)
+	}
+
+	_, err = coreSvc.Nack(ctx, QueueNackCommand{
+		Namespace:    "default",
+		Queue:        "q2-failure",
+		MessageID:    doc.ID,
+		MetaETag:     metaETag,
+		LeaseID:      acq.LeaseID,
+		Stateful:     false,
+		Delay:        0,
+		Intent:       QueueNackIntentFailure,
+		LastError:    map[string]any{"reason": "boom"},
+		FencingToken: acq.FencingToken,
+		TxnID:        acq.TxnID,
+	})
+	if err != nil {
+		t.Fatalf("nack failure intent: %v", err)
+	}
+
+	updated, err := qsvc.GetMessage(ctx, "default", "q2-failure", msg.ID)
+	if err != nil {
+		t.Fatalf("get updated message: %v", err)
+	}
+	if updated.Document.FailureAttempts != 1 {
+		t.Fatalf("expected failure_attempts=1, got %d", updated.Document.FailureAttempts)
+	}
+	if updated.Document.LastError == nil {
+		t.Fatalf("expected last_error to be recorded for failure intent")
+	}
+}
+
+func TestQueueNackDeferIntentDoesNotIncrementFailureAttempts(t *testing.T) {
+	ctx := context.Background()
+	coreSvc, qsvc := newQueueCoreForTest(t)
+
+	msg, err := qsvc.Enqueue(ctx, "default", "q2-defer", strings.NewReader("payload"), queue.EnqueueOptions{})
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	acq, err := coreSvc.Acquire(ctx, AcquireCommand{
+		Namespace:    "default",
+		Key:          relativeKey("default", msgLeaseKey(t, "default", "q2-defer", msg.ID)),
+		Owner:        "worker",
+		TTLSeconds:   30,
+		BlockSeconds: apiBlockNoWait,
+	})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	docRes, err := qsvc.GetMessage(ctx, "default", "q2-defer", msg.ID)
+	if err != nil {
+		t.Fatalf("get message: %v", err)
+	}
+	doc := docRes.Document
+	metaETag := docRes.ETag
+	doc.LeaseID = acq.LeaseID
+	doc.LeaseFencingToken = acq.FencingToken
+	doc.LeaseTxnID = acq.TxnID
+	metaETag, err = qsvc.SaveMessageDocument(ctx, "default", "q2-defer", doc.ID, doc, metaETag)
+	if err != nil {
+		t.Fatalf("save message: %v", err)
+	}
+
+	_, err = coreSvc.Nack(ctx, QueueNackCommand{
+		Namespace:    "default",
+		Queue:        "q2-defer",
+		MessageID:    doc.ID,
+		MetaETag:     metaETag,
+		LeaseID:      acq.LeaseID,
+		Stateful:     false,
+		Delay:        0,
+		Intent:       QueueNackIntentDefer,
+		FencingToken: acq.FencingToken,
+		TxnID:        acq.TxnID,
+	})
+	if err != nil {
+		t.Fatalf("nack defer intent: %v", err)
+	}
+
+	updated, err := qsvc.GetMessage(ctx, "default", "q2-defer", msg.ID)
+	if err != nil {
+		t.Fatalf("get updated message: %v", err)
+	}
+	if updated.Document.FailureAttempts != 0 {
+		t.Fatalf("expected failure_attempts=0 for defer intent, got %d", updated.Document.FailureAttempts)
+	}
+	if updated.Document.LastError != nil {
+		t.Fatalf("expected last_error cleared for defer intent, got %#v", updated.Document.LastError)
+	}
+}
+
+func TestQueueNackRejectsDeferLastError(t *testing.T) {
+	ctx := context.Background()
+	coreSvc, qsvc := newQueueCoreForTest(t)
+
+	msg, err := qsvc.Enqueue(ctx, "default", "q2-defer-last-error", strings.NewReader("payload"), queue.EnqueueOptions{})
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	acq, err := coreSvc.Acquire(ctx, AcquireCommand{
+		Namespace:    "default",
+		Key:          relativeKey("default", msgLeaseKey(t, "default", "q2-defer-last-error", msg.ID)),
+		Owner:        "worker",
+		TTLSeconds:   30,
+		BlockSeconds: apiBlockNoWait,
+	})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	docRes, err := qsvc.GetMessage(ctx, "default", "q2-defer-last-error", msg.ID)
+	if err != nil {
+		t.Fatalf("get message: %v", err)
+	}
+	doc := docRes.Document
+	metaETag := docRes.ETag
+	doc.LeaseID = acq.LeaseID
+	doc.LeaseFencingToken = acq.FencingToken
+	doc.LeaseTxnID = acq.TxnID
+	metaETag, err = qsvc.SaveMessageDocument(ctx, "default", "q2-defer-last-error", doc.ID, doc, metaETag)
+	if err != nil {
+		t.Fatalf("save message: %v", err)
+	}
+
+	_, err = coreSvc.Nack(ctx, QueueNackCommand{
+		Namespace:    "default",
+		Queue:        "q2-defer-last-error",
+		MessageID:    doc.ID,
+		MetaETag:     metaETag,
+		LeaseID:      acq.LeaseID,
+		Delay:        0,
+		Intent:       QueueNackIntentDefer,
+		LastError:    map[string]any{"reason": "ignored"},
+		FencingToken: acq.FencingToken,
+		TxnID:        acq.TxnID,
+	})
+	if err == nil {
+		t.Fatalf("expected invalid_nack_last_error")
+	}
+	fail := Failure{}
+	if !errors.As(err, &fail) || fail.Code != "invalid_nack_last_error" {
+		t.Fatalf("expected invalid_nack_last_error, got %v", err)
+	}
+}
+
+func TestQueueNackRejectsInvalidIntent(t *testing.T) {
+	ctx := context.Background()
+	coreSvc, qsvc := newQueueCoreForTest(t)
+
+	msg, err := qsvc.Enqueue(ctx, "default", "q2-invalid-intent", strings.NewReader("payload"), queue.EnqueueOptions{})
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	acq, err := coreSvc.Acquire(ctx, AcquireCommand{
+		Namespace:    "default",
+		Key:          relativeKey("default", msgLeaseKey(t, "default", "q2-invalid-intent", msg.ID)),
+		Owner:        "worker",
+		TTLSeconds:   30,
+		BlockSeconds: apiBlockNoWait,
+	})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	docRes, err := qsvc.GetMessage(ctx, "default", "q2-invalid-intent", msg.ID)
+	if err != nil {
+		t.Fatalf("get message: %v", err)
+	}
+	doc := docRes.Document
+	metaETag := docRes.ETag
+	doc.LeaseID = acq.LeaseID
+	doc.LeaseFencingToken = acq.FencingToken
+	doc.LeaseTxnID = acq.TxnID
+	metaETag, err = qsvc.SaveMessageDocument(ctx, "default", "q2-invalid-intent", doc.ID, doc, metaETag)
+	if err != nil {
+		t.Fatalf("save message: %v", err)
+	}
+
+	_, err = coreSvc.Nack(ctx, QueueNackCommand{
+		Namespace:    "default",
+		Queue:        "q2-invalid-intent",
+		MessageID:    doc.ID,
+		MetaETag:     metaETag,
+		LeaseID:      acq.LeaseID,
+		Intent:       QueueNackIntent("maybe-later"),
+		FencingToken: acq.FencingToken,
+		TxnID:        acq.TxnID,
+	})
+	if err == nil {
+		t.Fatalf("expected invalid intent error")
+	}
+	fail := Failure{}
+	if !errors.As(err, &fail) || fail.Code != "invalid_nack_intent" {
+		t.Fatalf("expected invalid_nack_intent, got %v", err)
+	}
+}
+
+func TestQueueNackNormalizesIntent(t *testing.T) {
+	ctx := context.Background()
+	coreSvc, qsvc := newQueueCoreForTest(t)
+
+	msg, err := qsvc.Enqueue(ctx, "default", "q2-normalized-intent", strings.NewReader("payload"), queue.EnqueueOptions{})
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	acq, err := coreSvc.Acquire(ctx, AcquireCommand{
+		Namespace:    "default",
+		Key:          relativeKey("default", msgLeaseKey(t, "default", "q2-normalized-intent", msg.ID)),
+		Owner:        "worker",
+		TTLSeconds:   30,
+		BlockSeconds: apiBlockNoWait,
+	})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	docRes, err := qsvc.GetMessage(ctx, "default", "q2-normalized-intent", msg.ID)
+	if err != nil {
+		t.Fatalf("get message: %v", err)
+	}
+	doc := docRes.Document
+	metaETag := docRes.ETag
+	doc.LeaseID = acq.LeaseID
+	doc.LeaseFencingToken = acq.FencingToken
+	doc.LeaseTxnID = acq.TxnID
+	metaETag, err = qsvc.SaveMessageDocument(ctx, "default", "q2-normalized-intent", doc.ID, doc, metaETag)
+	if err != nil {
+		t.Fatalf("save message: %v", err)
+	}
+
+	_, err = coreSvc.Nack(ctx, QueueNackCommand{
+		Namespace:    "default",
+		Queue:        "q2-normalized-intent",
+		MessageID:    doc.ID,
+		MetaETag:     metaETag,
+		LeaseID:      acq.LeaseID,
+		Intent:       QueueNackIntent("  DeFeR "),
+		FencingToken: acq.FencingToken,
+		TxnID:        acq.TxnID,
+	})
+	if err != nil {
+		t.Fatalf("nack normalized defer intent: %v", err)
+	}
+}
+
 func TestQueueExtendRenewsLease(t *testing.T) {
 	ctx := context.Background()
 	coreSvc, qsvc := newQueueCoreForTest(t)
@@ -533,6 +805,154 @@ func TestQueueNackUsesTCDecider(t *testing.T) {
 	}
 	if _, err := qsvc.GetMessage(ctx, "default", "q8", msg.ID); err != nil {
 		t.Fatalf("expected message to remain, got %v", err)
+	}
+}
+
+func TestQueueNackTCDeferDelayClearsStaleLastError(t *testing.T) {
+	ctx := context.Background()
+	coreSvc, qsvc := newQueueCoreForTest(t)
+
+	msg, err := qsvc.Enqueue(ctx, "default", "q8-tc-defer-delay", strings.NewReader("hi"), queue.EnqueueOptions{})
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	txnID := xid.New().String()
+	acq, err := coreSvc.Acquire(ctx, AcquireCommand{
+		Namespace:    "default",
+		Key:          relativeKey("default", msgLeaseKey(t, "default", "q8-tc-defer-delay", msg.ID)),
+		Owner:        "worker",
+		TTLSeconds:   30,
+		BlockSeconds: apiBlockNoWait,
+		TxnID:        txnID,
+	})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	docRes, err := qsvc.GetMessage(ctx, "default", "q8-tc-defer-delay", msg.ID)
+	if err != nil {
+		t.Fatalf("get message: %v", err)
+	}
+	doc := docRes.Document
+	metaETag := docRes.ETag
+	doc.LeaseID = acq.LeaseID
+	doc.LeaseFencingToken = acq.FencingToken
+	doc.LeaseTxnID = acq.TxnID
+	doc.LastError = map[string]any{"reason": "previous_failure"}
+	metaETag, err = qsvc.SaveMessageDocument(ctx, "default", "q8-tc-defer-delay", doc.ID, doc, metaETag)
+	if err != nil {
+		t.Fatalf("save message: %v", err)
+	}
+
+	decider := &stubTCDecider{}
+	coreSvc.SetTCDecider(decider)
+
+	res, err := coreSvc.Nack(ctx, QueueNackCommand{
+		Namespace:    "default",
+		Queue:        "q8-tc-defer-delay",
+		MessageID:    msg.ID,
+		MetaETag:     metaETag,
+		LeaseID:      acq.LeaseID,
+		TxnID:        txnID,
+		FencingToken: acq.FencingToken,
+		Delay:        2 * time.Second,
+		Intent:       QueueNackIntentDefer,
+	})
+	if err != nil {
+		t.Fatalf("nack defer delay: %v", err)
+	}
+	if !res.Requeued {
+		t.Fatalf("expected requeued")
+	}
+	if decider.calls != 1 {
+		t.Fatalf("expected 1 decide call, got %d", decider.calls)
+	}
+
+	updated, err := qsvc.GetMessage(ctx, "default", "q8-tc-defer-delay", msg.ID)
+	if err != nil {
+		t.Fatalf("get updated message: %v", err)
+	}
+	if updated.Document.FailureAttempts != 0 {
+		t.Fatalf("expected failure_attempts=0, got %d", updated.Document.FailureAttempts)
+	}
+	if updated.Document.LastError != nil {
+		t.Fatalf("expected stale last_error cleared, got %#v", updated.Document.LastError)
+	}
+	if !updated.Document.NotVisibleUntil.After(time.Now().UTC()) {
+		t.Fatalf("expected deferred visibility in future, got %v", updated.Document.NotVisibleUntil)
+	}
+}
+
+func TestQueueNackTCDeferZeroDelayClearsStaleLastError(t *testing.T) {
+	ctx := context.Background()
+	coreSvc, qsvc := newQueueCoreForTest(t)
+
+	msg, err := qsvc.Enqueue(ctx, "default", "q8-tc-defer-zero", strings.NewReader("hi"), queue.EnqueueOptions{})
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	txnID := xid.New().String()
+	acq, err := coreSvc.Acquire(ctx, AcquireCommand{
+		Namespace:    "default",
+		Key:          relativeKey("default", msgLeaseKey(t, "default", "q8-tc-defer-zero", msg.ID)),
+		Owner:        "worker",
+		TTLSeconds:   30,
+		BlockSeconds: apiBlockNoWait,
+		TxnID:        txnID,
+	})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	docRes, err := qsvc.GetMessage(ctx, "default", "q8-tc-defer-zero", msg.ID)
+	if err != nil {
+		t.Fatalf("get message: %v", err)
+	}
+	doc := docRes.Document
+	metaETag := docRes.ETag
+	doc.LeaseID = acq.LeaseID
+	doc.LeaseFencingToken = acq.FencingToken
+	doc.LeaseTxnID = acq.TxnID
+	doc.LastError = map[string]any{"reason": "previous_failure"}
+	metaETag, err = qsvc.SaveMessageDocument(ctx, "default", "q8-tc-defer-zero", doc.ID, doc, metaETag)
+	if err != nil {
+		t.Fatalf("save message: %v", err)
+	}
+
+	decider := &stubTCDecider{}
+	coreSvc.SetTCDecider(decider)
+
+	res, err := coreSvc.Nack(ctx, QueueNackCommand{
+		Namespace:    "default",
+		Queue:        "q8-tc-defer-zero",
+		MessageID:    msg.ID,
+		MetaETag:     metaETag,
+		LeaseID:      acq.LeaseID,
+		TxnID:        txnID,
+		FencingToken: acq.FencingToken,
+		Delay:        0,
+		Intent:       QueueNackIntentDefer,
+	})
+	if err != nil {
+		t.Fatalf("nack defer zero delay: %v", err)
+	}
+	if !res.Requeued {
+		t.Fatalf("expected requeued")
+	}
+	if res.MetaETag == "" || res.MetaETag == metaETag {
+		t.Fatalf("expected metadata etag to change, old=%q new=%q", metaETag, res.MetaETag)
+	}
+	if decider.calls != 1 {
+		t.Fatalf("expected 1 decide call, got %d", decider.calls)
+	}
+
+	updated, err := qsvc.GetMessage(ctx, "default", "q8-tc-defer-zero", msg.ID)
+	if err != nil {
+		t.Fatalf("get updated message: %v", err)
+	}
+	if updated.Document.FailureAttempts != 0 {
+		t.Fatalf("expected failure_attempts=0, got %d", updated.Document.FailureAttempts)
+	}
+	if updated.Document.LastError != nil {
+		t.Fatalf("expected stale last_error cleared, got %#v", updated.Document.LastError)
 	}
 }
 

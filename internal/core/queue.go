@@ -30,6 +30,7 @@ type QueueEnqueueResult struct {
 	MessageID           string
 	Attempts            int
 	MaxAttempts         int
+	FailureAttempts     int
 	NotVisibleUntilUnix int64
 	VisibilityTimeout   int64
 	PayloadBytes        int64
@@ -86,6 +87,7 @@ func (s *Service) Enqueue(ctx context.Context, cmd QueueEnqueueCommand) (*QueueE
 		MessageID:           msg.ID,
 		Attempts:            msg.Attempts,
 		MaxAttempts:         msg.MaxAttempts,
+		FailureAttempts:     msg.FailureAttempts,
 		NotVisibleUntilUnix: msg.NotVisibleUntil.Unix(),
 		VisibilityTimeout:   int64(msg.Visibility.Seconds()),
 		PayloadBytes:        msg.PayloadBytes,

@@ -25,7 +25,6 @@ import (
 	"pkt.systems/lockd"
 	"pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
-	"pkt.systems/lockd/internal/svcfields"
 	"pkt.systems/lockd/namespaces"
 	"pkt.systems/lockd/tlsutil"
 	"pkt.systems/pslog"
@@ -71,12 +70,12 @@ const (
 	defaultKeepAliveTTL  = lockd.DefaultDefaultTTL
 )
 
-func newClientCommand() *cobra.Command {
+func newClientCommand(baseLogger pslog.Logger) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "client",
 		Short: "Interact with a running lockd server",
 	}
-	cfg := addClientConnectionFlags(cmd, true)
+	cfg := addClientConnectionFlags(cmd, true, baseLogger)
 
 	cmd.AddCommand(
 		newClientQueueCommand(cfg),
@@ -110,8 +109,8 @@ func mustBindFlag(key, env string, flag *pflag.Flag) {
 	}
 }
 
-func addClientConnectionFlags(cmd *cobra.Command, includeVerbose bool) *clientCLIConfig {
-	cfg := &clientCLIConfig{}
+func addClientConnectionFlags(cmd *cobra.Command, includeVerbose bool, baseLogger pslog.Logger) *clientCLIConfig {
+	cfg := &clientCLIConfig{baseLogger: baseLogger}
 	flags := cmd.PersistentFlags()
 	flags.StringP("server", "s", "https://127.0.0.1:9341", "lockd server base URL")
 	flags.StringP("bundle", "b", "", "path to client bundle PEM (default auto-discover under $HOME/.lockd)")
@@ -129,8 +128,10 @@ func addClientConnectionFlags(cmd *cobra.Command, includeVerbose bool) *clientCL
 	mustBindFlag(clientCloseTimeoutKey, "LOCKD_CLIENT_CLOSE_TIMEOUT", flags.Lookup("close-timeout"))
 	mustBindFlag(clientKeepAliveTimeoutKey, "LOCKD_CLIENT_KEEPALIVE_TIMEOUT", flags.Lookup("keepalive-timeout"))
 	mustBindFlag(clientDrainAwareKey, "LOCKD_CLIENT_DRAIN_AWARE", flags.Lookup("drain-aware-shutdown"))
-	mustBindFlag(clientLogLevelKey, "LOCKD_CLIENT_LOG_LEVEL", flags.Lookup("log-level"))
-	mustBindFlag(clientLogOutputKey, "LOCKD_CLIENT_LOG_OUTPUT", flags.Lookup("log-output"))
+	cfg.logLevelFlag = flags.Lookup("log-level")
+	cfg.logOutputFlag = flags.Lookup("log-output")
+	mustBindFlag(clientLogLevelKey, "LOCKD_CLIENT_LOG_LEVEL", cfg.logLevelFlag)
+	mustBindFlag(clientLogOutputKey, "LOCKD_CLIENT_LOG_OUTPUT", cfg.logOutputFlag)
 	if includeVerbose {
 		var verbose bool
 		flags.BoolVarP(&verbose, "verbose", "v", false, "enable verbose (trace) client logging")
@@ -156,6 +157,9 @@ type clientCLIConfig struct {
 	logClosers       []io.Closer
 	loggerReady      bool
 	verboseFlag      *bool
+	baseLogger       pslog.Logger
+	logLevelFlag     *pflag.Flag
+	logOutputFlag    *pflag.Flag
 }
 
 type keyResolveMode int
@@ -262,6 +266,38 @@ func (c *clientCLIConfig) setupLogger() error {
 	if c.loggerReady {
 		return nil
 	}
+
+	logLevelExplicit := false
+	if c.logLevelFlag != nil && c.logLevelFlag.Changed {
+		logLevelExplicit = true
+	}
+	if _, ok := os.LookupEnv("LOCKD_CLIENT_LOG_LEVEL"); ok {
+		logLevelExplicit = true
+	}
+	if viper.InConfig(clientLogLevelKey) {
+		logLevelExplicit = true
+	}
+	if c.verboseFlag != nil && *c.verboseFlag {
+		logLevelExplicit = true
+	}
+
+	logOutputExplicit := false
+	if c.logOutputFlag != nil && c.logOutputFlag.Changed {
+		logOutputExplicit = true
+	}
+	if _, ok := os.LookupEnv("LOCKD_CLIENT_LOG_OUTPUT"); ok {
+		logOutputExplicit = true
+	}
+	if viper.InConfig(clientLogOutputKey) {
+		logOutputExplicit = true
+	}
+
+	if !logLevelExplicit {
+		c.logger = nil
+		c.loggerReady = true
+		return nil
+	}
+
 	levelStr := strings.TrimSpace(strings.ToLower(c.logLevel))
 	if levelStr == "" {
 		levelStr = "none"
@@ -298,8 +334,18 @@ func (c *clientCLIConfig) setupLogger() error {
 			writer = f
 		}
 	}
-	logger := svcfields.WithSubsystem(pslog.NewStructured(writer), "client.cli").LogLevel(level)
-	c.logger = logger
+
+	if logOutputExplicit && c.logOutput != "" {
+		c.logger = pslog.LoggerFromEnv(
+			pslog.WithEnvPrefix("LOCKD_LOG_"),
+			pslog.WithEnvOptions(pslog.Options{Mode: pslog.ModeStructured, MinLevel: level}),
+			pslog.WithEnvWriter(writer),
+		).With("app", "lockd").LogLevel(level)
+		c.loggerReady = true
+		return nil
+	}
+
+	c.logger = c.baseLogger.LogLevel(level)
 	c.loggerReady = true
 	return nil
 }
@@ -828,6 +874,7 @@ func newClientQueueDequeueCommand(cfg *clientCLIConfig) *cobra.Command {
 				"queue":                   msg.Queue(),
 				"message_id":              msg.MessageID(),
 				"attempts":                msg.Attempts(),
+				"failure_attempts":        msg.FailureAttempts(),
 				"max_attempts":            msg.MaxAttempts(),
 				"visibility_timeout_secs": msg.VisibilityTimeout().Seconds(),
 				"not_visible_until_unix":  msg.NotVisibleUntil().Unix(),
@@ -994,6 +1041,7 @@ func newClientQueueNackCommand(cfg *clientCLIConfig) *cobra.Command {
 	var stateFencing string
 	var delay time.Duration
 	var reason string
+	var intent string
 
 	cmd := &cobra.Command{
 		Use:   "nack",
@@ -1037,6 +1085,17 @@ func newClientQueueNackCommand(cfg *clientCLIConfig) *cobra.Command {
 				return err
 			}
 			ctx, _ := commandContextWithCorrelation(cmd)
+			intentVal := api.NackIntent(strings.ToLower(strings.TrimSpace(intent)))
+			switch intentVal {
+			case "", api.NackIntentFailure:
+				intentVal = api.NackIntentFailure
+			case api.NackIntentDefer:
+			default:
+				return fmt.Errorf("invalid --intent %q (expected failure|defer)", intent)
+			}
+			if intentVal == api.NackIntentDefer && strings.TrimSpace(reason) != "" {
+				return fmt.Errorf("--reason is only supported when --intent=failure")
+			}
 			req := api.NackRequest{
 				Namespace:    ns,
 				Queue:        queueName,
@@ -1045,6 +1104,7 @@ func newClientQueueNackCommand(cfg *clientCLIConfig) *cobra.Command {
 				MetaETag:     meta,
 				FencingToken: fencing,
 				DelaySeconds: mustDurationSeconds(delay),
+				Intent:       intentVal,
 			}
 			if reason != "" {
 				req.LastError = map[string]any{"detail": reason}
@@ -1068,7 +1128,8 @@ func newClientQueueNackCommand(cfg *clientCLIConfig) *cobra.Command {
 	cmd.Flags().StringVar(&stateLease, "state-lease", "", "state lease id")
 	cmd.Flags().StringVar(&stateFencing, "state-fencing-token", "", "state fencing token")
 	cmd.Flags().DurationVar(&delay, "delay", 0, "nack visibility delay")
-	cmd.Flags().StringVar(&reason, "reason", "", "optional nack reason")
+	cmd.Flags().StringVarP(&intent, "intent", "i", string(api.NackIntentFailure), "nack intent: failure|defer")
+	cmd.Flags().StringVar(&reason, "reason", "", "optional failure reason (intent=failure)")
 	return cmd
 }
 

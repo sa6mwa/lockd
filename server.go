@@ -25,6 +25,7 @@ import (
 
 	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/internal/clock"
+	"pkt.systems/lockd/internal/connguard"
 	"pkt.systems/lockd/internal/core"
 	"pkt.systems/lockd/internal/cryptoutil"
 	"pkt.systems/lockd/internal/httpapi"
@@ -950,11 +951,22 @@ func (s *Server) Start() error {
 	s.startSweeper()
 	defer s.stopSweeper()
 	var serveErr error
-	if s.httpSrv.TLSConfig != nil {
-		serveErr = s.httpSrv.ServeTLS(ln, "", "")
-	} else {
-		serveErr = s.httpSrv.Serve(ln)
+	serveListener := ln
+	if s.httpSrv.TLSConfig != nil || s.cfg.ConnguardEnabled {
+		cfg := connguard.ConnectionGuardConfig{
+			Enabled:          s.cfg.ConnguardEnabled,
+			FailureThreshold: s.cfg.ConnguardFailureThreshold,
+			FailureWindow:    s.cfg.ConnguardFailureWindow,
+			BlockDuration:    s.cfg.ConnguardBlockDuration,
+			ProbeTimeout:     s.cfg.ConnguardProbeTimeout,
+		}
+		guard := connguard.NewConnectionGuard(cfg, s.logger)
+		serveListener = guard.WrapListener(ln, s.httpSrv.TLSConfig)
 	}
+	if s.httpSrv.TLSConfig != nil && !s.cfg.ConnguardEnabled {
+		serveListener = tls.NewListener(serveListener, s.httpSrv.TLSConfig)
+	}
+	serveErr = s.httpSrv.Serve(serveListener)
 	s.recordServeErr(serveErr)
 	if errors.Is(serveErr, http.ErrServerClosed) {
 		return nil

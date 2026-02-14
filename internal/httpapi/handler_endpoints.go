@@ -2015,6 +2015,7 @@ func (h *Handler) handleQueueEnqueue(w http.ResponseWriter, r *http.Request) err
 		"payload_bytes", msg.PayloadBytes,
 		"attempts", msg.Attempts,
 		"max_attempts", msg.MaxAttempts,
+		"failure_attempts", msg.FailureAttempts,
 		"not_visible_until", msg.NotVisibleUntil.Unix(),
 		"visibility_timeout", msg.Visibility.Seconds(),
 	)
@@ -2024,6 +2025,7 @@ func (h *Handler) handleQueueEnqueue(w http.ResponseWriter, r *http.Request) err
 		MessageID:                msg.ID,
 		Attempts:                 msg.Attempts,
 		MaxAttempts:              msg.MaxAttempts,
+		FailureAttempts:          msg.FailureAttempts,
 		NotVisibleUntilUnix:      msg.NotVisibleUntil.Unix(),
 		VisibilityTimeoutSeconds: int64(msg.Visibility.Seconds()),
 		PayloadBytes:             msg.PayloadBytes,
@@ -2895,7 +2897,7 @@ func (h *Handler) handleQueueAck(w http.ResponseWriter, r *http.Request) error {
 
 // handleQueueNack godoc
 // @Summary      Return a message to the queue
-// @Description  Requeues the delivery with optional delay and last error metadata. If a txn_id is present (or the lease is already enlisted) and TC is enabled, this records a rollback decision via the TC.
+// @Description  Requeues the delivery with optional delay and last error metadata (intent=failure only). Set intent=defer to requeue intentionally without consuming max_attempts failure budget. If a txn_id is present (or the lease is already enlisted) and TC is enabled, this records a rollback decision via the TC.
 // @Tags         queue
 // @Accept       json
 // @Produce      json
@@ -2949,6 +2951,9 @@ func (h *Handler) handleQueueNack(w http.ResponseWriter, r *http.Request) error 
 	if req.DelaySeconds > 0 {
 		queueLogger = queueLogger.With("delay_seconds", req.DelaySeconds)
 	}
+	if req.Intent != "" {
+		queueLogger = queueLogger.With("intent", req.Intent)
+	}
 	txnID := ""
 	queueLogger.Debug("queue.nack.begin")
 	delay := time.Duration(req.DelaySeconds) * time.Second
@@ -2962,6 +2967,7 @@ func (h *Handler) handleQueueNack(w http.ResponseWriter, r *http.Request) error 
 		StateLeaseID:      req.StateLeaseID,
 		Stateful:          req.StateLeaseID != "",
 		Delay:             delay,
+		Intent:            core.QueueNackIntent(req.Intent),
 		LastError:         req.LastError,
 		FencingToken:      req.FencingToken,
 		StateFencingToken: req.StateFencingToken,

@@ -557,6 +557,25 @@ func fetchLeaderResponse(t testing.TB, ts *lockd.TestServer, clientFn HTTPClient
 	return payload, nil
 }
 
+func stopServerForFailover(t testing.TB, ts *lockd.TestServer, timeout time.Duration, contextLabel string) {
+	t.Helper()
+	if ts == nil {
+		t.Fatalf("scenario: stop server (%s): nil server", contextLabel)
+	}
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	drainGrace := time.Duration(float64(timeout) * 0.8)
+	if drainGrace <= 0 {
+		drainGrace = timeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := ts.Stop(ctx, lockd.WithDrainLeases(drainGrace), lockd.WithShutdownTimeout(timeout)); err != nil {
+		t.Fatalf("scenario: stop server (%s) %s: %v", contextLabel, ts.URL(), err)
+	}
+}
+
 // WaitForLeaderAll waits until every server reports the same non-expired leader.
 func WaitForLeaderAll(t testing.TB, servers []*lockd.TestServer, clientFn HTTPClientFunc, timeout time.Duration) (string, uint64) {
 	t.Helper()
@@ -1460,9 +1479,7 @@ func RunLeaderFailoverScenarioMulti(t testing.TB, tcs []*lockd.TestServer, islan
 		})
 	}
 
-	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer stopCancel()
-	_ = leaderTS.Stop(stopCtx)
+	stopServerForFailover(t, leaderTS, 10*time.Second, "leader_failover")
 
 	var alive []*lockd.TestServer
 	for _, tc := range tcs {
@@ -1933,9 +1950,7 @@ func RunRMApplyTermFencingScenario(t testing.TB, tcs []*lockd.TestServer, island
 	}
 
 	if term < 2 {
-		stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_ = leaderTS.Stop(stopCtx)
-		stopCancel()
+			stopServerForFailover(t, leaderTS, 10*time.Second, "rm_apply_term_fencing")
 		alive := filterServersByIndex(tcs, map[int]struct{}{indexOfServer(tcs, leaderTS): {}})
 		WaitForLeaderChange(t, alive, tcHTTP, leaderEndpoint, 30*time.Second)
 		if restarts != nil {
@@ -2341,9 +2356,7 @@ func RunQueueStateFailoverScenario(t testing.TB, tcs []*lockd.TestServer, island
 	}
 	extendCancel()
 
-	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	_ = leaderTS.Stop(stopCtx)
-	stopCancel()
+	stopServerForFailover(t, leaderTS, 10*time.Second, "queue_state_failover")
 
 	alive := make([]*lockd.TestServer, 0, len(tcs)-1)
 	for _, tc := range tcs {
@@ -3182,9 +3195,7 @@ func RunLeaderDecisionFanoutInterruptedScenario(t testing.TB, tcs []*lockd.TestS
 
 	gate.WaitForStart(t, 15*time.Second)
 
-	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	_ = leaderTS.Stop(stopCtx)
-	stopCancel()
+	stopServerForFailover(t, leaderTS, 10*time.Second, "non_leader_forward_unavailable")
 	gate.Release()
 	commitCancel()
 

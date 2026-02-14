@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/rs/xid"
+	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"pkt.systems/lockd"
 	"pkt.systems/lockd/api"
@@ -256,6 +257,70 @@ func TestCLIClientQueueCommands(t *testing.T) {
 	)
 	if !strings.Contains(stderr, "no message available") && !strings.Contains(stderr, "no messages available") {
 		t.Fatalf("expected empty queue notice, stderr=%q", stderr)
+	}
+}
+
+func TestCLIClientQueueNackRejectsReasonForDefer(t *testing.T) {
+	t.Setenv("LOCKD_CONFIG", "")
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	clk := clock.NewManual(time.Now().UTC())
+	ts := startCLITestServerWithClock(t, clk)
+	serverURL := ts.URL()
+	t.Setenv("LOCKD_CLIENT_SERVER", serverURL)
+	t.Setenv("LOCKD_CLIENT_DISABLE_MTLS", "1")
+	queueName := "cli-queue-defer-reason-" + uuidv7.NewString()
+	payload := `{"op":"test","value":99}`
+
+	_, _ = runCLICommandOutput(t,
+		"client",
+		"--server", serverURL,
+		"--disable-mtls",
+		"queue", "enqueue",
+		"--queue", queueName,
+		"--namespace", namespaces.Default,
+		"--data", payload,
+		"--content-type", "application/json",
+	)
+
+	dequeueOut, _ := runCLICommandOutput(t,
+		"client",
+		"--server", serverURL,
+		"--disable-mtls",
+		"queue", "dequeue",
+		"--queue", queueName,
+		"--namespace", namespaces.Default,
+		"--owner", "cli-worker",
+		"--block", "nowait",
+		"--output", "json",
+	)
+	var dq struct {
+		MessageID    string `json:"message_id"`
+		LeaseID      string `json:"lease_id"`
+		MetaETag     string `json:"meta_etag"`
+		FencingToken int64  `json:"fencing_token"`
+	}
+	if err := json.Unmarshal([]byte(dequeueOut), &dq); err != nil {
+		t.Fatalf("decode dequeue summary: %v", err)
+	}
+
+	err := runCLICommandExpectError(t,
+		"client",
+		"--server", serverURL,
+		"--disable-mtls",
+		"queue", "nack",
+		"--queue", queueName,
+		"--namespace", namespaces.Default,
+		"--message", dq.MessageID,
+		"--lease", dq.LeaseID,
+		"--meta-etag", dq.MetaETag,
+		"--fencing-token", strconv.FormatInt(dq.FencingToken, 10),
+		"--intent", "defer",
+		"--reason", "waiting on dependency",
+	)
+	if err == nil || !strings.Contains(err.Error(), "--reason is only supported when --intent=failure") {
+		t.Fatalf("expected defer reason validation error, got %v", err)
 	}
 }
 
@@ -1488,6 +1553,85 @@ func loadKeyStateNamespace(ctx context.Context, t *testing.T, ts *lockd.TestServ
 		t.Fatalf("load %s: %v", key, err)
 	}
 	return state
+}
+
+func TestClientCLIConfigDefaultLoggerDisabled(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	var buf bytes.Buffer
+	baseLogger := pslog.NewStructured(&buf).With("base", "yes")
+	cmd := &cobra.Command{Use: "client-test"}
+	cfg := addClientConnectionFlags(cmd, true, baseLogger)
+	if err := cmd.PersistentFlags().Parse([]string{}); err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+	if err := cfg.load(); err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	defer cfg.cleanup()
+
+	if cfg.logger != nil {
+		t.Fatalf("expected no client logger by default")
+	}
+}
+
+func TestClientCLIConfigVerboseInheritsBaseLogger(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	var buf bytes.Buffer
+	baseLogger := pslog.NewStructured(&buf).With("base", "yes")
+	cmd := &cobra.Command{Use: "client-test"}
+	cfg := addClientConnectionFlags(cmd, true, baseLogger)
+	if err := cmd.PersistentFlags().Parse([]string{"-v"}); err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+	if err := cfg.load(); err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	defer cfg.cleanup()
+
+	logger, ok := cfg.logger.(pslog.Logger)
+	if !ok {
+		t.Fatalf("expected pslog.Logger, got %T", cfg.logger)
+	}
+	logger.Info("verbose-probe")
+	output := buf.String()
+	if !strings.Contains(output, `"msg":"verbose-probe"`) {
+		t.Fatalf("expected probe log, got %q", output)
+	}
+	if !strings.Contains(output, `"base":"yes"`) {
+		t.Fatalf("expected inherited base logger fields, got %q", output)
+	}
+}
+
+func TestClientCLIConfigFlagLogLevelOverridesEnv(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	t.Setenv("LOCKD_CLIENT_LOG_LEVEL", "error")
+
+	var buf bytes.Buffer
+	baseLogger := pslog.NewStructured(&buf).With("base", "yes")
+	cmd := &cobra.Command{Use: "client-test"}
+	cfg := addClientConnectionFlags(cmd, true, baseLogger)
+	if err := cmd.PersistentFlags().Parse([]string{"--log-level", "trace"}); err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+	if err := cfg.load(); err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	defer cfg.cleanup()
+
+	logger, ok := cfg.logger.(pslog.Logger)
+	if !ok {
+		t.Fatalf("expected pslog.Logger, got %T", cfg.logger)
+	}
+	logger.Info("flag-overrides-env")
+	output := buf.String()
+	if !strings.Contains(output, `"msg":"flag-overrides-env"`) {
+		t.Fatalf("expected trace-enabled info log when flag overrides env, got %q", output)
+	}
 }
 
 func runCLICommand(t *testing.T, args ...string) {

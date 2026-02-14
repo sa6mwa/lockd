@@ -137,6 +137,13 @@ type configDefaults struct {
 	StorageRetryBaseDelay     string   `yaml:"storage-retry-base-delay"`
 	StorageRetryMaxDelay      string   `yaml:"storage-retry-max-delay"`
 	StorageRetryMultiplier    float64  `yaml:"storage-retry-multiplier"`
+	ConnguardEnabled          bool     `yaml:"connguard-enabled"`
+	ConnguardFailureThreshold int      `yaml:"connguard-failure-threshold"`
+	ConnguardFailureWindow    string   `yaml:"connguard-failure-window"`
+	ConnguardBlockDuration    string   `yaml:"connguard-block-duration"`
+	ConnguardProbeTimeout     string   `yaml:"connguard-probe-timeout"`
+	LSFSampleInterval         string   `yaml:"lsf-sample-interval"`
+	LSFLogInterval            string   `yaml:"lsf-log-interval"`
 	LogLevel                  string   `yaml:"log-level"`
 }
 
@@ -205,6 +212,13 @@ func defaultConfigYAML(overrides ...func(*configDefaults)) ([]byte, error) {
 		StorageRetryBaseDelay:     lockd.DefaultStorageRetryBaseDelay.String(),
 		StorageRetryMaxDelay:      lockd.DefaultStorageRetryMaxDelay.String(),
 		StorageRetryMultiplier:    lockd.DefaultStorageRetryMultiplier,
+		ConnguardEnabled:          true,
+		ConnguardFailureThreshold: lockd.DefaultConnguardFailureThreshold,
+		ConnguardFailureWindow:    lockd.DefaultConnguardFailureWindow.String(),
+		ConnguardBlockDuration:    lockd.DefaultConnguardBlockDuration.String(),
+		ConnguardProbeTimeout:     lockd.DefaultConnguardProbeTimeout.String(),
+		LSFSampleInterval:         lockd.DefaultLSFSampleInterval.String(),
+		LSFLogInterval:            lockd.DefaultLSFLogInterval.String(),
 		LogLevel:                  "info",
 	}
 	for _, fn := range overrides {

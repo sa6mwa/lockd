@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -198,5 +200,82 @@ func newMTLSClient(t *testing.T, caPEM []byte, cert tls.Certificate) *http.Clien
 		Transport: &http.Transport{
 			TLSClientConfig: tlsCfg,
 		},
+	}
+}
+
+func TestServerConnectionGuardBlocksPlainClients(t *testing.T) {
+	cfg := Config{
+		Listen:                    "127.0.0.1:0",
+		ListenProto:               "tcp",
+		Store:                     "memory://",
+		DisableMTLS:               true,
+		SweeperInterval:           time.Second,
+		ConnguardEnabled:          true,
+		ConnguardFailureThreshold: 2,
+		ConnguardFailureWindow:    time.Second,
+		ConnguardBlockDuration:    500 * time.Millisecond,
+		ConnguardProbeTimeout:     25 * time.Millisecond,
+	}
+	ts, err := NewTestServer(context.Background(),
+		WithTestConfig(cfg),
+		WithoutTestClient(),
+	)
+	if err != nil {
+		t.Fatalf("start test server: %v", err)
+	}
+	t.Cleanup(func() {
+		if stopErr := ts.Stop(context.Background()); stopErr != nil {
+			t.Fatalf("stop test server: %v", stopErr)
+		}
+	})
+
+	addr := ts.Addr().String()
+
+	failAttempt := func() {
+		conn, dialErr := net.DialTimeout("tcp", addr, time.Second)
+		if dialErr != nil {
+			t.Fatalf("dial for failure attempt: %v", dialErr)
+		}
+		_ = conn.Close()
+	}
+	for i := 0; i < 2; i++ {
+		failAttempt()
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	blocked := func() bool {
+		conn, dialErr := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+		if dialErr != nil {
+			t.Fatalf("dial while blocked: %v", dialErr)
+		}
+		defer func() {
+			_ = conn.Close()
+		}()
+		if err := conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond)); err != nil {
+			t.Fatalf("set read deadline: %v", err)
+		}
+		out := make([]byte, 1)
+		_, readErr := conn.Read(out)
+		if readErr == nil {
+			return false
+		}
+		var netErr net.Error
+		if errors.As(readErr, &netErr) && netErr.Timeout() {
+			return false
+		}
+		return true
+	}
+
+	isBlocked := false
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if blocked() {
+			isBlocked = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !isBlocked {
+		t.Fatalf("expected suspicious TCP client to be blocked")
 	}
 }

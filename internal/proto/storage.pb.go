@@ -672,6 +672,7 @@ type QueueMessageMeta struct {
 	LeaseId                  string                 `protobuf:"bytes,18,opt,name=lease_id,json=leaseId,proto3" json:"lease_id,omitempty"`
 	LeaseFencingToken        int64                  `protobuf:"varint,19,opt,name=lease_fencing_token,json=leaseFencingToken,proto3" json:"lease_fencing_token,omitempty"`
 	LeaseTxnId               string                 `protobuf:"bytes,20,opt,name=lease_txn_id,json=leaseTxnId,proto3" json:"lease_txn_id,omitempty"`
+	FailureAttempts          *int32                 `protobuf:"varint,21,opt,name=failure_attempts,json=failureAttempts,proto3,oneof" json:"failure_attempts,omitempty"`
 	unknownFields            protoimpl.UnknownFields
 	sizeCache                protoimpl.SizeCache
 }
@@ -846,6 +847,13 @@ func (x *QueueMessageMeta) GetLeaseTxnId() string {
 	return ""
 }
 
+func (x *QueueMessageMeta) GetFailureAttempts() int32 {
+	if x != nil && x.FailureAttempts != nil {
+		return *x.FailureAttempts
+	}
+	return 0
+}
+
 var File_storage_proto protoreflect.FileDescriptor
 
 const file_storage_proto_rawDesc = "" +
@@ -915,7 +923,7 @@ const file_storage_proto_rawDesc = "" +
 	"\x10preferred_engine\x18\x01 \x01(\tR\x0fpreferredEngine\x12'\n" +
 	"\x0ffallback_engine\x18\x02 \x01(\tR\x0efallbackEngine\"M\n" +
 	"\x0fNamespaceConfig\x12:\n" +
-	"\x05query\x18\x01 \x01(\v2$.lockd.internal.NamespaceQueryConfigR\x05query\"\xc4\x06\n" +
+	"\x05query\x18\x01 \x01(\v2$.lockd.internal.NamespaceQueryConfigR\x05query\"\x89\a\n" +
 	"\x10QueueMessageMeta\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x12\x14\n" +
 	"\x05queue\x18\x02 \x01(\tR\x05queue\x12\x0e\n" +
@@ -941,8 +949,10 @@ const file_storage_proto_rawDesc = "" +
 	"\blease_id\x18\x12 \x01(\tR\aleaseId\x12.\n" +
 	"\x13lease_fencing_token\x18\x13 \x01(\x03R\x11leaseFencingToken\x12 \n" +
 	"\flease_txn_id\x18\x14 \x01(\tR\n" +
-	"leaseTxnIdB\x12\n" +
-	"\x10_expires_at_unixB(Z&pkt.systems/lockd/internal/proto;protob\x06proto3"
+	"leaseTxnId\x12.\n" +
+	"\x10failure_attempts\x18\x15 \x01(\x05H\x01R\x0ffailureAttempts\x88\x01\x01B\x12\n" +
+	"\x10_expires_at_unixB\x13\n" +
+	"\x11_failure_attemptsB(Z&pkt.systems/lockd/internal/proto;protob\x06proto3"
 
 var (
 	file_storage_proto_rawDescOnce sync.Once

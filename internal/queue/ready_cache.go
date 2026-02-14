@@ -623,7 +623,7 @@ func (c *readyCache) handleDescriptor(ctx context.Context, desc MessageDescripto
 		return false, nil
 	}
 
-	if doc.MaxAttempts > 0 && doc.Attempts >= doc.MaxAttempts {
+	if doc.MaxAttempts > 0 && doc.FailureAttempts >= doc.MaxAttempts {
 		docCopy := doc
 		if err := c.svc.moveToDLQInternal(ctx, c.ns, c.queue, doc.ID, &docCopy, desc.MetadataETag, false); err != nil {
 			return false, err

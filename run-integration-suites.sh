@@ -157,7 +157,7 @@ for suite in "${SUITES_TO_RUN[@]}"; do
   fi
   suite_timeout=$go_test_timeout
   if [[ $suite == mem* ]]; then
-    suite_timeout=${LOCKD_MEM_GO_TEST_TIMEOUT:-5m}
+    suite_timeout=${LOCKD_MEM_GO_TEST_TIMEOUT:-6m}
   fi
   if [[ $suite == disk* ]]; then
     suite_timeout=${LOCKD_DISK_GO_TEST_TIMEOUT:-5m}

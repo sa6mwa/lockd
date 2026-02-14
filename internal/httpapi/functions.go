@@ -474,6 +474,7 @@ func toAPIDeliveryMessage(msg *core.QueueMessage) *api.Message {
 		MessageID:                msg.MessageID,
 		Attempts:                 msg.Attempts,
 		MaxAttempts:              msg.MaxAttempts,
+		FailureAttempts:          msg.FailureAttempts,
 		NotVisibleUntilUnix:      msg.NotVisibleUntilUnix,
 		VisibilityTimeoutSeconds: msg.VisibilityTimeoutSeconds,
 		Attributes:               msg.Attributes,

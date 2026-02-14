@@ -4,7 +4,7 @@
 //
 // Copyright (C) 2025 Michel Blomgren <https://pkt.systems>
 //
-// Quick start
+// # Quick start
 //
 // Construct a client with either client.New (single endpoint) or
 // client.NewWithEndpoints (ordered failover endpoints). Supported endpoint
@@ -49,7 +49,7 @@
 // per-call Namespace values can be omitted intentionally. Namespaces that start
 // with a dot are reserved for lockd internals and rejected for user workloads.
 //
-// Acquire for update
+// # Acquire for update
 //
 // AcquireForUpdate wraps the common acquire, load, mutate, save, release flow.
 // It keeps the lease alive while the callback runs and always attempts release.
@@ -71,7 +71,7 @@
 //	    log.Fatal(err)
 //	}
 //
-// Attachments
+// # Attachments
 //
 // Leases can stage binary attachments alongside JSON state. Staged writes and
 // staged deletes are committed on Release and discarded on Rollback.
@@ -89,14 +89,14 @@
 //	    log.Fatal(err)
 //	}
 //
-// Perimeter defence interoperability
+// # Perimeter defence interoperability
 //
 // Servers can throttle requests with HTTP 429 while the perimeter defence is
 // active. Responses can include Retry-After and X-Lockd-QRF-State headers.
 // The SDK consumes those hints in retry loops and surfaces parsed values on
 // APIError for custom handling.
 //
-// Queue API
+// # Queue API
 //
 // Queue helpers implement at-least-once delivery. Enqueue accepts any io.Reader
 // and streams payload bytes directly to lockd.
@@ -114,7 +114,7 @@
 //
 // Dequeue returns QueueMessage. DequeueWithState returns QueueMessage plus an
 // attached QueueStateHandle in the message. QueueMessage implements io.ReadCloser
-// and supports Ack, Nack, Extend, WritePayloadTo, and DecodePayloadJSON.
+// and supports Ack, Nack, Defer, Extend, WritePayloadTo, and DecodePayloadJSON.
 // QueueStateHandle mirrors lease-state helpers with Get, GetBytes, Load, Update,
 // UpdateBytes, Save, UpdateMetadata, and Remove.
 //
@@ -136,7 +136,7 @@
 //	    log.Fatal(err)
 //	}
 //
-// If a handler returns without explicit Ack or Nack, Close performs an automatic
+// If a handler returns without explicit Ack/Nack/Defer, Close performs an automatic
 // Nack so another worker can continue. Tune that with DequeueOptions.OnCloseDelay
 // or QueueMessage.SetOnCloseDelay. DequeueOptions.BlockSeconds controls waiting:
 // BlockNoWait for immediate return, positive values for bounded wait, and zero
@@ -145,7 +145,7 @@
 // Subscribe and SubscribeWithState keep one streaming request open and invoke a
 // user handler per delivery.
 //
-// StartConsumer worker runner
+// # StartConsumer worker runner
 //
 // StartConsumer starts one or more managed consumer loops and blocks until they
 // terminate. It is intended for long-running worker processes.
@@ -222,13 +222,13 @@
 // Direct helpers Client.QueueAck, Client.QueueNack, and Client.QueueExtend are
 // also available when metadata is managed outside QueueMessage helpers.
 //
-// State removal
+// # State removal
 //
 // Lease holders can delete state explicitly with LeaseSession.Remove or
 // Client.Remove. CAS guards such as If-ETag and If-Version are supported by the
 // API for concurrency-safe deletes.
 //
-// Metadata attributes and query visibility
+// # Metadata attributes and query visibility
 //
 // Metadata holds lease internals plus user attributes. The SDK provides
 // LeaseSession.UpdateMetadata and Client.UpdateMetadata, and metadata-aware state
@@ -242,7 +242,7 @@
 //	    log.Fatal(err)
 //	}
 //
-// Multi-endpoint failover
+// # Multi-endpoint failover
 //
 // NewWithEndpoints accepts multiple endpoints. The SDK rotates through them on
 // transport errors while preserving bounded retry semantics.
@@ -255,7 +255,7 @@
 //	    log.Fatal(err)
 //	}
 //
-// Correlation IDs and logging
+// # Correlation IDs and logging
 //
 // Use client.WithCorrelationID or client.GenerateCorrelationID to tie requests,
 // queue deliveries, and retries together. QueueMessage carries correlation data
@@ -264,7 +264,7 @@
 // The client logger is configured with client.WithLogger. Nil logger input is
 // normalized to pslog.NoopLogger so SDK logging calls remain safe.
 //
-// In-process testing
+// # In-process testing
 //
 // client/inprocess starts a lockd server in-process and returns a ready client.
 // It is useful for tests and local development.
@@ -282,7 +282,7 @@
 //	}
 //	_ = lease
 //
-// Authentication and mTLS
+// # Authentication and mTLS
 //
 // mTLS is enabled by default for https endpoints. Configure bundle PEM data with
 // client.WithBundlePEM or file paths with client.WithBundlePath. Bundle paths

@@ -1467,7 +1467,7 @@ func runDiskAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase fail
 	watchdog.Stop()
 	expectedConflict := phase == failoverAfterSave
 	conflictObserved := false
-	allowAlt503 := false
+	allowAlt503 := phase == failoverAfterSave
 	allowAltOKOnRelease := false
 	if err != nil {
 		var apiErr *lockdclient.APIError

@@ -117,18 +117,6 @@ type captureEntry struct {
 	fields []any
 }
 
-func (e captureEntry) toMap() map[string]any {
-	out := make(map[string]any)
-	for i := 0; i+1 < len(e.fields); i += 2 {
-		key, ok := e.fields[i].(string)
-		if !ok {
-			continue
-		}
-		out[key] = e.fields[i+1]
-	}
-	return out
-}
-
 type captureLogger struct {
 	fields  []any
 	entries *[]captureEntry

@@ -1950,7 +1950,7 @@ func RunRMApplyTermFencingScenario(t testing.TB, tcs []*lockd.TestServer, island
 	}
 
 	if term < 2 {
-			stopServerForFailover(t, leaderTS, 10*time.Second, "rm_apply_term_fencing")
+		stopServerForFailover(t, leaderTS, 10*time.Second, "rm_apply_term_fencing")
 		alive := filterServersByIndex(tcs, map[int]struct{}{indexOfServer(tcs, leaderTS): {}})
 		WaitForLeaderChange(t, alive, tcHTTP, leaderEndpoint, 30*time.Second)
 		if restarts != nil {

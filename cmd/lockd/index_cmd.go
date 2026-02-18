@@ -9,15 +9,13 @@ import (
 
 	"pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
-	"pkt.systems/pslog"
 )
 
-func newIndexCommand(baseLogger pslog.Logger) *cobra.Command {
+func newIndexCommand(cfg *clientCLIConfig) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "index",
 		Short: "Manage namespace indexing",
 	}
-	cfg := addClientConnectionFlags(cmd, false, baseLogger)
 	var namespace string
 	cmd.PersistentFlags().StringVarP(&namespace, "namespace", "n", "", "namespace name (defaults to client default)")
 	cmd.AddCommand(newIndexFlushCommand(cfg, &namespace))

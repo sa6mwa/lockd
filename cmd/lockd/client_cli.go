@@ -70,13 +70,11 @@ const (
 	defaultKeepAliveTTL  = lockd.DefaultDefaultTTL
 )
 
-func newClientCommand(baseLogger pslog.Logger) *cobra.Command {
+func newClientCommand(cfg *clientCLIConfig) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "client",
 		Short: "Interact with a running lockd server",
 	}
-	cfg := addClientConnectionFlags(cmd, true, baseLogger)
-
 	cmd.AddCommand(
 		newClientQueueCommand(cfg),
 		newClientAcquireCommand(cfg),
@@ -112,14 +110,14 @@ func mustBindFlag(key, env string, flag *pflag.Flag) {
 func addClientConnectionFlags(cmd *cobra.Command, includeVerbose bool, baseLogger pslog.Logger) *clientCLIConfig {
 	cfg := &clientCLIConfig{baseLogger: baseLogger}
 	flags := cmd.PersistentFlags()
-	flags.StringP("server", "s", "https://127.0.0.1:9341", "lockd server base URL")
-	flags.StringP("bundle", "b", "", "path to client bundle PEM (default auto-discover under $HOME/.lockd)")
-	flags.Bool("disable-mtls", false, "disable mutual TLS (plain HTTP by default for bare endpoints)")
+	flags.StringP("server", "s", "https://127.0.0.1:9341", "lockd endpoint for client-facing commands")
+	flags.StringP("bundle", "b", "", "bundle PEM path (context-dependent; default auto-discover under $HOME/.lockd)")
+	flags.Bool("disable-mtls", false, "disable mutual TLS (server and client context-dependent behavior)")
 	flags.Duration("timeout", lockdclient.DefaultHTTPTimeout, "HTTP client timeout")
 	flags.Duration("close-timeout", lockdclient.DefaultCloseTimeout, "timeout to wait for lease release during Close()")
 	flags.Duration("keepalive-timeout", lockdclient.DefaultKeepAliveTimeout, "timeout to wait for keepalive responses")
 	flags.Bool("drain-aware-shutdown", true, "automatically release leases when the server is draining")
-	flags.String("log-level", "none", "client log level (trace|debug|info|warn|error|none)")
+	flags.String("log-level", "", "log level (trace|debug|info|warn|error|none); default server=info, client=none")
 	flags.String("log-output", "", "client log output path (default stderr)")
 	mustBindFlag(clientServerKey, "LOCKD_CLIENT_SERVER", flags.Lookup("server"))
 	mustBindFlag(clientBundleKey, "LOCKD_CLIENT_BUNDLE", flags.Lookup("bundle"))
@@ -267,10 +265,7 @@ func (c *clientCLIConfig) setupLogger() error {
 		return nil
 	}
 
-	logLevelExplicit := false
-	if c.logLevelFlag != nil && c.logLevelFlag.Changed {
-		logLevelExplicit = true
-	}
+	logLevelExplicit := c.logLevelFlag != nil && c.logLevelFlag.Changed
 	if _, ok := os.LookupEnv("LOCKD_CLIENT_LOG_LEVEL"); ok {
 		logLevelExplicit = true
 	}
@@ -281,10 +276,7 @@ func (c *clientCLIConfig) setupLogger() error {
 		logLevelExplicit = true
 	}
 
-	logOutputExplicit := false
-	if c.logOutputFlag != nil && c.logOutputFlag.Changed {
-		logOutputExplicit = true
-	}
+	logOutputExplicit := c.logOutputFlag != nil && c.logOutputFlag.Changed
 	if _, ok := os.LookupEnv("LOCKD_CLIENT_LOG_OUTPUT"); ok {
 		logOutputExplicit = true
 	}

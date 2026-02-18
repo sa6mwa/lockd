@@ -14,6 +14,7 @@ import (
 
 	"github.com/dustin/go-humanize"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"pkt.systems/lockd"
 	"pkt.systems/lockd/internal/svcfields"
@@ -46,6 +47,20 @@ func invocationTargetsRootCommand(root *cobra.Command, args []string) bool {
 	if len(args) == 0 {
 		return true
 	}
+	lookupLong := func(name string) *pflag.Flag {
+		flag := root.Flags().Lookup(name)
+		if flag == nil {
+			flag = root.PersistentFlags().Lookup(name)
+		}
+		return flag
+	}
+	lookupShort := func(shorthand string) *pflag.Flag {
+		flag := root.Flags().ShorthandLookup(shorthand)
+		if flag == nil {
+			flag = root.PersistentFlags().ShorthandLookup(shorthand)
+		}
+		return flag
+	}
 	remainingHasSubcommand := func(rest []string) bool {
 		for _, tok := range rest {
 			if !isSubcommandToken(root, tok) {
@@ -66,7 +81,7 @@ func invocationTargetsRootCommand(root *cobra.Command, args []string) bool {
 				continue
 			}
 			name := strings.TrimPrefix(arg, "--")
-			flag := root.Flags().Lookup(name)
+			flag := lookupLong(name)
 			if flag == nil {
 				return !remainingHasSubcommand(args[i+1:])
 			}
@@ -80,7 +95,7 @@ func invocationTargetsRootCommand(root *cobra.Command, args []string) bool {
 			sh := strings.TrimPrefix(arg, "-")
 			consumeNext := false
 			for idx, ch := range sh {
-				flag := root.Flags().ShorthandLookup(string(ch))
+				flag := lookupShort(string(ch))
 				if flag == nil {
 					return !remainingHasSubcommand(args[i+1:])
 				}
@@ -183,7 +198,6 @@ func expandPath(p string) (string, error) {
 
 func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 	var cfg lockd.Config
-	var logLevel string
 	var bootstrapDir string
 	var bootstrapRan bool
 	runBootstrap := func(baseLogger pslog.Logger) error {
@@ -205,10 +219,9 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 	}
 
 	cmd := &cobra.Command{
-		Use:              "lockd",
-		Short:            "lockd is a single-binary coordination service with exclusive leases, atomic JSON state, and an at-least-once queue",
-		SilenceErrors:    true,
-		TraverseChildren: true,
+		Use:           "lockd",
+		Short:         "lockd is a single-binary coordination service with exclusive leases, atomic JSON state, and an at-least-once queue",
+		SilenceErrors: true,
 		Example: `
   # AWS S3 backend (expects AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY)
   LOCKD_STORE=aws://my-bucket/prefix LOCKD_AWS_REGION=us-west-2 lockd
@@ -264,7 +277,10 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 			}
 			cfg.IndexerFlushDocsSet = flagChanged("indexer-flush-docs") || viper.InConfig("indexer-flush-docs") || envSet("LOCKD_INDEXER_FLUSH_DOCS")
 			cfg.IndexerFlushIntervalSet = flagChanged("indexer-flush-interval") || viper.InConfig("indexer-flush-interval") || envSet("LOCKD_INDEXER_FLUSH_INTERVAL")
-			logLevel = viper.GetString("log-level")
+			logLevel := strings.TrimSpace(viper.GetString("log-level"))
+			if logLevel == "" {
+				logLevel = "info"
+			}
 
 			level, ok := pslog.ParseLevel(logLevel)
 			if ok {
@@ -300,10 +316,12 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 		},
 	}
 
-	cmd.PersistentFlags().StringVar(&bootstrapDir, "bootstrap", "", "initialize certificates + config under this directory before running (idempotent)")
+	persistentFlags := cmd.PersistentFlags()
+	persistentFlags.StringP("config", "c", "", "path to YAML config file (defaults to $HOME/.lockd/"+lockd.DefaultConfigFileName+")")
+	clientCfg := addClientConnectionFlags(cmd, true, baseLogger)
 
 	flags := cmd.Flags()
-	flags.StringP("config", "c", "", "path to YAML config file (defaults to $HOME/.lockd/"+lockd.DefaultConfigFileName+")")
+	flags.StringVar(&bootstrapDir, "bootstrap", "", "initialize certificates + config under this directory before running (idempotent)")
 	flags.String("listen", ":9341", "listen address")
 	flags.String("listen-proto", "tcp", "listen network (tcp, tcp4, tcp6)")
 	flags.String("metrics-listen", lockd.DefaultMetricsListen, "metrics listen address (Prometheus scrape endpoint; empty disables; default off)")
@@ -347,9 +365,7 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 	flags.Bool("disable-storage-encryption", false, "disable kryptograf envelope encryption (plaintext at rest)")
 	flags.Bool("storage-encryption-snappy", false, "enable Snappy compression before encrypting objects")
 	flags.Bool("disable-krypto-pool", false, "disable kryptograf buffer pool (enabled by default)")
-	flags.Bool("disable-mtls", false, "disable mutual TLS")
 	flags.Int("http2-max-concurrent-streams", lockd.DefaultMaxConcurrentStreams, "maximum concurrent HTTP/2 streams per connection (0 uses http2 default)")
-	flags.String("bundle", "", "path to combined server bundle PEM")
 	flags.String("denylist-path", "", "path to certificate denylist (optional)")
 	tcTrustDefault := ""
 	if dir, err := lockd.DefaultTCTrustDir(); err == nil {
@@ -423,10 +439,16 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 	flags.Duration("qrf-recovery-delay", lockd.DefaultQRFRecoveryDelay, "base delay used while QRF is recovering")
 	flags.Duration("qrf-max-wait", lockd.DefaultQRFMaxWait, "maximum delay applied by QRF pacing before returning a throttled response")
 	flags.String("otlp-endpoint", "", "OTLP collector endpoint (e.g. grpc://localhost:4317)")
-	flags.StringVar(&logLevel, "log-level", "info", "log level (trace,debug,info,...)")
 
 	bindFlag := func(name string) {
-		if err := viper.BindPFlag(name, flags.Lookup(name)); err != nil {
+		flag := flags.Lookup(name)
+		if flag == nil {
+			flag = persistentFlags.Lookup(name)
+		}
+		if flag == nil {
+			panic(fmt.Sprintf("flag %q not found", name))
+		}
+		if err := viper.BindPFlag(name, flag); err != nil {
 			panic(err)
 		}
 	}
@@ -468,12 +490,12 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 
 	cmd.AddCommand(newVerifyCommand(svcfields.WithSubsystem(baseLogger, "cli.verify")))
 	cmd.AddCommand(newAuthCommand())
-	cmd.AddCommand(newClientCommand(baseLogger))
-	cmd.AddCommand(newNamespaceCommand(baseLogger))
-	cmd.AddCommand(newIndexCommand(baseLogger))
+	cmd.AddCommand(newClientCommand(clientCfg))
+	cmd.AddCommand(newNamespaceCommand(clientCfg))
+	cmd.AddCommand(newIndexCommand(clientCfg))
 	cmd.AddCommand(newConfigCommand())
 	cmd.AddCommand(newVersionCommand())
-	cmd.AddCommand(newTxnRootCommand(baseLogger))
+	cmd.AddCommand(newTxnRootCommand(clientCfg))
 	cmd.AddCommand(newTCCommand())
 
 	return cmd

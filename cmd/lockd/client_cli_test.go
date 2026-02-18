@@ -260,6 +260,76 @@ func TestCLIClientQueueCommands(t *testing.T) {
 	}
 }
 
+func TestCLIClientServerFlagOverridesEnv(t *testing.T) {
+	t.Setenv("LOCKD_CONFIG", "")
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	t.Setenv("LOCKD_CLIENT_SERVER", "http://[::1")
+	err := runCLICommandExpectError(t,
+		"client",
+		"--server", "http://[::2",
+		"query", "",
+	)
+	if !strings.Contains(err.Error(), `parse endpoint "http://[::2"`) {
+		t.Fatalf("expected flag endpoint parse error, got %v", err)
+	}
+	if strings.Contains(err.Error(), "http://[::1") {
+		t.Fatalf("expected --server to override env endpoint, got %v", err)
+	}
+}
+
+func TestCLIClientServerShorthandOverridesEnv(t *testing.T) {
+	t.Setenv("LOCKD_CONFIG", "")
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	t.Setenv("LOCKD_CLIENT_SERVER", "http://[::1")
+	err := runCLICommandExpectError(t,
+		"client",
+		"-s", "http://[::2",
+		"query", "",
+	)
+	if !strings.Contains(err.Error(), `parse endpoint "http://[::2"`) {
+		t.Fatalf("expected shorthand endpoint parse error, got %v", err)
+	}
+	if strings.Contains(err.Error(), "http://[::1") {
+		t.Fatalf("expected -s to override env endpoint, got %v", err)
+	}
+}
+
+func TestCLIGlobalClientFlagsBeforeSubcommand(t *testing.T) {
+	t.Setenv("LOCKD_CONFIG", "")
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	err := runCLICommandExpectError(t,
+		"-b", filepath.Join(t.TempDir(), "client.pem"),
+		"-s", "http://[::2",
+		"client", "query", "",
+	)
+	if !strings.Contains(err.Error(), `parse endpoint "http://[::2"`) {
+		t.Fatalf("expected global -s endpoint parse error, got %v", err)
+	}
+	if strings.Contains(err.Error(), "unknown shorthand flag: 'b' in -b") {
+		t.Fatalf("expected global -b to parse before subcommand, got %v", err)
+	}
+}
+
+func TestCLIGlobalClientFlagsApplyToNamespace(t *testing.T) {
+	t.Setenv("LOCKD_CONFIG", "")
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	err := runCLICommandExpectError(t,
+		"-s", "http://[::2",
+		"namespace", "get",
+	)
+	if !strings.Contains(err.Error(), `parse endpoint "http://[::2"`) {
+		t.Fatalf("expected namespace command to use global --server/-s, got %v", err)
+	}
+}
+
 func TestCLIClientQueueNackRejectsReasonForDefer(t *testing.T) {
 	t.Setenv("LOCKD_CONFIG", "")
 	viper.Reset()

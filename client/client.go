@@ -3501,11 +3501,7 @@ func isFatalTransportError(err error) bool {
 		return true
 	}
 	var constraintErrValue x509.ConstraintViolationError
-	if errors.As(err, &constraintErrValue) {
-		return true
-	}
-
-	return false
+	return errors.As(err, &constraintErrValue)
 }
 
 func (c *Client) forUpdateContext(parent context.Context) (context.Context, context.CancelFunc) {

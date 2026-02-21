@@ -21,6 +21,7 @@ import (
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/integration/internal/cryptotest"
 	"pkt.systems/lockd/integration/internal/hatest"
+	"pkt.systems/lockd/integration/internal/locktest"
 	shutdowntest "pkt.systems/lockd/integration/internal/shutdowntest"
 	testlog "pkt.systems/lockd/integration/internal/testlog"
 	"pkt.systems/lockd/internal/uuidv7"
@@ -162,6 +163,20 @@ func TestAWSAcquireNoWaitReturnsWaiting(t *testing.T) {
 	if !errors.As(err, &apiErr) || apiErr.Response.ErrorCode != "waiting" {
 		t.Fatalf("expected waiting API error, got %v", err)
 	}
+}
+
+func TestAWSAcquireIfNotExistsReturnsAlreadyExists(t *testing.T) {
+	cfg := loadAWSConfig(t)
+	ensureStoreReady(t, context.Background(), cfg)
+	cli := startLockdServer(t, cfg)
+
+	locktest.RunAcquireIfNotExistsReturnsAlreadyExists(t, locktest.AcquireIfNotExistsConfig{
+		Client:    cli,
+		KeyPrefix: "aws-if-not-exists",
+		CleanupKey: func(key string) {
+			cleanupS3(t, cfg, key)
+		},
+	})
 }
 
 func TestAWSAttachmentsLifecycle(t *testing.T) {

@@ -118,6 +118,13 @@ func TestAuthWorkflowSplitCA(t *testing.T) {
 	if bundle.ServerCert == nil || bundle.ServerCertificate.PrivateKey == nil {
 		t.Fatalf("expected server certificate and key in bundle")
 	}
+	expectedServerAllClaim, err := url.Parse("lockd://ns/ALL?perm=rw")
+	if err != nil {
+		t.Fatalf("parse server all claim uri: %v", err)
+	}
+	if !containsURI(bundle.ServerCert.URIs, expectedServerAllClaim) {
+		t.Fatalf("expected ALL namespace claim %s in server bundle", expectedServerAllClaim.String())
+	}
 
 	nextOutput := runAuthCommand(t, "new", "server", "--cn", "lockd-server-test", "--hosts", "127.0.0.1")
 	nextPath := filepath.Join(filepath.Dir(serverPath), "server02.pem")
@@ -156,6 +163,13 @@ func TestAuthWorkflowSplitCA(t *testing.T) {
 	if !containsURI(clientBundle.ClientCert.URIs, expectedSDKURI) {
 		t.Fatalf("expected sdk spiffe uri %s in client bundle", expectedSDKURI.String())
 	}
+	expectedDefaultClaim, err := url.Parse("lockd://ns/default?perm=rw")
+	if err != nil {
+		t.Fatalf("parse default claim uri: %v", err)
+	}
+	if !containsURI(clientBundle.ClientCert.URIs, expectedDefaultClaim) {
+		t.Fatalf("expected default namespace claim %s in client bundle", expectedDefaultClaim.String())
+	}
 	clientSerial := strings.ToLower(clientBundle.ClientCert.SerialNumber.Text(16))
 
 	tcOut := runAuthCommand(t, "new", "tcclient", "--cn", "lockd-tc-client-test")
@@ -177,6 +191,38 @@ func TestAuthWorkflowSplitCA(t *testing.T) {
 	if !containsURI(tcBundle.ClientCert.URIs, expectedTCURI) {
 		t.Fatalf("expected tc spiffe uri %s in client bundle", expectedTCURI.String())
 	}
+	expectedAllClaim, err := url.Parse("lockd://ns/ALL?perm=rw")
+	if err != nil {
+		t.Fatalf("parse all claim uri: %v", err)
+	}
+	if !containsURI(tcBundle.ClientCert.URIs, expectedAllClaim) {
+		t.Fatalf("expected ALL namespace claim %s in tc client bundle", expectedAllClaim.String())
+	}
+
+	scopedClientPath := filepath.Join(configDir, "scoped-client.pem")
+	runAuthCommand(t, "new", "client", "--out", scopedClientPath, "--cn", "lockd-client-scoped", "-n", "orders=w,stash")
+	scopedClientBundle, err := tlsutil.LoadClientBundle(scopedClientPath)
+	if err != nil {
+		t.Fatalf("load scoped client bundle: %v", err)
+	}
+	expectedOrdersW, err := url.Parse("lockd://ns/orders?perm=w")
+	if err != nil {
+		t.Fatalf("parse orders claim uri: %v", err)
+	}
+	if !containsURI(scopedClientBundle.ClientCert.URIs, expectedOrdersW) {
+		t.Fatalf("expected orders claim %s in scoped client bundle", expectedOrdersW.String())
+	}
+	expectedStashRW, err := url.Parse("lockd://ns/stash?perm=rw")
+	if err != nil {
+		t.Fatalf("parse stash claim uri: %v", err)
+	}
+	if !containsURI(scopedClientBundle.ClientCert.URIs, expectedStashRW) {
+		t.Fatalf("expected stash claim %s in scoped client bundle", expectedStashRW.String())
+	}
+	if containsURI(scopedClientBundle.ClientCert.URIs, expectedDefaultClaim) {
+		t.Fatalf("expected scoped client bundle to omit default claim %s when explicit namespace flags are provided", expectedDefaultClaim.String())
+	}
+
 	resolvedSDK, err := lockd.ResolveClientBundlePath(lockd.ClientBundleRoleSDK, "")
 	if err != nil {
 		t.Fatalf("resolve sdk bundle: %v", err)
@@ -306,6 +352,122 @@ func TestAuthNewServerMissingCA(t *testing.T) {
 	}
 }
 
+func TestAuthNewClientNamespaceAliases(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	runAuthCommand(t, "new", "ca", "--cn", "lockd-ca-test")
+
+	cfgDir, err := lockd.DefaultConfigDir()
+	if err != nil {
+		t.Fatalf("default config dir: %v", err)
+	}
+
+	aliasPath := filepath.Join(cfgDir, "client-aliases.pem")
+	runAuthCommand(t, "new", "client", "--out", aliasPath, "--read-all", "--write-all")
+	aliasBundle, err := tlsutil.LoadClientBundle(aliasPath)
+	if err != nil {
+		t.Fatalf("load alias bundle: %v", err)
+	}
+	expectedAllW, err := url.Parse("lockd://ns/ALL?perm=w")
+	if err != nil {
+		t.Fatalf("parse ALL=w uri: %v", err)
+	}
+	if !containsURI(aliasBundle.ClientCert.URIs, expectedAllW) {
+		t.Fatalf("expected ALL write claim %s in alias bundle", expectedAllW.String())
+	}
+	expectedDefault, err := url.Parse("lockd://ns/default?perm=rw")
+	if err != nil {
+		t.Fatalf("parse default uri: %v", err)
+	}
+	if containsURI(aliasBundle.ClientCert.URIs, expectedDefault) {
+		t.Fatalf("expected explicit alias claims to suppress implicit default claim %s", expectedDefault.String())
+	}
+
+	rwAllPath := filepath.Join(cfgDir, "client-rw-all.pem")
+	runAuthCommand(t, "new", "client", "--out", rwAllPath, "--rw-all")
+	rwAllBundle, err := tlsutil.LoadClientBundle(rwAllPath)
+	if err != nil {
+		t.Fatalf("load rw-all bundle: %v", err)
+	}
+	expectedAllRW, err := url.Parse("lockd://ns/ALL?perm=rw")
+	if err != nil {
+		t.Fatalf("parse ALL=rw uri: %v", err)
+	}
+	if !containsURI(rwAllBundle.ClientCert.URIs, expectedAllRW) {
+		t.Fatalf("expected ALL rw claim %s in rw-all bundle", expectedAllRW.String())
+	}
+}
+
+func TestAuthNewClientNamespaceRepeatImplicitRW(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	runAuthCommand(t, "new", "ca", "--cn", "lockd-ca-test")
+
+	cfgDir, err := lockd.DefaultConfigDir()
+	if err != nil {
+		t.Fatalf("default config dir: %v", err)
+	}
+	path := filepath.Join(cfgDir, "client-repeat.pem")
+	runAuthCommand(t, "new", "client", "--out", path, "-n", "default,orders", "-n", "stash")
+	bundle, err := tlsutil.LoadClientBundle(path)
+	if err != nil {
+		t.Fatalf("load repeat bundle: %v", err)
+	}
+
+	expected := []string{
+		"lockd://ns/default?perm=rw",
+		"lockd://ns/orders?perm=rw",
+		"lockd://ns/stash?perm=rw",
+	}
+	for _, raw := range expected {
+		claim, parseErr := url.Parse(raw)
+		if parseErr != nil {
+			t.Fatalf("parse expected claim %q: %v", raw, parseErr)
+		}
+		if !containsURI(bundle.ClientCert.URIs, claim) {
+			t.Fatalf("expected claim %s in repeat bundle", claim.String())
+		}
+	}
+}
+
+func TestAuthNewClientNamespaceDuplicateStrongestWins(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	runAuthCommand(t, "new", "ca", "--cn", "lockd-ca-test")
+
+	cfgDir, err := lockd.DefaultConfigDir()
+	if err != nil {
+		t.Fatalf("default config dir: %v", err)
+	}
+	path := filepath.Join(cfgDir, "client-strongest.pem")
+	runAuthCommand(t, "new", "client", "--out", path, "-n", "orders=r", "-n", "orders=w", "-n", "orders=rw", "-n", "orders=w")
+	bundle, err := tlsutil.LoadClientBundle(path)
+	if err != nil {
+		t.Fatalf("load strongest bundle: %v", err)
+	}
+	expectedRW, err := url.Parse("lockd://ns/orders?perm=rw")
+	if err != nil {
+		t.Fatalf("parse expected claim: %v", err)
+	}
+	if !containsURI(bundle.ClientCert.URIs, expectedRW) {
+		t.Fatalf("expected strongest claim %s in bundle", expectedRW.String())
+	}
+	if got := countClaimURIsWithPrefix(bundle.ClientCert.URIs, "lockd://ns/orders?perm="); got != 1 {
+		t.Fatalf("expected one orders claim after merge, got %d", got)
+	}
+}
+
+func TestAuthNewClientNamespaceInvalidInput(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	runAuthCommand(t, "new", "ca", "--cn", "lockd-ca-test")
+
+	out := runAuthCommandExpectError(t, "new", "client", "-n", "default==rw")
+	if !strings.Contains(out, "invalid namespace claim") {
+		t.Fatalf("expected invalid namespace claim error, got %q", out)
+	}
+	out = runAuthCommandExpectError(t, "new", "client", "-n", "default=x")
+	if !strings.Contains(out, "invalid namespace claim") {
+		t.Fatalf("expected invalid namespace permission error, got %q", out)
+	}
+}
+
 func containsURI(uris []*url.URL, expected *url.URL) bool {
 	if expected == nil {
 		return false
@@ -320,4 +482,17 @@ func containsURI(uris []*url.URL, expected *url.URL) bool {
 		}
 	}
 	return false
+}
+
+func countClaimURIsWithPrefix(uris []*url.URL, prefix string) int {
+	count := 0
+	for _, uri := range uris {
+		if uri == nil {
+			continue
+		}
+		if strings.HasPrefix(uri.String(), prefix) {
+			count++
+		}
+	}
+	return count
 }

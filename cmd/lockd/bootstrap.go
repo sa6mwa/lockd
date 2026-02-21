@@ -12,6 +12,7 @@ import (
 
 	"pkt.systems/lockd"
 	"pkt.systems/lockd/internal/cryptoutil"
+	"pkt.systems/lockd/internal/nsauth"
 	"pkt.systems/lockd/internal/uuidv7"
 	"pkt.systems/lockd/tlsutil"
 	"pkt.systems/pslog"
@@ -104,11 +105,15 @@ func ensureBootstrapServer(path, caPath string, ca *tlsutil.CA, logger pslog.Log
 	if err != nil {
 		return fmt.Errorf("bootstrap: spiffe uri: %w", err)
 	}
+	allClaim, err := nsauth.ClaimURI("ALL", nsauth.PermissionReadWrite)
+	if err != nil {
+		return fmt.Errorf("bootstrap: all namespace claim: %w", err)
+	}
 	issued, err := ca.IssueServerWithRequest(tlsutil.ServerCertRequest{
 		CommonName: bootstrapServerCN,
 		Validity:   2 * 365 * 24 * time.Hour,
 		Hosts:      []string{"*"},
-		URIs:       []*url.URL{spiffeURI},
+		URIs:       []*url.URL{spiffeURI, allClaim},
 	})
 	if err != nil {
 		return fmt.Errorf("bootstrap: issue server certificate: %w", err)
@@ -138,10 +143,14 @@ func ensureBootstrapClient(path string, ca *tlsutil.CA, logger pslog.Logger) err
 	if err != nil {
 		return fmt.Errorf("bootstrap: spiffe uri: %w", err)
 	}
+	defaultClaim, err := nsauth.ClaimURI(lockd.DefaultNamespace, nsauth.PermissionReadWrite)
+	if err != nil {
+		return fmt.Errorf("bootstrap: default namespace claim: %w", err)
+	}
 	issued, err := ca.IssueClient(tlsutil.ClientCertRequest{
 		CommonName: bootstrapClientCN,
 		Validity:   365 * 24 * time.Hour,
-		URIs:       []*url.URL{spiffeURI},
+		URIs:       []*url.URL{spiffeURI, defaultClaim},
 	})
 	if err != nil {
 		return fmt.Errorf("bootstrap: issue client certificate: %w", err)
@@ -167,10 +176,14 @@ func ensureBootstrapTCClient(path string, ca *tlsutil.CA, logger pslog.Logger) e
 	if err != nil {
 		return fmt.Errorf("bootstrap: spiffe uri: %w", err)
 	}
+	allClaim, err := nsauth.ClaimURI("ALL", nsauth.PermissionReadWrite)
+	if err != nil {
+		return fmt.Errorf("bootstrap: tc namespace claim: %w", err)
+	}
 	issued, err := ca.IssueClient(tlsutil.ClientCertRequest{
 		CommonName: bootstrapTCClientCN,
 		Validity:   365 * 24 * time.Hour,
-		URIs:       []*url.URL{spiffeURI},
+		URIs:       []*url.URL{spiffeURI, allClaim},
 	})
 	if err != nil {
 		return fmt.Errorf("bootstrap: issue tc client certificate: %w", err)

@@ -17,6 +17,7 @@ type AcquireCommand struct {
 	Owner            string
 	TTLSeconds       int64
 	BlockSeconds     int64
+	IfNotExists      bool
 	TxnID            string
 	ClientHint       string // optional client identity
 	ForceQueryHidden bool   // mark meta as query-hidden when acquiring (for queue state keys)

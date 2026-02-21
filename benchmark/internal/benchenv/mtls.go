@@ -10,6 +10,7 @@ import (
 
 	"pkt.systems/lockd"
 	"pkt.systems/lockd/internal/cryptoutil"
+	"pkt.systems/lockd/internal/nsauth"
 	"pkt.systems/lockd/internal/uuidv7"
 	"pkt.systems/lockd/tlsutil"
 )
@@ -93,11 +94,15 @@ func generateSharedCredentials() (lockd.TestMTLSCredentials, error) {
 	if err != nil {
 		return lockd.TestMTLSCredentials{}, err
 	}
+	allClaim, err := nsauth.ClaimURI("ALL", nsauth.PermissionReadWrite)
+	if err != nil {
+		return lockd.TestMTLSCredentials{}, err
+	}
 	serverIssued, err := ca.IssueServerWithRequest(tlsutil.ServerCertRequest{
 		CommonName: "lockd-bench-server",
 		Validity:   365 * 24 * time.Hour,
 		Hosts:      hosts,
-		URIs:       []*url.URL{spiffeURI},
+		URIs:       []*url.URL{spiffeURI, allClaim},
 	})
 	if err != nil {
 		return lockd.TestMTLSCredentials{}, err
@@ -110,7 +115,19 @@ func generateSharedCredentials() (lockd.TestMTLSCredentials, error) {
 	if err != nil {
 		return lockd.TestMTLSCredentials{}, err
 	}
-	clientIssued, err := ca.IssueClient(tlsutil.ClientCertRequest{CommonName: "lockd-bench-client", Validity: 365 * 24 * time.Hour})
+	clientSPIFFE, err := lockd.SPIFFEURIForRole(lockd.ClientBundleRoleSDK, "lockd-bench-client")
+	if err != nil {
+		return lockd.TestMTLSCredentials{}, err
+	}
+	clientAllClaim, err := nsauth.ClaimURI("ALL", nsauth.PermissionReadWrite)
+	if err != nil {
+		return lockd.TestMTLSCredentials{}, err
+	}
+	clientIssued, err := ca.IssueClient(tlsutil.ClientCertRequest{
+		CommonName: "lockd-bench-client",
+		Validity:   365 * 24 * time.Hour,
+		URIs:       []*url.URL{clientSPIFFE, clientAllClaim},
+	})
 	if err != nil {
 		return lockd.TestMTLSCredentials{}, err
 	}

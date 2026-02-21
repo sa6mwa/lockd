@@ -14,9 +14,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rs/xid"
 	"pkt.systems/pslog"
 
 	"pkt.systems/lockd/api"
+	"pkt.systems/lockd/internal/core"
 	"pkt.systems/lockd/internal/correlation"
 	"pkt.systems/lockd/internal/queue"
 	"pkt.systems/lockd/internal/search"
@@ -360,6 +362,111 @@ func TestTxnEndpointsRequireTCAuth(t *testing.T) {
 				t.Fatalf("expected tc_client_required, got %s", errResp.ErrorCode)
 			}
 		})
+	}
+}
+
+func TestTxnDecideNormalizesParticipantNamespace(t *testing.T) {
+	store := memory.New()
+	handler := New(Config{
+		Store:        store,
+		Logger:       pslog.NoopLogger(),
+		Clock:        newStubClock(time.Unix(1_700_000_000, 0)),
+		JSONMaxBytes: 1 << 20,
+		DefaultTTL:   15 * time.Second,
+		MaxTTL:       1 * time.Minute,
+		AcquireBlock: 10 * time.Second,
+	})
+	mux := http.NewServeMux()
+	handler.Register(mux)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	txnID := xid.New().String()
+	var resp api.TxnDecisionResponse
+	status := doJSON(t, server, http.MethodPost, "/v1/txn/decide", nil, api.TxnDecisionRequest{
+		TxnID: txnID,
+		State: string(core.TxnStatePending),
+		Participants: []api.TxnParticipant{
+			{Namespace: "MiXeD_Ns", Key: "orders"},
+		},
+	}, &resp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d", status)
+	}
+
+	obj, err := store.GetObject(context.Background(), ".txns", txnID)
+	if err != nil {
+		t.Fatalf("load txn record: %v", err)
+	}
+	defer obj.Reader.Close()
+
+	var rec core.TxnRecord
+	if err := json.NewDecoder(obj.Reader).Decode(&rec); err != nil {
+		t.Fatalf("decode txn record: %v", err)
+	}
+	if len(rec.Participants) != 1 {
+		t.Fatalf("expected 1 participant, got %d", len(rec.Participants))
+	}
+	if got := rec.Participants[0].Namespace; got != "mixed_ns" {
+		t.Fatalf("expected normalized namespace mixed_ns, got %q", got)
+	}
+}
+
+type captureLoadMetaStore struct {
+	*memory.Store
+	mu         sync.Mutex
+	namespaces []string
+}
+
+func (s *captureLoadMetaStore) LoadMeta(ctx context.Context, namespace, key string) (storage.LoadMetaResult, error) {
+	s.mu.Lock()
+	s.namespaces = append(s.namespaces, namespace)
+	s.mu.Unlock()
+	return s.Store.LoadMeta(ctx, namespace, key)
+}
+
+func (s *captureLoadMetaStore) sawNamespace(namespace string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, seen := range s.namespaces {
+		if seen == namespace {
+			return true
+		}
+	}
+	return false
+}
+
+func TestTxnCommitNormalizesParticipantNamespaceForApply(t *testing.T) {
+	store := &captureLoadMetaStore{Store: memory.New()}
+	handler := New(Config{
+		Store:        store,
+		Logger:       pslog.NoopLogger(),
+		Clock:        newStubClock(time.Unix(1_700_000_000, 0)),
+		JSONMaxBytes: 1 << 20,
+		DefaultTTL:   15 * time.Second,
+		MaxTTL:       1 * time.Minute,
+		AcquireBlock: 10 * time.Second,
+	})
+	mux := http.NewServeMux()
+	handler.Register(mux)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	txnID := xid.New().String()
+	status := doJSON(t, server, http.MethodPost, "/v1/txn/commit", nil, api.TxnDecisionRequest{
+		TxnID: txnID,
+		Participants: []api.TxnParticipant{
+			{Namespace: "MiXeD_Ns", Key: "orders"},
+		},
+	}, nil)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d", status)
+	}
+	if !store.sawNamespace("mixed_ns") {
+		t.Fatalf("expected apply path to read normalized namespace mixed_ns, got %+v", store.namespaces)
+	}
+	if store.sawNamespace("MiXeD_Ns") {
+		t.Fatalf("expected apply path to avoid raw namespace MiXeD_Ns, got %+v", store.namespaces)
 	}
 }
 
@@ -871,6 +978,57 @@ func TestAcquireConflictAndWaiting(t *testing.T) {
 	}
 	if resp.Owner != "worker-b" {
 		t.Fatalf("expected new owner worker-b, got %s", resp.Owner)
+	}
+}
+
+func TestAcquireIfNotExistsReturnsAlreadyExists(t *testing.T) {
+	store := memory.New()
+	clk := newStubClock(time.Unix(1_700_000_000, 0))
+	handler := New(Config{
+		Store:        store,
+		Logger:       pslog.NoopLogger(),
+		Clock:        clk,
+		JSONMaxBytes: 1 << 20,
+		DefaultTTL:   10 * time.Second,
+		MaxTTL:       1 * time.Minute,
+		AcquireBlock: 5 * time.Second,
+	})
+	mux := http.NewServeMux()
+	handler.Register(mux)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	first := api.AcquireRequest{Key: "stream", Owner: "worker-a", TTLSeconds: 5}
+	var firstResp api.AcquireResponse
+	if status := doJSON(t, server, http.MethodPost, "/v1/acquire", nil, first, &firstResp); status != http.StatusOK {
+		t.Fatalf("expected first acquire 200, got %d", status)
+	}
+
+	var releaseResp api.ReleaseResponse
+	releaseReq := api.ReleaseRequest{
+		Key:     firstResp.Key,
+		LeaseID: firstResp.LeaseID,
+		TxnID:   firstResp.TxnID,
+	}
+	releaseHeaders := map[string]string{"X-Fencing-Token": strconv.FormatInt(firstResp.FencingToken, 10)}
+	if status := doJSON(t, server, http.MethodPost, "/v1/release", releaseHeaders, releaseReq, &releaseResp); status != http.StatusOK {
+		t.Fatalf("expected release 200, got %d", status)
+	}
+
+	conflict := api.AcquireRequest{
+		Key:         "stream",
+		Owner:       "worker-b",
+		TTLSeconds:  5,
+		BlockSecs:   5,
+		IfNotExists: true,
+	}
+	var errResp api.ErrorResponse
+	status := doJSON(t, server, http.MethodPost, "/v1/acquire", nil, conflict, &errResp)
+	if status != http.StatusConflict {
+		t.Fatalf("expected conflict 409, got %d", status)
+	}
+	if errResp.ErrorCode != "already_exists" {
+		t.Fatalf("expected already_exists error code, got %s", errResp.ErrorCode)
 	}
 }
 

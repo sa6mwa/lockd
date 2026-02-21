@@ -49,10 +49,36 @@
 // per-call Namespace values can be omitted intentionally. Namespaces that start
 // with a dot are reserved for lockd internals and rejected for user workloads.
 //
+// # Create-only acquire
+//
+// Set api.AcquireRequest.IfNotExists=true to request create-only semantics.
+// When state already exists for the key, Acquire fails with API error code
+// "already_exists". The SDK supports both check styles:
+// client.IsAlreadyExists(err) and errors.Is(err, client.ErrAlreadyExists).
+// You only need one check style; for SDK-returned acquire errors they are
+// equivalent.
+//
+//	_, err = cli.Acquire(ctx, api.AcquireRequest{
+//	    Namespace:   "workflows",
+//	    Key:         "orders",
+//	    Owner:       "initializer",
+//	    TTLSeconds:  30,
+//	    BlockSecs:   client.BlockNoWait,
+//	    IfNotExists: true,
+//	})
+//	if err != nil {
+//	    if errors.Is(err, client.ErrAlreadyExists) {
+//	        return
+//	    }
+//	    log.Fatal(err)
+//	}
+//
 // # Acquire for update
 //
 // AcquireForUpdate wraps the common acquire, load, mutate, save, release flow.
 // It keeps the lease alive while the callback runs and always attempts release.
+// The supplied api.AcquireRequest is forwarded to Acquire; setting
+// IfNotExists=true applies create-only semantics to the initial handshake.
 //
 //	err := cli.AcquireForUpdate(ctx, api.AcquireRequest{
 //	    Namespace:  "workflows",

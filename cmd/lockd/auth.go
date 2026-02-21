@@ -15,6 +15,7 @@ import (
 
 	"pkt.systems/lockd"
 	"pkt.systems/lockd/internal/cryptoutil"
+	"pkt.systems/lockd/internal/nsauth"
 	"pkt.systems/lockd/internal/uuidv7"
 	"pkt.systems/lockd/tlsutil"
 )
@@ -148,11 +149,15 @@ func newAuthNewServerCommand() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("spiffe uri: %w", err)
 			}
+			allClaim, err := nsauth.ClaimURI("ALL", nsauth.PermissionReadWrite)
+			if err != nil {
+				return fmt.Errorf("all namespace claim: %w", err)
+			}
 			issued, err := ca.IssueServerWithRequest(tlsutil.ServerCertRequest{
 				CommonName: cn,
 				Validity:   validity,
 				Hosts:      hostList,
-				URIs:       []*url.URL{spiffeURI},
+				URIs:       []*url.URL{spiffeURI, allClaim},
 			})
 			if err != nil {
 				return err
@@ -221,6 +226,10 @@ func newAuthNewClientCommand() *cobra.Command {
 	var cn string
 	var validity time.Duration
 	var force bool
+	var namespaceInputs []string
+	var readAll bool
+	var writeAll bool
+	var rwAll bool
 
 	cmd := &cobra.Command{
 		Use:   "client",
@@ -263,10 +272,23 @@ func newAuthNewClientCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			namespacePerms, hasExplicit, err := parseNamespacePermissions(namespaceInputs, readAll, writeAll, rwAll)
+			if err != nil {
+				return err
+			}
+			if !hasExplicit {
+				mergeNamespacePermission(namespacePerms, lockd.DefaultNamespace, nsauth.PermissionReadWrite)
+			}
+			namespaceClaims, err := namespacePermissionsToURIs(namespacePerms)
+			if err != nil {
+				return err
+			}
+			uris := []*url.URL{spiffeURI}
+			uris = append(uris, namespaceClaims...)
 			issued, err := ca.IssueClient(tlsutil.ClientCertRequest{
 				CommonName: effectiveCN,
 				Validity:   validity,
-				URIs:       []*url.URL{spiffeURI},
+				URIs:       uris,
 			})
 			if err != nil {
 				return err
@@ -287,6 +309,10 @@ func newAuthNewClientCommand() *cobra.Command {
 	cmd.Flags().StringVar(&out, "out", "", "client output path (default $HOME/.lockd/client.pem)")
 	cmd.Flags().StringVar(&cn, "cn", "lockd-client", "client certificate common name")
 	cmd.Flags().DurationVar(&validity, "valid-for", 365*24*time.Hour, "certificate validity period")
+	cmd.Flags().StringSliceVarP(&namespaceInputs, "namespace", "n", nil, "namespace claims, repeatable and/or csv (example: -n default=rw,orders=w,stash)")
+	cmd.Flags().BoolVar(&readAll, "read-all", false, "alias for -n ALL=r")
+	cmd.Flags().BoolVar(&writeAll, "write-all", false, "alias for -n ALL=w")
+	cmd.Flags().BoolVar(&rwAll, "rw-all", false, "alias for -n ALL=rw")
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite existing file")
 	return cmd
 }
@@ -339,10 +365,14 @@ func newAuthNewTCClientCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			allClaim, err := nsauth.ClaimURI("ALL", nsauth.PermissionReadWrite)
+			if err != nil {
+				return err
+			}
 			issued, err := ca.IssueClient(tlsutil.ClientCertRequest{
 				CommonName: effectiveCN,
 				Validity:   validity,
-				URIs:       []*url.URL{spiffeURI},
+				URIs:       []*url.URL{spiffeURI, allClaim},
 			})
 			if err != nil {
 				return err

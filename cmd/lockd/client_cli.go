@@ -1446,6 +1446,7 @@ func newClientAcquireCommand(cfg *clientCLIConfig) *cobra.Command {
 	var keyFlag string
 	var namespace string
 	var txnID string
+	var ifNotExists bool
 
 	cmd := &cobra.Command{
 		Use:   "acquire",
@@ -1482,12 +1483,13 @@ func newClientAcquireCommand(cfg *clientCLIConfig) *cobra.Command {
 				txn = strings.TrimSpace(os.Getenv(envTxnID))
 			}
 			req := api.AcquireRequest{
-				Namespace:  ns,
-				Key:        key,
-				Owner:      ownerVal,
-				TTLSeconds: mustDurationSeconds(ttl),
-				BlockSecs:  blockSecs,
-				TxnID:      txn,
+				Namespace:   ns,
+				Key:         key,
+				Owner:       ownerVal,
+				TTLSeconds:  mustDurationSeconds(ttl),
+				BlockSecs:   blockSecs,
+				IfNotExists: ifNotExists,
+				TxnID:       txn,
 			}
 			if req.TTLSeconds <= 0 {
 				return fmt.Errorf("ttl must be > 0")
@@ -1548,6 +1550,7 @@ func newClientAcquireCommand(cfg *clientCLIConfig) *cobra.Command {
 	cmd.Flags().StringVar(&owner, "owner", "", "owner identity (default hostname + pid)")
 	cmd.Flags().StringVar(&output, "output", string(outputText), "output format (text|json)")
 	cmd.Flags().IntVar(&failureRetries, "retries", lockdclient.DefaultAcquireFailureRetries, "max retries on non-conflict failures (-1 disables)")
+	cmd.Flags().BoolVar(&ifNotExists, "if-not-exists", false, "fail with already_exists when the key already exists")
 	cmd.Flags().StringVar(&txnID, "txn-id", "", "transaction id to join (xid, 20-char base32; defaults to $LOCKD_TXN_ID)")
 	cmd.Flags().StringVarP(&namespace, "namespace", "n", "", "namespace for the key (defaults to server configuration)")
 	return cmd

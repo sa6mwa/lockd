@@ -2,6 +2,7 @@ package client
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -90,5 +91,26 @@ func TestAPIErrorRetryAfterFallback(t *testing.T) {
 	err.QRFState = "soft_arm"
 	if state := qrfStateFromError(err); state != "soft_arm" {
 		t.Fatalf("expected soft_arm, got %q", state)
+	}
+}
+
+func TestIsAlreadyExistsErrorHelpers(t *testing.T) {
+	err := &APIError{
+		Status:   http.StatusConflict,
+		Response: api.ErrorResponse{ErrorCode: "already_exists"},
+	}
+	if !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("expected errors.Is(..., ErrAlreadyExists) to match")
+	}
+	if !IsAlreadyExists(err) {
+		t.Fatalf("expected IsAlreadyExists to match")
+	}
+	wrapped := errors.Join(err)
+	if !IsAlreadyExists(wrapped) {
+		t.Fatalf("expected IsAlreadyExists to match wrapped APIError")
+	}
+	var apiErr *APIError
+	if !errors.As(wrapped, &apiErr) {
+		t.Fatalf("expected errors.As to recover APIError from wrapped error")
 	}
 }

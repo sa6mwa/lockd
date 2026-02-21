@@ -117,6 +117,7 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (res *Acquire
 		"owner", cmd.Owner,
 		"ttl_seconds", ttl.Seconds(),
 		"block_seconds", cmd.BlockSeconds,
+		"if_not_exists", cmd.IfNotExists,
 		"generated_key", autoKey,
 	)
 
@@ -199,10 +200,16 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (res *Acquire
 			if !errors.Is(err, storage.ErrCASMismatch) {
 				return nil, plan.Wait(fmt.Errorf("store meta: %w", err))
 			}
+			if cmd.IfNotExists {
+				return nil, plan.Wait(acquireAlreadyExistsFailure(0, ""))
+			}
 		}
 		meta, metaETag, err := s.ensureMeta(commitCtx, namespace, storageKey)
 		if err != nil {
 			return nil, plan.Wait(err)
+		}
+		if cmd.IfNotExists && metaETag != "" {
+			return nil, plan.Wait(acquireAlreadyExistsFailure(meta.Version, meta.StateETag))
 		}
 		if cmd.ForceQueryHidden && !meta.HasQueryHiddenPreference() {
 			meta.SetQueryHidden(true)
@@ -280,6 +287,9 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (res *Acquire
 				creationMu.Unlock()
 			}
 			if errors.Is(err, storage.ErrCASMismatch) {
+				if cmd.IfNotExists {
+					return nil, plan.Wait(acquireAlreadyExistsFailure(meta.Version, meta.StateETag))
+				}
 				if waitErr := plan.Wait(nil); waitErr != nil {
 					return nil, waitErr
 				}
@@ -915,6 +925,16 @@ func durationToSeconds(d time.Duration) int64 {
 		return 0
 	}
 	return int64(math.Ceil(d.Seconds()))
+}
+
+func acquireAlreadyExistsFailure(version int64, etag string) Failure {
+	return Failure{
+		Code:       "already_exists",
+		Detail:     "key already exists",
+		Version:    version,
+		ETag:       etag,
+		HTTPStatus: http.StatusConflict,
+	}
 }
 
 func pickStagedVersion(meta *storage.Meta) int64 {

@@ -1126,6 +1126,49 @@ func TestCLIClientAcquireNowaitFailsWhenHeld(t *testing.T) {
 	}
 }
 
+func TestCLIClientAcquireIfNotExistsFailsWhenKeyExists(t *testing.T) {
+	t.Setenv("LOCKD_CONFIG", "")
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	ts := startCLITestServer(t)
+	serverURL := ts.URL()
+	t.Setenv("LOCKD_CLIENT_SERVER", serverURL)
+	t.Setenv("LOCKD_CLIENT_DISABLE_MTLS", "1")
+
+	key := "cli-if-not-exists-" + uuidv7.NewString()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	holder, err := ts.Client.Acquire(ctx, api.AcquireRequest{
+		Namespace:  namespaces.Default,
+		Key:        key,
+		Owner:      "holder",
+		TTLSeconds: 30,
+		BlockSecs:  client.BlockNoWait,
+	})
+	if err != nil {
+		t.Fatalf("seed acquire: %v", err)
+	}
+	if err := holder.Release(ctx); err != nil {
+		t.Fatalf("seed release: %v", err)
+	}
+
+	err = runCLICommandExpectError(t,
+		"client",
+		"--server", serverURL,
+		"--disable-mtls",
+		"acquire",
+		"--key", key,
+		"--owner", "contender",
+		"--ttl", "5s",
+		"--if-not-exists",
+	)
+	var apiErr *client.APIError
+	if !errors.As(err, &apiErr) || apiErr.Response.ErrorCode != "already_exists" {
+		t.Fatalf("expected already_exists API error, got %v", err)
+	}
+}
+
 func TestCLIClientAcquireWithNamespacePersists(t *testing.T) {
 	t.Setenv("LOCKD_CONFIG", "")
 	viper.Reset()

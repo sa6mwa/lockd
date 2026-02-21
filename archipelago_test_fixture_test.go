@@ -10,6 +10,7 @@ import (
 
 	"pkt.systems/lockd"
 	"pkt.systems/lockd/internal/cryptoutil"
+	"pkt.systems/lockd/internal/nsauth"
 	"pkt.systems/lockd/internal/uuidv7"
 	"pkt.systems/lockd/tlsutil"
 )
@@ -71,10 +72,14 @@ func buildTCAuthority(baseDir string) (tcAuthMaterial, error) {
 	if err != nil {
 		return tcAuthMaterial{}, fmt.Errorf("tc auth: spiffe uri: %w", err)
 	}
+	allClaim, err := nsauth.ClaimURI("ALL", nsauth.PermissionReadWrite)
+	if err != nil {
+		return tcAuthMaterial{}, fmt.Errorf("tc auth: namespace claim: %w", err)
+	}
 	clientIssued, err := ca.IssueClient(tlsutil.ClientCertRequest{
 		CommonName: "lockd-test-tc-client",
 		Validity:   365 * 24 * time.Hour,
-		URIs:       []*url.URL{spiffeURI},
+		URIs:       []*url.URL{spiffeURI, allClaim},
 	})
 	if err != nil {
 		return tcAuthMaterial{}, fmt.Errorf("tc auth: issue client: %w", err)
@@ -113,9 +118,18 @@ func buildSharedMTLSAuthority() (sharedMTLSAuthority, error) {
 	if err != nil {
 		return sharedMTLSAuthority{}, fmt.Errorf("mtls: metadata material: %w", err)
 	}
+	spiffeURI, err := lockd.SPIFFEURIForRole(lockd.ClientBundleRoleSDK, "lockd-test-client")
+	if err != nil {
+		return sharedMTLSAuthority{}, fmt.Errorf("mtls: sdk spiffe uri: %w", err)
+	}
+	allClaim, err := nsauth.ClaimURI("ALL", nsauth.PermissionReadWrite)
+	if err != nil {
+		return sharedMTLSAuthority{}, fmt.Errorf("mtls: namespace claim: %w", err)
+	}
 	clientIssued, err := ca.IssueClient(tlsutil.ClientCertRequest{
 		CommonName: "lockd-test-client",
 		Validity:   365 * 24 * time.Hour,
+		URIs:       []*url.URL{spiffeURI, allClaim},
 	})
 	if err != nil {
 		return sharedMTLSAuthority{}, fmt.Errorf("mtls: issue client: %w", err)
@@ -150,11 +164,15 @@ func buildServerCredPool(ca *tlsutil.CA, material cryptoutil.MetadataMaterial, c
 		if err != nil {
 			return nil, fmt.Errorf("mtls: spiffe uri: %w", err)
 		}
+		allClaim, err := nsauth.ClaimURI("ALL", nsauth.PermissionReadWrite)
+		if err != nil {
+			return nil, fmt.Errorf("mtls: all namespace claim: %w", err)
+		}
 		serverIssued, err := ca.IssueServerWithRequest(tlsutil.ServerCertRequest{
 			CommonName: "lockd-test-server",
 			Validity:   365 * 24 * time.Hour,
 			Hosts:      hosts,
-			URIs:       []*url.URL{spiffeURI},
+			URIs:       []*url.URL{spiffeURI, allClaim},
 		})
 		if err != nil {
 			return nil, fmt.Errorf("mtls: issue server: %w", err)

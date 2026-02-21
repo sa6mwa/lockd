@@ -46,6 +46,7 @@ last committed checkpoint.
 ### Coordination primitives
 
 - **Exclusive leases** per key with configurable TTLs, keep-alives, fencing tokens, and sweeper reaping for expired holders.
+- **Create-only acquire mode** via `if_not_exists` / `--if-not-exists` to fail fast with `already_exists` when a key is already initialized.
 - **Acquire-for-update helpers** wrap acquire → get → update, keeping leases alive while user code runs and releasing them automatically.
 - **Public reads** let dashboards or downstream systems fetch published state without holding leases (`/v1/get?public=1`, `Client.Get` default behavior).
 - **Reserved namespaces**: user namespaces must not start with `.`; `.txns` and other dot-prefixed namespaces are reserved for lockd internals.
@@ -147,7 +148,7 @@ Additional prefixes show up in specialised contexts:
 
 ### Request flow
 
-1. **Acquire** – `POST /v1/acquire` → acquire lease (optionally blocking). Include `X-Txn-ID` (or `txn_id` in the body) to join an existing transaction across keys. Namespaces starting with `.` are rejected to protect internal records such as `.txns`.
+1. **Acquire** – `POST /v1/acquire` → acquire lease (optionally blocking). Include `X-Txn-ID` (or `txn_id` in the body) to join an existing transaction across keys. Set `if_not_exists=true` for create-only semantics (returns `409 already_exists` when state already exists for the key). Namespaces starting with `.` are rejected to protect internal records such as `.txns`.
 2. **Get state** – `POST /v1/get` → stream JSON state with CAS headers.
    Supply `X-Lease-ID` + `X-Fencing-Token` from the acquire response.
 3. **Update state** – `POST /v1/update` → upload new JSON with
@@ -626,6 +627,9 @@ For multi-host deployments, build clients with
 base URLs when a request fails, carrying the same bounded retry budget across
 endpoints, so failovers remain deterministic.
 
+When `Acquire` is called with create-only semantics (`if_not_exists=true`),
+`already_exists` is treated as terminal and returned immediately (not retried).
+
 ### Configuration files
 
 `lockd` can also read a YAML configuration file (loaded via Viper). At start-up
@@ -1093,6 +1097,29 @@ cli, err := client.New(
 )
 ```
 
+Create-only acquire (initialize once, fail if state already exists):
+
+```go
+_, err := cli.Acquire(ctx, api.AcquireRequest{
+    Key:         "orders",
+    Owner:       "initializer",
+    TTLSeconds:  30,
+    BlockSecs:   client.BlockNoWait,
+    IfNotExists: true,
+})
+if err != nil {
+    if errors.Is(err, client.ErrAlreadyExists) {
+        // Key was already initialized by another worker.
+        return
+    }
+    log.Fatal(err)
+}
+```
+
+Use either `errors.Is(err, client.ErrAlreadyExists)` or
+`client.IsAlreadyExists(err)`; for SDK-returned acquire errors they are
+equivalent checks.
+
 To connect over a Unix domain socket (useful when the server runs on the same
 host), point the client at `unix:///path/to/lockd.sock`:
 
@@ -1167,6 +1194,10 @@ you omit `--key`, the command falls back to `LOCKD_CLIENT_KEY` (typically set
 by the most recent `acquire`). Invoking `acquire` without `--key` requests a
 server-generated identifier; the resulting value is exported via
 `LOCKD_CLIENT_KEY` so follow-up calls can rely on the environment.
+
+Use `lockd client acquire --if-not-exists` to request create-only semantics.
+When the key already exists, acquire fails with `already_exists` and exits
+without retrying.
 
 ### Queue operations
 

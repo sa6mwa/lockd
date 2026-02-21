@@ -2,11 +2,13 @@ package main
 
 import (
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"pkt.systems/lockd/tlsutil"
 	"pkt.systems/pslog"
 )
 
@@ -35,6 +37,21 @@ func TestBootstrapConfigDir(t *testing.T) {
 	}
 	if !strings.Contains(string(cfgBytes), "tc-client-bundle: "+filepath.Join(dir, "tc-client.pem")) {
 		t.Fatalf("config missing tc-client-bundle override: %s", cfgBytes)
+	}
+
+	serverBundle, err := tlsutil.LoadBundle(filepath.Join(dir, "server.pem"), "")
+	if err != nil {
+		t.Fatalf("load server bundle: %v", err)
+	}
+	if serverBundle.ServerCert == nil {
+		t.Fatalf("expected server certificate in bootstrap bundle")
+	}
+	expectedAllClaim, err := url.Parse("lockd://ns/ALL?perm=rw")
+	if err != nil {
+		t.Fatalf("parse all claim: %v", err)
+	}
+	if !containsURI(serverBundle.ServerCert.URIs, expectedAllClaim) {
+		t.Fatalf("expected server bundle to include claim %s", expectedAllClaim.String())
 	}
 
 	if err := bootstrapConfigDir(dir, logger); err != nil {

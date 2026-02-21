@@ -20,6 +20,7 @@ import (
 	"pkt.systems/lockd/client"
 	"pkt.systems/lockd/internal/clock"
 	"pkt.systems/lockd/internal/cryptoutil"
+	"pkt.systems/lockd/internal/nsauth"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/txncoord"
 	"pkt.systems/lockd/internal/uuidv7"
@@ -1193,11 +1194,15 @@ func newTestMTLSMaterial(hosts []string) (*testMTLSMaterial, error) {
 	if err != nil {
 		return nil, fmt.Errorf("mtls: spiffe uri: %w", err)
 	}
+	allClaim, err := nsauth.ClaimURI("ALL", nsauth.PermissionReadWrite)
+	if err != nil {
+		return nil, fmt.Errorf("mtls: all namespace claim: %w", err)
+	}
 	serverIssued, err := ca.IssueServerWithRequest(tlsutil.ServerCertRequest{
 		CommonName: "lockd-test-server",
 		Validity:   365 * 24 * time.Hour,
 		Hosts:      dedupedHosts,
-		URIs:       []*url.URL{spiffeURI},
+		URIs:       []*url.URL{spiffeURI, allClaim},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("mtls: issue server cert: %w", err)
@@ -1210,7 +1215,19 @@ func newTestMTLSMaterial(hosts []string) (*testMTLSMaterial, error) {
 	if err != nil {
 		return nil, fmt.Errorf("mtls: augment server bundle: %w", err)
 	}
-	clientIssued, err := ca.IssueClient(tlsutil.ClientCertRequest{CommonName: "lockd-test-client", Validity: 365 * 24 * time.Hour})
+	clientSPIFFE, err := SPIFFEURIForRole(ClientBundleRoleSDK, "lockd-test-client")
+	if err != nil {
+		return nil, fmt.Errorf("mtls: sdk spiffe uri: %w", err)
+	}
+	allClaim, err = nsauth.ClaimURI("ALL", nsauth.PermissionReadWrite)
+	if err != nil {
+		return nil, fmt.Errorf("mtls: all namespace claim: %w", err)
+	}
+	clientIssued, err := ca.IssueClient(tlsutil.ClientCertRequest{
+		CommonName: "lockd-test-client",
+		Validity:   365 * 24 * time.Hour,
+		URIs:       []*url.URL{clientSPIFFE, allClaim},
+	})
 	if err != nil {
 		return nil, fmt.Errorf("mtls: issue client cert: %w", err)
 	}

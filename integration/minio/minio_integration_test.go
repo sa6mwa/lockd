@@ -19,6 +19,7 @@ import (
 	lockdclient "pkt.systems/lockd/client"
 	cryptotest "pkt.systems/lockd/integration/internal/cryptotest"
 	"pkt.systems/lockd/integration/internal/hatest"
+	"pkt.systems/lockd/integration/internal/locktest"
 	shutdowntest "pkt.systems/lockd/integration/internal/shutdowntest"
 	testlog "pkt.systems/lockd/integration/internal/testlog"
 	"pkt.systems/lockd/internal/uuidv7"
@@ -157,6 +158,21 @@ func TestMinioAcquireNoWaitReturnsWaiting(t *testing.T) {
 		t.Fatalf("expected waiting API error, got %v", err)
 	}
 	cleanupMinio(t, cfg, key)
+}
+
+func TestMinioAcquireIfNotExistsReturnsAlreadyExists(t *testing.T) {
+	cfg := loadMinioConfig(t)
+	ensureMinioBucket(t, cfg)
+	ensureStoreReady(t, context.Background(), cfg)
+	cli := startLockdServer(t, cfg)
+
+	locktest.RunAcquireIfNotExistsReturnsAlreadyExists(t, locktest.AcquireIfNotExistsConfig{
+		Client:    cli,
+		KeyPrefix: "minio-if-not-exists",
+		CleanupKey: func(key string) {
+			cleanupMinio(t, cfg, key)
+		},
+	})
 }
 
 func TestMinioAttachmentsLifecycle(t *testing.T) {

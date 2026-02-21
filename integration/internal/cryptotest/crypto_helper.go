@@ -20,6 +20,7 @@ import (
 	"pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/internal/cryptoutil"
+	"pkt.systems/lockd/internal/nsauth"
 	"pkt.systems/lockd/internal/uuidv7"
 	"pkt.systems/lockd/tlsutil"
 )
@@ -173,10 +174,14 @@ func generateTCCredentials() (tcCredentials, error) {
 	if err != nil {
 		return tcCredentials{}, err
 	}
+	allClaim, err := nsauth.ClaimURI("ALL", nsauth.PermissionReadWrite)
+	if err != nil {
+		return tcCredentials{}, err
+	}
 	clientIssued, err := ca.IssueClient(tlsutil.ClientCertRequest{
 		CommonName: "lockd-test-tc-client",
 		Validity:   365 * 24 * time.Hour,
-		URIs:       []*url.URL{spiffeURI},
+		URIs:       []*url.URL{spiffeURI, allClaim},
 	})
 	if err != nil {
 		return tcCredentials{}, err
@@ -456,7 +461,19 @@ func generateSharedCredentials() (*sharedMTLSState, error) {
 	if err != nil {
 		return nil, err
 	}
-	clientIssued, err := ca.IssueClient(tlsutil.ClientCertRequest{CommonName: "lockd-test-client", Validity: 365 * 24 * time.Hour})
+	spiffeURI, err := lockd.SPIFFEURIForRole(lockd.ClientBundleRoleSDK, "lockd-test-client")
+	if err != nil {
+		return nil, err
+	}
+	allClaim, err := nsauth.ClaimURI("ALL", nsauth.PermissionReadWrite)
+	if err != nil {
+		return nil, err
+	}
+	clientIssued, err := ca.IssueClient(tlsutil.ClientCertRequest{
+		CommonName: "lockd-test-client",
+		Validity:   365 * 24 * time.Hour,
+		URIs:       []*url.URL{spiffeURI, allClaim},
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -483,11 +500,15 @@ func (s *sharedMTLSState) issueCredentials() (lockd.TestMTLSCredentials, error) 
 	if err != nil {
 		return lockd.TestMTLSCredentials{}, err
 	}
+	allClaim, err := nsauth.ClaimURI("ALL", nsauth.PermissionReadWrite)
+	if err != nil {
+		return lockd.TestMTLSCredentials{}, err
+	}
 	serverIssued, err := s.ca.IssueServerWithRequest(tlsutil.ServerCertRequest{
 		CommonName: "lockd-test-server",
 		Validity:   365 * 24 * time.Hour,
 		Hosts:      hosts,
-		URIs:       []*url.URL{spiffeURI},
+		URIs:       []*url.URL{spiffeURI, allClaim},
 	})
 	if err != nil {
 		return lockd.TestMTLSCredentials{}, err

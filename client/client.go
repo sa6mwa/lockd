@@ -1429,6 +1429,9 @@ const (
 // ErrMissingFencingToken is returned when an operation needs a fencing token but none was found.
 var ErrMissingFencingToken = errors.New("lockd: fencing token required")
 
+// ErrAlreadyExists is returned when create-only acquire semantics are requested for an existing key.
+var ErrAlreadyExists = errors.New("lockd: key already exists")
+
 var (
 	acquireRandMu    sync.Mutex
 	acquireRand      = rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -3898,6 +3901,10 @@ func (c *Client) Acquire(ctx context.Context, req api.AcquireRequest, opts ...Ac
 				c.logErrorCtx(ctx, "client.acquire.forbidden", "key", req.Key, "error", err, "attempt", attempt)
 				return nil, err
 			case http.StatusConflict:
+				if IsAlreadyExists(apiErr) {
+					c.logInfoCtx(ctx, "client.acquire.already_exists", "key", req.Key, "endpoint", c.lastEndpoint, "attempt", attempt)
+					return nil, err
+				}
 				if currentReq.BlockSecs != BlockNoWait {
 					expectedRetry = true
 					c.logDebugCtx(ctx, "client.acquire.conflict_status", "key", req.Key, "endpoint", c.lastEndpoint, "attempt", attempt)
@@ -5554,6 +5561,19 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("lockd: status %d", e.Status)
 }
 
+// Is maps structured API errors to sentinel errors for errors.Is checks.
+func (e *APIError) Is(target error) bool {
+	if e == nil {
+		return false
+	}
+	switch target {
+	case ErrAlreadyExists:
+		return e.Response.ErrorCode == "already_exists"
+	default:
+		return false
+	}
+}
+
 // RetryAfterDuration returns the recommended back-off hinted by the server.
 func (e *APIError) RetryAfterDuration() time.Duration {
 	if e == nil {
@@ -5660,6 +5680,19 @@ func isLeaseRequiredError(err error) bool {
 		}
 	}
 	return false
+}
+
+// IsAlreadyExists reports whether err indicates create-only acquire semantics
+// failed because the key already exists.
+func IsAlreadyExists(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrAlreadyExists) {
+		return true
+	}
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.Response.ErrorCode == "already_exists"
 }
 
 func parseRetryAfterHeader(raw string) time.Duration {

@@ -134,6 +134,25 @@
 //	state.Counter++
 //	if err := sess.Save(ctx, state); err != nil { log.Fatal(err) }
 //
+// For create-only initialization, set AcquireRequest.IfNotExists=true. When
+// state already exists for the key, acquire fails with error code
+// "already_exists". The SDK exposes both helper styles:
+// client.IsAlreadyExists(err) and errors.Is(err, client.ErrAlreadyExists).
+// You only need one check style; for SDK-returned acquire errors they are
+// equivalent.
+//
+//	_, err = cli.Acquire(ctx, api.AcquireRequest{
+//	    Namespace:   "orders-v2",
+//	    Key:         "orders",
+//	    Owner:       "initializer",
+//	    TTLSeconds:  30,
+//	    BlockSecs:   client.BlockNoWait,
+//	    IfNotExists: true,
+//	})
+//	if err != nil && client.IsAlreadyExists(err) {
+//	    // Another worker initialized the key first.
+//	}
+//
 // The lease session carries the TxnID minted by Acquire. All lease-bound
 // mutations (Update/Remove/UpdateMetadata/Release/attachments) require that
 // transaction id. The SDK wires X-Txn-ID automatically when you use
@@ -225,6 +244,10 @@
 // handler starts running, further errors are surfaced immediately—the typical
 // pattern is to return the error (acquire-for-update propagates it) and decide
 // whether to retry at a higher level.
+//
+// AcquireForUpdate forwards the acquire request unchanged. If IfNotExists=true
+// and the key already exists, it returns already_exists and does not invoke the
+// handler.
 //
 // Explicit Release calls elsewhere still treat lease_required as success so
 // teardown never hangs even if the lease has already been reclaimed.

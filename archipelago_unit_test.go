@@ -24,6 +24,7 @@ import (
 	"pkt.systems/lockd/internal/archipelagotest"
 	"pkt.systems/lockd/internal/clock"
 	"pkt.systems/lockd/internal/cryptoutil"
+	"pkt.systems/lockd/internal/nsauth"
 	memorybackend "pkt.systems/lockd/internal/storage/memory"
 	"pkt.systems/lockd/internal/tccluster"
 	"pkt.systems/lockd/internal/uuidv7"
@@ -112,11 +113,15 @@ func (a sharedMTLSAuthority) issueServerCredentials(t testing.TB, hosts []string
 	if err != nil {
 		t.Fatalf("mtls: spiffe uri: %v", err)
 	}
+	allClaim, err := nsauth.ClaimURI("ALL", nsauth.PermissionReadWrite)
+	if err != nil {
+		t.Fatalf("mtls: all namespace claim: %v", err)
+	}
 	serverIssued, err := a.ca.IssueServerWithRequest(tlsutil.ServerCertRequest{
 		CommonName: "lockd-test-server",
 		Validity:   365 * 24 * time.Hour,
 		Hosts:      deduped,
-		URIs:       []*url.URL{spiffeURI},
+		URIs:       []*url.URL{spiffeURI, allClaim},
 	})
 	if err != nil {
 		t.Fatalf("mtls: issue server: %v", err)

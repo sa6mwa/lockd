@@ -22,6 +22,7 @@ import (
 	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/internal/core"
 	"pkt.systems/lockd/internal/correlation"
+	"pkt.systems/lockd/internal/nsauth"
 	"pkt.systems/lockd/internal/qrf"
 	"pkt.systems/lockd/internal/queue"
 	"pkt.systems/lockd/internal/search"
@@ -40,7 +41,7 @@ var benchLogErrors = os.Getenv("MEM_LQ_BENCH_LOG_ERRORS") == "1"
 
 // handleAcquire godoc
 // @Summary      Acquire an exclusive lease
-// @Description  Acquire or wait for an exclusive lease on a key. When block_seconds > 0 the request will long-poll until a lease becomes available or the timeout elapses. Returns a compact xid-based `lease_id` and `txn_id` (20-char lowercase base32, e.g. `c5v9d0sl70b3m3q8ndg0`) that must be echoed on write operations. Namespaces starting with `.` are reserved (e.g. `.txns`) and will be rejected.
+// @Description  Acquire or wait for an exclusive lease on a key. When block_seconds > 0 the request will long-poll until a lease becomes available or the timeout elapses. Set if_not_exists=true to enforce create-only semantics and fail with already_exists when the key already exists. Returns a compact xid-based `lease_id` and `txn_id` (20-char lowercase base32, e.g. `c5v9d0sl70b3m3q8ndg0`) that must be echoed on write operations. Namespaces starting with `.` are reserved (e.g. `.txns`) and will be rejected.
 // @Tags         lease
 // @Accept       json
 // @Produce      json
@@ -76,12 +77,20 @@ func (h *Handler) handleAcquire(w http.ResponseWriter, r *http.Request) error {
 	if id := clientIdentityFromContext(ctx); id != "" {
 		payload.Owner = fmt.Sprintf("%s/%s", payload.Owner, id)
 	}
+	namespace, err := h.resolveNamespace(payload.Namespace)
+	if err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
+	}
+	if err := h.authorizeNamespace(r, namespace, nsauth.AccessAny); err != nil {
+		return err
+	}
 	cmd := core.AcquireCommand{
-		Namespace:    payload.Namespace,
+		Namespace:    namespace,
 		Key:          payload.Key,
 		Owner:        payload.Owner,
 		TTLSeconds:   payload.TTLSeconds,
 		BlockSeconds: payload.BlockSecs,
+		IfNotExists:  payload.IfNotExists,
 		TxnID:        strings.TrimSpace(payload.TxnID),
 		ClientHint:   h.clientKeyFromRequest(r),
 	}
@@ -151,6 +160,9 @@ func (h *Handler) handleKeepAlive(w http.ResponseWriter, r *http.Request) error 
 	namespace, err := h.resolveNamespace(payload.Namespace)
 	if err != nil {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
+	}
+	if err := h.authorizeNamespace(r, namespace, nsauth.AccessAny); err != nil {
+		return err
 	}
 	payload.Namespace = namespace
 	h.observeNamespace(namespace)
@@ -272,6 +284,9 @@ func (h *Handler) handleTxnReplay(w http.ResponseWriter, r *http.Request) error 
 	if _, err := xid.FromString(payload.TxnID); err != nil {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_txn_id", Detail: "txn_id must be an xid"}
 	}
+	if err := h.authorizeAllNamespaces(r, nsauth.AccessReadWrite); err != nil {
+		return err
+	}
 	start := time.Now()
 	txnLogger := logger.With("txn_id", payload.TxnID)
 	txnLogger.Debug("txn.rm.replay.begin")
@@ -345,9 +360,21 @@ func (h *Handler) handleTxnDecide(w http.ResponseWriter, r *http.Request) error 
 		ExpiresAtUnix: payload.ExpiresAtUnix,
 		TCTerm:        payload.TCTerm,
 	}
+	if len(payload.Participants) == 0 {
+		if err := h.authorizeAllNamespaces(r, nsauth.AccessReadWrite); err != nil {
+			return err
+		}
+	}
 	for _, p := range payload.Participants {
-		if p.Namespace == "" || strings.HasPrefix(p.Namespace, ".") {
+		if strings.TrimSpace(p.Namespace) == "" {
 			return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: "participant namespace is required and must not start with '.'"}
+		}
+		namespace, err := h.resolveNamespace(p.Namespace)
+		if err != nil {
+			return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: fmt.Sprintf("participant namespace %q: %v", p.Namespace, err)}
+		}
+		if err := h.authorizeNamespace(r, namespace, nsauth.AccessReadWrite); err != nil {
+			return err
 		}
 		if strings.TrimSpace(p.Key) == "" {
 			return httpError{Status: http.StatusBadRequest, Code: "invalid_key", Detail: "participant key is required"}
@@ -356,7 +383,7 @@ func (h *Handler) handleTxnDecide(w http.ResponseWriter, r *http.Request) error 
 		if p.BackendHash != "" && backendHash == "" {
 			return httpError{Status: http.StatusBadRequest, Code: "invalid_backend_hash", Detail: "participant backend_hash is invalid"}
 		}
-		rec.Participants = append(rec.Participants, core.TxnParticipant{Namespace: p.Namespace, Key: p.Key, BackendHash: backendHash})
+		rec.Participants = append(rec.Participants, core.TxnParticipant{Namespace: namespace, Key: p.Key, BackendHash: backendHash})
 	}
 	decided, err := h.core.DecideTxnViaTC(ctx, rec)
 	if err != nil {
@@ -1038,9 +1065,21 @@ func (h *Handler) handleTxnApply(w http.ResponseWriter, r *http.Request, decisio
 		ExpiresAtUnix: payload.ExpiresAtUnix,
 		TCTerm:        payload.TCTerm,
 	}
+	if len(payload.Participants) == 0 {
+		if err := h.authorizeAllNamespaces(r, nsauth.AccessReadWrite); err != nil {
+			return err
+		}
+	}
 	for _, p := range payload.Participants {
-		if p.Namespace == "" || strings.HasPrefix(p.Namespace, ".") {
+		if strings.TrimSpace(p.Namespace) == "" {
 			return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: "participant namespace is required and must not start with '.'"}
+		}
+		namespace, err := h.resolveNamespace(p.Namespace)
+		if err != nil {
+			return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: fmt.Sprintf("participant namespace %q: %v", p.Namespace, err)}
+		}
+		if err := h.authorizeNamespace(r, namespace, nsauth.AccessReadWrite); err != nil {
+			return err
 		}
 		if strings.TrimSpace(p.Key) == "" {
 			return httpError{Status: http.StatusBadRequest, Code: "invalid_key", Detail: "participant key is required"}
@@ -1049,7 +1088,7 @@ func (h *Handler) handleTxnApply(w http.ResponseWriter, r *http.Request, decisio
 		if p.BackendHash != "" && backendHash == "" {
 			return httpError{Status: http.StatusBadRequest, Code: "invalid_backend_hash", Detail: "participant backend_hash is invalid"}
 		}
-		rec.Participants = append(rec.Participants, core.TxnParticipant{Namespace: p.Namespace, Key: p.Key, BackendHash: backendHash})
+		rec.Participants = append(rec.Participants, core.TxnParticipant{Namespace: namespace, Key: p.Key, BackendHash: backendHash})
 	}
 	if targetHash != "" {
 		txnLogger = txnLogger.With("target_backend_hash", targetHash)
@@ -1141,6 +1180,9 @@ func (h *Handler) handleRelease(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
 	}
+	if err := h.authorizeNamespace(r, namespace, nsauth.AccessAny); err != nil {
+		return err
+	}
 	payload.Namespace = namespace
 	if payload.Key == "" && r.URL.Query().Get("key") != "" {
 		payload.Key = r.URL.Query().Get("key")
@@ -1218,8 +1260,19 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request) error {
 			return err
 		}
 	}
+	namespace, err := h.resolveNamespace(r.URL.Query().Get("namespace"))
+	if err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
+	}
+	requiredAccess := nsauth.AccessAny
+	if publicRead {
+		requiredAccess = nsauth.AccessRead
+	}
+	if err := h.authorizeNamespace(r, namespace, requiredAccess); err != nil {
+		return err
+	}
 	res, err := h.core.Get(r.Context(), core.GetCommand{
-		Namespace:    r.URL.Query().Get("namespace"),
+		Namespace:    namespace,
 		Key:          key,
 		LeaseID:      leaseID,
 		FencingToken: fencingToken,
@@ -1349,6 +1402,9 @@ func (h *Handler) handleQuery(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
 	}
+	if err := h.authorizeNamespace(r, namespace, nsauth.AccessRead); err != nil {
+		return err
+	}
 	h.observeNamespace(namespace)
 	limit := req.Limit
 	if limit <= 0 {
@@ -1468,6 +1524,9 @@ func (h *Handler) handleIndexFlush(w http.ResponseWriter, r *http.Request) error
 	if err != nil {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
 	}
+	if err := h.authorizeNamespace(r, resolved, nsauth.AccessReadWrite); err != nil {
+		return err
+	}
 	mode := strings.TrimSpace(payload.Mode)
 	if m := strings.TrimSpace(query.Get("mode")); m != "" {
 		mode = m
@@ -1575,6 +1634,9 @@ func (h *Handler) handleUpdate(w http.ResponseWriter, r *http.Request) error {
 	namespace, err := h.resolveNamespace(r.URL.Query().Get("namespace"))
 	if err != nil {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
+	}
+	if err := h.authorizeNamespace(r, namespace, nsauth.AccessWrite); err != nil {
+		return err
 	}
 	h.observeNamespace(namespace)
 	storageKey, err := h.namespacedKey(namespace, key)
@@ -1714,6 +1776,9 @@ func (h *Handler) handleMetadata(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
 	}
+	if err := h.authorizeNamespace(r, ns, nsauth.AccessWrite); err != nil {
+		return err
+	}
 	h.observeNamespace(ns)
 	storageKey, err := h.namespacedKey(ns, key)
 	if err != nil {
@@ -1794,6 +1859,9 @@ func (h *Handler) handleRemove(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
 	}
+	if err := h.authorizeNamespace(r, namespace, nsauth.AccessWrite); err != nil {
+		return err
+	}
 	h.observeNamespace(namespace)
 	storageKey, err := h.namespacedKey(namespace, key)
 	if err != nil {
@@ -1870,8 +1938,15 @@ func (h *Handler) handleDescribe(w http.ResponseWriter, r *http.Request) error {
 	if key == "" {
 		return httpError{Status: http.StatusBadRequest, Code: "missing_key", Detail: "key query required"}
 	}
+	namespace, err := h.resolveNamespace(r.URL.Query().Get("namespace"))
+	if err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
+	}
+	if err := h.authorizeNamespace(r, namespace, nsauth.AccessRead); err != nil {
+		return err
+	}
 	res, err := h.core.Describe(r.Context(), core.DescribeCommand{
-		Namespace: r.URL.Query().Get("namespace"),
+		Namespace: namespace,
 		Key:       key,
 	})
 	if err != nil {
@@ -1967,6 +2042,9 @@ func (h *Handler) handleQueueEnqueue(w http.ResponseWriter, r *http.Request) err
 	resolvedNamespace, err := h.resolveNamespace(meta.Namespace)
 	if err != nil {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
+	}
+	if err := h.authorizeNamespace(r, resolvedNamespace, nsauth.AccessWrite); err != nil {
+		return err
 	}
 	queueName := strings.TrimSpace(meta.Queue)
 	if queueName == "" {
@@ -2076,6 +2154,9 @@ func (h *Handler) handleQueueDequeue(w http.ResponseWriter, r *http.Request) err
 	resolvedNamespace, err := h.resolveNamespace(namespace)
 	if err != nil {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
+	}
+	if err := h.authorizeNamespace(r, resolvedNamespace, nsauth.AccessRead); err != nil {
+		return err
 	}
 	req.Namespace = resolvedNamespace
 	h.observeNamespace(resolvedNamespace)
@@ -2271,6 +2352,9 @@ func (h *Handler) handleQueueDequeueWithState(w http.ResponseWriter, r *http.Req
 	resolvedNamespace, err := h.resolveNamespace(namespace)
 	if err != nil {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
+	}
+	if err := h.authorizeNamespace(r, resolvedNamespace, nsauth.AccessRead); err != nil {
+		return err
 	}
 	req.Namespace = resolvedNamespace
 
@@ -2495,6 +2579,9 @@ func (h *Handler) handleQueueSubscribeInternal(w http.ResponseWriter, r *http.Re
 	resolvedNamespace, err := h.resolveNamespace(namespace)
 	if err != nil {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
+	}
+	if err := h.authorizeNamespace(r, resolvedNamespace, nsauth.AccessRead); err != nil {
+		return err
 	}
 	req.Namespace = resolvedNamespace
 
@@ -2834,6 +2921,9 @@ func (h *Handler) handleQueueAck(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
 	}
+	if err := h.authorizeNamespace(r, resolvedNamespace, nsauth.AccessRead); err != nil {
+		return err
+	}
 	req.Namespace = resolvedNamespace
 	h.observeNamespace(resolvedNamespace)
 	if req.Queue == "" || req.MessageID == "" || req.LeaseID == "" {
@@ -2929,6 +3019,9 @@ func (h *Handler) handleQueueNack(w http.ResponseWriter, r *http.Request) error 
 	resolvedNamespace, err := h.resolveNamespace(namespace)
 	if err != nil {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
+	}
+	if err := h.authorizeNamespace(r, resolvedNamespace, nsauth.AccessRead); err != nil {
+		return err
 	}
 	req.Namespace = resolvedNamespace
 	h.observeNamespace(resolvedNamespace)
@@ -3033,6 +3126,9 @@ func (h *Handler) handleQueueExtend(w http.ResponseWriter, r *http.Request) erro
 	resolvedNamespace, err := h.resolveNamespace(namespace)
 	if err != nil {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
+	}
+	if err := h.authorizeNamespace(r, resolvedNamespace, nsauth.AccessRead); err != nil {
+		return err
 	}
 	req.Namespace = resolvedNamespace
 	h.observeNamespace(resolvedNamespace)
@@ -3211,6 +3307,9 @@ func (h *Handler) handleNamespaceConfigGet(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
 	}
+	if err := h.authorizeNamespace(r, namespace, nsauth.AccessReadWrite); err != nil {
+		return err
+	}
 	h.observeNamespace(namespace)
 	loadRes, err := h.namespaceConfigs.Load(r.Context(), namespace)
 	if err != nil {
@@ -3263,6 +3362,9 @@ func (h *Handler) handleNamespaceConfigSet(w http.ResponseWriter, r *http.Reques
 		if err != nil {
 			return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
 		}
+	}
+	if err := h.authorizeNamespace(r, namespace, nsauth.AccessReadWrite); err != nil {
+		return err
 	}
 	if payload.Query == nil {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace_request", Detail: "query configuration required"}
@@ -3389,6 +3491,9 @@ func (h *Handler) handleAttachmentUpload(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
 	}
+	if err := h.authorizeNamespace(r, namespace, nsauth.AccessWrite); err != nil {
+		return err
+	}
 	h.observeNamespace(namespace)
 	storageKey, err := h.namespacedKey(namespace, key)
 	if err != nil {
@@ -3472,6 +3577,13 @@ func (h *Handler) handleAttachmentList(w http.ResponseWriter, r *http.Request) e
 	if err != nil {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
 	}
+	requiredAccess := nsauth.AccessAny
+	if publicRead {
+		requiredAccess = nsauth.AccessRead
+	}
+	if err := h.authorizeNamespace(r, namespace, requiredAccess); err != nil {
+		return err
+	}
 	h.observeNamespace(namespace)
 	txnID := strings.TrimSpace(r.Header.Get("X-Txn-ID"))
 	if !publicRead && txnID == "" {
@@ -3520,6 +3632,13 @@ func (h *Handler) handleAttachmentGet(w http.ResponseWriter, r *http.Request) er
 	namespace, err := h.resolveNamespace(r.URL.Query().Get("namespace"))
 	if err != nil {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
+	}
+	requiredAccess := nsauth.AccessAny
+	if publicRead {
+		requiredAccess = nsauth.AccessRead
+	}
+	if err := h.authorizeNamespace(r, namespace, requiredAccess); err != nil {
+		return err
 	}
 	h.observeNamespace(namespace)
 	txnID := strings.TrimSpace(r.Header.Get("X-Txn-ID"))
@@ -3578,6 +3697,9 @@ func (h *Handler) handleAttachmentDelete(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
 	}
+	if err := h.authorizeNamespace(r, namespace, nsauth.AccessWrite); err != nil {
+		return err
+	}
 	h.observeNamespace(namespace)
 	storageKey, err := h.namespacedKey(namespace, key)
 	if err != nil {
@@ -3627,6 +3749,9 @@ func (h *Handler) handleAttachmentDeleteAll(w http.ResponseWriter, r *http.Reque
 	namespace, err := h.resolveNamespace(r.URL.Query().Get("namespace"))
 	if err != nil {
 		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
+	}
+	if err := h.authorizeNamespace(r, namespace, nsauth.AccessWrite); err != nil {
+		return err
 	}
 	h.observeNamespace(namespace)
 	storageKey, err := h.namespacedKey(namespace, key)

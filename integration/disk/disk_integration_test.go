@@ -27,6 +27,7 @@ import (
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/integration/internal/cryptotest"
 	"pkt.systems/lockd/integration/internal/hatest"
+	"pkt.systems/lockd/integration/internal/locktest"
 	shutdowntest "pkt.systems/lockd/integration/internal/shutdowntest"
 	testlog "pkt.systems/lockd/integration/internal/testlog"
 	"pkt.systems/lockd/internal/storage"
@@ -119,6 +120,18 @@ func TestDiskAcquireNoWaitReturnsWaiting(t *testing.T) {
 	if !errors.As(err, &apiErr) || apiErr.Response.ErrorCode != "waiting" {
 		t.Fatalf("expected waiting API error, got %v", err)
 	}
+}
+
+func TestDiskAcquireIfNotExistsReturnsAlreadyExists(t *testing.T) {
+	ensureDiskRootEnv(t)
+	root := prepareDiskRoot(t, "")
+	cfg := buildDiskConfig(t, root, 0)
+	cli := startDiskServer(t, cfg)
+
+	locktest.RunAcquireIfNotExistsReturnsAlreadyExists(t, locktest.AcquireIfNotExistsConfig{
+		Client:    cli,
+		KeyPrefix: "disk-if-not-exists",
+	})
 }
 
 func TestDiskAttachmentsLifecycle(t *testing.T) {

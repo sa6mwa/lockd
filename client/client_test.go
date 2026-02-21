@@ -1124,6 +1124,21 @@ func (tpt *acquireBlockSecsTransport) RoundTrip(req *http.Request) (*http.Respon
 	return newJSONResponse(req, http.StatusOK, body), nil
 }
 
+type acquireAlreadyExistsTransport struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (tpt *acquireAlreadyExistsTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	tpt.mu.Lock()
+	defer tpt.mu.Unlock()
+	if req.URL.Path != "/v1/acquire" {
+		return newJSONResponse(req, http.StatusNotFound, `{"error":"not_found"}`), nil
+	}
+	tpt.calls++
+	return newJSONResponse(req, http.StatusConflict, `{"error":"already_exists","detail":"key already exists"}`), nil
+}
+
 func TestClientAcquireAllEndpointsDown(t *testing.T) {
 	transport := &downTransport{}
 	httpClient := &http.Client{Transport: transport}
@@ -1224,6 +1239,49 @@ func TestClientAcquireBlockWaitForeverHonorsContextDeadline(t *testing.T) {
 	}
 	if transport.blockSecs <= 0 {
 		t.Fatalf("expected block_secs > 0 when context has deadline, got %d", transport.blockSecs)
+	}
+}
+
+func TestClientAcquireAlreadyExistsNoRetry(t *testing.T) {
+	transport := &acquireAlreadyExistsTransport{}
+	httpClient := &http.Client{Transport: transport}
+	endpoints := []string{"http://hosta:9341"}
+	cli, err := client.NewWithEndpoints(endpoints,
+		client.WithDisableMTLS(true),
+		client.WithHTTPClient(httpClient),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	_, err = cli.Acquire(context.Background(), api.AcquireRequest{
+		Key:         "orders",
+		Owner:       "worker",
+		TTLSeconds:  5,
+		BlockSecs:   client.BlockWaitForever,
+		IfNotExists: true,
+	})
+	if err == nil {
+		t.Fatal("expected already_exists error")
+	}
+	if !client.IsAlreadyExists(err) {
+		t.Fatalf("expected IsAlreadyExists=true, got %v", err)
+	}
+	if !errors.Is(err, client.ErrAlreadyExists) {
+		t.Fatalf("expected errors.Is(err, ErrAlreadyExists), got %v", err)
+	}
+	var apiErr *client.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected APIError type, got %T: %v", err, err)
+	}
+	if apiErr.Response.ErrorCode != "already_exists" {
+		t.Fatalf("expected already_exists error code, got %q", apiErr.Response.ErrorCode)
+	}
+	transport.mu.Lock()
+	calls := transport.calls
+	transport.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("expected single acquire attempt, got %d", calls)
 	}
 }
 

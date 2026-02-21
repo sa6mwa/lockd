@@ -22,6 +22,7 @@ import (
 	azuretest "pkt.systems/lockd/integration/azuretest"
 	"pkt.systems/lockd/integration/internal/cryptotest"
 	"pkt.systems/lockd/integration/internal/hatest"
+	"pkt.systems/lockd/integration/internal/locktest"
 	shutdowntest "pkt.systems/lockd/integration/internal/shutdowntest"
 	testlog "pkt.systems/lockd/integration/internal/testlog"
 	"pkt.systems/lockd/internal/uuidv7"
@@ -157,6 +158,20 @@ func TestAzureAcquireNoWaitReturnsWaiting(t *testing.T) {
 	if !errors.As(err, &apiErr) || apiErr.Response.ErrorCode != "waiting" {
 		t.Fatalf("expected waiting API error, got %v", err)
 	}
+}
+
+func TestAzureAcquireIfNotExistsReturnsAlreadyExists(t *testing.T) {
+	cfg := loadAzureConfig(t)
+	ensureAzureStoreReady(t, context.Background(), cfg)
+	ts := startAzureTestServer(t, cfg)
+
+	locktest.RunAcquireIfNotExistsReturnsAlreadyExists(t, locktest.AcquireIfNotExistsConfig{
+		Client:    ts.Client,
+		KeyPrefix: "azure-if-not-exists",
+		CleanupKey: func(key string) {
+			cleanupAzure(t, cfg, key)
+		},
+	})
 }
 
 func TestAzureAttachmentsLifecycle(t *testing.T) {

@@ -12,6 +12,8 @@ type AcquireRequest struct {
 	Owner string `json:"owner"`
 	// BlockSecs controls acquire wait behavior in seconds (-1 no-wait, 0 indefinite, >0 bounded wait).
 	BlockSecs int64 `json:"block_seconds"`
+	// IfNotExists enforces create-only semantics: fail when the key already exists.
+	IfNotExists bool `json:"if_not_exists,omitempty"`
 	// TxnID associates the operation with a transaction coordinator record.
 	TxnID string `json:"txn_id,omitempty"`
 }

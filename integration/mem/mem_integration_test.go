@@ -24,6 +24,7 @@ import (
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/integration/internal/cryptotest"
 	"pkt.systems/lockd/integration/internal/hatest"
+	"pkt.systems/lockd/integration/internal/locktest"
 	shutdowntest "pkt.systems/lockd/integration/internal/shutdowntest"
 	testlog "pkt.systems/lockd/integration/internal/testlog"
 	memorybackend "pkt.systems/lockd/internal/storage/memory"
@@ -100,6 +101,16 @@ func TestMemAcquireNoWaitReturnsWaiting(t *testing.T) {
 	if !errors.As(err, &apiErr) || apiErr.Response.ErrorCode != "waiting" {
 		t.Fatalf("expected waiting API error, got %v", err)
 	}
+}
+
+func TestMemAcquireIfNotExistsReturnsAlreadyExists(t *testing.T) {
+	cfg := buildMemConfig(t)
+	cli := startMemServer(t, cfg)
+
+	locktest.RunAcquireIfNotExistsReturnsAlreadyExists(t, locktest.AcquireIfNotExistsConfig{
+		Client:    cli,
+		KeyPrefix: "mem-if-not-exists",
+	})
 }
 
 func TestMemAttachmentsLifecycle(t *testing.T) {

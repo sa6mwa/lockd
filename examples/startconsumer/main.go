@@ -26,7 +26,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	l := pslog.LoggerFromEnv(pslog.WithEnvOptions(pslog.Options{
+	l := pslog.LoggerFromEnv(context.Background(), pslog.WithEnvOptions(pslog.Options{
 		Mode:       pslog.ModeConsole,
 		TimeFormat: time.RFC3339,
 		MinLevel:   pslog.InfoLevel,
@@ -62,7 +62,7 @@ func main() {
 		prettyx.PrettyTo(os.Stdout, b, nil)
 	}()
 
-	clientLogger := pslog.LoggerFromEnv(pslog.WithEnvPrefix("CLIENT_LOG_"), pslog.WithEnvOptions(pslog.Options{
+	clientLogger := pslog.LoggerFromEnv(context.Background(), pslog.WithEnvPrefix("CLIENT_LOG_"), pslog.WithEnvOptions(pslog.Options{
 		Mode:       pslog.ModeConsole,
 		TimeFormat: time.RFC3339,
 		MinLevel:   pslog.InfoLevel,

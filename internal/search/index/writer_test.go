@@ -20,7 +20,7 @@ func TestWriterFlushByCount(t *testing.T) {
 		Store:         idxStore,
 		FlushDocs:     2,
 		FlushInterval: time.Minute,
-		Logger:        pslog.NewStructured(io.Discard),
+		Logger:        pslog.NewStructured(context.Background(), io.Discard),
 	})
 	defer writer.Close(context.Background())
 	doc := Document{Key: "doc-1", Fields: map[string][]string{"status": {"open"}}}
@@ -50,7 +50,7 @@ func TestWriterWaitForReadableReturnsAfterFlush(t *testing.T) {
 		FlushDocs:     100,
 		FlushInterval: 200 * time.Millisecond,
 		Clock:         clk,
-		Logger:        pslog.NewStructured(io.Discard),
+		Logger:        pslog.NewStructured(context.Background(), io.Discard),
 	})
 	defer writer.Close(context.Background())
 	writer.cancel() // disable background flush loop to control timing
@@ -93,7 +93,7 @@ func TestWriterWaitForReadableTimesOut(t *testing.T) {
 		FlushDocs:     100,
 		FlushInterval: 40 * time.Millisecond,
 		Clock:         clk,
-		Logger:        pslog.NewStructured(io.Discard),
+		Logger:        pslog.NewStructured(context.Background(), io.Discard),
 	})
 	defer writer.Close(context.Background())
 	writer.cancel()

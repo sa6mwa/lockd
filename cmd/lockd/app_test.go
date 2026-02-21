@@ -11,7 +11,7 @@ import (
 )
 
 func TestInvocationTargetsRootCommand(t *testing.T) {
-	root := newRootCommand(pslog.NewStructured(io.Discard))
+	root := newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
 	cases := []struct {
 		name string
 		args []string
@@ -56,7 +56,7 @@ func TestSubmainInvalidFlagLikeTokenBeforeSubcommand(t *testing.T) {
 }
 
 func TestRootHasGlobalClientShorthands(t *testing.T) {
-	root := newRootCommand(pslog.NewStructured(io.Discard))
+	root := newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
 	if flag := root.PersistentFlags().ShorthandLookup("v"); flag == nil || flag.Name != "verbose" {
 		t.Fatalf("expected global -v shorthand for --verbose, got %#v", flag)
 	}
@@ -69,7 +69,7 @@ func TestRootHasGlobalClientShorthands(t *testing.T) {
 }
 
 func TestBootstrapFlagIsRootOnly(t *testing.T) {
-	root := newRootCommand(pslog.NewStructured(io.Discard))
+	root := newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
 	if flag := root.Flags().Lookup("bootstrap"); flag == nil {
 		t.Fatalf("expected --bootstrap on root local flags")
 	}

@@ -2796,7 +2796,7 @@ func (c *LogCapture) Logger() pslog.Logger {
 	if level == 0 {
 		level = pslog.TraceLevel
 	}
-	logger := pslog.NewStructured(c)
+	logger := pslog.NewStructured(context.Background(), c)
 	return logger.LogLevel(level)
 }
 

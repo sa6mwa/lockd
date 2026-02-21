@@ -2,6 +2,7 @@ package testlog
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -32,7 +33,7 @@ type Recorder struct {
 func NewRecorder(t testing.TB, level pslog.Level) (pslog.Logger, *Recorder) {
 	rec := &Recorder{}
 	writer := &recordingWriter{t: t, recorder: rec}
-	logger := pslog.NewStructured(writer)
+	logger := pslog.NewStructured(context.Background(), writer)
 	if level != pslog.NoLevel {
 		logger = logger.LogLevel(level)
 	}

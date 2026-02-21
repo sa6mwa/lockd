@@ -422,7 +422,7 @@ func TestShutdownTimeoutDisabled(t *testing.T) {
 func TestShutdownIgnoresClosedListenerError(t *testing.T) {
 	srv, _, _ := newShutdownHarness(t)
 	var logBuf bytes.Buffer
-	srv.logger = pslog.NewWithOptions(&logBuf, pslog.Options{
+	srv.logger = pslog.NewWithOptions(context.Background(), &logBuf, pslog.Options{
 		Mode:             pslog.ModeStructured,
 		DisableTimestamp: true,
 		NoColor:          true,

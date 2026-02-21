@@ -304,7 +304,7 @@ func minioTestLoggerOption(tb testing.TB) lockd.TestServerOption {
 	}
 	tb.Cleanup(func() { _ = file.Close() })
 
-	logger := svcfields.WithSubsystem(pslog.NewStructured(file).With("app", "lockd"), "bench.minio.harness")
+	logger := svcfields.WithSubsystem(pslog.NewStructured(context.Background(), file).With("app", "lockd"), "bench.minio.harness")
 	if level, ok := pslog.ParseLevel(levelStr); ok {
 		logger = logger.LogLevel(level)
 	} else {

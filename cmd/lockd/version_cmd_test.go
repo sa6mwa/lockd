@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"strings"
 	"testing"
@@ -12,7 +13,7 @@ import (
 
 func executeRootCommand(t *testing.T, args ...string) (string, string, error) {
 	t.Helper()
-	cmd := newRootCommand(pslog.NewStructured(io.Discard))
+	cmd := newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.SetOut(&stdout)

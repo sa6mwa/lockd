@@ -2416,7 +2416,7 @@ func diskTestLoggerOption(tb testing.TB) lockd.TestServerOption {
 	}
 	tb.Cleanup(func() { _ = file.Close() })
 
-	logger := svcfields.WithSubsystem(pslog.NewStructured(file), "bench.disk")
+	logger := svcfields.WithSubsystem(pslog.NewStructured(context.Background(), file), "bench.disk")
 	if level, ok := pslog.ParseLevel(levelStr); ok {
 		logger = logger.LogLevel(level)
 	} else {

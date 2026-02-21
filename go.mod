@@ -41,7 +41,7 @@ require (
 	pkt.systems/jpact v0.1.0
 	pkt.systems/kryptograf v0.5.1
 	pkt.systems/psi v0.3.0
-	pkt.systems/pslog v0.15.0
+	pkt.systems/pslog v0.20.0
 )
 
 require pkt.systems/version v0.4.0

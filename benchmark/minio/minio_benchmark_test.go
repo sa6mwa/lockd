@@ -446,7 +446,7 @@ func minioBenchLoggerOptions(tb testing.TB) (lockd.TestServerOption, lockdclient
 		tb.Cleanup(func() { _ = os.Remove(logPath) })
 	}
 
-	baseLogger := svcfields.WithSubsystem(pslog.NewStructured(writer), "bench.minio")
+	baseLogger := svcfields.WithSubsystem(pslog.NewStructured(context.Background(), writer), "bench.minio")
 	if level, ok := pslog.ParseLevel(levelStr); ok {
 		baseLogger = baseLogger.LogLevel(level)
 	} else {

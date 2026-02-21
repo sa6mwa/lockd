@@ -328,7 +328,7 @@ func (c *clientCLIConfig) setupLogger() error {
 	}
 
 	if logOutputExplicit && c.logOutput != "" {
-		c.logger = pslog.LoggerFromEnv(
+		c.logger = pslog.LoggerFromEnv(context.Background(),
 			pslog.WithEnvPrefix("LOCKD_LOG_"),
 			pslog.WithEnvOptions(pslog.Options{Mode: pslog.ModeStructured, MinLevel: level}),
 			pslog.WithEnvWriter(writer),

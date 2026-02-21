@@ -22,7 +22,7 @@ import (
 )
 
 func submain(ctx context.Context) int {
-	baseLogger := pslog.LoggerFromEnv(
+	baseLogger := pslog.LoggerFromEnv(context.Background(),
 		pslog.WithEnvPrefix("LOCKD_LOG_"),
 		pslog.WithEnvOptions(pslog.Options{Mode: pslog.ModeStructured, MinLevel: pslog.InfoLevel}),
 		pslog.WithEnvWriter(os.Stderr),

@@ -661,7 +661,7 @@ func newBenchLogger(cfg benchConfig) (pslog.Logger, func()) {
 		writer = f
 		cleanup = func() { _ = f.Close() }
 	}
-	logger := pslog.NewStructured(writer).LogLevel(level)
+	logger := pslog.NewStructured(context.Background(), writer).LogLevel(level)
 	return logger, cleanup
 }
 

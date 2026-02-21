@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"net/url"
 	"os"
@@ -14,7 +15,7 @@ import (
 
 func TestBootstrapConfigDir(t *testing.T) {
 	dir := t.TempDir()
-	logger := pslog.NewStructured(io.Discard)
+	logger := pslog.NewStructured(context.Background(), io.Discard)
 
 	if err := bootstrapConfigDir(dir, logger); err != nil {
 		t.Fatalf("bootstrap failed: %v", err)

@@ -568,7 +568,7 @@ func diskBenchLoggerOptions(tb testing.TB) (lockd.TestServerOption, lockdclient.
 		tb.Cleanup(func() { _ = os.Remove(logPath) })
 	}
 
-	baseLogger := svcfields.WithSubsystem(pslog.NewStructured(writer), "bench.disk")
+	baseLogger := svcfields.WithSubsystem(pslog.NewStructured(context.Background(), writer), "bench.disk")
 	if level, ok := pslog.ParseLevel(levelStr); ok {
 		baseLogger = baseLogger.LogLevel(level)
 	} else {

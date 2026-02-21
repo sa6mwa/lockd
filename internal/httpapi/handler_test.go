@@ -39,7 +39,7 @@ func scanNamespaceConfig() namespaces.Config {
 func TestAcquireLifecycle(t *testing.T) {
 	store := memory.New()
 	clk := newStubClock(time.Unix(1_700_000_000, 0))
-	logger := pslog.NewStructured(io.Discard)
+	logger := pslog.NewStructured(context.Background(), io.Discard)
 
 	handler := New(Config{
 		Store:        store,
@@ -136,7 +136,7 @@ func TestAcquireLifecycle(t *testing.T) {
 func TestAttachmentContentLengthHeader(t *testing.T) {
 	store := memory.New()
 	clk := newStubClock(time.Unix(1_700_000_000, 0))
-	logger := pslog.NewStructured(io.Discard)
+	logger := pslog.NewStructured(context.Background(), io.Discard)
 
 	handler := New(Config{
 		Store:        store,
@@ -235,7 +235,7 @@ func TestQueryDisabled(t *testing.T) {
 	store := memory.New()
 	handler := New(Config{
 		Store:        store,
-		Logger:       pslog.NewStructured(io.Discard),
+		Logger:       pslog.NewStructured(context.Background(), io.Discard),
 		Clock:        newStubClock(time.Unix(1_700_000_000, 0)),
 		JSONMaxBytes: 1 << 20,
 	})
@@ -274,7 +274,7 @@ func TestQuerySuccess(t *testing.T) {
 	}
 	handler := New(Config{
 		Store:                  store,
-		Logger:                 pslog.NewStructured(io.Discard),
+		Logger:                 pslog.NewStructured(context.Background(), io.Discard),
 		Clock:                  newStubClock(time.Unix(1_700_000_000, 0)),
 		SearchAdapter:          adapter,
 		DefaultNamespaceConfig: scanNamespaceConfig(),
@@ -330,7 +330,7 @@ func TestTxnEndpointsRequireTCAuth(t *testing.T) {
 	store := memory.New()
 	handler := New(Config{
 		Store:         store,
-		Logger:        pslog.NewStructured(io.Discard),
+		Logger:        pslog.NewStructured(context.Background(), io.Discard),
 		Clock:         newStubClock(time.Unix(1_700_000_000, 0)),
 		JSONMaxBytes:  1 << 20,
 		TCAuthEnabled: true,
@@ -564,7 +564,7 @@ func TestQueryInvalidCursor(t *testing.T) {
 	}
 	handler := New(Config{
 		Store:                  store,
-		Logger:                 pslog.NewStructured(io.Discard),
+		Logger:                 pslog.NewStructured(context.Background(), io.Discard),
 		Clock:                  newStubClock(time.Unix(1_700_000_000, 0)),
 		SearchAdapter:          adapter,
 		DefaultNamespaceConfig: scanNamespaceConfig(),
@@ -699,7 +699,7 @@ func TestQueryReturnDocuments(t *testing.T) {
 func TestGetPublicWithoutLease(t *testing.T) {
 	store := memory.New()
 	clk := newStubClock(time.Unix(1_700_000_000, 0))
-	logger := pslog.NewStructured(io.Discard)
+	logger := pslog.NewStructured(context.Background(), io.Discard)
 
 	handler := New(Config{
 		Store:        store,
@@ -778,7 +778,7 @@ func TestGetPublicWithoutLease(t *testing.T) {
 func TestAcquireAutoGeneratesKey(t *testing.T) {
 	store := memory.New()
 	clk := newStubClock(time.Unix(1_700_000_000, 0))
-	logger := pslog.NewStructured(io.Discard)
+	logger := pslog.NewStructured(context.Background(), io.Discard)
 
 	handler := New(Config{
 		Store:        store,
@@ -1410,7 +1410,7 @@ func newQueryTestServer(t *testing.T, adapter search.Adapter) *httptest.Server {
 	configStore := namespaces.NewConfigStore(store, nil, nil, defaultCfg)
 	handler := New(Config{
 		Store:                  store,
-		Logger:                 pslog.NewStructured(io.Discard),
+		Logger:                 pslog.NewStructured(context.Background(), io.Discard),
 		Clock:                  newStubClock(time.Unix(1_700_000_000, 0)),
 		SearchAdapter:          adapter,
 		NamespaceConfigs:       configStore,

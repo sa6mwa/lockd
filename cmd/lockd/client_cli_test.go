@@ -1673,7 +1673,7 @@ func TestClientCLIConfigDefaultLoggerDisabled(t *testing.T) {
 	t.Cleanup(viper.Reset)
 
 	var buf bytes.Buffer
-	baseLogger := pslog.NewStructured(&buf).With("base", "yes")
+	baseLogger := pslog.NewStructured(context.Background(), &buf).With("base", "yes")
 	cmd := &cobra.Command{Use: "client-test"}
 	cfg := addClientConnectionFlags(cmd, true, baseLogger)
 	if err := cmd.PersistentFlags().Parse([]string{}); err != nil {
@@ -1694,7 +1694,7 @@ func TestClientCLIConfigVerboseInheritsBaseLogger(t *testing.T) {
 	t.Cleanup(viper.Reset)
 
 	var buf bytes.Buffer
-	baseLogger := pslog.NewStructured(&buf).With("base", "yes")
+	baseLogger := pslog.NewStructured(context.Background(), &buf).With("base", "yes")
 	cmd := &cobra.Command{Use: "client-test"}
 	cfg := addClientConnectionFlags(cmd, true, baseLogger)
 	if err := cmd.PersistentFlags().Parse([]string{"-v"}); err != nil {
@@ -1725,7 +1725,7 @@ func TestClientCLIConfigFlagLogLevelOverridesEnv(t *testing.T) {
 	t.Setenv("LOCKD_CLIENT_LOG_LEVEL", "error")
 
 	var buf bytes.Buffer
-	baseLogger := pslog.NewStructured(&buf).With("base", "yes")
+	baseLogger := pslog.NewStructured(context.Background(), &buf).With("base", "yes")
 	cmd := &cobra.Command{Use: "client-test"}
 	cfg := addClientConnectionFlags(cmd, true, baseLogger)
 	if err := cmd.PersistentFlags().Parse([]string{"--log-level", "trace"}); err != nil {
@@ -1754,7 +1754,7 @@ func runCLICommand(t *testing.T, args ...string) {
 
 func runCLICommandOutput(t *testing.T, args ...string) (string, string) {
 	t.Helper()
-	cmd := newRootCommand(pslog.NewStructured(io.Discard))
+	cmd := newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -1767,7 +1767,7 @@ func runCLICommandOutput(t *testing.T, args ...string) (string, string) {
 
 func runCLICommandExpectError(t *testing.T, args ...string) error {
 	t.Helper()
-	cmd := newRootCommand(pslog.NewStructured(io.Discard))
+	cmd := newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
 	cmd.SetArgs(args)
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)

@@ -417,6 +417,87 @@ func TestClientWithBundlePathMTLS(t *testing.T) {
 	}
 }
 
+func TestClientWithBundlePEMMTLS(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ts, bundlePEM, _, hit := startClientMTLSTestServer(t)
+
+	cli, err := client.New(ts.URL, client.WithBundlePEM(bundlePEM))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	resp, err := cli.Describe(ctx, "demo")
+	if err != nil {
+		t.Fatalf("describe: %v", err)
+	}
+	if resp == nil || resp.Key != "demo" {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+	if !*hit {
+		t.Fatal("expected server to receive request")
+	}
+}
+
+func TestClientWithBundlePEMInvalid(t *testing.T) {
+	_, err := client.New("https://127.0.0.1:9341", client.WithBundlePEM([]byte("not-a-bundle")))
+	if err == nil {
+		t.Fatal("expected error for invalid bundle PEM")
+	}
+	if !strings.Contains(err.Error(), "load client bundle from PEM") {
+		t.Fatalf("expected PEM parse error, got %v", err)
+	}
+}
+
+func TestClientWithBundlePEMOverridesBundlePath(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ts, bundlePEM, _, hit := startClientMTLSTestServer(t)
+
+	cli, err := client.New(
+		ts.URL,
+		client.WithBundlePath(filepath.Join(t.TempDir(), "missing-client.pem")),
+		client.WithBundlePEM(bundlePEM),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	resp, err := cli.Describe(ctx, "demo")
+	if err != nil {
+		t.Fatalf("describe: %v", err)
+	}
+	if resp == nil || resp.Key != "demo" {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+	if !*hit {
+		t.Fatal("expected server to receive request")
+	}
+}
+
+func TestClientWithBundlePathOverridesBundlePEM(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ts, _, bundlePath, hit := startClientMTLSTestServer(t)
+
+	cli, err := client.New(
+		ts.URL,
+		client.WithBundlePEM([]byte("invalid")),
+		client.WithBundlePath(bundlePath),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	resp, err := cli.Describe(ctx, "demo")
+	if err != nil {
+		t.Fatalf("describe: %v", err)
+	}
+	if resp == nil || resp.Key != "demo" {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+	if !*hit {
+		t.Fatal("expected server to receive request")
+	}
+}
+
 func TestClientWithBundlePathInvalid(t *testing.T) {
 	_, err := client.New("https://127.0.0.1:9341", client.WithBundlePath(filepath.Join(t.TempDir(), "missing-client.pem")))
 	if err == nil {
@@ -474,6 +555,65 @@ func TestClientWithBundlePathDisableExpansion(t *testing.T) {
 	if !strings.Contains(err.Error(), literal) {
 		t.Fatalf("expected literal bundle path %q in error, got %v", literal, err)
 	}
+}
+
+func startClientMTLSTestServer(t *testing.T) (*httptest.Server, []byte, string, *bool) {
+	t.Helper()
+
+	ca, err := tlsutil.GenerateCA("lockd-sdk-test-ca", time.Hour)
+	if err != nil {
+		t.Fatalf("generate ca: %v", err)
+	}
+	serverIssued, err := ca.IssueServer([]string{"127.0.0.1", "localhost"}, "lockd-sdk-test-server", time.Hour)
+	if err != nil {
+		t.Fatalf("issue server cert: %v", err)
+	}
+	clientIssued, err := ca.IssueClient(tlsutil.ClientCertRequest{
+		CommonName: "lockd-sdk-test-client",
+		Validity:   time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("issue client cert: %v", err)
+	}
+	clientBundlePEM, err := tlsutil.EncodeClientBundle(ca.CertPEM, clientIssued.CertPEM, clientIssued.KeyPEM)
+	if err != nil {
+		t.Fatalf("encode client bundle: %v", err)
+	}
+	bundlePath := filepath.Join(t.TempDir(), "client.pem")
+	if err := os.WriteFile(bundlePath, clientBundlePEM, 0o600); err != nil {
+		t.Fatalf("write client bundle: %v", err)
+	}
+
+	serverCert, err := tls.X509KeyPair(serverIssued.CertPEM, serverIssued.KeyPEM)
+	if err != nil {
+		t.Fatalf("load server keypair: %v", err)
+	}
+	clientCAs := x509.NewCertPool()
+	if !clientCAs.AppendCertsFromPEM(ca.CertPEM) {
+		t.Fatal("append ca cert")
+	}
+
+	hit := new(bool)
+	ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/describe" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if len(r.TLS.PeerCertificates) == 0 {
+			t.Fatal("expected peer client certificate")
+		}
+		*hit = true
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"key":"demo","version":1}`)
+	}))
+	ts.TLS = &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{serverCert},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    clientCAs,
+	}
+	ts.StartTLS()
+	t.Cleanup(ts.Close)
+	return ts, clientBundlePEM, bundlePath, hit
 }
 
 func TestAcquireWaitForeverIgnoresHTTPTimeout(t *testing.T) {
@@ -3021,6 +3161,93 @@ func TestClientSubscribe(t *testing.T) {
 	}
 }
 
+func TestClientSubscribeNamespaceOverride(t *testing.T) {
+	var subscribeReq api.DequeueRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/queue/subscribe":
+			if err := json.NewDecoder(r.Body).Decode(&subscribeReq); err != nil {
+				t.Fatalf("decode subscribe request: %v", err)
+			}
+			mw := multipart.NewWriter(w)
+			w.Header().Set("Content-Type", "multipart/related; boundary="+mw.Boundary())
+			w.WriteHeader(http.StatusOK)
+			metaHeader := textproto.MIMEHeader{}
+			metaHeader.Set("Content-Type", "application/json")
+			metaHeader.Set("Content-Disposition", `form-data; name="meta"`)
+			metaPart, err := mw.CreatePart(metaHeader)
+			if err != nil {
+				t.Fatalf("create meta part: %v", err)
+			}
+			if err := json.NewEncoder(metaPart).Encode(map[string]any{
+				"message": map[string]any{
+					"queue":                      "orders",
+					"message_id":                 "msg-1",
+					"attempts":                   1,
+					"max_attempts":               3,
+					"not_visible_until_unix":     time.Now().Unix(),
+					"visibility_timeout_seconds": 10,
+					"payload_content_type":       "application/json",
+					"payload_bytes":              2,
+					"lease_id":                   "lease-1",
+					"lease_expires_at_unix":      time.Now().Add(10 * time.Second).Unix(),
+				},
+				"next_cursor": "cursor-1",
+			}); err != nil {
+				t.Fatalf("encode meta: %v", err)
+			}
+			payloadHeader := textproto.MIMEHeader{}
+			payloadHeader.Set("Content-Type", "application/json")
+			payloadHeader.Set("Content-Disposition", `form-data; name="payload"`)
+			payloadPart, err := mw.CreatePart(payloadHeader)
+			if err != nil {
+				t.Fatalf("create payload part: %v", err)
+			}
+			if _, err := payloadPart.Write([]byte("{}")); err != nil {
+				t.Fatalf("write payload: %v", err)
+			}
+			if err := mw.Close(); err != nil {
+				t.Fatalf("close multipart: %v", err)
+			}
+		case "/v1/queue/ack":
+			_ = json.NewEncoder(w).Encode(map[string]any{"acked": true})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	cli, err := client.New(
+		srv.URL,
+		client.WithDisableMTLS(true),
+		client.WithEndpointShuffle(false),
+		client.WithDefaultNamespace("client-default"),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	err = cli.Subscribe(ctx, "orders", client.SubscribeOptions{
+		Namespace: "subscribe-override",
+		Owner:     "worker-1",
+	}, func(_ context.Context, msg *client.QueueMessage) error {
+		defer msg.Close()
+		if ackErr := msg.Ack(context.Background()); ackErr != nil {
+			return ackErr
+		}
+		cancel()
+		return nil
+	})
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("subscribe: %v", err)
+	}
+
+	if subscribeReq.Namespace != "subscribe-override" {
+		t.Fatalf("expected subscribe namespace override, got %q", subscribeReq.Namespace)
+	}
+}
+
 func TestClientSubscribeWithState(t *testing.T) {
 	now := time.Now().Unix()
 	message := testQueueMessage{
@@ -3674,6 +3901,149 @@ func TestClientStartConsumerWithStateMessage(t *testing.T) {
 	}
 }
 
+func TestClientStartConsumerNamespacePrecedence(t *testing.T) {
+	tests := []struct {
+		name              string
+		clientDefaultNS   string
+		configNamespace   string
+		optionsNamespace  string
+		expectedNamespace string
+	}{
+		{
+			name:              "consumer config namespace",
+			clientDefaultNS:   "default-ns",
+			configNamespace:   "consumer-ns",
+			expectedNamespace: "consumer-ns",
+		},
+		{
+			name:              "options override consumer namespace",
+			clientDefaultNS:   "default-ns",
+			configNamespace:   "consumer-ns",
+			optionsNamespace:  "options-ns",
+			expectedNamespace: "options-ns",
+		},
+		{
+			name:              "fallback to client default",
+			clientDefaultNS:   "default-ns",
+			expectedNamespace: "default-ns",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var (
+				mu            sync.Mutex
+				subscribeReqs []api.DequeueRequest
+			)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v1/queue/subscribe":
+					var req api.DequeueRequest
+					if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+						t.Fatalf("decode subscribe request: %v", err)
+					}
+					mu.Lock()
+					subscribeReqs = append(subscribeReqs, req)
+					mu.Unlock()
+
+					mw := multipart.NewWriter(w)
+					w.Header().Set("Content-Type", "multipart/related; boundary="+mw.Boundary())
+					w.WriteHeader(http.StatusOK)
+
+					metaHeader := textproto.MIMEHeader{}
+					metaHeader.Set("Content-Type", "application/json")
+					metaHeader.Set("Content-Disposition", `form-data; name="meta"`)
+					metaPart, err := mw.CreatePart(metaHeader)
+					if err != nil {
+						t.Fatalf("create meta part: %v", err)
+					}
+					if err := json.NewEncoder(metaPart).Encode(map[string]any{
+						"message": map[string]any{
+							"queue":                      "orders",
+							"message_id":                 "msg-1",
+							"attempts":                   1,
+							"max_attempts":               3,
+							"not_visible_until_unix":     time.Now().Unix(),
+							"visibility_timeout_seconds": 10,
+							"payload_content_type":       "application/json",
+							"payload_bytes":              2,
+							"lease_id":                   "lease-1",
+							"lease_expires_at_unix":      time.Now().Add(10 * time.Second).Unix(),
+						},
+						"next_cursor": "cursor-1",
+					}); err != nil {
+						t.Fatalf("encode meta: %v", err)
+					}
+
+					payloadHeader := textproto.MIMEHeader{}
+					payloadHeader.Set("Content-Type", "application/json")
+					payloadHeader.Set("Content-Disposition", `form-data; name="payload"`)
+					payloadPart, err := mw.CreatePart(payloadHeader)
+					if err != nil {
+						t.Fatalf("create payload part: %v", err)
+					}
+					if _, err := payloadPart.Write([]byte("{}")); err != nil {
+						t.Fatalf("write payload: %v", err)
+					}
+
+					if err := mw.Close(); err != nil {
+						t.Fatalf("close multipart: %v", err)
+					}
+				case "/v1/queue/ack":
+					_ = json.NewEncoder(w).Encode(map[string]any{"acked": true})
+				default:
+					t.Fatalf("unexpected path %s", r.URL.Path)
+				}
+			}))
+			t.Cleanup(srv.Close)
+
+			cli, err := client.New(
+				srv.URL,
+				client.WithDisableMTLS(true),
+				client.WithEndpointShuffle(false),
+				client.WithDefaultNamespace(tc.clientDefaultNS),
+			)
+			if err != nil {
+				t.Fatalf("new client: %v", err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			err = cli.StartConsumer(ctx, client.ConsumerConfig{
+				Name:      "orders-consumer",
+				Queue:     "orders",
+				Namespace: tc.configNamespace,
+				Options: client.SubscribeOptions{
+					Namespace: tc.optionsNamespace,
+				},
+				MessageHandler: func(handlerCtx context.Context, msg client.ConsumerMessage) error {
+					if msg.Message != nil {
+						defer msg.Message.Close()
+						if ackErr := msg.Message.Ack(context.Background()); ackErr != nil {
+							return ackErr
+						}
+					}
+					cancel()
+					return nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("start consumer: %v", err)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if len(subscribeReqs) == 0 {
+				t.Fatalf("expected at least one subscribe request")
+			}
+			if got := subscribeReqs[0].Namespace; got != tc.expectedNamespace {
+				t.Fatalf("expected namespace %q, got %q", tc.expectedNamespace, got)
+			}
+		})
+	}
+}
+
 func TestClientStartConsumerRestartsAndCallsErrorHandler(t *testing.T) {
 	now := time.Now().Unix()
 	message := testQueueMessage{
@@ -3802,6 +4172,79 @@ func TestClientStartConsumerRestartsAndCallsErrorHandler(t *testing.T) {
 	}
 	if errorCalls[1].Attempt != 2 || errorCalls[1].RestartIn < 20*time.Millisecond {
 		t.Fatalf("unexpected second error event: %+v", errorCalls[1])
+	}
+}
+
+func TestClientStartConsumerStopsOnNamespaceForbidden(t *testing.T) {
+	var subscribeCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/queue/subscribe":
+			subscribeCalls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(api.ErrorResponse{
+				ErrorCode: "namespace_forbidden",
+				Detail:    `namespace "stash" requires read permission`,
+			})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	cli, err := client.New(srv.URL, client.WithDisableMTLS(true), client.WithEndpointShuffle(false))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	var (
+		mu     sync.Mutex
+		events []client.ConsumerError
+	)
+	err = cli.StartConsumer(context.Background(), client.ConsumerConfig{
+		Name:  "ackOnThree",
+		Queue: "testing",
+		Options: client.SubscribeOptions{
+			Namespace: "stash",
+			Owner:     "worker-authz",
+		},
+		RestartPolicy: client.ConsumerRestartPolicy{
+			ImmediateRetries: 5,
+			BaseDelay:        10 * time.Millisecond,
+			MaxDelay:         50 * time.Millisecond,
+			Multiplier:       2,
+		},
+		MessageHandler: func(context.Context, client.ConsumerMessage) error {
+			t.Fatal("message handler should not be invoked")
+			return nil
+		},
+		ErrorHandler: func(_ context.Context, event client.ConsumerError) error {
+			mu.Lock()
+			defer mu.Unlock()
+			events = append(events, event)
+			return nil
+		},
+	})
+	if err == nil {
+		t.Fatalf("expected non-retryable consumer error")
+	}
+	if !strings.Contains(err.Error(), "namespace_forbidden") {
+		t.Fatalf("expected namespace_forbidden error, got %v", err)
+	}
+	if got := subscribeCalls.Load(); got != 1 {
+		t.Fatalf("expected exactly one subscribe attempt, got %d", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(events) != 1 {
+		t.Fatalf("expected one error event, got %d", len(events))
+	}
+	if events[0].Attempt != 1 {
+		t.Fatalf("expected attempt=1, got %+v", events[0])
+	}
+	if events[0].RestartIn != 0 {
+		t.Fatalf("expected restart_in=0 for non-retryable error, got %+v", events[0])
 	}
 }
 

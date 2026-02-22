@@ -194,6 +194,9 @@ type ConsumerConfig struct {
 	Name string
 	// Queue is the queue name to subscribe to.
 	Queue string
+	// Namespace scopes this consumer when Options.Namespace is empty.
+	// Empty falls back to the client's default namespace.
+	Namespace string
 	// Options configures subscription behavior (namespace, owner, prefetch, etc.).
 	// When Options.Owner is empty, StartConsumer generates a unique owner value.
 	Options SubscribeOptions
@@ -1655,26 +1658,42 @@ func (c *Client) initialize(endpoints []string) error {
 			applyDefaultTransportTuning(tr)
 		}
 	}
-	if !c.disableMTLS && strings.TrimSpace(c.bundlePath) != "" {
-		bundlePath := c.bundlePath
-		if !c.bundlePathDisableExpansion {
-			bundlePath, err = pathutil.ExpandUserAndEnv(bundlePath)
+	if !c.disableMTLS {
+		var (
+			clientBundle *tlsutil.ClientBundle
+			bundleSource string
+		)
+		switch {
+		case len(c.bundlePEM) > 0:
+			clientBundle, err = tlsutil.LoadClientBundleFromBytes(c.bundlePEM)
 			if err != nil {
-				return fmt.Errorf("lockd: expand client bundle path %q: %w", c.bundlePath, err)
+				return fmt.Errorf("lockd: load client bundle from PEM: %w", err)
 			}
-			c.bundlePath = bundlePath
+			bundleSource = "pem"
+		case strings.TrimSpace(c.bundlePath) != "":
+			bundlePath := c.bundlePath
+			if !c.bundlePathDisableExpansion {
+				bundlePath, err = pathutil.ExpandUserAndEnv(bundlePath)
+				if err != nil {
+					return fmt.Errorf("lockd: expand client bundle path %q: %w", c.bundlePath, err)
+				}
+				c.bundlePath = bundlePath
+			}
+			clientBundle, err = tlsutil.LoadClientBundle(bundlePath)
+			if err != nil {
+				return fmt.Errorf("lockd: load client bundle %s: %w", bundlePath, err)
+			}
+			bundleSource = "path"
 		}
-		clientBundle, err := tlsutil.LoadClientBundle(bundlePath)
-		if err != nil {
-			return fmt.Errorf("lockd: load client bundle %s: %w", bundlePath, err)
+		if clientBundle != nil {
+			tr, ok := c.httpClient.Transport.(*http.Transport)
+			if !ok || tr == nil {
+				return fmt.Errorf("lockd: with bundle %s requires *http.Transport, got %T", bundleSource, c.httpClient.Transport)
+			}
+			cloned := tr.Clone()
+			cloned.TLSClientConfig = buildClientTLS(clientBundle)
+			c.httpClient.Transport = cloned
 		}
-		tr, ok := c.httpClient.Transport.(*http.Transport)
-		if !ok || tr == nil {
-			return fmt.Errorf("lockd: with bundle path requires *http.Transport, got %T", c.httpClient.Transport)
-		}
-		cloned := tr.Clone()
-		cloned.TLSClientConfig = buildClientTLS(clientBundle)
-		c.httpClient.Transport = cloned
 	}
 	if c.httpClient.Timeout != 0 {
 		c.httpClient.Timeout = 0
@@ -3059,6 +3078,7 @@ type Client struct {
 	keepAliveTimeout           time.Duration
 	forUpdateTimeout           time.Duration
 	disableMTLS                bool
+	bundlePEM                  []byte
 	bundlePath                 string
 	bundlePathDisableExpansion bool
 	logger                     pslog.Base
@@ -3436,6 +3456,25 @@ func isNodePassiveError(err error) bool {
 	return false
 }
 
+func isNonRetryableConsumerError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	if apiErr.Status == http.StatusUnauthorized || apiErr.Status == http.StatusForbidden {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(apiErr.Response.ErrorCode)) {
+	case "namespace_forbidden", "forbidden", "unauthorized", "permission_denied":
+		return true
+	default:
+		return false
+	}
+}
+
 func isTransportError(err error) bool {
 	if err == nil {
 		return false
@@ -3570,7 +3609,18 @@ func WithDisableMTLS(disable bool) Option {
 // Use WithBundlePathDisableExpansion() to treat the path literally.
 func WithBundlePath(path string) Option {
 	return func(c *Client) {
+		c.bundlePEM = nil
 		c.bundlePath = strings.TrimSpace(path)
+	}
+}
+
+// WithBundlePEM configures an in-memory mTLS client bundle PEM (CA cert + client cert + key).
+// This option overrides any previously configured bundle path.
+func WithBundlePEM(pemBytes []byte) Option {
+	return func(c *Client) {
+		c.bundlePEM = append([]byte(nil), pemBytes...)
+		c.bundlePath = ""
+		c.bundlePathDisableExpansion = false
 	}
 }
 
@@ -6399,7 +6449,7 @@ func (c *Client) subscribe(ctx context.Context, queue string, opts SubscribeOpti
 	if owner == "" {
 		return fmt.Errorf("lockd: owner is required")
 	}
-	namespace, err := c.namespaceFor("")
+	namespace, err := c.namespaceFor(opts.Namespace)
 	if err != nil {
 		return err
 	}
@@ -6839,6 +6889,10 @@ func normalizeConsumerConfigs(consumers []ConsumerConfig) ([]consumerRuntimeConf
 			return nil, fmt.Errorf("lockd: consumer config[%d] message handler is required", idx)
 		}
 		opts := cfg.Options
+		opts.Namespace = strings.TrimSpace(opts.Namespace)
+		if opts.Namespace == "" {
+			opts.Namespace = strings.TrimSpace(cfg.Namespace)
+		}
 		opts.Owner = strings.TrimSpace(opts.Owner)
 		if opts.Owner == "" {
 			opts.Owner = defaultConsumerOwner(name)
@@ -7048,7 +7102,11 @@ func (c *Client) handleConsumerFailure(ctx context.Context, cfg consumerRuntimeC
 	if cfg.restartPolicy.MaxFailures > 0 && *failures > cfg.restartPolicy.MaxFailures {
 		return fmt.Errorf("lockd: consumer %q queue %q exceeded max failures (%d): %w", cfg.name, cfg.queue, cfg.restartPolicy.MaxFailures, runErr)
 	}
+	nonRetryable := isNonRetryableConsumerError(runErr)
 	delay := consumerRestartDelay(*failures, cfg.restartPolicy)
+	if nonRetryable {
+		delay = 0
+	}
 	event := ConsumerError{
 		Name:      cfg.name,
 		Queue:     cfg.queue,
@@ -7062,15 +7120,29 @@ func (c *Client) handleConsumerFailure(ctx context.Context, cfg consumerRuntimeC
 			return fmt.Errorf("lockd: consumer %q queue %q error handler: %w", cfg.name, cfg.queue, handlerErr)
 		}
 	} else {
-		c.logWarnCtx(ctx,
-			"client.consumer.restart",
-			"consumer", cfg.name,
-			"queue", cfg.queue,
-			"stateful", cfg.withState,
-			"attempt", *failures,
-			"restart_in", delay,
-			"error", runErr,
-		)
+		if nonRetryable {
+			c.logErrorCtx(ctx,
+				"client.consumer.stop",
+				"consumer", cfg.name,
+				"queue", cfg.queue,
+				"stateful", cfg.withState,
+				"attempt", *failures,
+				"error", runErr,
+			)
+		} else {
+			c.logWarnCtx(ctx,
+				"client.consumer.restart",
+				"consumer", cfg.name,
+				"queue", cfg.queue,
+				"stateful", cfg.withState,
+				"attempt", *failures,
+				"restart_in", delay,
+				"error", runErr,
+			)
+		}
+	}
+	if nonRetryable {
+		return fmt.Errorf("lockd: consumer %q queue %q non-retryable error: %w", cfg.name, cfg.queue, runErr)
 	}
 	if delay <= 0 {
 		return nil

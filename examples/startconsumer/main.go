@@ -32,12 +32,32 @@ func main() {
 		MinLevel:   pslog.InfoLevel,
 	}))
 
+	caPEM, err := lockd.CreateCABundle(lockd.CreateCABundleRequest{})
+	if err != nil {
+		l.With(err).Fatal("lockd.create_ca_bundle")
+	}
+	serverPEM, err := lockd.CreateServerBundle(lockd.CreateServerBundleRequest{
+		CABundlePEM: caPEM,
+		CommonName:  "localhost",
+	})
+	if err != nil {
+		l.With(err).Fatal("lockd.create_server_bundle")
+	}
+	clientPEM, err := lockd.CreateClientBundle(lockd.CreateClientBundleRequest{
+		CABundlePEM:     caPEM,
+		CommonName:      "client01",
+		NamespaceClaims: []string{"default=r", "stash=rw"},
+	})
+	if err != nil {
+		l.With(err).Fatal("lockd.create_client_bundle")
+	}
+
 	cfg := lockd.Config{
-		Store:            "mem://",
-		Listen:           "127.0.0.1:13371",
-		BundlePath:       "$HOME/.lockd/server.pem",
-		DefaultNamespace: "stash",
-		DrainGrace:       3 * time.Second,
+		Store:  "mem://",
+		Listen: "127.0.0.1:13371",
+		//BundlePath:       "$HOME/.lockd/server.pem",
+		BundlePEM:  serverPEM,
+		DrainGrace: 3 * time.Second,
 	}
 
 	serverLogger := l.With("actor", "server")
@@ -69,7 +89,10 @@ func main() {
 		Palette:    &ansi.PaletteEverforest,
 	})).With("actor", "client")
 
-	cli, err := client.New("localhost:13371", client.WithBundlePath("$HOME/.lockd/client.pem"), client.WithLogger(clientLogger))
+	cli, err := client.New("localhost:13371",
+		client.WithBundlePEM(clientPEM),
+		//client.WithBundlePath("$HOME/.lockd/client.pem"),
+		client.WithLogger(clientLogger))
 	if err != nil {
 		l.With(err).Fatal("client.new")
 	}
@@ -79,7 +102,8 @@ func main() {
 	// defer cancel()
 
 	_, err = cli.EnqueueBytes(ctx, "testing", []byte(`{"hello":"world"}`), client.EnqueueOptions{
-		Delay: 1 * time.Second,
+		Namespace: "stash",
+		Delay:     1 * time.Second,
 	})
 	if err != nil {
 		l.With(err).Fatal("client.enqueue.bytes")
@@ -106,6 +130,7 @@ func main() {
 	l.Info("client.start_consumer")
 
 	if err := cli.StartConsumer(consumerCtx, client.ConsumerConfig{
+		Namespace: "stash",
 		Name:      "ackOnThree",
 		Queue:     "testing",
 		WithState: true,

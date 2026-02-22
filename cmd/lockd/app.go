@@ -497,6 +497,12 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 	cmd.AddCommand(newVersionCommand())
 	cmd.AddCommand(newTxnRootCommand(clientCfg))
 	cmd.AddCommand(newTCCommand())
+	cmd.AddCommand(newMCPCommand(
+		baseLogger,
+		cmd.PersistentFlags().Lookup("server"),
+		cmd.PersistentFlags().Lookup("bundle"),
+		cmd.PersistentFlags().Lookup("disable-mtls"),
+	))
 
 	return cmd
 }

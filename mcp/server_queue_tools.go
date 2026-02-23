@@ -1,0 +1,264 @@
+package mcp
+
+import (
+	"context"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"io"
+	"strings"
+	"unicode/utf8"
+
+	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"pkt.systems/lockd/api"
+	lockdclient "pkt.systems/lockd/client"
+)
+
+type queueDequeueToolInput struct {
+	Queue       string `json:"queue,omitempty" jsonschema:"Queue name (defaults to lockd.agent.bus)"`
+	Namespace   string `json:"namespace,omitempty" jsonschema:"Namespace (defaults to server default namespace)"`
+	Owner       string `json:"owner,omitempty" jsonschema:"Consumer owner ID (defaults to oauth client id)"`
+	BlockSecond int64  `json:"block_seconds,omitempty" jsonschema:"Long-poll wait; -1 no wait, 0 wait forever, >0 wait seconds"`
+}
+
+type queueDequeueToolOutput struct {
+	Namespace       string `json:"namespace"`
+	Queue           string `json:"queue"`
+	Found           bool   `json:"found"`
+	MessageID       string `json:"message_id,omitempty"`
+	Attempts        int    `json:"attempts,omitempty"`
+	MaxAttempts     int    `json:"max_attempts,omitempty"`
+	FailureAttempts int    `json:"failure_attempts,omitempty"`
+	LeaseID         string `json:"lease_id,omitempty"`
+	FencingToken    int64  `json:"fencing_token,omitempty"`
+	MetaETag        string `json:"meta_etag,omitempty"`
+	TxnID           string `json:"txn_id,omitempty"`
+	CorrelationID   string `json:"correlation_id,omitempty"`
+	ContentType     string `json:"content_type,omitempty"`
+	PayloadBytes    int64  `json:"payload_bytes,omitempty"`
+	PayloadText     string `json:"payload_text,omitempty"`
+	PayloadBase64   string `json:"payload_base64,omitempty"`
+}
+
+func (s *server) handleQueueDequeueTool(ctx context.Context, req *mcpsdk.CallToolRequest, input queueDequeueToolInput) (*mcpsdk.CallToolResult, queueDequeueToolOutput, error) {
+	queue := s.resolveQueue(input.Queue)
+	namespace := s.resolveNamespace(input.Namespace)
+	clientID := ""
+	if req != nil {
+		clientID = requestClientID(req.Extra)
+	}
+	owner := strings.TrimSpace(input.Owner)
+	if owner == "" {
+		owner = defaultOwner(clientID)
+	}
+	blockSeconds := input.BlockSecond
+	if blockSeconds == 0 {
+		blockSeconds = api.BlockNoWait
+	}
+	opts := lockdclient.DequeueOptions{
+		Namespace:    namespace,
+		Owner:        owner,
+		BlockSeconds: blockSeconds,
+	}
+	msg, err := s.upstream.Dequeue(ctx, queue, opts)
+	if err != nil {
+		var apiErr *lockdclient.APIError
+		if errors.As(err, &apiErr) && apiErr.Response.ErrorCode == "waiting" {
+			return nil, queueDequeueToolOutput{
+				Namespace: namespace,
+				Queue:     queue,
+				Found:     false,
+			}, nil
+		}
+		return nil, queueDequeueToolOutput{}, err
+	}
+	if msg == nil {
+		return nil, queueDequeueToolOutput{
+			Namespace: namespace,
+			Queue:     queue,
+			Found:     false,
+		}, nil
+	}
+
+	reader, err := msg.PayloadReader()
+	if err != nil {
+		return nil, queueDequeueToolOutput{}, err
+	}
+	payload, readErr := io.ReadAll(reader)
+	_ = reader.Close()
+	_ = msg.ClosePayload()
+	if readErr != nil {
+		return nil, queueDequeueToolOutput{}, readErr
+	}
+
+	out := queueDequeueToolOutput{
+		Namespace:       msg.Namespace(),
+		Queue:           msg.Queue(),
+		Found:           true,
+		MessageID:       msg.MessageID(),
+		Attempts:        msg.Attempts(),
+		MaxAttempts:     msg.MaxAttempts(),
+		FailureAttempts: msg.FailureAttempts(),
+		LeaseID:         msg.LeaseID(),
+		FencingToken:    msg.FencingToken(),
+		MetaETag:        msg.MetaETag(),
+		TxnID:           msg.TxnID(),
+		CorrelationID:   msg.CorrelationID(),
+		ContentType:     msg.ContentType(),
+		PayloadBytes:    msg.PayloadSize(),
+	}
+	if len(payload) > 0 {
+		out.PayloadBase64 = base64.StdEncoding.EncodeToString(payload)
+		if utf8.Valid(payload) {
+			out.PayloadText = string(payload)
+		}
+	}
+	return nil, out, nil
+}
+
+type queueAckToolInput struct {
+	Namespace         string `json:"namespace,omitempty" jsonschema:"Namespace (defaults to server default namespace)"`
+	Queue             string `json:"queue" jsonschema:"Queue name"`
+	MessageID         string `json:"message_id" jsonschema:"Dequeued message id"`
+	LeaseID           string `json:"lease_id" jsonschema:"Dequeued lease id"`
+	TxnID             string `json:"txn_id,omitempty" jsonschema:"Optional transaction id"`
+	FencingToken      int64  `json:"fencing_token" jsonschema:"Dequeued fencing token"`
+	MetaETag          string `json:"meta_etag" jsonschema:"Dequeued meta etag"`
+	StateETag         string `json:"state_etag,omitempty" jsonschema:"Optional state etag"`
+	StateLeaseID      string `json:"state_lease_id,omitempty" jsonschema:"Optional state lease id"`
+	StateFencingToken int64  `json:"state_fencing_token,omitempty" jsonschema:"Optional state fencing token"`
+}
+
+type queueAckToolOutput struct {
+	Acked         bool   `json:"acked"`
+	CorrelationID string `json:"correlation_id,omitempty"`
+}
+
+func (s *server) handleQueueAckTool(ctx context.Context, _ *mcpsdk.CallToolRequest, input queueAckToolInput) (*mcpsdk.CallToolResult, queueAckToolOutput, error) {
+	req := api.AckRequest{
+		Namespace:         s.resolveNamespace(input.Namespace),
+		Queue:             strings.TrimSpace(input.Queue),
+		MessageID:         strings.TrimSpace(input.MessageID),
+		LeaseID:           strings.TrimSpace(input.LeaseID),
+		TxnID:             strings.TrimSpace(input.TxnID),
+		FencingToken:      input.FencingToken,
+		MetaETag:          strings.TrimSpace(input.MetaETag),
+		StateETag:         strings.TrimSpace(input.StateETag),
+		StateLeaseID:      strings.TrimSpace(input.StateLeaseID),
+		StateFencingToken: input.StateFencingToken,
+	}
+	if req.Queue == "" || req.MessageID == "" || req.LeaseID == "" || req.MetaETag == "" {
+		return nil, queueAckToolOutput{}, fmt.Errorf("queue, message_id, lease_id, and meta_etag are required")
+	}
+	resp, err := s.upstream.QueueAck(ctx, req)
+	if err != nil {
+		return nil, queueAckToolOutput{}, err
+	}
+	return nil, queueAckToolOutput{
+		Acked:         resp.Acked,
+		CorrelationID: resp.CorrelationID,
+	}, nil
+}
+
+type queueDeferToolInput struct {
+	Namespace         string `json:"namespace,omitempty" jsonschema:"Namespace (defaults to server default namespace)"`
+	Queue             string `json:"queue" jsonschema:"Queue name"`
+	MessageID         string `json:"message_id" jsonschema:"Dequeued message id"`
+	LeaseID           string `json:"lease_id" jsonschema:"Dequeued lease id"`
+	TxnID             string `json:"txn_id,omitempty" jsonschema:"Optional transaction id"`
+	FencingToken      int64  `json:"fencing_token" jsonschema:"Dequeued fencing token"`
+	MetaETag          string `json:"meta_etag" jsonschema:"Dequeued meta etag"`
+	StateETag         string `json:"state_etag,omitempty" jsonschema:"Optional state etag"`
+	StateLeaseID      string `json:"state_lease_id,omitempty" jsonschema:"Optional state lease id"`
+	StateFencingToken int64  `json:"state_fencing_token,omitempty" jsonschema:"Optional state fencing token"`
+	DelaySeconds      int64  `json:"delay_seconds,omitempty" jsonschema:"Visibility delay before message becomes available again"`
+}
+
+type queueDeferToolOutput struct {
+	Requeued      bool   `json:"requeued"`
+	MetaETag      string `json:"meta_etag,omitempty"`
+	CorrelationID string `json:"correlation_id,omitempty"`
+}
+
+func (s *server) handleQueueDeferTool(ctx context.Context, _ *mcpsdk.CallToolRequest, input queueDeferToolInput) (*mcpsdk.CallToolResult, queueDeferToolOutput, error) {
+	req := api.NackRequest{
+		Namespace:         s.resolveNamespace(input.Namespace),
+		Queue:             strings.TrimSpace(input.Queue),
+		MessageID:         strings.TrimSpace(input.MessageID),
+		LeaseID:           strings.TrimSpace(input.LeaseID),
+		TxnID:             strings.TrimSpace(input.TxnID),
+		FencingToken:      input.FencingToken,
+		MetaETag:          strings.TrimSpace(input.MetaETag),
+		StateETag:         strings.TrimSpace(input.StateETag),
+		StateLeaseID:      strings.TrimSpace(input.StateLeaseID),
+		StateFencingToken: input.StateFencingToken,
+		DelaySeconds:      input.DelaySeconds,
+		Intent:            api.NackIntentDefer,
+	}
+	if req.Queue == "" || req.MessageID == "" || req.LeaseID == "" || req.MetaETag == "" {
+		return nil, queueDeferToolOutput{}, fmt.Errorf("queue, message_id, lease_id, and meta_etag are required")
+	}
+	resp, err := s.upstream.QueueNack(ctx, req)
+	if err != nil {
+		return nil, queueDeferToolOutput{}, err
+	}
+	return nil, queueDeferToolOutput{
+		Requeued:      resp.Requeued,
+		MetaETag:      resp.MetaETag,
+		CorrelationID: resp.CorrelationID,
+	}, nil
+}
+
+type queueSubscribeToolInput struct {
+	Namespace string `json:"namespace,omitempty" jsonschema:"Namespace (defaults to server default namespace)"`
+	Queue     string `json:"queue,omitempty" jsonschema:"Queue name (defaults to lockd.agent.bus)"`
+}
+
+type queueSubscribeToolOutput struct {
+	Namespace  string `json:"namespace"`
+	Queue      string `json:"queue"`
+	Subscribed bool   `json:"subscribed"`
+}
+
+func (s *server) handleQueueSubscribeTool(ctx context.Context, req *mcpsdk.CallToolRequest, input queueSubscribeToolInput) (*mcpsdk.CallToolResult, queueSubscribeToolOutput, error) {
+	if req == nil || req.Session == nil {
+		return nil, queueSubscribeToolOutput{}, fmt.Errorf("queue subscriptions require an active MCP session")
+	}
+	namespace := s.resolveNamespace(input.Namespace)
+	queue := s.resolveQueue(input.Queue)
+	subscribed, err := s.subscriptions.Subscribe(ctx, req.Session, requestClientID(req.Extra), namespace, queue)
+	if err != nil {
+		return nil, queueSubscribeToolOutput{}, err
+	}
+	return nil, queueSubscribeToolOutput{
+		Namespace:  namespace,
+		Queue:      queue,
+		Subscribed: subscribed,
+	}, nil
+}
+
+type queueUnsubscribeToolInput struct {
+	Namespace string `json:"namespace,omitempty" jsonschema:"Namespace (defaults to server default namespace)"`
+	Queue     string `json:"queue,omitempty" jsonschema:"Queue name (defaults to lockd.agent.bus)"`
+}
+
+type queueUnsubscribeToolOutput struct {
+	Namespace    string `json:"namespace"`
+	Queue        string `json:"queue"`
+	Unsubscribed bool   `json:"unsubscribed"`
+}
+
+func (s *server) handleQueueUnsubscribeTool(_ context.Context, req *mcpsdk.CallToolRequest, input queueUnsubscribeToolInput) (*mcpsdk.CallToolResult, queueUnsubscribeToolOutput, error) {
+	if req == nil || req.Session == nil {
+		return nil, queueUnsubscribeToolOutput{}, fmt.Errorf("queue subscriptions require an active MCP session")
+	}
+	namespace := s.resolveNamespace(input.Namespace)
+	queue := s.resolveQueue(input.Queue)
+	unsubscribed := s.subscriptions.Unsubscribe(req.Session, namespace, queue)
+	return nil, queueUnsubscribeToolOutput{
+		Namespace:    namespace,
+		Queue:        queue,
+		Unsubscribed: unsubscribed,
+	}, nil
+}

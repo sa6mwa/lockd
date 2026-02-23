@@ -40,6 +40,11 @@ func TestMCPCommandFlags(t *testing.T) {
 	} else if flag.DefValue != "mcp" {
 		t.Fatalf("expected default namespace mcp, got %q", flag.DefValue)
 	}
+	if flag := mcpCmd.Flags().Lookup("agent-bus-queue"); flag == nil {
+		t.Fatalf("expected --agent-bus-queue on mcp command")
+	} else if flag.DefValue != "lockd.agent.bus" {
+		t.Fatalf("expected default agent bus queue lockd.agent.bus, got %q", flag.DefValue)
+	}
 	if inherited := mcpCmd.InheritedFlags().Lookup("bundle"); inherited == nil || inherited.Shorthand != "b" {
 		t.Fatalf("expected inherited --bundle/-b on mcp command")
 	}

@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -95,6 +96,25 @@ type SubscribeOptions struct {
 	// OnCloseDelay applies a delay before auto-nack when handlers close without ack.
 	OnCloseDelay time.Duration
 }
+
+// WatchQueueOptions configures non-consuming queue visibility watches.
+type WatchQueueOptions struct {
+	// Namespace scopes the queue operation. Empty uses the client's default namespace.
+	Namespace string
+}
+
+// QueueWatchEvent describes queue visibility changes emitted by WatchQueue.
+type QueueWatchEvent struct {
+	Namespace     string
+	Queue         string
+	Available     bool
+	HeadMessageID string
+	ChangedAt     time.Time
+	CorrelationID string
+}
+
+// QueueWatchHandler is invoked for each WatchQueue event.
+type QueueWatchHandler func(context.Context, QueueWatchEvent) error
 
 // ConsumerMessage bundles the runtime context provided to ConsumerMessageHandler.
 // The same handler can be reused across multiple ConsumerConfig entries and inspect
@@ -6420,6 +6440,106 @@ func (c *Client) DequeueWithState(ctx context.Context, queue string, opts Dequeu
 	return msg, nil
 }
 
+// WatchQueue streams non-consuming queue visibility changes over SSE.
+func (c *Client) WatchQueue(ctx context.Context, queue string, opts WatchQueueOptions, handler QueueWatchHandler) error {
+	if handler == nil {
+		return fmt.Errorf("lockd: queue watch handler required")
+	}
+	queue = strings.TrimSpace(queue)
+	if queue == "" {
+		return fmt.Errorf("lockd: queue is required")
+	}
+	namespace, err := c.namespaceFor(opts.Namespace)
+	if err != nil {
+		return err
+	}
+	body, err := json.Marshal(api.QueueWatchRequest{
+		Namespace: namespace,
+		Queue:     queue,
+	})
+	if err != nil {
+		return err
+	}
+	builder := func(base string) (*http.Request, context.CancelFunc, error) {
+		reqCtx, cancel := c.requestContextNoTimeout(ctx)
+		httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, base+"/v1/queue/watch", bytes.NewReader(body))
+		if err != nil {
+			cancel()
+			return nil, nil, err
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Accept", "text/event-stream")
+		c.applyCorrelationHeader(ctx, httpReq, "")
+		return httpReq, cancel, nil
+	}
+
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		resp, cancel, endpoint, err := c.attemptEndpoints(builder, "")
+		if err != nil {
+			return err
+		}
+		c.observeShutdown(endpoint, resp)
+		if resp.StatusCode != http.StatusOK {
+			apiErr := c.decodeError(resp)
+			resp.Body.Close()
+			cancel()
+			if apiErr != nil {
+				return apiErr
+			}
+			return fmt.Errorf("lockd: watch queue unexpected status %d", resp.StatusCode)
+		}
+
+		r := bufio.NewReader(resp.Body)
+		streamErr := func() error {
+			for {
+				ev, err := readSSEEvent(r)
+				if err != nil {
+					return err
+				}
+				if ev.data == "" {
+					continue
+				}
+				if ev.event != "" && ev.event != "queue_watch" {
+					continue
+				}
+				var payload api.QueueWatchEvent
+				if err := json.Unmarshal([]byte(ev.data), &payload); err != nil {
+					return fmt.Errorf("lockd: decode queue watch event: %w", err)
+				}
+				event := QueueWatchEvent{
+					Namespace:     payload.Namespace,
+					Queue:         payload.Queue,
+					Available:     payload.Available,
+					HeadMessageID: payload.HeadMessageID,
+					CorrelationID: payload.CorrelationID,
+				}
+				if payload.ChangedAtUnix > 0 {
+					event.ChangedAt = time.Unix(payload.ChangedAtUnix, 0).UTC()
+				}
+				if err := handler(ctx, event); err != nil {
+					return err
+				}
+			}
+		}()
+		resp.Body.Close()
+		cancel()
+		if streamErr == nil {
+			continue
+		}
+		if errors.Is(streamErr, io.EOF) || errors.Is(streamErr, context.Canceled) {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		return streamErr
+	}
+}
+
 // Subscribe streams queue messages continuously and invokes handler for each delivery.
 // While the handler runs, the client renews the in-flight queue lease implicitly
 // via QueueExtend to reduce timeout risk for long-running handlers.
@@ -6704,6 +6824,53 @@ func (c *Client) subscribe(ctx context.Context, queue string, opts SubscribeOpti
 		resp.Body.Close()
 		cancel()
 		return nil
+	}
+}
+
+type sseEvent struct {
+	event string
+	data  string
+}
+
+func readSSEEvent(r *bufio.Reader) (sseEvent, error) {
+	ev := sseEvent{}
+	var dataLines []string
+	seenAny := false
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			if errors.Is(err, io.EOF) && !seenAny {
+				return sseEvent{}, io.EOF
+			}
+			if errors.Is(err, io.EOF) {
+				line = strings.TrimRight(line, "\r\n")
+				if line == "" {
+					ev.data = strings.Join(dataLines, "\n")
+					return ev, nil
+				}
+			} else {
+				return sseEvent{}, err
+			}
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if line == "" {
+			ev.data = strings.Join(dataLines, "\n")
+			return ev, nil
+		}
+		seenAny = true
+		if strings.HasPrefix(line, ":") {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(line, "event:"):
+			ev.event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		case strings.HasPrefix(line, "data:"):
+			dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+		}
+		if err != nil && errors.Is(err, io.EOF) {
+			ev.data = strings.Join(dataLines, "\n")
+			return ev, nil
+		}
 	}
 }
 

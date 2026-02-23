@@ -34,6 +34,7 @@ type Config struct {
 	BundlePath                string
 	UpstreamServer            string
 	DefaultNamespace          string
+	AgentBusQueue             string
 	UpstreamDisableMTLS       bool
 	UpstreamClientBundlePath  string
 	UpstreamHTTPTimeout       time.Duration
@@ -62,8 +63,10 @@ type server struct {
 	oauthLogger    pslog.Logger
 	lifecycleLog   pslog.Logger
 	transportLog   pslog.Logger
+	subscribeLog   pslog.Logger
 	upstream       *lockdclient.Client
 	oauthManager   *oauth.Manager
+	subscriptions  *subscriptionManager
 	httpServer     *http.Server
 	tlsBundlePath  string
 	resourceID     string
@@ -91,6 +94,7 @@ func NewServer(req NewServerRequest) (Server, error) {
 		oauthLogger:    svcfields.WithSubsystem(logger, "mcp.oauth"),
 		lifecycleLog:   svcfields.WithSubsystem(logger, "server.lifecycle.mcp"),
 		transportLog:   svcfields.WithSubsystem(logger, "mcp.transport.http"),
+		subscribeLog:   svcfields.WithSubsystem(logger, "mcp.queue.subscriptions"),
 		mcpHTTPPath:    cleanHTTPPath(cfg.MCPPath),
 		metadataPath:   "/.well-known/oauth-protected-resource",
 		oauthWellKnown: "/.well-known/oauth-authorization-server",
@@ -101,6 +105,7 @@ func NewServer(req NewServerRequest) (Server, error) {
 		return nil, err
 	}
 	s.upstream = upstream
+	s.subscriptions = newSubscriptionManager(upstream, s.subscribeLog)
 
 	if !cfg.DisableTLS {
 		oauthMgr, err := oauth.NewManager(oauth.ManagerConfig{
@@ -159,6 +164,9 @@ func NewServer(req NewServerRequest) (Server, error) {
 func (s *server) Run(ctx context.Context) error {
 	s.lifecycleLog.Info("starting lockd MCP facade", "listen", s.cfg.Listen, "disable_tls", s.cfg.DisableTLS, "mcp_path", s.mcpHTTPPath)
 	defer func() {
+		if s.subscriptions != nil {
+			s.subscriptions.Close()
+		}
 		if s.upstream != nil {
 			_ = s.upstream.Close()
 		}
@@ -208,7 +216,11 @@ func (s *server) buildMux() (*http.ServeMux, error) {
 	mcpSrv := mcpsdk.NewServer(&mcpsdk.Implementation{
 		Name:    "lockd-mcp-facade",
 		Version: "0.1.0",
-	}, nil)
+	}, &mcpsdk.ServerOptions{
+		Instructions:       defaultServerInstructions(s.cfg),
+		InitializedHandler: s.handleInitialized,
+	})
+	s.registerResources(mcpSrv)
 	s.registerTools(mcpSrv)
 
 	streamable := mcpsdk.NewStreamableHTTPHandler(func(_ *http.Request) *mcpsdk.Server {
@@ -246,13 +258,39 @@ func (s *server) handleProtectedResourceMetadata(w http.ResponseWriter, r *http.
 func (s *server) registerTools(srv *mcpsdk.Server) {
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        "lockd.get",
-		Description: "Read the JSON state document for a lockd key",
+		Description: "Read a JSON state document by key. Use when you need current state before making lock or queue decisions.",
 	}, s.handleGetTool)
 
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        "lockd.query",
-		Description: "Run an LQL query and return matching keys",
+		Description: "Run LQL and return matching keys. Use this for namespace discovery and document lookups before lock or queue operations.",
 	}, s.handleQueryTool)
+
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        "lockd.help",
+		Description: "Return lockd MCP workflow guidance, invariants, and documentation URIs. Call first when exploring this server.",
+	}, s.handleHelpTool)
+
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        "lockd.queue.dequeue",
+		Description: "Dequeue one queue message (at-most one lease) and return payload + lease material needed for ack/defer follow-up calls.",
+	}, s.handleQueueDequeueTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        "lockd.queue.ack",
+		Description: "Acknowledge a previously dequeued queue message using lease fields from lockd.queue.dequeue.",
+	}, s.handleQueueAckTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        "lockd.queue.defer",
+		Description: "Requeue a dequeued message intentionally (non-failure defer intent). Use when message is not for this worker yet.",
+	}, s.handleQueueDeferTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        "lockd.queue.subscribe",
+		Description: "Subscribe this MCP session to queue availability notifications. Notifications are sent over MCP SSE as notifications/progress messages.",
+	}, s.handleQueueSubscribeTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        "lockd.queue.unsubscribe",
+		Description: "Unsubscribe this MCP session from queue availability notifications.",
+	}, s.handleQueueUnsubscribeTool)
 }
 
 type getToolInput struct {
@@ -396,6 +434,10 @@ func applyDefaults(cfg *Config) {
 		cfg.DefaultNamespace = "mcp"
 	}
 	cfg.DefaultNamespace = strings.TrimSpace(cfg.DefaultNamespace)
+	if strings.TrimSpace(cfg.AgentBusQueue) == "" {
+		cfg.AgentBusQueue = "lockd.agent.bus"
+	}
+	cfg.AgentBusQueue = strings.TrimSpace(cfg.AgentBusQueue)
 	if cfg.UpstreamHTTPTimeout <= 0 {
 		cfg.UpstreamHTTPTimeout = lockdclient.DefaultHTTPTimeout
 	}

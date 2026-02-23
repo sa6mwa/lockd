@@ -14,6 +14,9 @@ func TestApplyDefaultsSetsMCPNamespace(t *testing.T) {
 	if cfg.DefaultNamespace != "mcp" {
 		t.Fatalf("expected default namespace mcp, got %q", cfg.DefaultNamespace)
 	}
+	if cfg.AgentBusQueue != "lockd.agent.bus" {
+		t.Fatalf("expected default agent bus queue lockd.agent.bus, got %q", cfg.AgentBusQueue)
+	}
 }
 
 func TestNewUpstreamClientUsesConfiguredDefaultNamespace(t *testing.T) {

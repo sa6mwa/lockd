@@ -858,6 +858,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle("/v1/queue/enqueue", h.wrap("queue.enqueue", h.handleQueueEnqueue))
 	mux.Handle("/v1/queue/dequeue", h.wrap("queue.dequeue", h.handleQueueDequeue))
 	mux.Handle("/v1/queue/dequeueWithState", h.wrap("queue.dequeue_with_state", h.handleQueueDequeueWithState))
+	mux.Handle("/v1/queue/watch", h.wrap("queue.watch", h.handleQueueWatch))
 	mux.Handle("/v1/queue/subscribe", h.wrap("queue.subscribe", h.handleQueueSubscribe))
 	mux.Handle("/v1/queue/subscribeWithState", h.wrap("queue.subscribe_with_state", h.handleQueueSubscribeWithState))
 	mux.Handle("/v1/queue/ack", h.wrap("queue.ack", h.handleQueueAck))

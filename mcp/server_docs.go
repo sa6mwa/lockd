@@ -23,6 +23,7 @@ lockd MCP facade operating manual:
 - Default coordination queue: %s
 - Queue workflow: dequeue -> (ack | defer). Defer intentionally requeues without failure accounting.
 - Subscription workflow: lockd.queue.subscribe to receive queue availability notifications over MCP SSE progress notifications.
+- XA workflow: optional txn_id can be attached to lock/queue/state/attachment operations; finalize with lockd.txn.commit or lockd.txn.rollback.
 - Lock safety: keep lease IDs/fencing tokens from lock operations and send them back on protected writes.
 - Query first when uncertain: use lockd.query for key discovery and lockd.get for point reads.
 - Documentation resources: %s, %s, %s, %s
@@ -98,6 +99,7 @@ For push-notify:
 Use queues for eventing and lock/state operations for shared context updates.
 Keep queue payloads small and use key/state references for large context.
 Use namespace scoping to isolate agent groups.
+Use txn_id only when you need cross-key atomic decisions; normal single-key operations should omit it.
 `),
 	}
 }
@@ -150,16 +152,17 @@ func (s *server) handleHelpTool(_ context.Context, _ *mcpsdk.CallToolRequest, in
 			"defer preserves message without counting as failure",
 			"namespace isolation follows client certificate claims",
 			"lock writes must preserve lease/fencing semantics",
+			"XA is optional: only include txn_id when coordinating multiple participants",
 		},
 	}
 	switch topic {
 	case "overview":
-		out.Summary = "Use lockd.help first, subscribe for queue notifications, then dequeue and ack/defer messages."
-		out.NextCalls = []string{"lockd.queue.subscribe", "lockd.queue.dequeue", "lockd.queue.ack"}
+		out.Summary = "Use lockd.help first, acquire lock when mutating shared state, subscribe for queue notifications, then dequeue and ack/defer messages."
+		out.NextCalls = []string{"lockd.lock.acquire", "lockd.queue.subscribe", "lockd.queue.dequeue", "lockd.queue.ack"}
 		out.Resources = []string{docOverviewURI, docMessagingURI, docSyncURI}
 	case "locks":
 		out.Summary = "Locks gate state mutation; keep lease identity and fencing token through the full mutation lifecycle."
-		out.NextCalls = []string{"lockd.get", "lockd.query"}
+		out.NextCalls = []string{"lockd.lock.acquire", "lockd.state.update", "lockd.lock.release"}
 		out.Resources = []string{docLocksURI}
 	case "messaging":
 		out.Summary = "Messaging is dequeue-driven. If the message is not for the worker, defer it."

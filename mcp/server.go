@@ -257,6 +257,19 @@ func (s *server) handleProtectedResourceMetadata(w http.ResponseWriter, r *http.
 
 func (s *server) registerTools(srv *mcpsdk.Server) {
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        "lockd.lock.acquire",
+		Description: "Acquire an exclusive lock lease on a key. Returns lease_id and fencing_token for follow-up state or attachment mutations.",
+	}, s.handleLockAcquireTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        "lockd.lock.keepalive",
+		Description: "Extend an existing lock lease TTL.",
+	}, s.handleLockKeepAliveTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        "lockd.lock.release",
+		Description: "Release an existing lock lease (commit by default, rollback when requested).",
+	}, s.handleLockReleaseTool)
+
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        "lockd.get",
 		Description: "Read a JSON state document by key. Use when you need current state before making lock or queue decisions.",
 	}, s.handleGetTool)
@@ -265,6 +278,52 @@ func (s *server) registerTools(srv *mcpsdk.Server) {
 		Name:        "lockd.query",
 		Description: "Run LQL and return matching keys. Use this for namespace discovery and document lookups before lock or queue operations.",
 	}, s.handleQueryTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        "lockd.state.update",
+		Description: "Update state JSON under a held lease. Supports optional XA txn_id and metadata mutation.",
+	}, s.handleStateUpdateTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        "lockd.state.metadata",
+		Description: "Mutate state metadata (for example query_hidden) under a held lease without replacing JSON state.",
+	}, s.handleStateMetadataTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        "lockd.state.remove",
+		Description: "Remove state JSON under a held lease.",
+	}, s.handleStateRemoveTool)
+
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        "lockd.attachments.put",
+		Description: "Upload/stage an attachment under a held lease.",
+	}, s.handleAttachmentPutTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        "lockd.attachments.list",
+		Description: "List attachment metadata for a key.",
+	}, s.handleAttachmentListTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        "lockd.attachments.get",
+		Description: "Retrieve a single attachment payload by id or name.",
+	}, s.handleAttachmentGetTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        "lockd.attachments.delete",
+		Description: "Delete a single attachment by id or name under a held lease.",
+	}, s.handleAttachmentDeleteTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        "lockd.attachments.delete_all",
+		Description: "Delete all attachments for a key under a held lease.",
+	}, s.handleAttachmentDeleteAllTool)
+
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        "lockd.namespace.get",
+		Description: "Get namespace query-engine configuration.",
+	}, s.handleNamespaceGetTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        "lockd.namespace.update",
+		Description: "Update namespace query-engine configuration.",
+	}, s.handleNamespaceUpdateTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        "lockd.index.flush",
+		Description: "Trigger namespace index flush (async by default, wait mode optional).",
+	}, s.handleIndexFlushTool)
 
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        "lockd.help",
@@ -295,6 +354,23 @@ func (s *server) registerTools(srv *mcpsdk.Server) {
 		Name:        "lockd.queue.unsubscribe",
 		Description: "Unsubscribe this MCP session from queue availability notifications.",
 	}, s.handleQueueUnsubscribeTool)
+
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        "lockd.txn.prepare",
+		Description: "Record pending XA decision for txn_id and optional participants.",
+	}, s.handleTxnPrepareTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        "lockd.txn.commit",
+		Description: "Commit XA decision for txn_id and optional participants.",
+	}, s.handleTxnCommitTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        "lockd.txn.rollback",
+		Description: "Rollback XA decision for txn_id and optional participants.",
+	}, s.handleTxnRollbackTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        "lockd.txn.replay",
+		Description: "Replay previously recorded decision for txn_id.",
+	}, s.handleTxnReplayTool)
 }
 
 type getToolInput struct {

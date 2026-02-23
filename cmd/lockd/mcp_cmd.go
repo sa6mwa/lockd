@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -292,6 +293,109 @@ func newMCPOAuthClientCommand() *cobra.Command {
 		},
 	})
 
+	var showID string
+	showCmd := &cobra.Command{
+		Use:   "show",
+		Short: "Show OAuth client details and endpoints",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			mgr, err := openOAuthManager()
+			if err != nil {
+				return err
+			}
+			client, err := findOAuthClient(mgr, showID)
+			if err != nil {
+				return err
+			}
+			issuer, err := mgr.Issuer()
+			if err != nil {
+				return err
+			}
+			resourceURL := oauthResourceURLFromConfig(issuer)
+			status := "active"
+			if client.Revoked {
+				status = "revoked"
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "client_id: %s\n", client.ID)
+			fmt.Fprintf(cmd.OutOrStdout(), "name: %s\n", client.Name)
+			fmt.Fprintf(cmd.OutOrStdout(), "status: %s\n", status)
+			fmt.Fprintf(cmd.OutOrStdout(), "scopes: %s\n", strings.Join(client.Scopes, ","))
+			fmt.Fprintf(cmd.OutOrStdout(), "issuer: %s\n", issuer)
+			fmt.Fprintf(cmd.OutOrStdout(), "authorize_url: %s\n", joinIssuerPath(issuer, "/authorize"))
+			fmt.Fprintf(cmd.OutOrStdout(), "token_url: %s\n", joinIssuerPath(issuer, "/token"))
+			fmt.Fprintf(cmd.OutOrStdout(), "resource_url: %s\n", resourceURL)
+			fmt.Fprintln(cmd.OutOrStdout(), "client_secret: (not retrievable after issuance; use 'rotate-secret' or 'credentials --rotate-secret')")
+			return nil
+		},
+	}
+	showCmd.Flags().StringVar(&showID, "id", "", "client ID")
+	_ = showCmd.MarkFlagRequired("id")
+	cmd.AddCommand(showCmd)
+
+	var credentialsID string
+	var rotateSecret bool
+	var credentialsFormat string
+	credentialsCmd := &cobra.Command{
+		Use:   "credentials",
+		Short: "Print agent configuration credentials for a client",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			mgr, err := openOAuthManager()
+			if err != nil {
+				return err
+			}
+			client, err := findOAuthClient(mgr, credentialsID)
+			if err != nil {
+				return err
+			}
+			issuer, err := mgr.Issuer()
+			if err != nil {
+				return err
+			}
+			secret := ""
+			if rotateSecret {
+				secret, err = mgr.RotateClientSecret(client.ID)
+				if err != nil {
+					return err
+				}
+			}
+			payload := oauthClientCredentialPayload{
+				ClientID:     client.ID,
+				ClientSecret: secret,
+				Scopes:       append([]string(nil), client.Scopes...),
+				Issuer:       issuer,
+				AuthorizeURL: joinIssuerPath(issuer, "/authorize"),
+				TokenURL:     joinIssuerPath(issuer, "/token"),
+				ResourceURL:  oauthResourceURLFromConfig(issuer),
+				SecretIssued: rotateSecret,
+			}
+			switch strings.ToLower(strings.TrimSpace(credentialsFormat)) {
+			case "json":
+				enc := json.NewEncoder(cmd.OutOrStdout())
+				enc.SetIndent("", "  ")
+				return enc.Encode(payload)
+			case "env", "":
+				fmt.Fprintf(cmd.OutOrStdout(), "LOCKD_MCP_OAUTH_CLIENT_ID=%s\n", payload.ClientID)
+				if payload.ClientSecret != "" {
+					fmt.Fprintf(cmd.OutOrStdout(), "LOCKD_MCP_OAUTH_CLIENT_SECRET=%s\n", payload.ClientSecret)
+				} else {
+					fmt.Fprintln(cmd.OutOrStdout(), "# client secret not retrievable; rerun with --rotate-secret to issue a new one")
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "LOCKD_MCP_OAUTH_ISSUER=%s\n", payload.Issuer)
+				fmt.Fprintf(cmd.OutOrStdout(), "LOCKD_MCP_OAUTH_AUTHORIZE_URL=%s\n", payload.AuthorizeURL)
+				fmt.Fprintf(cmd.OutOrStdout(), "LOCKD_MCP_OAUTH_TOKEN_URL=%s\n", payload.TokenURL)
+				fmt.Fprintf(cmd.OutOrStdout(), "LOCKD_MCP_OAUTH_RESOURCE_URL=%s\n", payload.ResourceURL)
+				fmt.Fprintf(cmd.OutOrStdout(), "LOCKD_MCP_OAUTH_SCOPES=%s\n", strings.Join(payload.Scopes, ","))
+				return nil
+			default:
+				return fmt.Errorf("unsupported --format %q (expected env|json)", credentialsFormat)
+			}
+		},
+	}
+	credentialsCmd.Flags().StringVar(&credentialsID, "id", "", "client ID")
+	credentialsCmd.Flags().BoolVar(&rotateSecret, "rotate-secret", false, "rotate and print a newly issued client secret")
+	credentialsCmd.Flags().StringVar(&credentialsFormat, "format", "env", "output format (env|json)")
+	_ = credentialsCmd.MarkFlagRequired("id")
+	cmd.AddCommand(credentialsCmd)
+
 	var addName string
 	var addScopes []string
 	addCmd := &cobra.Command{
@@ -444,6 +548,58 @@ func openOAuthManager() (*oauth.Manager, error) {
 		return nil, err
 	}
 	return mgr, nil
+}
+
+type oauthClientCredentialPayload struct {
+	ClientID     string   `json:"client_id"`
+	ClientSecret string   `json:"client_secret,omitempty"`
+	SecretIssued bool     `json:"secret_issued"`
+	Scopes       []string `json:"scopes,omitempty"`
+	Issuer       string   `json:"issuer"`
+	AuthorizeURL string   `json:"authorize_url"`
+	TokenURL     string   `json:"token_url"`
+	ResourceURL  string   `json:"resource_url"`
+}
+
+func findOAuthClient(mgr *oauth.Manager, clientID string) (mcpstate.Client, error) {
+	clients, err := mgr.ListClients()
+	if err != nil {
+		return mcpstate.Client{}, err
+	}
+	clientID = strings.TrimSpace(clientID)
+	for _, c := range clients {
+		if c.ID == clientID {
+			return c, nil
+		}
+	}
+	return mcpstate.Client{}, fmt.Errorf("oauth client %s not found", clientID)
+}
+
+func oauthResourceURLFromConfig(issuer string) string {
+	cfg, err := mcpConfigFromViper()
+	if err != nil {
+		return joinIssuerPath(issuer, "/mcp")
+	}
+	if resource := strings.TrimSpace(cfg.OAuthProtectedResourceURL); resource != "" {
+		return resource
+	}
+	return joinIssuerPath(issuer, cfg.MCPPath)
+}
+
+func joinIssuerPath(issuer, p string) string {
+	issuer = strings.TrimSpace(issuer)
+	if issuer == "" {
+		return p
+	}
+	u, err := url.Parse(issuer)
+	if err != nil {
+		return strings.TrimRight(issuer, "/") + p
+	}
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	u.Path = strings.TrimRight(u.Path, "/") + p
+	return u.String()
 }
 
 func newMCPExportCACommand() *cobra.Command {

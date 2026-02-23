@@ -52,3 +52,20 @@ func TestMCPCommandFlags(t *testing.T) {
 		t.Fatalf("expected inherited --server/-s on mcp command")
 	}
 }
+
+func TestMCPOAuthClientAdminSubcommands(t *testing.T) {
+	root := newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
+	clientCmd, _, err := root.Find([]string{"mcp", "oauth", "client"})
+	if err != nil {
+		t.Fatalf("find mcp oauth client command: %v", err)
+	}
+	if clientCmd == nil {
+		t.Fatalf("expected mcp oauth client command")
+	}
+	if showCmd, _, err := clientCmd.Find([]string{"show"}); err != nil || showCmd == nil || showCmd.Name() != "show" {
+		t.Fatalf("expected show subcommand, err=%v", err)
+	}
+	if credCmd, _, err := clientCmd.Find([]string{"credentials"}); err != nil || credCmd == nil || credCmd.Name() != "credentials" {
+		t.Fatalf("expected credentials subcommand, err=%v", err)
+	}
+}

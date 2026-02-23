@@ -256,105 +256,113 @@ func (s *server) handleProtectedResourceMetadata(w http.ResponseWriter, r *http.
 }
 
 func (s *server) registerTools(srv *mcpsdk.Server) {
+	descriptions := buildToolDescriptions(s.cfg)
+	desc := func(name string) string {
+		description, ok := descriptions[name]
+		if !ok {
+			panic(fmt.Sprintf("missing MCP tool description for %q", name))
+		}
+		return description
+	}
+
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
-		Name:        "lockd.lock.acquire",
-		Description: "Acquire an exclusive lock lease on a key. Returns lease_id and fencing_token for follow-up state or attachment mutations.",
+		Name:        toolLockAcquire,
+		Description: desc(toolLockAcquire),
 	}, s.handleLockAcquireTool)
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
-		Name:        "lockd.lock.keepalive",
-		Description: "Extend an existing lock lease TTL.",
+		Name:        toolLockKeepAlive,
+		Description: desc(toolLockKeepAlive),
 	}, s.handleLockKeepAliveTool)
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
-		Name:        "lockd.lock.release",
-		Description: "Release an existing lock lease (commit by default, rollback when requested).",
+		Name:        toolLockRelease,
+		Description: desc(toolLockRelease),
 	}, s.handleLockReleaseTool)
 
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
-		Name:        "lockd.get",
-		Description: "Read a JSON state document by key. Use when you need current state before making lock or queue decisions.",
+		Name:        toolGet,
+		Description: desc(toolGet),
 	}, s.handleGetTool)
 
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
-		Name:        "lockd.query",
-		Description: "Run LQL and return matching keys. Use this for namespace discovery and document lookups before lock or queue operations.",
+		Name:        toolQuery,
+		Description: desc(toolQuery),
 	}, s.handleQueryTool)
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
-		Name:        "lockd.state.update",
-		Description: "Update state JSON under a held lease. Supports optional XA txn_id and metadata mutation.",
+		Name:        toolStateUpdate,
+		Description: desc(toolStateUpdate),
 	}, s.handleStateUpdateTool)
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
-		Name:        "lockd.state.metadata",
-		Description: "Mutate state metadata (for example query_hidden) under a held lease without replacing JSON state.",
+		Name:        toolStateMetadata,
+		Description: desc(toolStateMetadata),
 	}, s.handleStateMetadataTool)
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
-		Name:        "lockd.state.remove",
-		Description: "Remove state JSON under a held lease.",
+		Name:        toolStateRemove,
+		Description: desc(toolStateRemove),
 	}, s.handleStateRemoveTool)
 
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
-		Name:        "lockd.attachments.put",
-		Description: "Upload/stage an attachment under a held lease.",
+		Name:        toolAttachmentsPut,
+		Description: desc(toolAttachmentsPut),
 	}, s.handleAttachmentPutTool)
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
-		Name:        "lockd.attachments.list",
-		Description: "List attachment metadata for a key.",
+		Name:        toolAttachmentsList,
+		Description: desc(toolAttachmentsList),
 	}, s.handleAttachmentListTool)
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
-		Name:        "lockd.attachments.get",
-		Description: "Retrieve a single attachment payload by id or name.",
+		Name:        toolAttachmentsGet,
+		Description: desc(toolAttachmentsGet),
 	}, s.handleAttachmentGetTool)
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
-		Name:        "lockd.attachments.delete",
-		Description: "Delete a single attachment by id or name under a held lease.",
+		Name:        toolAttachmentsDelete,
+		Description: desc(toolAttachmentsDelete),
 	}, s.handleAttachmentDeleteTool)
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
-		Name:        "lockd.attachments.delete_all",
-		Description: "Delete all attachments for a key under a held lease.",
+		Name:        toolAttachmentsDeleteAll,
+		Description: desc(toolAttachmentsDeleteAll),
 	}, s.handleAttachmentDeleteAllTool)
 
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
-		Name:        "lockd.namespace.get",
-		Description: "Get namespace query-engine configuration.",
+		Name:        toolNamespaceGet,
+		Description: desc(toolNamespaceGet),
 	}, s.handleNamespaceGetTool)
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
-		Name:        "lockd.namespace.update",
-		Description: "Update namespace query-engine configuration.",
+		Name:        toolNamespaceUpdate,
+		Description: desc(toolNamespaceUpdate),
 	}, s.handleNamespaceUpdateTool)
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
-		Name:        "lockd.index.flush",
-		Description: "Trigger namespace index flush (async by default, wait mode optional).",
+		Name:        toolIndexFlush,
+		Description: desc(toolIndexFlush),
 	}, s.handleIndexFlushTool)
 
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
-		Name:        "lockd.help",
-		Description: "Return lockd MCP workflow guidance, invariants, and documentation URIs. Call first when exploring this server.",
+		Name:        toolHelp,
+		Description: desc(toolHelp),
 	}, s.handleHelpTool)
 
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
-		Name:        "lockd.queue.enqueue",
-		Description: "Enqueue a message payload into a lockd queue for agent coordination and messaging.",
+		Name:        toolQueueEnqueue,
+		Description: desc(toolQueueEnqueue),
 	}, s.handleQueueEnqueueTool)
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
-		Name:        "lockd.queue.dequeue",
-		Description: "Dequeue one queue message (at-most one lease) and return payload + lease material needed for ack/defer follow-up calls.",
+		Name:        toolQueueDequeue,
+		Description: desc(toolQueueDequeue),
 	}, s.handleQueueDequeueTool)
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
-		Name:        "lockd.queue.ack",
-		Description: "Acknowledge a previously dequeued queue message using lease fields from lockd.queue.dequeue.",
+		Name:        toolQueueAck,
+		Description: desc(toolQueueAck),
 	}, s.handleQueueAckTool)
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
-		Name:        "lockd.queue.defer",
-		Description: "Requeue a dequeued message intentionally (non-failure defer intent). Use when message is not for this worker yet.",
+		Name:        toolQueueDefer,
+		Description: desc(toolQueueDefer),
 	}, s.handleQueueDeferTool)
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
-		Name:        "lockd.queue.subscribe",
-		Description: "Subscribe this MCP session to queue availability notifications. Notifications are sent over MCP SSE as notifications/progress messages.",
+		Name:        toolQueueSubscribe,
+		Description: desc(toolQueueSubscribe),
 	}, s.handleQueueSubscribeTool)
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
-		Name:        "lockd.queue.unsubscribe",
-		Description: "Unsubscribe this MCP session from queue availability notifications.",
+		Name:        toolQueueUnsubscribe,
+		Description: desc(toolQueueUnsubscribe),
 	}, s.handleQueueUnsubscribeTool)
-
 }
 
 type getToolInput struct {

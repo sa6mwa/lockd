@@ -33,6 +33,7 @@ type Config struct {
 	DisableTLS                bool
 	BundlePath                string
 	UpstreamServer            string
+	DefaultNamespace          string
 	UpstreamDisableMTLS       bool
 	UpstreamClientBundlePath  string
 	UpstreamHTTPTimeout       time.Duration
@@ -365,6 +366,7 @@ func newUpstreamClient(cfg Config, logger pslog.Logger) (*lockdclient.Client, er
 	}
 	opts := []lockdclient.Option{
 		lockdclient.WithDisableMTLS(cfg.UpstreamDisableMTLS),
+		lockdclient.WithDefaultNamespace(cfg.DefaultNamespace),
 		lockdclient.WithHTTPTimeout(cfg.UpstreamHTTPTimeout),
 		lockdclient.WithCloseTimeout(cfg.UpstreamCloseTimeout),
 		lockdclient.WithKeepAliveTimeout(cfg.UpstreamKeepAliveTimeout),
@@ -373,7 +375,7 @@ func newUpstreamClient(cfg Config, logger pslog.Logger) (*lockdclient.Client, er
 	}
 
 	if !cfg.UpstreamDisableMTLS {
-		bundlePath, err := lockd.ResolveClientBundlePath(lockd.ClientBundleRoleSDK, cfg.UpstreamClientBundlePath)
+		bundlePath, err := lockd.ResolveClientBundlePathWithHint(lockd.ClientBundleRoleSDK, cfg.UpstreamClientBundlePath, "--client-bundle")
 		if err != nil {
 			return nil, fmt.Errorf("resolve mcp upstream client bundle: %w", err)
 		}
@@ -390,6 +392,10 @@ func applyDefaults(cfg *Config) {
 	if strings.TrimSpace(cfg.UpstreamServer) == "" {
 		cfg.UpstreamServer = "https://127.0.0.1:9341"
 	}
+	if strings.TrimSpace(cfg.DefaultNamespace) == "" {
+		cfg.DefaultNamespace = "mcp"
+	}
+	cfg.DefaultNamespace = strings.TrimSpace(cfg.DefaultNamespace)
 	if cfg.UpstreamHTTPTimeout <= 0 {
 		cfg.UpstreamHTTPTimeout = lockdclient.DefaultHTTPTimeout
 	}

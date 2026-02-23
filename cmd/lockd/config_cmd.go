@@ -133,6 +133,7 @@ type configDefaults struct {
 	MCPBundle                 string   `yaml:"mcp.bundle"`
 	MCPDisableTLS             bool     `yaml:"mcp.disable-tls"`
 	MCPDisableMTLS            bool     `yaml:"mcp.disable-mtls"`
+	MCPDefaultNamespace       string   `yaml:"mcp.default-namespace"`
 	MCPStateFile              string   `yaml:"mcp.state-file"`
 	MCPRefreshStore           string   `yaml:"mcp.refresh-store"`
 	MCPIssuer                 string   `yaml:"mcp.issuer"`
@@ -219,6 +220,7 @@ func defaultConfigYAML(overrides ...func(*configDefaults)) ([]byte, error) {
 		MCPBundle:                 "",
 		MCPDisableTLS:             false,
 		MCPDisableMTLS:            false,
+		MCPDefaultNamespace:       "mcp",
 		MCPStateFile:              "",
 		MCPRefreshStore:           "",
 		MCPIssuer:                 "",

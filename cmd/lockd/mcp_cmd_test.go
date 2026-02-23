@@ -35,6 +35,11 @@ func TestMCPCommandFlags(t *testing.T) {
 	} else if flag.DefValue != "127.0.0.1:19341" {
 		t.Fatalf("expected listen default 127.0.0.1:19341, got %q", flag.DefValue)
 	}
+	if flag := mcpCmd.Flags().Lookup("default-namespace"); flag == nil {
+		t.Fatalf("expected --default-namespace on mcp command")
+	} else if flag.DefValue != "mcp" {
+		t.Fatalf("expected default namespace mcp, got %q", flag.DefValue)
+	}
 	if inherited := mcpCmd.InheritedFlags().Lookup("bundle"); inherited == nil || inherited.Shorthand != "b" {
 		t.Fatalf("expected inherited --bundle/-b on mcp command")
 	}

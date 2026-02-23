@@ -30,6 +30,7 @@ const (
 	mcpBundleKey           = "mcp.bundle"
 	mcpDisableTLSKey       = "mcp.disable_tls"
 	mcpDisableMTLSKey      = "mcp.disable_mtls"
+	mcpDefaultNamespaceKey = "mcp.default_namespace"
 	mcpStateFileKey        = "mcp.state_file"
 	mcpRefreshStoreKey     = "mcp.refresh_store"
 	mcpIssuerKey           = "mcp.issuer"
@@ -75,6 +76,7 @@ func newMCPCommand(baseLogger pslog.Logger, inheritedServerFlag, inheritedBundle
 	flags.String("mcp-path", "/mcp", "HTTP path for the MCP streamable endpoint")
 	flags.String("oauth-resource-url", "", "OAuth protected resource identifier URL (default <issuer>/mcp)")
 	flags.Bool("disable-mcp-upstream-mtls", false, "disable mTLS when MCP calls upstream lockd")
+	flags.String("default-namespace", "mcp", "default namespace used by MCP tools when not explicitly set")
 
 	mustBindMCPFlag(mcpListenKey, "LOCKD_MCP_LISTEN", flags.Lookup("listen"))
 	mustBindMCPFlag(mcpClientBundleKey, "LOCKD_MCP_CLIENT_BUNDLE", flags.Lookup("client-bundle"))
@@ -85,6 +87,7 @@ func newMCPCommand(baseLogger pslog.Logger, inheritedServerFlag, inheritedBundle
 	mustBindMCPFlag(mcpPathKey, "LOCKD_MCP_PATH", flags.Lookup("mcp-path"))
 	mustBindMCPFlag(mcpOAuthResourceURLKey, "LOCKD_MCP_OAUTH_RESOURCE_URL", flags.Lookup("oauth-resource-url"))
 	mustBindMCPFlag(mcpDisableMTLSKey, "LOCKD_MCP_DISABLE_MTLS", flags.Lookup("disable-mcp-upstream-mtls"))
+	mustBindMCPFlag(mcpDefaultNamespaceKey, "LOCKD_MCP_DEFAULT_NAMESPACE", flags.Lookup("default-namespace"))
 
 	if inheritedServerFlag != nil {
 		mustBindMCPFlag(mcpServerKey, "LOCKD_MCP_SERVER", inheritedServerFlag)
@@ -122,6 +125,7 @@ func mcpConfigFromViper() (lockdmcp.Config, error) {
 		DisableTLS:                viper.GetBool(mcpDisableTLSKey),
 		BundlePath:                strings.TrimSpace(viper.GetString(mcpBundleKey)),
 		UpstreamServer:            strings.TrimSpace(viper.GetString(mcpServerKey)),
+		DefaultNamespace:          strings.TrimSpace(viper.GetString(mcpDefaultNamespaceKey)),
 		UpstreamDisableMTLS:       viper.GetBool(mcpDisableMTLSKey),
 		UpstreamClientBundlePath:  strings.TrimSpace(viper.GetString(mcpClientBundleKey)),
 		OAuthStatePath:            strings.TrimSpace(viper.GetString(mcpStateFileKey)),

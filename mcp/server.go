@@ -339,6 +339,10 @@ func (s *server) registerTools(srv *mcpsdk.Server) {
 	}, s.handleIndexFlushTool)
 
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        toolHint,
+		Description: desc(toolHint),
+	}, s.handleHintTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolHelp,
 		Description: desc(toolHelp),
 	}, s.handleHelpTool)
@@ -637,14 +641,22 @@ func newUpstreamClient(cfg Config, logger pslog.Logger) (*lockdclient.Client, er
 	}
 
 	if !cfg.UpstreamDisableMTLS {
-		bundlePath, err := lockd.ResolveClientBundlePathWithHint(lockd.ClientBundleRoleSDK, cfg.UpstreamClientBundlePath, "--client-bundle")
+		bundlePath, err := resolveUpstreamClientBundlePath(cfg)
 		if err != nil {
-			return nil, fmt.Errorf("resolve mcp upstream client bundle: %w", err)
+			return nil, err
 		}
 		opts = append(opts, lockdclient.WithBundlePath(bundlePath))
 	}
 
 	return lockdclient.NewWithEndpoints(endpoints, opts...)
+}
+
+func resolveUpstreamClientBundlePath(cfg Config) (string, error) {
+	bundlePath, err := lockd.ResolveClientBundlePathWithHint(lockd.ClientBundleRoleSDK, cfg.UpstreamClientBundlePath, "--client-bundle")
+	if err != nil {
+		return "", fmt.Errorf("resolve mcp upstream client bundle: %w", err)
+	}
+	return bundlePath, nil
 }
 
 func applyDefaults(cfg *Config) {

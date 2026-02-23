@@ -33,6 +33,10 @@
 // namespace `mcp`). Queue activity is emitted as MCP progress notifications,
 // and consumers explicitly dequeue/ack/nack/defer/extend messages.
 //
+// Agents should start with the `lockd.hint` tool to retrieve namespace-access
+// hints derived from upstream client-bundle claims before selecting namespaces
+// for lock/query/queue calls.
+//
 // # Constructor and lifecycle
 //
 // Use NewServer with NewServerRequest, then call Run with a cancellable context.

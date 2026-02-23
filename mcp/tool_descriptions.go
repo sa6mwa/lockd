@@ -23,6 +23,7 @@ const (
 	toolNamespaceGet         = "lockd.namespace.get"
 	toolNamespaceUpdate      = "lockd.namespace.update"
 	toolIndexFlush           = "lockd.index.flush"
+	toolHint                 = "lockd.hint"
 	toolHelp                 = "lockd.help"
 	toolQueueEnqueue         = "lockd.queue.enqueue"
 	toolQueueDequeue         = "lockd.queue.dequeue"
@@ -52,6 +53,7 @@ var mcpToolNames = []string{
 	toolNamespaceGet,
 	toolNamespaceUpdate,
 	toolIndexFlush,
+	toolHint,
 	toolHelp,
 	toolQueueEnqueue,
 	toolQueueDequeue,
@@ -229,6 +231,14 @@ func buildToolDescriptions(cfg Config) map[string]string {
 			Effects:  "Schedules or waits for index flush and returns flush progress metadata.",
 			Retry:    "Safe to retry; repeated flush requests are operationally benign.",
 			Next:     "Run `lockd.query` to observe refreshed index results.",
+		}),
+		toolHint: formatToolDescription(toolContract{
+			Purpose:  "Return namespace access hints so agents can choose valid namespaces before doing work.",
+			UseWhen:  "Session start, planning phase, or when namespace-forbidden errors occur.",
+			Requires: "No required fields. Uses current caller token context plus upstream client-bundle namespace claims when available.",
+			Effects:  "Returns advisory namespace access hints, default namespace, client id, and token scope context.",
+			Retry:    "Safe to retry; this is a read-only advisory operation.",
+			Next:     "Call `lockd.help` then use returned namespace hints when invoking lock/query/queue tools.",
 		}),
 		toolHelp: formatToolDescription(toolContract{
 			Purpose:  "Return curated lockd MCP workflows, invariants, and documentation resource URIs.",

@@ -1,0 +1,1935 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "tools": [
+      {
+        "description": "Purpose: Delete a single attachment under lease protection.\nUse when: One attachment should be removed while keeping others.\nRequires: `key` and `lease_id` are required, plus either `id` or `name`. `namespace` defaults to \"mcp\". Optional `txn_id` enables XA staging.\nEffects: Deletes (or stages deletion of) the targeted attachment and returns success state.\nRetry: Generally safe after network errors; repeated deletes may become no-op/not-found depending on prior success.\nNext: List attachments to verify remaining items, then release lease.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "fencing_token": {
+              "description": "Optional fencing token override",
+              "type": "string"
+            },
+            "id": {
+              "description": "Attachment id selector",
+              "type": "string"
+            },
+            "key": {
+              "description": "State key",
+              "type": "string"
+            },
+            "lease_id": {
+              "description": "Active lease id",
+              "type": "string"
+            },
+            "name": {
+              "description": "Attachment name selector",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            },
+            "txn_id": {
+              "description": "Optional XA transaction id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "lease_id"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.attachments.delete",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "deleted": {
+              "type": "boolean"
+            },
+            "version": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "deleted",
+            "version"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Delete all attachments for a key under lease protection.\nUse when: You need full attachment cleanup for a key.\nRequires: `key` and `lease_id` are required. `namespace` defaults to \"mcp\". Optional `txn_id` allows transactional staging.\nEffects: Removes (or stages removal of) all attachments for the key.\nRetry: Usually safe to retry after transport failures; later attempts may report already-empty state.\nNext: Optionally write replacement attachments, then release lease.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "fencing_token": {
+              "description": "Optional fencing token override",
+              "type": "string"
+            },
+            "key": {
+              "description": "State key",
+              "type": "string"
+            },
+            "lease_id": {
+              "description": "Active lease id",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            },
+            "txn_id": {
+              "description": "Optional XA transaction id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "lease_id"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.attachments.delete_all",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "deleted": {
+              "type": "integer"
+            },
+            "version": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "deleted",
+            "version"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Fetch one attachment payload by id or name.\nUse when: You need the actual attachment content for processing.\nRequires: `key` plus either `id` or `name` is required. `namespace` defaults to \"mcp\". Provide lease fields for protected reads or set `public=true` for public-read access.\nEffects: Returns attachment metadata plus payload (`payload_base64`, and `payload_text` when UTF-8).\nRetry: Safe to retry; this is a read operation.\nNext: Process payload or delete/replace attachment under lease as needed.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "fencing_token": {
+              "description": "Optional fencing token override",
+              "type": "string"
+            },
+            "id": {
+              "description": "Attachment id selector",
+              "type": "string"
+            },
+            "key": {
+              "description": "State key",
+              "type": "string"
+            },
+            "lease_id": {
+              "description": "Optional lease id for protected retrieval",
+              "type": "string"
+            },
+            "name": {
+              "description": "Attachment name selector",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            },
+            "public": {
+              "description": "Allow public read retrieval",
+              "type": "boolean"
+            },
+            "txn_id": {
+              "description": "Optional XA transaction id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "key"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.attachments.get",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "attachment": {
+              "additionalProperties": false,
+              "properties": {
+                "content_type": {
+                  "type": "string"
+                },
+                "created_at_unix": {
+                  "type": "integer"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "size": {
+                  "type": "integer"
+                },
+                "updated_at_unix": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "size"
+              ],
+              "type": "object"
+            },
+            "payload_base64": {
+              "type": "string"
+            },
+            "payload_bytes": {
+              "type": "integer"
+            },
+            "payload_text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "attachment",
+            "payload_bytes"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: List attachment metadata for a key.\nUse when: You need attachment ids/names before get/delete workflows.\nRequires: `key` is required. `namespace` defaults to \"mcp\". Provide lease fields for protected reads or set `public=true` for public-read listing.\nEffects: Returns attachment metadata only (no payload bytes).\nRetry: Safe to retry; this is a read operation.\nNext: Use `lockd.attachments.get` for payload access or delete tools for cleanup.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "fencing_token": {
+              "description": "Optional fencing token override",
+              "type": "string"
+            },
+            "key": {
+              "description": "State key",
+              "type": "string"
+            },
+            "lease_id": {
+              "description": "Optional lease id for protected listing",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            },
+            "public": {
+              "description": "Allow public read listing",
+              "type": "boolean"
+            },
+            "txn_id": {
+              "description": "Optional XA transaction id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "key"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.attachments.list",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "attachments": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "content_type": {
+                    "type": "string"
+                  },
+                  "created_at_unix": {
+                    "type": "integer"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "size": {
+                    "type": "integer"
+                  },
+                  "updated_at_unix": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "id",
+                  "name",
+                  "size"
+                ],
+                "type": "object"
+              },
+              "type": [
+                "null",
+                "array"
+              ]
+            },
+            "key": {
+              "type": "string"
+            },
+            "namespace": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "namespace",
+            "key",
+            "attachments"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Upload or stage an attachment for a key under lease protection.\nUse when: You need to associate binary/text payloads with key state.\nRequires: `key`, `lease_id`, and `name` are required. `namespace` defaults to \"mcp\". Payload comes from `payload_text` or `payload_base64`. Optional `prevent_overwrite` enforces create-only behavior.\nEffects: Stores attachment content/metadata and returns attachment id/version details.\nRetry: Not strictly idempotent by default; retries can overwrite unless guarded by `prevent_overwrite` and deterministic naming.\nNext: List/get attachments for verification, then release lease when complete.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "content_type": {
+              "description": "Attachment content type",
+              "type": "string"
+            },
+            "fencing_token": {
+              "description": "Optional fencing token override",
+              "type": "string"
+            },
+            "key": {
+              "description": "State key",
+              "type": "string"
+            },
+            "lease_id": {
+              "description": "Active lease id",
+              "type": "string"
+            },
+            "max_bytes": {
+              "description": "Optional upload size cap",
+              "type": "integer"
+            },
+            "name": {
+              "description": "Attachment name",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            },
+            "payload_base64": {
+              "description": "Base64 payload bytes",
+              "type": "string"
+            },
+            "payload_text": {
+              "description": "UTF-8 payload text",
+              "type": "string"
+            },
+            "prevent_overwrite": {
+              "description": "Reject when attachment already exists",
+              "type": "boolean"
+            },
+            "txn_id": {
+              "description": "Optional XA transaction id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "lease_id",
+            "name"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.attachments.put",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "attachment": {
+              "additionalProperties": false,
+              "properties": {
+                "content_type": {
+                  "type": "string"
+                },
+                "created_at_unix": {
+                  "type": "integer"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "size": {
+                  "type": "integer"
+                },
+                "updated_at_unix": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "size"
+              ],
+              "type": "object"
+            },
+            "noop": {
+              "type": "boolean"
+            },
+            "version": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "attachment",
+            "noop",
+            "version"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Read key metadata (lease owner, version, ETag, timestamps) without returning state payload.\nUse when: You need lock/version metadata for diagnostics, conflict handling, or coordination checks.\nRequires: `key` is required. `namespace` defaults to \"mcp\" when omitted.\nEffects: Returns metadata snapshot only; does not mutate state.\nRetry: Safe to retry; this is a read operation.\nNext: Use `lockd.get` to read payload or lock tools for mutation workflows.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "key": {
+              "description": "Lock key to inspect",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            }
+          },
+          "required": [
+            "key"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.describe",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "expires_at_unix": {
+              "type": "integer"
+            },
+            "key": {
+              "type": "string"
+            },
+            "lease_id": {
+              "type": "string"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "owner": {
+              "type": "string"
+            },
+            "query_hidden": {
+              "type": [
+                "null",
+                "boolean"
+              ]
+            },
+            "state_etag": {
+              "type": "string"
+            },
+            "updated_at_unix": {
+              "type": "integer"
+            },
+            "version": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "namespace",
+            "key",
+            "version"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Read committed JSON state for one key.\nUse when: You need current state for planning, validation, or rendering context.\nRequires: `key` is required. `namespace` defaults to \"mcp\". `public=true` enables public-read fallback; optional `lease_id` scopes lease-bound reads.\nEffects: Returns read-only state, ETag/version metadata, and `found=false` when no state exists.\nRetry: Safe to retry; this is a read operation.\nNext: Use `lockd.query` for broader discovery or acquire a lock before mutation.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "key": {
+              "description": "Lock key to read",
+              "type": "string"
+            },
+            "lease_id": {
+              "description": "Optional lease ID for lease-bound reads",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            },
+            "public": {
+              "description": "Allow public-read fallback when true",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "key"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.get",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "etag": {
+              "type": "string"
+            },
+            "found": {
+              "type": "boolean"
+            },
+            "key": {
+              "type": "string"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "value": {
+              "items": {
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": [
+                "null",
+                "array"
+              ]
+            },
+            "version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "namespace",
+            "key",
+            "found"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Return curated lockd MCP workflows, invariants, and documentation resource URIs.\nUse when: Start of session or when uncertain about correct operation sequence.\nRequires: No required fields. Optional `topic` narrows guidance to overview/locks/messaging/sync.\nEffects: Returns guidance only; no lockd state mutation occurs.\nRetry: Safe to retry.\nNext: Follow `next_calls` in the response, typically beginning with lock, queue, or query tools.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "topic": {
+              "description": "Optional topic: overview, locks, messaging, sync",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "name": "lockd.help",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "defaults": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "invariants": {
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "null",
+                "array"
+              ]
+            },
+            "next_calls": {
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "null",
+                "array"
+              ]
+            },
+            "resources": {
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "null",
+                "array"
+              ]
+            },
+            "summary": {
+              "type": "string"
+            },
+            "topic": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "topic",
+            "summary",
+            "next_calls",
+            "resources",
+            "defaults",
+            "invariants"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Return namespace access hints so agents can choose valid namespaces before doing work.\nUse when: Session start, planning phase, or when namespace-forbidden errors occur.\nRequires: No required fields. Uses current caller token context plus upstream client-bundle namespace claims when available.\nEffects: Returns advisory namespace access hints, default namespace, client id, and token scope context.\nRetry: Safe to retry; this is a read-only advisory operation.\nNext: Call `lockd.help` then use returned namespace hints when invoking lock/query/queue tools.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "topic": {
+              "description": "Optional hint topic; defaults to namespace_access",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "name": "lockd.hint",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "claim_uris": {
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "null",
+                "array"
+              ]
+            },
+            "client_id": {
+              "type": "string"
+            },
+            "default_namespace": {
+              "type": "string"
+            },
+            "namespace_hints": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "namespace": {
+                    "type": "string"
+                  },
+                  "permission": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "namespace",
+                  "permission"
+                ],
+                "type": "object"
+              },
+              "type": [
+                "null",
+                "array"
+              ]
+            },
+            "notes": {
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "null",
+                "array"
+              ]
+            },
+            "source": {
+              "type": "string"
+            },
+            "token_scopes": {
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "null",
+                "array"
+              ]
+            },
+            "topic": {
+              "type": "string"
+            },
+            "wildcard_permission": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "topic",
+            "default_namespace",
+            "source"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Trigger search index flush for a namespace.\nUse when: You need query index freshness guarantees after heavy writes or before time-sensitive reads.\nRequires: `namespace` defaults to \"mcp\". `mode` may be `async` (default) or `wait`.\nEffects: Schedules or waits for index flush and returns flush progress metadata.\nRetry: Safe to retry; repeated flush requests are operationally benign.\nNext: Run `lockd.query` to observe refreshed index results.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "description": "Flush mode: async (default) or wait",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "name": "lockd.index.flush",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "accepted": {
+              "type": "boolean"
+            },
+            "flush_id": {
+              "type": "string"
+            },
+            "flushed": {
+              "type": "boolean"
+            },
+            "index_seq": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "mode": {
+              "type": "string"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "pending": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "namespace",
+            "mode",
+            "accepted",
+            "flushed",
+            "pending"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Acquire an exclusive lock lease and receive the lease identity/fencing material needed for protected writes.\nUse when: You need to mutate shared state or attachments for a key, or you need exclusive coordination ownership.\nRequires: `key` is required. `namespace` defaults to \"mcp\". `owner` defaults to OAuth client id. Optional `txn_id` enlists the lease in XA flow.\nEffects: Creates or claims a lease and returns `lease_id`, `fencing_token`, expiry, and optional `txn_id` for follow-up tools.\nRetry: Not inherently idempotent. Retry can obtain a different lease or block outcome; use deterministic owner/workflow guards.\nNext: Call `lockd.state.update` or attachment tools, keep lease alive while working, then `lockd.lock.release`.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "block_seconds": {
+              "description": "Acquire wait: -1 no wait, 0 wait forever, \u003e0 wait seconds",
+              "type": "integer"
+            },
+            "if_not_exists": {
+              "description": "Create-only acquire",
+              "type": "boolean"
+            },
+            "key": {
+              "description": "Key to lock",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            },
+            "owner": {
+              "description": "Lock owner (defaults to oauth client id)",
+              "type": "string"
+            },
+            "ttl_seconds": {
+              "description": "Lease TTL in seconds",
+              "type": "integer"
+            },
+            "txn_id": {
+              "description": "Optional XA transaction id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "key"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.lock.acquire",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "correlation_id": {
+              "type": "string"
+            },
+            "expires_at_unix": {
+              "type": "integer"
+            },
+            "fencing_token": {
+              "type": "integer"
+            },
+            "key": {
+              "type": "string"
+            },
+            "lease_id": {
+              "type": "string"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "owner": {
+              "type": "string"
+            },
+            "state_etag": {
+              "type": "string"
+            },
+            "txn_id": {
+              "type": "string"
+            },
+            "version": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "namespace",
+            "key",
+            "lease_id",
+            "owner",
+            "expires_at_unix",
+            "version"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Extend an active lock lease TTL.\nUse when: Long-running work might outlive current lease expiry.\nRequires: `key`, `lease_id`, and `ttl_seconds \u003e 0` are required. `namespace` defaults to \"mcp\". Optional `txn_id` keeps XA context consistent.\nEffects: Extends lease expiry and returns the updated expiration timestamp.\nRetry: Safe to retry while lease is still valid. If lease already expired, reacquire with `lockd.lock.acquire`.\nNext: Continue mutation workflow; periodically keepalive until ready to release.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "key": {
+              "description": "Locked key",
+              "type": "string"
+            },
+            "lease_id": {
+              "description": "Active lease id",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            },
+            "ttl_seconds": {
+              "description": "TTL extension in seconds",
+              "type": "integer"
+            },
+            "txn_id": {
+              "description": "Optional XA transaction id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "lease_id",
+            "ttl_seconds"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.lock.keepalive",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "expires_at_unix": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "expires_at_unix"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Release a lease and finalize staged changes.\nUse when: Work under a lease is complete or must be abandoned.\nRequires: `key` and `lease_id` are required. `namespace` defaults to \"mcp\". Optional `txn_id` and `rollback=true` control XA/rollback behavior.\nEffects: Releases lease ownership. Commits staged changes by default; rolls back when `rollback=true`.\nRetry: Usually safe to retry after transport failures; duplicate release may return already-released/lease errors depending on timing.\nNext: If more work is needed later, reacquire with `lockd.lock.acquire`.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "key": {
+              "description": "Locked key",
+              "type": "string"
+            },
+            "lease_id": {
+              "description": "Active lease id",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            },
+            "rollback": {
+              "description": "Rollback staged changes instead of commit",
+              "type": "boolean"
+            },
+            "txn_id": {
+              "description": "Optional XA transaction id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "lease_id"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.lock.release",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "released": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "released"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Read namespace query-engine configuration.\nUse when: You need to inspect current query engine settings before updates or debugging.\nRequires: `namespace` defaults to \"mcp\" when omitted.\nEffects: Returns effective namespace query configuration and ETag context.\nRetry: Safe to retry; this is a read operation.\nNext: Use `lockd.namespace.update` to change engine preferences.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "name": "lockd.namespace.get",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "etag": {
+              "type": "string"
+            },
+            "fallback_engine": {
+              "type": "string"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "preferred_engine": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "namespace",
+            "preferred_engine",
+            "fallback_engine"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Update namespace query-engine configuration.\nUse when: You need to change preferred/fallback query engines for a namespace.\nRequires: `preferred_engine` and `fallback_engine` are required. `namespace` defaults to \"mcp\". Optional `if_match` enables CAS-safe updates.\nEffects: Persists namespace query config and returns updated values/ETag.\nRetry: Prefer `if_match` for deterministic retries; otherwise concurrent updates may overwrite each other.\nNext: Optionally call `lockd.index.flush` or rerun queries to validate behavior.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "fallback_engine": {
+              "description": "Fallback query engine",
+              "type": "string"
+            },
+            "if_match": {
+              "description": "Optional If-Match ETag for CAS updates",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            },
+            "preferred_engine": {
+              "description": "Preferred query engine",
+              "type": "string"
+            }
+          },
+          "required": [
+            "preferred_engine",
+            "fallback_engine"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.namespace.update",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "etag": {
+              "type": "string"
+            },
+            "fallback_engine": {
+              "type": "string"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "preferred_engine": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "namespace",
+            "preferred_engine",
+            "fallback_engine"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Run LQL queries over namespace data in key or document mode.\nUse when: You need to locate candidate keys/documents before reading or locking.\nRequires: `query` expression is required. `namespace` defaults to \"mcp\". Optional `limit`, `cursor`, `return`, `engine`, `refresh`, and `fields` refine execution.\nEffects: Returns matching keys or documents plus pagination/index metadata (`cursor`, `index_seq`).\nRetry: Safe to retry. Cursor-based pagination should reuse the latest returned cursor.\nNext: Call `lockd.get` for point reads, then lock/mutate selected keys as needed.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "cursor": {
+              "description": "Continuation cursor",
+              "type": "string"
+            },
+            "engine": {
+              "description": "Optional query engine override: auto, index, or scan",
+              "type": "string"
+            },
+            "fields": {
+              "additionalProperties": true,
+              "description": "Optional query field projection map",
+              "type": "object"
+            },
+            "limit": {
+              "description": "Maximum rows to return",
+              "type": "integer"
+            },
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            },
+            "query": {
+              "description": "LQL query expression",
+              "type": "string"
+            },
+            "refresh": {
+              "description": "Optional refresh policy, for example wait_for",
+              "type": "string"
+            },
+            "return": {
+              "description": "Query return mode: keys (default) or documents",
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.query",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "cursor": {
+              "type": "string"
+            },
+            "documents": {
+              "items": {
+                "items": {
+                  "maximum": 255,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": [
+                  "null",
+                  "array"
+                ]
+              },
+              "type": [
+                "null",
+                "array"
+              ]
+            },
+            "index_seq": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "keys": {
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "null",
+                "array"
+              ]
+            },
+            "metadata": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "mode": {
+              "type": "string"
+            },
+            "namespace": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "namespace",
+            "mode"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Acknowledge successful processing of a dequeued message.\nUse when: Worker completed handling of a leased message.\nRequires: `queue`, `message_id`, `lease_id`, `fencing_token`, and `meta_etag` are required. `namespace` defaults to \"mcp\". Use fields returned by `lockd.queue.dequeue`.\nEffects: Confirms processing and removes/commits message state according to lockd queue semantics.\nRetry: Generally safe after network failures; duplicate ack may return already-acknowledged/mismatch errors based on lease state.\nNext: Dequeue next message or perform follow-up state updates as needed.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "fencing_token": {
+              "description": "Dequeued fencing token",
+              "type": "integer"
+            },
+            "lease_id": {
+              "description": "Dequeued lease id",
+              "type": "string"
+            },
+            "message_id": {
+              "description": "Dequeued message id",
+              "type": "string"
+            },
+            "meta_etag": {
+              "description": "Dequeued meta etag",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            },
+            "queue": {
+              "description": "Queue name",
+              "type": "string"
+            },
+            "state_etag": {
+              "description": "Optional state etag",
+              "type": "string"
+            },
+            "state_fencing_token": {
+              "description": "Optional state fencing token",
+              "type": "integer"
+            },
+            "state_lease_id": {
+              "description": "Optional state lease id",
+              "type": "string"
+            },
+            "txn_id": {
+              "description": "Optional transaction id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "queue",
+            "message_id",
+            "lease_id",
+            "fencing_token",
+            "meta_etag"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.queue.ack",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "acked": {
+              "type": "boolean"
+            },
+            "correlation_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "acked"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Requeue a leased message intentionally without counting it as failure.\nUse when: Message is valid but should be processed later or by another worker.\nRequires: `queue`, `message_id`, `lease_id`, `fencing_token`, and `meta_etag` are required. `namespace` defaults to \"mcp\". Optional `delay_seconds` postpones visibility.\nEffects: Returns message to queue with defer intent and optional delay.\nRetry: Generally safe after transport failures; repeated defer can change next-visibility timing.\nNext: Continue polling/subscription workflow and dequeue again when ready.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "delay_seconds": {
+              "description": "Visibility delay before message becomes available again",
+              "type": "integer"
+            },
+            "fencing_token": {
+              "description": "Dequeued fencing token",
+              "type": "integer"
+            },
+            "lease_id": {
+              "description": "Dequeued lease id",
+              "type": "string"
+            },
+            "message_id": {
+              "description": "Dequeued message id",
+              "type": "string"
+            },
+            "meta_etag": {
+              "description": "Dequeued meta etag",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            },
+            "queue": {
+              "description": "Queue name",
+              "type": "string"
+            },
+            "state_etag": {
+              "description": "Optional state etag",
+              "type": "string"
+            },
+            "state_fencing_token": {
+              "description": "Optional state fencing token",
+              "type": "integer"
+            },
+            "state_lease_id": {
+              "description": "Optional state lease id",
+              "type": "string"
+            },
+            "txn_id": {
+              "description": "Optional transaction id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "queue",
+            "message_id",
+            "lease_id",
+            "fencing_token",
+            "meta_etag"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.queue.defer",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "correlation_id": {
+              "type": "string"
+            },
+            "meta_etag": {
+              "type": "string"
+            },
+            "requeued": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "requeued"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Receive one available message lease from a queue.\nUse when: A worker is ready to process the next queue item.\nRequires: `queue` defaults to \"lockd.agent.bus\". `namespace` defaults to \"mcp\". `owner` defaults to OAuth client id. Optional `stateful`, `visibility_seconds`, `page_size`, `start_after`, and `txn_id` tune dequeue semantics.\nEffects: Returns `found=false` when no message is available, or message payload plus lease fields required for ack/nack/defer/extend.\nRetry: Safe to retry. Duplicate retries may lease different messages when queue state changes.\nNext: If processed, call `lockd.queue.ack`; if failed call `lockd.queue.nack`; if not for this worker call `lockd.queue.defer`; extend long handlers with `lockd.queue.extend`.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "block_seconds": {
+              "description": "Long-poll wait; -1 no wait, 0 wait forever, \u003e0 wait seconds",
+              "type": "integer"
+            },
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            },
+            "owner": {
+              "description": "Consumer owner ID (defaults to oauth client id)",
+              "type": "string"
+            },
+            "page_size": {
+              "description": "Optional dequeue page size hint",
+              "type": "integer"
+            },
+            "queue": {
+              "description": "Queue name (defaults to lockd.agent.bus)",
+              "type": "string"
+            },
+            "start_after": {
+              "description": "Optional dequeue cursor start-after message id",
+              "type": "string"
+            },
+            "stateful": {
+              "description": "Acquire workflow state lease alongside dequeued message",
+              "type": "boolean"
+            },
+            "txn_id": {
+              "description": "Optional transaction id to bind dequeue operations",
+              "type": "string"
+            },
+            "visibility_seconds": {
+              "description": "Optional visibility timeout override in seconds",
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "name": "lockd.queue.dequeue",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "attempts": {
+              "type": "integer"
+            },
+            "content_type": {
+              "type": "string"
+            },
+            "correlation_id": {
+              "type": "string"
+            },
+            "cursor": {
+              "type": "string"
+            },
+            "failure_attempts": {
+              "type": "integer"
+            },
+            "fencing_token": {
+              "type": "integer"
+            },
+            "found": {
+              "type": "boolean"
+            },
+            "lease_expires_at_unix": {
+              "type": "integer"
+            },
+            "lease_id": {
+              "type": "string"
+            },
+            "max_attempts": {
+              "type": "integer"
+            },
+            "message_id": {
+              "type": "string"
+            },
+            "meta_etag": {
+              "type": "string"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "not_visible_until_unix": {
+              "type": "integer"
+            },
+            "payload_base64": {
+              "type": "string"
+            },
+            "payload_bytes": {
+              "type": "integer"
+            },
+            "payload_text": {
+              "type": "string"
+            },
+            "queue": {
+              "type": "string"
+            },
+            "state_etag": {
+              "type": "string"
+            },
+            "state_fencing_token": {
+              "type": "integer"
+            },
+            "state_lease_expires_at_unix": {
+              "type": "integer"
+            },
+            "state_lease_id": {
+              "type": "string"
+            },
+            "txn_id": {
+              "type": "string"
+            },
+            "visibility_timeout_seconds": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "namespace",
+            "queue",
+            "found"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Publish a message to a lockd queue for agent coordination.\nUse when: You need to signal work/events/context to queue consumers.\nRequires: `queue` defaults to \"lockd.agent.bus\". `namespace` defaults to \"mcp\". Provide payload via `payload_text` or `payload_base64`; optional delay/visibility/ttl/attributes tune delivery.\nEffects: Appends a queue message and returns delivery metadata (`message_id`, visibility, attempts).\nRetry: Not idempotent by default; retries can enqueue duplicates. Use application-level dedupe keys in payload/attributes.\nNext: Consumers should `lockd.queue.dequeue` then `lockd.queue.ack` or `lockd.queue.defer`.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "attributes": {
+              "additionalProperties": true,
+              "description": "Message attributes metadata",
+              "type": "object"
+            },
+            "content_type": {
+              "description": "Payload content type",
+              "type": "string"
+            },
+            "delay_seconds": {
+              "description": "Initial invisibility delay",
+              "type": "integer"
+            },
+            "max_attempts": {
+              "description": "Maximum failed attempts before terminal handling",
+              "type": "integer"
+            },
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            },
+            "payload_base64": {
+              "description": "Base64-encoded payload bytes",
+              "type": "string"
+            },
+            "payload_text": {
+              "description": "UTF-8 payload text",
+              "type": "string"
+            },
+            "queue": {
+              "description": "Queue name (defaults to lockd.agent.bus)",
+              "type": "string"
+            },
+            "ttl_seconds": {
+              "description": "Message retention TTL in seconds",
+              "type": "integer"
+            },
+            "visibility_seconds": {
+              "description": "Visibility timeout for dequeued lease",
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "name": "lockd.queue.enqueue",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "attempts": {
+              "type": "integer"
+            },
+            "correlation_id": {
+              "type": "string"
+            },
+            "failure_attempts": {
+              "type": "integer"
+            },
+            "max_attempts": {
+              "type": "integer"
+            },
+            "message_id": {
+              "type": "string"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "not_visible_until_unix": {
+              "type": "integer"
+            },
+            "payload_bytes": {
+              "type": "integer"
+            },
+            "queue": {
+              "type": "string"
+            },
+            "visibility_timeout_seconds": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "namespace",
+            "queue",
+            "message_id",
+            "attempts",
+            "max_attempts",
+            "not_visible_until_unix",
+            "visibility_timeout_seconds",
+            "payload_bytes"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Extend visibility/lease timeout for a currently leased queue message.\nUse when: Message processing is still active and lease timeout is approaching.\nRequires: `queue`, `message_id`, `lease_id`, `fencing_token`, and `meta_etag` are required. `namespace` defaults to \"mcp\". Optional state lease fields support stateful dequeue workflows.\nEffects: Refreshes message lease expiry and visibility timeout; returns updated lease timing and metadata ETag.\nRetry: Safe to retry while lease remains valid. If lease has expired, dequeue again to reacquire.\nNext: Continue processing, then ack/nack/defer when work is complete.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "extend_by_seconds": {
+              "description": "Lease extension in seconds",
+              "type": "integer"
+            },
+            "fencing_token": {
+              "description": "Dequeued fencing token",
+              "type": "integer"
+            },
+            "lease_id": {
+              "description": "Dequeued lease id",
+              "type": "string"
+            },
+            "message_id": {
+              "description": "Dequeued message id",
+              "type": "string"
+            },
+            "meta_etag": {
+              "description": "Dequeued meta etag",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            },
+            "queue": {
+              "description": "Queue name",
+              "type": "string"
+            },
+            "state_fencing_token": {
+              "description": "Optional state fencing token",
+              "type": "integer"
+            },
+            "state_lease_id": {
+              "description": "Optional state lease id",
+              "type": "string"
+            },
+            "txn_id": {
+              "description": "Optional transaction id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "queue",
+            "message_id",
+            "lease_id",
+            "fencing_token",
+            "meta_etag"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.queue.extend",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "correlation_id": {
+              "type": "string"
+            },
+            "lease_expires_at_unix": {
+              "type": "integer"
+            },
+            "meta_etag": {
+              "type": "string"
+            },
+            "state_lease_expires_at_unix": {
+              "type": "integer"
+            },
+            "visibility_timeout_seconds": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "lease_expires_at_unix",
+            "visibility_timeout_seconds"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Requeue a message as a failure, consuming failure budget (`max_attempts`).\nUse when: Message processing failed and should be retried later with failure semantics.\nRequires: `queue`, `message_id`, `lease_id`, `fencing_token`, and `meta_etag` are required. `namespace` defaults to \"mcp\". Optional `delay_seconds` and `reason` enrich retry behavior.\nEffects: Requeues message with `intent=failure`, updates queue metadata ETag, and records optional failure detail.\nRetry: Generally safe after transport failures; repeated nack can alter delay/attempt metadata depending on timing.\nNext: Dequeue next message or inspect retry/dead-letter behavior.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "delay_seconds": {
+              "description": "Visibility delay before message becomes available again",
+              "type": "integer"
+            },
+            "fencing_token": {
+              "description": "Dequeued fencing token",
+              "type": "integer"
+            },
+            "lease_id": {
+              "description": "Dequeued lease id",
+              "type": "string"
+            },
+            "message_id": {
+              "description": "Dequeued message id",
+              "type": "string"
+            },
+            "meta_etag": {
+              "description": "Dequeued meta etag",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            },
+            "queue": {
+              "description": "Queue name",
+              "type": "string"
+            },
+            "reason": {
+              "description": "Optional failure reason detail",
+              "type": "string"
+            },
+            "state_etag": {
+              "description": "Optional state etag",
+              "type": "string"
+            },
+            "state_fencing_token": {
+              "description": "Optional state fencing token",
+              "type": "integer"
+            },
+            "state_lease_id": {
+              "description": "Optional state lease id",
+              "type": "string"
+            },
+            "txn_id": {
+              "description": "Optional transaction id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "queue",
+            "message_id",
+            "lease_id",
+            "fencing_token",
+            "meta_etag"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.queue.nack",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "correlation_id": {
+              "type": "string"
+            },
+            "meta_etag": {
+              "type": "string"
+            },
+            "requeued": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "requeued"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Subscribe current MCP session to queue-availability notifications over SSE.\nUse when: You want push wake-ups instead of pure dequeue polling.\nRequires: Active MCP session is required. `queue` defaults to \"lockd.agent.bus\" and `namespace` defaults to \"mcp\".\nEffects: Registers session subscription; future queue activity emits MCP progress notifications.\nRetry: Safe to retry; duplicate subscribe is handled as already subscribed.\nNext: On notification, call `lockd.queue.dequeue` then `ack` or `defer`.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            },
+            "queue": {
+              "description": "Queue name (defaults to lockd.agent.bus)",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "name": "lockd.queue.subscribe",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "namespace": {
+              "type": "string"
+            },
+            "queue": {
+              "type": "string"
+            },
+            "subscribed": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "namespace",
+            "queue",
+            "subscribed"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Remove current MCP session queue subscription.\nUse when: Worker no longer wants notifications for a queue.\nRequires: Active MCP session is required. `queue` defaults to \"lockd.agent.bus\" and `namespace` defaults to \"mcp\".\nEffects: Stops notification forwarding for the targeted session+queue binding.\nRetry: Safe to retry; unsubscribing an absent subscription returns false/unsubscribed state.\nNext: Either resubscribe later or continue with explicit dequeue polling.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            },
+            "queue": {
+              "description": "Queue name (defaults to lockd.agent.bus)",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "name": "lockd.queue.unsubscribe",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "namespace": {
+              "type": "string"
+            },
+            "queue": {
+              "type": "string"
+            },
+            "unsubscribed": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "namespace",
+            "queue",
+            "unsubscribed"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Update state metadata without replacing JSON state payload.\nUse when: Only metadata (for example `query_hidden`) needs to change.\nRequires: `key`, `lease_id`, and `query_hidden` are required. `namespace` defaults to \"mcp\". Optional CAS/fencing fields protect against races.\nEffects: Persists metadata mutation and returns resulting version/metadata.\nRetry: Use CAS/fencing fields for deterministic retries; otherwise last-writer-wins behavior applies.\nNext: Continue updates under the same lease or release the lease when done.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "fencing_token": {
+              "description": "Optional fencing token override",
+              "type": "string"
+            },
+            "if_etag": {
+              "description": "Conditional ETag guard",
+              "type": "string"
+            },
+            "if_version": {
+              "description": "Conditional version guard",
+              "type": "string"
+            },
+            "key": {
+              "description": "State key",
+              "type": "string"
+            },
+            "lease_id": {
+              "description": "Active lease id",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            },
+            "query_hidden": {
+              "description": "Set true to hide, false to expose in queries",
+              "type": [
+                "null",
+                "boolean"
+              ]
+            },
+            "txn_id": {
+              "description": "Optional XA transaction id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "lease_id",
+            "query_hidden"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.state.metadata",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "query_hidden": {
+              "type": [
+                "null",
+                "boolean"
+              ]
+            },
+            "version": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "version"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Delete state for a key under lease protection.\nUse when: State should be removed as part of cleanup or workflow transitions.\nRequires: `key` and `lease_id` are required. `namespace` defaults to \"mcp\". Optional `txn_id` and CAS/fencing fields support XA/concurrency control.\nEffects: Removes committed state for the key (or stages delete in transaction context).\nRetry: Prefer CAS/fencing guards for deterministic retries; repeated deletes may be no-op or not-found depending on timing.\nNext: Release lease to finalize, or write replacement state/attachments first.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "fencing_token": {
+              "description": "Optional fencing token override",
+              "type": "string"
+            },
+            "if_etag": {
+              "description": "Conditional ETag guard",
+              "type": "string"
+            },
+            "if_version": {
+              "description": "Conditional version guard",
+              "type": "string"
+            },
+            "key": {
+              "description": "State key",
+              "type": "string"
+            },
+            "lease_id": {
+              "description": "Active lease id",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            },
+            "txn_id": {
+              "description": "Optional XA transaction id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "lease_id"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.state.remove",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "new_version": {
+              "type": "integer"
+            },
+            "removed": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "removed"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Write JSON state under lease protection.\nUse when: You need to create or update state for a locked key.\nRequires: `key` and `lease_id` are required. `namespace` defaults to \"mcp\". Payload comes from `payload_text` or `payload_base64` (defaults to `{}`). Optional CAS/fencing fields harden concurrency safety.\nEffects: Updates state and returns new version/ETag metadata; can also mutate `query_hidden` metadata.\nRetry: Use `if_etag`, `if_version`, and `fencing_token` for safe retries. Without guards, retries can apply duplicate writes.\nNext: Optionally update metadata/attachments, then release lease to commit or rollback.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "fencing_token": {
+              "description": "Optional fencing token override",
+              "type": "string"
+            },
+            "if_etag": {
+              "description": "Conditional ETag guard",
+              "type": "string"
+            },
+            "if_version": {
+              "description": "Conditional version guard",
+              "type": "string"
+            },
+            "key": {
+              "description": "State key",
+              "type": "string"
+            },
+            "lease_id": {
+              "description": "Active lease id",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            },
+            "payload_base64": {
+              "description": "Base64-encoded JSON payload bytes",
+              "type": "string"
+            },
+            "payload_text": {
+              "description": "UTF-8 JSON payload text",
+              "type": "string"
+            },
+            "query_hidden": {
+              "description": "Optional query-hidden metadata mutation",
+              "type": [
+                "null",
+                "boolean"
+              ]
+            },
+            "txn_id": {
+              "description": "Optional XA transaction id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "lease_id"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.state.update",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "bytes": {
+              "type": "integer"
+            },
+            "new_state_etag": {
+              "type": "string"
+            },
+            "new_version": {
+              "type": "integer"
+            },
+            "query_hidden": {
+              "type": [
+                "null",
+                "boolean"
+              ]
+            }
+          },
+          "required": [
+            "new_version",
+            "new_state_etag",
+            "bytes"
+          ],
+          "type": "object"
+        }
+      }
+    ]
+  }
+}

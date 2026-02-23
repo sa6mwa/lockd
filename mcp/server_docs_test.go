@@ -18,6 +18,9 @@ func TestDefaultServerInstructionsIncludeNamespaceAndQueue(t *testing.T) {
 	if !strings.Contains(text, "Default coordination queue: lockd.agent.bus") {
 		t.Fatalf("expected queue in instructions: %q", text)
 	}
+	if !strings.Contains(text, "call lockd.hint first") {
+		t.Fatalf("expected lockd.hint guidance in instructions: %q", text)
+	}
 }
 
 func TestHelpToolMessagingTopic(t *testing.T) {
@@ -32,6 +35,18 @@ func TestHelpToolMessagingTopic(t *testing.T) {
 	}
 	if len(out.Resources) == 0 || out.Resources[0] != docMessagingURI {
 		t.Fatalf("expected messaging docs resource, got %#v", out.Resources)
+	}
+}
+
+func TestHelpToolOverviewIncludesHintFirst(t *testing.T) {
+	t.Parallel()
+	s := &server{cfg: Config{DefaultNamespace: "mcp", AgentBusQueue: "lockd.agent.bus"}}
+	_, out, err := s.handleHelpTool(context.Background(), nil, helpToolInput{Topic: "overview"})
+	if err != nil {
+		t.Fatalf("help tool: %v", err)
+	}
+	if len(out.NextCalls) == 0 || out.NextCalls[0] != "lockd.hint" {
+		t.Fatalf("expected lockd.hint as first overview next_call, got %#v", out.NextCalls)
 	}
 }
 

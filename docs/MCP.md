@@ -147,6 +147,7 @@ Config file YAML uses dashed dotted keys (for example `mcp.default-namespace`).
 
 Discovery and docs:
 
+- `lockd.hint`
 - `lockd.help`
 - resource docs under `resource://docs/*`
 
@@ -264,3 +265,13 @@ When `DisableTLS` is true, OAuth/TLS enforcement is disabled. This is intended f
   - verify OAuth client status, issuer, token URL, scopes, and resource URL
 - No queue notifications:
   - verify session has active subscription and queue/namespace match
+
+## Agent Workflow Recommendation
+
+At session start:
+
+1. call `lockd.hint` to discover namespace-access hints from client-bundle claims
+2. call `lockd.help` for operation sequencing
+3. run queue/query/lock workflows using hinted namespaces
+
+`lockd.hint` is advisory, but it is the fastest way for an agent to avoid namespace-forbidden calls before first operation.

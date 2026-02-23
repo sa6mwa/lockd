@@ -552,14 +552,19 @@ func resolveLease(lease string) (string, error) {
 	return "", fmt.Errorf("--lease is required (or set %s)", envLeaseID)
 }
 
-func resolveFencing(token string) (string, error) {
-	if token != "" {
-		return token, nil
+func resolveFencing(token string) (int64, error) {
+	raw := strings.TrimSpace(token)
+	if raw == "" {
+		raw = strings.TrimSpace(os.Getenv(envFencingToken))
 	}
-	if env := os.Getenv(envFencingToken); env != "" {
-		return env, nil
+	if raw == "" {
+		return 0, fmt.Errorf("--fencing-token is required (or set %s)", envFencingToken)
 	}
-	return "", fmt.Errorf("--fencing-token is required (or set %s)", envFencingToken)
+	parsed, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || parsed <= 0 {
+		return 0, fmt.Errorf("invalid --fencing-token %q (must be a positive int64)", raw)
+	}
+	return parsed, nil
 }
 
 func resolveTxn(txn string) (string, error) {
@@ -1515,7 +1520,7 @@ func newClientAcquireCommand(cfg *clientCLIConfig) *cobra.Command {
 					{name: envLeaseID, value: sess.LeaseID},
 					{name: envKey, value: sess.Key},
 					{name: envOwner, value: sess.Owner},
-					{name: envFencingToken, value: sess.FencingTokenString()},
+					{name: envFencingToken, value: strconv.FormatInt(sess.CurrentFencingToken(), 10)},
 					{name: envTxnID, value: sess.TxnID},
 					{name: envServerURL, value: cfg.server},
 					{name: envVersion, value: strconv.FormatInt(sess.Version, 10)},
@@ -1869,7 +1874,7 @@ func newClientUpdateCommand(cfg *clientCLIConfig) *cobra.Command {
 				return err
 			}
 			ns := resolveNamespaceInput(namespace)
-			opts := lockdclient.UpdateOptions{Namespace: ns, IfVersion: ifVersion, IfETag: ifETag, FencingToken: token, TxnID: txn}
+			opts := lockdclient.UpdateOptions{Namespace: ns, IfVersion: ifVersion, IfETag: ifETag, FencingToken: lockdclient.Int64(token), TxnID: txn}
 			ctx, _ := commandContextWithCorrelation(cmd)
 			result, err := cli.UpdateBytes(ctx, key, lease, payload, opts)
 			if err != nil {
@@ -1948,7 +1953,7 @@ func newClientRemoveCommand(cfg *clientCLIConfig) *cobra.Command {
 			}
 			cli.RegisterLeaseToken(lease, token)
 			ns := resolveNamespaceInput(namespace)
-			opts := lockdclient.RemoveOptions{Namespace: ns, IfVersion: ifVersion, IfETag: ifETag, FencingToken: token, TxnID: txn}
+			opts := lockdclient.RemoveOptions{Namespace: ns, IfVersion: ifVersion, IfETag: ifETag, FencingToken: lockdclient.Int64(token), TxnID: txn}
 			ctx, _ := commandContextWithCorrelation(cmd)
 			result, err := cli.Remove(ctx, key, lease, opts)
 			if err != nil {
@@ -2069,7 +2074,7 @@ func newClientSetCommand(cfg *clientCLIConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			opts := lockdclient.UpdateOptions{Namespace: ns, FencingToken: token, TxnID: txn}
+			opts := lockdclient.UpdateOptions{Namespace: ns, FencingToken: lockdclient.Int64(token), TxnID: txn}
 			if !noCAS {
 				opts.IfVersion = version
 				opts.IfETag = etag

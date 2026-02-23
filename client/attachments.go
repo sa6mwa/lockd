@@ -88,7 +88,7 @@ type AttachRequest struct {
 	// TxnID associates the operation with a transaction coordinator record.
 	TxnID string
 	// FencingToken is the monotonic token used to fence stale writers.
-	FencingToken string
+	FencingToken *int64
 	// Name is the human-readable identifier for the referenced object.
 	Name string
 	// Body provides the request or response payload stream/content.
@@ -130,7 +130,7 @@ type ListAttachmentsRequest struct {
 	// TxnID associates the operation with a transaction coordinator record.
 	TxnID string
 	// FencingToken is the monotonic token used to fence stale writers.
-	FencingToken string
+	FencingToken *int64
 	// Public enables read-only attachment listing without lease credentials when public reads are allowed.
 	Public bool
 }
@@ -156,7 +156,7 @@ type GetAttachmentRequest struct {
 	// TxnID associates the operation with a transaction coordinator record.
 	TxnID string
 	// FencingToken is the monotonic token used to fence stale writers.
-	FencingToken string
+	FencingToken *int64
 	// Public enables read-only attachment retrieval without lease credentials when public reads are allowed.
 	Public bool
 	// Selector identifies which attachment to retrieve (by ID, Name, or both).
@@ -174,7 +174,7 @@ type DeleteAttachmentRequest struct {
 	// TxnID associates the operation with a transaction coordinator record.
 	TxnID string
 	// FencingToken is the monotonic token used to fence stale writers.
-	FencingToken string
+	FencingToken *int64
 	// Selector identifies which attachment to delete (by ID, Name, or both).
 	Selector AttachmentSelector
 }
@@ -190,7 +190,7 @@ type DeleteAllAttachmentsRequest struct {
 	// TxnID associates the operation with a transaction coordinator record.
 	TxnID string
 	// FencingToken is the monotonic token used to fence stale writers.
-	FencingToken string
+	FencingToken *int64
 }
 
 // DeleteAttachmentResult reports delete status for a single attachment.
@@ -536,7 +536,7 @@ func (c *Client) Attach(ctx context.Context, req AttachRequest) (*AttachResult, 
 		httpReq.Header.Set("Content-Type", contentType)
 		httpReq.Header.Set("X-Lease-ID", leaseID)
 		httpReq.Header.Set(headerTxnID, req.TxnID)
-		httpReq.Header.Set(headerFencingToken, token)
+		httpReq.Header.Set(headerFencingToken, strconv.FormatInt(token, 10))
 		c.applyCorrelationHeader(ctx, httpReq, "")
 		return httpReq, cancel, nil
 	}
@@ -555,7 +555,7 @@ func (c *Client) Attach(ctx context.Context, req AttachRequest) (*AttachResult, 
 	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
 		return nil, err
 	}
-	if newToken := resp.Header.Get(headerFencingToken); newToken != "" {
+	if newToken, ok := parseFencingTokenHeader(resp.Header.Get(headerFencingToken)); ok {
 		c.RegisterLeaseToken(leaseID, newToken)
 	}
 	result := &AttachResult{
@@ -617,7 +617,7 @@ func (c *Client) ListAttachments(ctx context.Context, req ListAttachmentsRequest
 			}
 			httpReq.Header.Set("X-Lease-ID", leaseID)
 			httpReq.Header.Set(headerTxnID, req.TxnID)
-			httpReq.Header.Set(headerFencingToken, token)
+			httpReq.Header.Set(headerFencingToken, strconv.FormatInt(token, 10))
 		}
 		c.applyCorrelationHeader(ctx, httpReq, "")
 		return httpReq, cancel, nil
@@ -705,7 +705,7 @@ func (c *Client) GetAttachment(ctx context.Context, req GetAttachmentRequest) (*
 			}
 			httpReq.Header.Set("X-Lease-ID", leaseID)
 			httpReq.Header.Set(headerTxnID, req.TxnID)
-			httpReq.Header.Set(headerFencingToken, token)
+			httpReq.Header.Set(headerFencingToken, strconv.FormatInt(token, 10))
 		}
 		c.applyCorrelationHeader(ctx, httpReq, "")
 		return httpReq, cancel, nil
@@ -798,7 +798,7 @@ func (c *Client) DeleteAttachment(ctx context.Context, req DeleteAttachmentReque
 		}
 		httpReq.Header.Set("X-Lease-ID", leaseID)
 		httpReq.Header.Set(headerTxnID, req.TxnID)
-		httpReq.Header.Set(headerFencingToken, token)
+		httpReq.Header.Set(headerFencingToken, strconv.FormatInt(token, 10))
 		c.applyCorrelationHeader(ctx, httpReq, "")
 		return httpReq, cancel, nil
 	}
@@ -817,7 +817,7 @@ func (c *Client) DeleteAttachment(ctx context.Context, req DeleteAttachmentReque
 	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
 		return nil, err
 	}
-	if newToken := resp.Header.Get(headerFencingToken); newToken != "" {
+	if newToken, ok := parseFencingTokenHeader(resp.Header.Get(headerFencingToken)); ok {
 		c.RegisterLeaseToken(leaseID, newToken)
 	}
 	return &DeleteAttachmentResult{Deleted: apiResp.Deleted, Version: apiResp.Version}, nil
@@ -868,7 +868,7 @@ func (c *Client) DeleteAllAttachments(ctx context.Context, req DeleteAllAttachme
 		}
 		httpReq.Header.Set("X-Lease-ID", leaseID)
 		httpReq.Header.Set(headerTxnID, req.TxnID)
-		httpReq.Header.Set(headerFencingToken, token)
+		httpReq.Header.Set(headerFencingToken, strconv.FormatInt(token, 10))
 		c.applyCorrelationHeader(ctx, httpReq, "")
 		return httpReq, cancel, nil
 	}
@@ -887,7 +887,7 @@ func (c *Client) DeleteAllAttachments(ctx context.Context, req DeleteAllAttachme
 	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
 		return nil, err
 	}
-	if newToken := resp.Header.Get(headerFencingToken); newToken != "" {
+	if newToken, ok := parseFencingTokenHeader(resp.Header.Get(headerFencingToken)); ok {
 		c.RegisterLeaseToken(leaseID, newToken)
 	}
 	return &DeleteAllAttachmentsResult{Deleted: apiResp.Deleted, Version: apiResp.Version}, nil

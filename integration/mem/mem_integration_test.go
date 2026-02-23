@@ -220,8 +220,7 @@ func TestMemPublicGetAfterRelease(t *testing.T) {
 	}
 
 	// Attempt a normal leased GET using the old lease id/token – expect lease_required.
-	token := strconv.FormatInt(lease.FencingToken, 10)
-	cli.RegisterLeaseToken(lease.LeaseID, token)
+	cli.RegisterLeaseToken(lease.LeaseID, lease.FencingToken)
 	staleCtx, staleCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer staleCancel()
 	_, err := cli.Get(staleCtx, key,

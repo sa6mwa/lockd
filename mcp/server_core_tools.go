@@ -151,7 +151,7 @@ type stateUpdateToolInput struct {
 	Namespace     string `json:"namespace,omitempty" jsonschema:"Namespace (defaults to server default namespace)"`
 	LeaseID       string `json:"lease_id" jsonschema:"Active lease id"`
 	TxnID         string `json:"txn_id,omitempty" jsonschema:"Optional XA transaction id"`
-	FencingToken  string `json:"fencing_token,omitempty" jsonschema:"Optional fencing token override"`
+	FencingToken  *int64 `json:"fencing_token,omitempty" jsonschema:"Optional fencing token override"`
 	IfETag        string `json:"if_etag,omitempty" jsonschema:"Conditional ETag guard"`
 	IfVersion     string `json:"if_version,omitempty" jsonschema:"Conditional version guard"`
 	QueryHidden   *bool  `json:"query_hidden,omitempty" jsonschema:"Optional query-hidden metadata mutation"`
@@ -185,7 +185,7 @@ func (s *server) handleStateUpdateTool(ctx context.Context, _ *mcpsdk.CallToolRe
 	opts := lockdclient.UpdateOptions{
 		Namespace:    s.resolveNamespace(input.Namespace),
 		TxnID:        strings.TrimSpace(input.TxnID),
-		FencingToken: strings.TrimSpace(input.FencingToken),
+		FencingToken: input.FencingToken,
 		IfETag:       strings.TrimSpace(input.IfETag),
 		IfVersion:    strings.TrimSpace(input.IfVersion),
 		Metadata: lockdclient.MetadataOptions{
@@ -210,7 +210,7 @@ type stateMetadataToolInput struct {
 	Namespace    string `json:"namespace,omitempty" jsonschema:"Namespace (defaults to server default namespace)"`
 	LeaseID      string `json:"lease_id" jsonschema:"Active lease id"`
 	TxnID        string `json:"txn_id,omitempty" jsonschema:"Optional XA transaction id"`
-	FencingToken string `json:"fencing_token,omitempty" jsonschema:"Optional fencing token override"`
+	FencingToken *int64 `json:"fencing_token,omitempty" jsonschema:"Optional fencing token override"`
 	IfETag       string `json:"if_etag,omitempty" jsonschema:"Conditional ETag guard"`
 	IfVersion    string `json:"if_version,omitempty" jsonschema:"Conditional version guard"`
 	QueryHidden  *bool  `json:"query_hidden" jsonschema:"Set true to hide, false to expose in queries"`
@@ -231,7 +231,7 @@ func (s *server) handleStateMetadataTool(ctx context.Context, _ *mcpsdk.CallTool
 	opts := lockdclient.UpdateOptions{
 		Namespace:    s.resolveNamespace(input.Namespace),
 		TxnID:        strings.TrimSpace(input.TxnID),
-		FencingToken: strings.TrimSpace(input.FencingToken),
+		FencingToken: input.FencingToken,
 		IfETag:       strings.TrimSpace(input.IfETag),
 		IfVersion:    strings.TrimSpace(input.IfVersion),
 		Metadata: lockdclient.MetadataOptions{
@@ -254,7 +254,7 @@ type stateRemoveToolInput struct {
 	Namespace    string `json:"namespace,omitempty" jsonschema:"Namespace (defaults to server default namespace)"`
 	LeaseID      string `json:"lease_id" jsonschema:"Active lease id"`
 	TxnID        string `json:"txn_id,omitempty" jsonschema:"Optional XA transaction id"`
-	FencingToken string `json:"fencing_token,omitempty" jsonschema:"Optional fencing token override"`
+	FencingToken *int64 `json:"fencing_token,omitempty" jsonschema:"Optional fencing token override"`
 	IfETag       string `json:"if_etag,omitempty" jsonschema:"Conditional ETag guard"`
 	IfVersion    string `json:"if_version,omitempty" jsonschema:"Conditional version guard"`
 }
@@ -271,7 +271,7 @@ func (s *server) handleStateRemoveTool(ctx context.Context, _ *mcpsdk.CallToolRe
 	resp, err := s.upstream.Remove(ctx, strings.TrimSpace(input.Key), strings.TrimSpace(input.LeaseID), lockdclient.RemoveOptions{
 		Namespace:    s.resolveNamespace(input.Namespace),
 		TxnID:        strings.TrimSpace(input.TxnID),
-		FencingToken: strings.TrimSpace(input.FencingToken),
+		FencingToken: input.FencingToken,
 		IfETag:       strings.TrimSpace(input.IfETag),
 		IfVersion:    strings.TrimSpace(input.IfVersion),
 	})
@@ -286,7 +286,7 @@ type attachmentPutToolInput struct {
 	Namespace        string `json:"namespace,omitempty" jsonschema:"Namespace (defaults to server default namespace)"`
 	LeaseID          string `json:"lease_id" jsonschema:"Active lease id"`
 	TxnID            string `json:"txn_id,omitempty" jsonschema:"Optional XA transaction id"`
-	FencingToken     string `json:"fencing_token,omitempty" jsonschema:"Optional fencing token override"`
+	FencingToken     *int64 `json:"fencing_token,omitempty" jsonschema:"Optional fencing token override"`
 	Name             string `json:"name" jsonschema:"Attachment name"`
 	ContentType      string `json:"content_type,omitempty" jsonschema:"Attachment content type"`
 	MaxBytes         int64  `json:"max_bytes,omitempty" jsonschema:"Optional upload size cap"`
@@ -329,7 +329,7 @@ func (s *server) handleAttachmentPutTool(ctx context.Context, _ *mcpsdk.CallTool
 		Key:              strings.TrimSpace(input.Key),
 		LeaseID:          strings.TrimSpace(input.LeaseID),
 		TxnID:            strings.TrimSpace(input.TxnID),
-		FencingToken:     strings.TrimSpace(input.FencingToken),
+		FencingToken:     input.FencingToken,
 		Name:             strings.TrimSpace(input.Name),
 		Body:             bytes.NewReader(payload),
 		ContentType:      strings.TrimSpace(input.ContentType),
@@ -358,7 +358,7 @@ type attachmentListToolInput struct {
 	Namespace    string `json:"namespace,omitempty" jsonschema:"Namespace (defaults to server default namespace)"`
 	LeaseID      string `json:"lease_id,omitempty" jsonschema:"Optional lease id for protected listing"`
 	TxnID        string `json:"txn_id,omitempty" jsonschema:"Optional XA transaction id"`
-	FencingToken string `json:"fencing_token,omitempty" jsonschema:"Optional fencing token override"`
+	FencingToken *int64 `json:"fencing_token,omitempty" jsonschema:"Optional fencing token override"`
 	Public       bool   `json:"public,omitempty" jsonschema:"Allow public read listing"`
 }
 
@@ -377,7 +377,7 @@ func (s *server) handleAttachmentListTool(ctx context.Context, _ *mcpsdk.CallToo
 		Key:          strings.TrimSpace(input.Key),
 		LeaseID:      strings.TrimSpace(input.LeaseID),
 		TxnID:        strings.TrimSpace(input.TxnID),
-		FencingToken: strings.TrimSpace(input.FencingToken),
+		FencingToken: input.FencingToken,
 		Public:       input.Public,
 	})
 	if err != nil {
@@ -399,7 +399,7 @@ type attachmentGetToolInput struct {
 	Namespace    string `json:"namespace,omitempty" jsonschema:"Namespace (defaults to server default namespace)"`
 	LeaseID      string `json:"lease_id,omitempty" jsonschema:"Optional lease id for protected retrieval"`
 	TxnID        string `json:"txn_id,omitempty" jsonschema:"Optional XA transaction id"`
-	FencingToken string `json:"fencing_token,omitempty" jsonschema:"Optional fencing token override"`
+	FencingToken *int64 `json:"fencing_token,omitempty" jsonschema:"Optional fencing token override"`
 	Public       bool   `json:"public,omitempty" jsonschema:"Allow public read retrieval"`
 	ID           string `json:"id,omitempty" jsonschema:"Attachment id selector"`
 	Name         string `json:"name,omitempty" jsonschema:"Attachment name selector"`
@@ -424,7 +424,7 @@ func (s *server) handleAttachmentGetTool(ctx context.Context, _ *mcpsdk.CallTool
 		Key:          strings.TrimSpace(input.Key),
 		LeaseID:      strings.TrimSpace(input.LeaseID),
 		TxnID:        strings.TrimSpace(input.TxnID),
-		FencingToken: strings.TrimSpace(input.FencingToken),
+		FencingToken: input.FencingToken,
 		Public:       input.Public,
 		Selector: lockdclient.AttachmentSelector{
 			ID:   strings.TrimSpace(input.ID),
@@ -457,7 +457,7 @@ type attachmentDeleteToolInput struct {
 	Namespace    string `json:"namespace,omitempty" jsonschema:"Namespace (defaults to server default namespace)"`
 	LeaseID      string `json:"lease_id" jsonschema:"Active lease id"`
 	TxnID        string `json:"txn_id,omitempty" jsonschema:"Optional XA transaction id"`
-	FencingToken string `json:"fencing_token,omitempty" jsonschema:"Optional fencing token override"`
+	FencingToken *int64 `json:"fencing_token,omitempty" jsonschema:"Optional fencing token override"`
 	ID           string `json:"id,omitempty" jsonschema:"Attachment id selector"`
 	Name         string `json:"name,omitempty" jsonschema:"Attachment name selector"`
 }
@@ -479,7 +479,7 @@ func (s *server) handleAttachmentDeleteTool(ctx context.Context, _ *mcpsdk.CallT
 		Key:          strings.TrimSpace(input.Key),
 		LeaseID:      strings.TrimSpace(input.LeaseID),
 		TxnID:        strings.TrimSpace(input.TxnID),
-		FencingToken: strings.TrimSpace(input.FencingToken),
+		FencingToken: input.FencingToken,
 		Selector: lockdclient.AttachmentSelector{
 			ID:   strings.TrimSpace(input.ID),
 			Name: strings.TrimSpace(input.Name),
@@ -496,7 +496,7 @@ type attachmentDeleteAllToolInput struct {
 	Namespace    string `json:"namespace,omitempty" jsonschema:"Namespace (defaults to server default namespace)"`
 	LeaseID      string `json:"lease_id" jsonschema:"Active lease id"`
 	TxnID        string `json:"txn_id,omitempty" jsonschema:"Optional XA transaction id"`
-	FencingToken string `json:"fencing_token,omitempty" jsonschema:"Optional fencing token override"`
+	FencingToken *int64 `json:"fencing_token,omitempty" jsonschema:"Optional fencing token override"`
 }
 
 type attachmentDeleteAllToolOutput struct {
@@ -513,7 +513,7 @@ func (s *server) handleAttachmentDeleteAllTool(ctx context.Context, _ *mcpsdk.Ca
 		Key:          strings.TrimSpace(input.Key),
 		LeaseID:      strings.TrimSpace(input.LeaseID),
 		TxnID:        strings.TrimSpace(input.TxnID),
-		FencingToken: strings.TrimSpace(input.FencingToken),
+		FencingToken: input.FencingToken,
 	})
 	if err != nil {
 		return nil, attachmentDeleteAllToolOutput{}, err

@@ -2386,7 +2386,7 @@ func TestClientUpdateWithMetadataHeader(t *testing.T) {
 	}
 
 	opts := client.UpdateOptions{
-		FencingToken: "token-9",
+		FencingToken: client.Int64(9),
 		Metadata:     client.MetadataOptions{QueryHidden: client.Bool(true)},
 	}
 	res, err := cli.Update(context.Background(), "orders", "lease-1", bytes.NewReader([]byte(`{"status":"open"}`)), opts)
@@ -2444,7 +2444,7 @@ func TestClientUpdateMetadataSendsJSONPayload(t *testing.T) {
 	}
 
 	opts := client.UpdateOptions{
-		FencingToken: "tok-1",
+		FencingToken: client.Int64(1),
 		IfVersion:    "3",
 		Metadata:     client.MetadataOptions{QueryHidden: client.Bool(true)},
 	}
@@ -2455,7 +2455,7 @@ func TestClientUpdateMetadataSendsJSONPayload(t *testing.T) {
 	if capturedIfVersion != "3" {
 		t.Fatalf("expected X-If-Version header, got %q", capturedIfVersion)
 	}
-	if capturedToken != "tok-1" {
+	if capturedToken != "1" {
 		t.Fatalf("expected fencing token header, got %q", capturedToken)
 	}
 	var payload map[string]any
@@ -3008,7 +3008,7 @@ func TestQueueStateHandleHelperOverrides(t *testing.T) {
 		TxnID:        "override-update-txn",
 		IfETag:       "override-etag",
 		IfVersion:    "42",
-		FencingToken: "777",
+		FencingToken: client.Int64(777),
 	}); err != nil {
 		t.Fatalf("update with options: %v", err)
 	}
@@ -3018,7 +3018,7 @@ func TestQueueStateHandleHelperOverrides(t *testing.T) {
 		TxnID:        "override-remove-txn",
 		IfETag:       "override-remove-etag",
 		IfVersion:    "43",
-		FencingToken: "778",
+		FencingToken: client.Int64(778),
 	}); err != nil {
 		t.Fatalf("remove with options: %v", err)
 	}

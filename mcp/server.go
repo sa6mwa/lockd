@@ -355,22 +355,6 @@ func (s *server) registerTools(srv *mcpsdk.Server) {
 		Description: "Unsubscribe this MCP session from queue availability notifications.",
 	}, s.handleQueueUnsubscribeTool)
 
-	mcpsdk.AddTool(srv, &mcpsdk.Tool{
-		Name:        "lockd.txn.prepare",
-		Description: "Record pending XA decision for txn_id and optional participants.",
-	}, s.handleTxnPrepareTool)
-	mcpsdk.AddTool(srv, &mcpsdk.Tool{
-		Name:        "lockd.txn.commit",
-		Description: "Commit XA decision for txn_id and optional participants.",
-	}, s.handleTxnCommitTool)
-	mcpsdk.AddTool(srv, &mcpsdk.Tool{
-		Name:        "lockd.txn.rollback",
-		Description: "Rollback XA decision for txn_id and optional participants.",
-	}, s.handleTxnRollbackTool)
-	mcpsdk.AddTool(srv, &mcpsdk.Tool{
-		Name:        "lockd.txn.replay",
-		Description: "Replay previously recorded decision for txn_id.",
-	}, s.handleTxnReplayTool)
 }
 
 type getToolInput struct {

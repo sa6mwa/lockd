@@ -23,7 +23,7 @@ lockd MCP facade operating manual:
 - Default coordination queue: %s
 - Queue workflow: dequeue -> (ack | defer). Defer intentionally requeues without failure accounting.
 - Subscription workflow: lockd.queue.subscribe to receive queue availability notifications over MCP SSE progress notifications.
-- XA workflow: optional txn_id can be attached to lock/queue/state/attachment operations; finalize with lockd.txn.commit or lockd.txn.rollback.
+- XA workflow: optional txn_id can be attached to lock/queue/state/attachment operations; transaction decisions are applied by lockd APIs, not TC decision tools in this MCP surface.
 - Lock safety: keep lease IDs/fencing tokens from lock operations and send them back on protected writes.
 - Query first when uncertain: use lockd.query for key discovery and lockd.get for point reads.
 - Documentation resources: %s, %s, %s, %s

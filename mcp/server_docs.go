@@ -82,9 +82,10 @@ Critical invariants:
 # Queue Messaging Workflow
 
 Primary queue loop:
-1. lockd.queue.dequeue (default queue %q unless overridden)
-2. If message is for this worker: lockd.queue.ack
-3. If message is not for this worker: lockd.queue.defer
+1. lockd.queue.enqueue to publish coordination events
+2. lockd.queue.dequeue (default queue %q unless overridden)
+3. If message is for this worker: lockd.queue.ack
+4. If message is not for this worker: lockd.queue.defer
 
 For push-notify:
 1. lockd.queue.subscribe
@@ -162,7 +163,7 @@ func (s *server) handleHelpTool(_ context.Context, _ *mcpsdk.CallToolRequest, in
 		out.Resources = []string{docLocksURI}
 	case "messaging":
 		out.Summary = "Messaging is dequeue-driven. If the message is not for the worker, defer it."
-		out.NextCalls = []string{"lockd.queue.subscribe", "lockd.queue.dequeue", "lockd.queue.defer"}
+		out.NextCalls = []string{"lockd.queue.enqueue", "lockd.queue.subscribe", "lockd.queue.dequeue", "lockd.queue.defer"}
 		out.Resources = []string{docMessagingURI}
 	case "sync":
 		out.Summary = "Coordinate through queue events and shared state; keep large context in lockd documents."

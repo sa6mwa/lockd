@@ -1,12 +1,14 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -14,6 +16,77 @@ import (
 	"pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
 )
+
+type queueEnqueueToolInput struct {
+	Queue             string         `json:"queue,omitempty" jsonschema:"Queue name (defaults to lockd.agent.bus)"`
+	Namespace         string         `json:"namespace,omitempty" jsonschema:"Namespace (defaults to server default namespace)"`
+	PayloadText       string         `json:"payload_text,omitempty" jsonschema:"UTF-8 payload text"`
+	PayloadBase64     string         `json:"payload_base64,omitempty" jsonschema:"Base64-encoded payload bytes"`
+	ContentType       string         `json:"content_type,omitempty" jsonschema:"Payload content type"`
+	DelaySeconds      int64          `json:"delay_seconds,omitempty" jsonschema:"Initial invisibility delay"`
+	VisibilitySeconds int64          `json:"visibility_seconds,omitempty" jsonschema:"Visibility timeout for dequeued lease"`
+	TTLSeconds        int64          `json:"ttl_seconds,omitempty" jsonschema:"Message retention TTL in seconds"`
+	MaxAttempts       int            `json:"max_attempts,omitempty" jsonschema:"Maximum failed attempts before terminal handling"`
+	Attributes        map[string]any `json:"attributes,omitempty" jsonschema:"Message attributes metadata"`
+}
+
+type queueEnqueueToolOutput struct {
+	Namespace         string `json:"namespace"`
+	Queue             string `json:"queue"`
+	MessageID         string `json:"message_id"`
+	Attempts          int    `json:"attempts"`
+	MaxAttempts       int    `json:"max_attempts"`
+	FailureAttempts   int    `json:"failure_attempts,omitempty"`
+	NotVisibleUntil   int64  `json:"not_visible_until_unix"`
+	VisibilitySeconds int64  `json:"visibility_timeout_seconds"`
+	PayloadBytes      int64  `json:"payload_bytes"`
+	CorrelationID     string `json:"correlation_id,omitempty"`
+}
+
+func (s *server) handleQueueEnqueueTool(ctx context.Context, _ *mcpsdk.CallToolRequest, input queueEnqueueToolInput) (*mcpsdk.CallToolResult, queueEnqueueToolOutput, error) {
+	queue := s.resolveQueue(input.Queue)
+	namespace := s.resolveNamespace(input.Namespace)
+
+	var payload []byte
+	if input.PayloadBase64 != "" {
+		decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(input.PayloadBase64))
+		if err != nil {
+			return nil, queueEnqueueToolOutput{}, fmt.Errorf("decode payload_base64: %w", err)
+		}
+		payload = decoded
+	} else {
+		payload = []byte(input.PayloadText)
+	}
+	contentType := strings.TrimSpace(input.ContentType)
+	if contentType == "" {
+		contentType = "application/json"
+	}
+
+	resp, err := s.upstream.Enqueue(ctx, queue, bytes.NewReader(payload), lockdclient.EnqueueOptions{
+		Namespace:   namespace,
+		Delay:       time.Duration(input.DelaySeconds) * time.Second,
+		Visibility:  time.Duration(input.VisibilitySeconds) * time.Second,
+		TTL:         time.Duration(input.TTLSeconds) * time.Second,
+		MaxAttempts: input.MaxAttempts,
+		Attributes:  input.Attributes,
+		ContentType: contentType,
+	})
+	if err != nil {
+		return nil, queueEnqueueToolOutput{}, err
+	}
+	return nil, queueEnqueueToolOutput{
+		Namespace:         resp.Namespace,
+		Queue:             resp.Queue,
+		MessageID:         resp.MessageID,
+		Attempts:          resp.Attempts,
+		MaxAttempts:       resp.MaxAttempts,
+		FailureAttempts:   resp.FailureAttempts,
+		NotVisibleUntil:   resp.NotVisibleUntilUnix,
+		VisibilitySeconds: resp.VisibilityTimeoutSeconds,
+		PayloadBytes:      resp.PayloadBytes,
+		CorrelationID:     resp.CorrelationID,
+	}, nil
+}
 
 type queueDequeueToolInput struct {
 	Queue       string `json:"queue,omitempty" jsonschema:"Queue name (defaults to lockd.agent.bus)"`

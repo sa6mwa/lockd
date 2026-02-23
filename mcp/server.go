@@ -272,6 +272,10 @@ func (s *server) registerTools(srv *mcpsdk.Server) {
 	}, s.handleHelpTool)
 
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        "lockd.queue.enqueue",
+		Description: "Enqueue a message payload into a lockd queue for agent coordination and messaging.",
+	}, s.handleQueueEnqueueTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        "lockd.queue.dequeue",
 		Description: "Dequeue one queue message (at-most one lease) and return payload + lease material needed for ack/defer follow-up calls.",
 	}, s.handleQueueDequeueTool)

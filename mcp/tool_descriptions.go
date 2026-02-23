@@ -10,6 +10,7 @@ const (
 	toolLockKeepAlive        = "lockd.lock.keepalive"
 	toolLockRelease          = "lockd.lock.release"
 	toolGet                  = "lockd.get"
+	toolDescribe             = "lockd.describe"
 	toolQuery                = "lockd.query"
 	toolStateUpdate          = "lockd.state.update"
 	toolStateMetadata        = "lockd.state.metadata"
@@ -26,7 +27,9 @@ const (
 	toolQueueEnqueue         = "lockd.queue.enqueue"
 	toolQueueDequeue         = "lockd.queue.dequeue"
 	toolQueueAck             = "lockd.queue.ack"
+	toolQueueNack            = "lockd.queue.nack"
 	toolQueueDefer           = "lockd.queue.defer"
+	toolQueueExtend          = "lockd.queue.extend"
 	toolQueueSubscribe       = "lockd.queue.subscribe"
 	toolQueueUnsubscribe     = "lockd.queue.unsubscribe"
 )
@@ -36,6 +39,7 @@ var mcpToolNames = []string{
 	toolLockKeepAlive,
 	toolLockRelease,
 	toolGet,
+	toolDescribe,
 	toolQuery,
 	toolStateUpdate,
 	toolStateMetadata,
@@ -52,7 +56,9 @@ var mcpToolNames = []string{
 	toolQueueEnqueue,
 	toolQueueDequeue,
 	toolQueueAck,
+	toolQueueNack,
 	toolQueueDefer,
+	toolQueueExtend,
 	toolQueueSubscribe,
 	toolQueueUnsubscribe,
 }
@@ -120,11 +126,19 @@ func buildToolDescriptions(cfg Config) map[string]string {
 			Retry:    "Safe to retry; this is a read operation.",
 			Next:     "Use `lockd.query` for broader discovery or acquire a lock before mutation.",
 		}),
+		toolDescribe: formatToolDescription(toolContract{
+			Purpose:  "Read key metadata (lease owner, version, ETag, timestamps) without returning state payload.",
+			UseWhen:  "You need lock/version metadata for diagnostics, conflict handling, or coordination checks.",
+			Requires: fmt.Sprintf("`key` is required. `namespace` defaults to %q when omitted.", namespace),
+			Effects:  "Returns metadata snapshot only; does not mutate state.",
+			Retry:    "Safe to retry; this is a read operation.",
+			Next:     "Use `lockd.get` to read payload or lock tools for mutation workflows.",
+		}),
 		toolQuery: formatToolDescription(toolContract{
-			Purpose:  "Run LQL key discovery queries over namespace data.",
+			Purpose:  "Run LQL queries over namespace data in key or document mode.",
 			UseWhen:  "You need to locate candidate keys/documents before reading or locking.",
-			Requires: fmt.Sprintf("`query` expression is required. `namespace` defaults to %q. Optional `limit` and `cursor` control pagination.", namespace),
-			Effects:  "Returns matching keys plus pagination/index metadata (`cursor`, `index_seq`).",
+			Requires: fmt.Sprintf("`query` expression is required. `namespace` defaults to %q. Optional `limit`, `cursor`, `return`, `engine`, `refresh`, and `fields` refine execution.", namespace),
+			Effects:  "Returns matching keys or documents plus pagination/index metadata (`cursor`, `index_seq`).",
 			Retry:    "Safe to retry. Cursor-based pagination should reuse the latest returned cursor.",
 			Next:     "Call `lockd.get` for point reads, then lock/mutate selected keys as needed.",
 		}),
@@ -235,10 +249,10 @@ func buildToolDescriptions(cfg Config) map[string]string {
 		toolQueueDequeue: formatToolDescription(toolContract{
 			Purpose:  "Receive one available message lease from a queue.",
 			UseWhen:  "A worker is ready to process the next queue item.",
-			Requires: fmt.Sprintf("`queue` defaults to %q. `namespace` defaults to %q. `owner` defaults to OAuth client id. `block_seconds` controls wait behavior.", queue, namespace),
-			Effects:  "Returns `found=false` when no message is available, or message payload plus lease fields required for ack/defer.",
+			Requires: fmt.Sprintf("`queue` defaults to %q. `namespace` defaults to %q. `owner` defaults to OAuth client id. Optional `stateful`, `visibility_seconds`, `page_size`, `start_after`, and `txn_id` tune dequeue semantics.", queue, namespace),
+			Effects:  "Returns `found=false` when no message is available, or message payload plus lease fields required for ack/nack/defer/extend.",
 			Retry:    "Safe to retry. Duplicate retries may lease different messages when queue state changes.",
-			Next:     "If processed, call `lockd.queue.ack`; if not for this worker, call `lockd.queue.defer`.",
+			Next:     "If processed, call `lockd.queue.ack`; if failed call `lockd.queue.nack`; if not for this worker call `lockd.queue.defer`; extend long handlers with `lockd.queue.extend`.",
 		}),
 		toolQueueAck: formatToolDescription(toolContract{
 			Purpose:  "Acknowledge successful processing of a dequeued message.",
@@ -248,6 +262,14 @@ func buildToolDescriptions(cfg Config) map[string]string {
 			Retry:    "Generally safe after network failures; duplicate ack may return already-acknowledged/mismatch errors based on lease state.",
 			Next:     "Dequeue next message or perform follow-up state updates as needed.",
 		}),
+		toolQueueNack: formatToolDescription(toolContract{
+			Purpose:  "Requeue a message as a failure, consuming failure budget (`max_attempts`).",
+			UseWhen:  "Message processing failed and should be retried later with failure semantics.",
+			Requires: fmt.Sprintf("`queue`, `message_id`, `lease_id`, `fencing_token`, and `meta_etag` are required. `namespace` defaults to %q. Optional `delay_seconds` and `reason` enrich retry behavior.", namespace),
+			Effects:  "Requeues message with `intent=failure`, updates queue metadata ETag, and records optional failure detail.",
+			Retry:    "Generally safe after transport failures; repeated nack can alter delay/attempt metadata depending on timing.",
+			Next:     "Dequeue next message or inspect retry/dead-letter behavior.",
+		}),
 		toolQueueDefer: formatToolDescription(toolContract{
 			Purpose:  "Requeue a leased message intentionally without counting it as failure.",
 			UseWhen:  "Message is valid but should be processed later or by another worker.",
@@ -255,6 +277,14 @@ func buildToolDescriptions(cfg Config) map[string]string {
 			Effects:  "Returns message to queue with defer intent and optional delay.",
 			Retry:    "Generally safe after transport failures; repeated defer can change next-visibility timing.",
 			Next:     "Continue polling/subscription workflow and dequeue again when ready.",
+		}),
+		toolQueueExtend: formatToolDescription(toolContract{
+			Purpose:  "Extend visibility/lease timeout for a currently leased queue message.",
+			UseWhen:  "Message processing is still active and lease timeout is approaching.",
+			Requires: fmt.Sprintf("`queue`, `message_id`, `lease_id`, `fencing_token`, and `meta_etag` are required. `namespace` defaults to %q. Optional state lease fields support stateful dequeue workflows.", namespace),
+			Effects:  "Refreshes message lease expiry and visibility timeout; returns updated lease timing and metadata ETag.",
+			Retry:    "Safe to retry while lease remains valid. If lease has expired, dequeue again to reacquire.",
+			Next:     "Continue processing, then ack/nack/defer when work is complete.",
 		}),
 		toolQueueSubscribe: formatToolDescription(toolContract{
 			Purpose:  "Subscribe current MCP session to queue-availability notifications over SSE.",

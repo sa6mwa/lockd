@@ -329,6 +329,7 @@ func newMCPOAuthClientCommand() *cobra.Command {
 	}
 	showCmd.Flags().StringVar(&showID, "id", "", "client ID")
 	_ = showCmd.MarkFlagRequired("id")
+	mustRegisterFlagCompletion(showCmd, "id", completeMCPOAuthClientID)
 	cmd.AddCommand(showCmd)
 
 	var credentialsID string
@@ -394,6 +395,7 @@ func newMCPOAuthClientCommand() *cobra.Command {
 	credentialsCmd.Flags().BoolVar(&rotateSecret, "rotate-secret", false, "rotate and print a newly issued client secret")
 	credentialsCmd.Flags().StringVar(&credentialsFormat, "format", "env", "output format (env|json)")
 	_ = credentialsCmd.MarkFlagRequired("id")
+	mustRegisterFlagCompletion(credentialsCmd, "id", completeMCPOAuthClientID)
 	cmd.AddCommand(credentialsCmd)
 
 	var addName string
@@ -438,6 +440,7 @@ func newMCPOAuthClientCommand() *cobra.Command {
 	}
 	rmCmd.Flags().StringVar(&rmID, "id", "", "client ID")
 	_ = rmCmd.MarkFlagRequired("id")
+	mustRegisterFlagCompletion(rmCmd, "id", completeMCPOAuthClientID)
 	cmd.AddCommand(rmCmd)
 
 	var revokeID string
@@ -458,6 +461,7 @@ func newMCPOAuthClientCommand() *cobra.Command {
 	}
 	revokeCmd.Flags().StringVar(&revokeID, "id", "", "client ID")
 	_ = revokeCmd.MarkFlagRequired("id")
+	mustRegisterFlagCompletion(revokeCmd, "id", completeMCPOAuthClientID)
 	cmd.AddCommand(revokeCmd)
 
 	var restoreID string
@@ -478,6 +482,7 @@ func newMCPOAuthClientCommand() *cobra.Command {
 	}
 	restoreCmd.Flags().StringVar(&restoreID, "id", "", "client ID")
 	_ = restoreCmd.MarkFlagRequired("id")
+	mustRegisterFlagCompletion(restoreCmd, "id", completeMCPOAuthClientID)
 	cmd.AddCommand(restoreCmd)
 
 	var rotateID string
@@ -500,6 +505,7 @@ func newMCPOAuthClientCommand() *cobra.Command {
 	}
 	rotateCmd.Flags().StringVar(&rotateID, "id", "", "client ID")
 	_ = rotateCmd.MarkFlagRequired("id")
+	mustRegisterFlagCompletion(rotateCmd, "id", completeMCPOAuthClientID)
 	cmd.AddCommand(rotateCmd)
 
 	var updateID string
@@ -527,9 +533,46 @@ func newMCPOAuthClientCommand() *cobra.Command {
 	updateCmd.Flags().StringVar(&updateName, "name", "", "updated client name")
 	updateCmd.Flags().StringSliceVar(&updateScopes, "scope", nil, "replacement scope list")
 	_ = updateCmd.MarkFlagRequired("id")
+	mustRegisterFlagCompletion(updateCmd, "id", completeMCPOAuthClientID)
 	cmd.AddCommand(updateCmd)
 
 	return cmd
+}
+
+func completeMCPOAuthClientID(_ *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	mgr, err := openOAuthManager()
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	clients, err := mgr.ListClients()
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	sort.Slice(clients, func(i, j int) bool { return clients[i].ID < clients[j].ID })
+	out := make([]string, 0, len(clients))
+	for _, client := range clients {
+		if toComplete != "" && !strings.HasPrefix(client.ID, toComplete) {
+			continue
+		}
+		status := "active"
+		if client.Revoked {
+			status = "revoked"
+		}
+		label := strings.TrimSpace(client.Name)
+		if label == "" {
+			label = status
+		} else {
+			label = fmt.Sprintf("%s (%s)", label, status)
+		}
+		out = append(out, fmt.Sprintf("%s\t%s", client.ID, label))
+	}
+	return out, cobra.ShellCompDirectiveNoFileComp
+}
+
+func mustRegisterFlagCompletion(cmd *cobra.Command, flag string, fn cobra.CompletionFunc) {
+	if err := cmd.RegisterFlagCompletionFunc(flag, fn); err != nil {
+		panic(err)
+	}
 }
 
 func openOAuthManager() (*oauth.Manager, error) {

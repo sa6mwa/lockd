@@ -21,7 +21,7 @@ func defaultServerInstructions(cfg Config) string {
 lockd MCP facade operating manual:
 - Default namespace: %s
 - Default coordination queue: %s
-- Queue workflow: dequeue -> (ack | defer). Defer intentionally requeues without failure accounting.
+- Queue workflow: dequeue -> ack | nack(failure) | defer(intentional). Use queue.extend for long-running handlers.
 - Subscription workflow: lockd.queue.subscribe to receive queue availability notifications over MCP SSE progress notifications.
 - XA workflow: optional txn_id can be attached to lock/queue/state/attachment operations; transaction decisions are applied by lockd APIs, not TC decision tools in this MCP surface.
 - Lock safety: keep lease IDs/fencing tokens from lock operations and send them back on protected writes.
@@ -85,8 +85,10 @@ Critical invariants:
 Primary queue loop:
 1. lockd.queue.enqueue to publish coordination events
 2. lockd.queue.dequeue (default queue %q unless overridden)
-3. If message is for this worker: lockd.queue.ack
-4. If message is not for this worker: lockd.queue.defer
+3. If processing succeeds: lockd.queue.ack
+4. If processing fails: lockd.queue.nack
+5. If message is not for this worker: lockd.queue.defer
+6. If processing runs long: lockd.queue.extend
 
 For push-notify:
 1. lockd.queue.subscribe
@@ -148,8 +150,9 @@ func (s *server) handleHelpTool(_ context.Context, _ *mcpsdk.CallToolRequest, in
 			"queue":     s.cfg.AgentBusQueue,
 		},
 		Invariants: []string{
-			"queue workflow is dequeue then ack/defer",
+			"queue workflow is dequeue then ack/nack/defer",
 			"defer preserves message without counting as failure",
+			"extend refreshes lease for long-running handlers",
 			"namespace isolation follows client certificate claims",
 			"lock writes must preserve lease/fencing semantics",
 			"XA is optional: only include txn_id when coordinating multiple participants",
@@ -157,16 +160,16 @@ func (s *server) handleHelpTool(_ context.Context, _ *mcpsdk.CallToolRequest, in
 	}
 	switch topic {
 	case "overview":
-		out.Summary = "Use lockd.help first, acquire lock when mutating shared state, subscribe for queue notifications, then dequeue and ack/defer messages."
-		out.NextCalls = []string{"lockd.lock.acquire", "lockd.queue.subscribe", "lockd.queue.dequeue", "lockd.queue.ack"}
+		out.Summary = "Use lockd.help first, acquire lock when mutating shared state, subscribe for queue notifications, then dequeue and ack/nack/defer messages."
+		out.NextCalls = []string{"lockd.lock.acquire", "lockd.queue.subscribe", "lockd.queue.dequeue", "lockd.queue.ack", "lockd.queue.nack", "lockd.queue.defer"}
 		out.Resources = []string{docOverviewURI, docMessagingURI, docSyncURI}
 	case "locks":
 		out.Summary = "Locks gate state mutation; keep lease identity and fencing token through the full mutation lifecycle."
 		out.NextCalls = []string{"lockd.lock.acquire", "lockd.state.update", "lockd.lock.release"}
 		out.Resources = []string{docLocksURI}
 	case "messaging":
-		out.Summary = "Messaging is dequeue-driven. If the message is not for the worker, defer it."
-		out.NextCalls = []string{"lockd.queue.enqueue", "lockd.queue.subscribe", "lockd.queue.dequeue", "lockd.queue.defer"}
+		out.Summary = "Messaging is dequeue-driven. Ack success, nack failures, defer when a message is not for this worker, and extend when processing runs long."
+		out.NextCalls = []string{"lockd.queue.enqueue", "lockd.queue.subscribe", "lockd.queue.dequeue", "lockd.queue.ack", "lockd.queue.nack", "lockd.queue.defer", "lockd.queue.extend"}
 		out.Resources = []string{docMessagingURI}
 	case "sync":
 		out.Summary = "Coordinate through queue events and shared state; keep large context in lockd documents."

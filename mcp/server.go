@@ -282,6 +282,10 @@ func (s *server) registerTools(srv *mcpsdk.Server) {
 		Name:        toolGet,
 		Description: desc(toolGet),
 	}, s.handleGetTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        toolDescribe,
+		Description: desc(toolDescribe),
+	}, s.handleDescribeTool)
 
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolQuery,
@@ -352,9 +356,17 @@ func (s *server) registerTools(srv *mcpsdk.Server) {
 		Description: desc(toolQueueAck),
 	}, s.handleQueueAckTool)
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        toolQueueNack,
+		Description: desc(toolQueueNack),
+	}, s.handleQueueNackTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolQueueDefer,
 		Description: desc(toolQueueDefer),
 	}, s.handleQueueDeferTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        toolQueueExtend,
+		Description: desc(toolQueueExtend),
+	}, s.handleQueueExtendTool)
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolQueueSubscribe,
 		Description: desc(toolQueueSubscribe),
@@ -424,18 +436,70 @@ func (s *server) handleGetTool(ctx context.Context, _ *mcpsdk.CallToolRequest, i
 	return nil, out, nil
 }
 
-type queryToolInput struct {
-	Query     string `json:"query" jsonschema:"LQL query expression"`
+type describeToolInput struct {
+	Key       string `json:"key" jsonschema:"Lock key to inspect"`
 	Namespace string `json:"namespace,omitempty" jsonschema:"Namespace (defaults to server default namespace)"`
-	Limit     int    `json:"limit,omitempty" jsonschema:"Maximum rows to return"`
-	Cursor    string `json:"cursor,omitempty" jsonschema:"Continuation cursor"`
+}
+
+type describeToolOutput struct {
+	Namespace   string `json:"namespace"`
+	Key         string `json:"key"`
+	Owner       string `json:"owner,omitempty"`
+	LeaseID     string `json:"lease_id,omitempty"`
+	ExpiresAt   int64  `json:"expires_at_unix,omitempty"`
+	Version     int64  `json:"version"`
+	StateETag   string `json:"state_etag,omitempty"`
+	UpdatedAt   int64  `json:"updated_at_unix,omitempty"`
+	QueryHidden *bool  `json:"query_hidden,omitempty"`
+}
+
+func (s *server) handleDescribeTool(ctx context.Context, _ *mcpsdk.CallToolRequest, input describeToolInput) (*mcpsdk.CallToolResult, describeToolOutput, error) {
+	key := strings.TrimSpace(input.Key)
+	if key == "" {
+		return nil, describeToolOutput{}, fmt.Errorf("key is required")
+	}
+	upstream, done, err := s.upstreamForNamespace(input.Namespace)
+	if err != nil {
+		return nil, describeToolOutput{}, err
+	}
+	defer done()
+
+	describe, err := upstream.Describe(ctx, key)
+	if err != nil {
+		return nil, describeToolOutput{}, err
+	}
+	return nil, describeToolOutput{
+		Namespace:   describe.Namespace,
+		Key:         describe.Key,
+		Owner:       describe.Owner,
+		LeaseID:     describe.LeaseID,
+		ExpiresAt:   describe.ExpiresAt,
+		Version:     describe.Version,
+		StateETag:   describe.StateETag,
+		UpdatedAt:   describe.UpdatedAt,
+		QueryHidden: describe.Metadata.QueryHidden,
+	}, nil
+}
+
+type queryToolInput struct {
+	Query     string         `json:"query" jsonschema:"LQL query expression"`
+	Namespace string         `json:"namespace,omitempty" jsonschema:"Namespace (defaults to server default namespace)"`
+	Limit     int            `json:"limit,omitempty" jsonschema:"Maximum rows to return"`
+	Cursor    string         `json:"cursor,omitempty" jsonschema:"Continuation cursor"`
+	Return    string         `json:"return,omitempty" jsonschema:"Query return mode: keys (default) or documents"`
+	Engine    string         `json:"engine,omitempty" jsonschema:"Optional query engine override: auto, index, or scan"`
+	Refresh   string         `json:"refresh,omitempty" jsonschema:"Optional refresh policy, for example wait_for"`
+	Fields    map[string]any `json:"fields,omitempty" jsonschema:"Optional query field projection map"`
 }
 
 type queryToolOutput struct {
-	Namespace string   `json:"namespace"`
-	Keys      []string `json:"keys"`
-	Cursor    string   `json:"cursor,omitempty"`
-	IndexSeq  uint64   `json:"index_seq,omitempty"`
+	Namespace string            `json:"namespace"`
+	Mode      string            `json:"mode"`
+	Keys      []string          `json:"keys,omitempty"`
+	Documents []json.RawMessage `json:"documents,omitempty"`
+	Cursor    string            `json:"cursor,omitempty"`
+	IndexSeq  uint64            `json:"index_seq,omitempty"`
+	Metadata  map[string]string `json:"metadata,omitempty"`
 }
 
 func (s *server) handleQueryTool(ctx context.Context, _ *mcpsdk.CallToolRequest, input queryToolInput) (*mcpsdk.CallToolResult, queryToolOutput, error) {
@@ -454,6 +518,28 @@ func (s *server) handleQueryTool(ctx context.Context, _ *mcpsdk.CallToolRequest,
 	if cursor := strings.TrimSpace(input.Cursor); cursor != "" {
 		opts = append(opts, lockdclient.WithQueryCursor(cursor))
 	}
+	if len(input.Fields) > 0 {
+		opts = append(opts, lockdclient.WithQueryFields(cloneAnyMap(input.Fields)))
+	}
+	if engine := strings.ToLower(strings.TrimSpace(input.Engine)); engine != "" {
+		switch engine {
+		case "auto", "index", "scan":
+			opts = append(opts, lockdclient.WithQueryEngine(engine))
+		default:
+			return nil, queryToolOutput{}, fmt.Errorf("invalid engine %q (expected auto|index|scan)", input.Engine)
+		}
+	}
+	if refresh := strings.TrimSpace(input.Refresh); refresh != "" {
+		opts = append(opts, lockdclient.WithQueryRefresh(refresh))
+	}
+	switch mode := strings.ToLower(strings.TrimSpace(input.Return)); mode {
+	case "", "keys":
+		opts = append(opts, lockdclient.WithQueryReturnKeys())
+	case "documents", "document", "docs":
+		opts = append(opts, lockdclient.WithQueryReturnDocuments())
+	default:
+		return nil, queryToolOutput{}, fmt.Errorf("invalid return mode %q (expected keys|documents)", input.Return)
+	}
 
 	resp, err := s.upstream.Query(ctx, opts...)
 	if err != nil {
@@ -461,12 +547,78 @@ func (s *server) handleQueryTool(ctx context.Context, _ *mcpsdk.CallToolRequest,
 	}
 	defer resp.Close()
 
-	return nil, queryToolOutput{
+	out := queryToolOutput{
 		Namespace: resp.Namespace,
-		Keys:      resp.Keys(),
+		Mode:      string(resp.Mode()),
 		Cursor:    resp.Cursor,
 		IndexSeq:  resp.IndexSeq,
+		Metadata:  cloneStringMap(resp.Metadata),
+	}
+	if out.Mode == "" {
+		out.Mode = string(lockdclient.QueryReturnKeys)
+	}
+	if resp.Mode() == lockdclient.QueryReturnDocuments {
+		keys := make([]string, 0, 16)
+		docs := make([]json.RawMessage, 0, 16)
+		if err := resp.ForEach(func(row lockdclient.QueryRow) error {
+			keys = append(keys, row.Key)
+			doc, err := row.Document()
+			if err != nil {
+				return err
+			}
+			body, err := doc.Bytes()
+			if err != nil {
+				return err
+			}
+			docs = append(docs, json.RawMessage(append([]byte(nil), body...)))
+			return nil
+		}); err != nil {
+			return nil, queryToolOutput{}, err
+		}
+		out.Keys = keys
+		out.Documents = docs
+		return nil, out, nil
+	}
+	out.Keys = resp.Keys()
+	return nil, out, nil
+}
+
+func (s *server) upstreamForNamespace(raw string) (*lockdclient.Client, func(), error) {
+	ns := s.resolveNamespace(raw)
+	if ns == s.cfg.DefaultNamespace {
+		return s.upstream, func() {}, nil
+	}
+	cfg := s.cfg
+	cfg.DefaultNamespace = ns
+	cli, err := newUpstreamClient(cfg, s.logger)
+	if err != nil {
+		return nil, nil, err
+	}
+	return cli, func() {
+		_ = cli.Close()
 	}, nil
+}
+
+func cloneAnyMap(source map[string]any) map[string]any {
+	if len(source) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(source))
+	for key, value := range source {
+		out[key] = value
+	}
+	return out
+}
+
+func cloneStringMap(source map[string]string) map[string]string {
+	if len(source) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(source))
+	for key, value := range source {
+		out[key] = value
+	}
+	return out
 }
 
 func newUpstreamClient(cfg Config, logger pslog.Logger) (*lockdclient.Client, error) {

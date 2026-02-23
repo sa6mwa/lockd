@@ -3,8 +3,13 @@ package main
 import (
 	"context"
 	"io"
+	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+
+	mcpstate "pkt.systems/lockd/mcp/state"
 	"pkt.systems/pslog"
 )
 
@@ -67,5 +72,69 @@ func TestMCPOAuthClientAdminSubcommands(t *testing.T) {
 	}
 	if credCmd, _, err := clientCmd.Find([]string{"credentials"}); err != nil || credCmd == nil || credCmd.Name() != "credentials" {
 		t.Fatalf("expected credentials subcommand, err=%v", err)
+	}
+}
+
+func TestMCPOAuthClientIDCompletionRegistered(t *testing.T) {
+	root := newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
+	paths := [][]string{
+		{"mcp", "oauth", "client", "show"},
+		{"mcp", "oauth", "client", "credentials"},
+		{"mcp", "oauth", "client", "remove"},
+		{"mcp", "oauth", "client", "revoke"},
+		{"mcp", "oauth", "client", "restore"},
+		{"mcp", "oauth", "client", "rotate-secret"},
+		{"mcp", "oauth", "client", "update"},
+	}
+	for _, p := range paths {
+		cmd, _, err := root.Find(p)
+		if err != nil {
+			t.Fatalf("find %v: %v", p, err)
+		}
+		if cmd == nil {
+			t.Fatalf("expected command for %v", p)
+		}
+		if _, ok := cmd.GetFlagCompletionFunc("id"); !ok {
+			t.Fatalf("expected id completion func on %v", p)
+		}
+	}
+}
+
+func TestMCPOAuthClientIDCompletionValues(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "mcp.pem")
+	bootstrap, err := mcpstate.Bootstrap(mcpstate.BootstrapRequest{
+		Path:              statePath,
+		Issuer:            "https://127.0.0.1:19341",
+		InitialClientName: "default",
+	})
+	if err != nil {
+		t.Fatalf("bootstrap state: %v", err)
+	}
+	t.Setenv("LOCKD_MCP_STATE_FILE", statePath)
+	t.Setenv("LOCKD_MCP_REFRESH_STORE", filepath.Join(dir, "mcp-auth-store.json"))
+
+	root := newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
+	showCmd, _, err := root.Find([]string{"mcp", "oauth", "client", "show"})
+	if err != nil {
+		t.Fatalf("find show command: %v", err)
+	}
+	completer, ok := showCmd.GetFlagCompletionFunc("id")
+	if !ok {
+		t.Fatalf("missing id completion")
+	}
+	values, directive := completer(showCmd, nil, "")
+	if directive != cobra.ShellCompDirectiveNoFileComp {
+		t.Fatalf("expected no-file completion directive, got %v", directive)
+	}
+	var found bool
+	for _, value := range values {
+		if strings.HasPrefix(value, bootstrap.ClientID+"\t") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected completion list to include %q, got %v", bootstrap.ClientID, values)
 	}
 }

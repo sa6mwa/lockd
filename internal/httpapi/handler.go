@@ -852,6 +852,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle("/v1/attachments", h.wrap("attachments", h.handleAttachments))
 	mux.Handle("/v1/attachment", h.wrap("attachment", h.handleAttachment))
 	mux.Handle("/v1/query", h.wrap("query", h.handleQuery))
+	mux.Handle("/v1/mutate", h.wrap("mutate", h.handleMutate))
 	mux.Handle("/v1/update", h.wrap("update", h.handleUpdate))
 	mux.Handle("/v1/metadata", h.wrap("update_metadata", h.handleMetadata))
 	mux.Handle("/v1/remove", h.wrap("remove", h.handleRemove))

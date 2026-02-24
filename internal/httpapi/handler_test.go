@@ -1197,6 +1197,97 @@ func TestUpdateExpectedPayloadHeaderErrors(t *testing.T) {
 	}
 }
 
+func TestMutateAppliesLQLExpressions(t *testing.T) {
+	server := newTestHTTPServer(t)
+
+	req := api.AcquireRequest{Key: "stream-mutate", Owner: "worker-a", TTLSeconds: 5}
+	var acquire api.AcquireResponse
+	if status := doJSON(t, server, http.MethodPost, "/v1/acquire", nil, req, &acquire); status != http.StatusOK {
+		t.Fatalf("acquire: expected 200, got %d", status)
+	}
+
+	headers := map[string]string{
+		"X-Lease-ID":      acquire.LeaseID,
+		"X-Txn-ID":        acquire.TxnID,
+		"X-Fencing-Token": strconv.FormatInt(acquire.FencingToken, 10),
+	}
+	var mutateResp api.UpdateResponse
+	status := doJSON(t, server, http.MethodPost, "/v1/mutate?key=stream-mutate", headers, api.MutateRequest{
+		Mutations: []string{`/status="ready"`, `/count=1`},
+	}, &mutateResp)
+	if status != http.StatusOK {
+		t.Fatalf("mutate: expected 200, got %d", status)
+	}
+	if mutateResp.NewVersion == 0 || mutateResp.NewStateETag == "" {
+		t.Fatalf("unexpected mutate response: %+v", mutateResp)
+	}
+
+	var release api.ReleaseResponse
+	if status := doJSON(t, server, http.MethodPost, "/v1/release", headers, api.ReleaseRequest{
+		Key:     "stream-mutate",
+		LeaseID: acquire.LeaseID,
+		TxnID:   acquire.TxnID,
+	}, &release); status != http.StatusOK || !release.Released {
+		t.Fatalf("release failed: status=%d resp=%+v", status, release)
+	}
+
+	getReq, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/get?key=stream-mutate&public=1", http.NoBody)
+	getResp, err := http.DefaultClient.Do(getReq)
+	if err != nil {
+		t.Fatalf("public get request failed: %v", err)
+	}
+	defer getResp.Body.Close()
+	if getResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected public get 200, got %d", getResp.StatusCode)
+	}
+	var state map[string]any
+	if err := json.NewDecoder(getResp.Body).Decode(&state); err != nil {
+		t.Fatalf("decode mutated state: %v", err)
+	}
+	if got := state["status"]; got != "ready" {
+		t.Fatalf("expected status=ready, got %v", got)
+	}
+	if got := state["count"]; got != float64(1) {
+		t.Fatalf("expected count=1, got %v", got)
+	}
+}
+
+func TestMutateValidation(t *testing.T) {
+	server := newTestHTTPServer(t)
+
+	req := api.AcquireRequest{Key: "stream-mutate-errors", Owner: "worker-a", TTLSeconds: 5}
+	var acquire api.AcquireResponse
+	if status := doJSON(t, server, http.MethodPost, "/v1/acquire", nil, req, &acquire); status != http.StatusOK {
+		t.Fatalf("acquire: expected 200, got %d", status)
+	}
+
+	headers := map[string]string{
+		"X-Lease-ID":      acquire.LeaseID,
+		"X-Txn-ID":        acquire.TxnID,
+		"X-Fencing-Token": strconv.FormatInt(acquire.FencingToken, 10),
+	}
+
+	var errResp api.ErrorResponse
+	status := doJSON(t, server, http.MethodPost, "/v1/mutate?key=stream-mutate-errors", headers, api.MutateRequest{}, &errResp)
+	if status != http.StatusBadRequest {
+		t.Fatalf("expected 400 for empty mutations, got %d", status)
+	}
+	if errResp.ErrorCode != "invalid_body" {
+		t.Fatalf("expected invalid_body, got %s", errResp.ErrorCode)
+	}
+
+	errResp = api.ErrorResponse{}
+	status = doJSON(t, server, http.MethodPost, "/v1/mutate?key=stream-mutate-errors", headers, api.MutateRequest{
+		Mutations: []string{`/broken`},
+	}, &errResp)
+	if status != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid mutation expression, got %d", status)
+	}
+	if errResp.ErrorCode != "invalid_mutations" {
+		t.Fatalf("expected invalid_mutations, got %s", errResp.ErrorCode)
+	}
+}
+
 func TestGetRequiresLease(t *testing.T) {
 	store := memory.New()
 	handler := New(Config{

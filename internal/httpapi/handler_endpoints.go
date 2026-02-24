@@ -1605,6 +1605,219 @@ func (h *Handler) handleIndexFlush(w http.ResponseWriter, r *http.Request) error
 	return nil
 }
 
+// handleMutate godoc
+// @Summary      Atomically mutate JSON state for a key using LQL
+// @Description  Loads lease-visible state for the key, applies LQL mutations server-side via streaming, then stages the mutated JSON as an update. Optional CAS headers guard against concurrent updates.
+// @Tags         lease
+// @Accept       json
+// @Produce      json
+// @Param        namespace          query   string  false  "Namespace override (defaults to server setting)"
+// @Param        key                query   string  true   "Lease key"
+// @Param        X-Lease-ID         header  string  true   "Lease identifier (xid from Acquire, 20-char lowercase base32)"
+// @Param        X-Txn-ID           header  string  true   "Transaction identifier (xid from Acquire)"
+// @Param        X-Fencing-Token    header  string  false  "Optional fencing token proof"
+// @Param        X-If-Version       header  string  false  "Conditionally update when the current version matches"
+// @Param        X-If-State-ETag    header  string  false  "Conditionally update when the state ETag matches"
+// @Param        request            body    api.MutateRequest  true  "LQL mutation request payload"
+// @Success      200                {object}  api.UpdateResponse
+// @Failure      400                {object}  api.ErrorResponse
+// @Failure      404                {object}  api.ErrorResponse
+// @Failure      409                {object}  api.ErrorResponse
+// @Failure      413                {object}  api.ErrorResponse
+// @Failure      503                {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/mutate [post]
+func (h *Handler) handleMutate(w http.ResponseWriter, r *http.Request) error {
+	key := strings.TrimSpace(r.URL.Query().Get("key"))
+	if key == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_key", Detail: "key query required"}
+	}
+
+	reqBody := http.MaxBytesReader(w, r.Body, h.jsonMaxBytes)
+	defer reqBody.Close()
+	var payload api.MutateRequest
+	if err := decodeJSONBody(reqBody, &payload, jsonDecodeOptions{disallowUnknowns: true}); err != nil {
+		return httpError{
+			Status: http.StatusBadRequest,
+			Code:   "invalid_body",
+			Detail: fmt.Sprintf("failed to decode request: %v", err),
+		}
+	}
+	mutationExprs := make([]string, 0, len(payload.Mutations))
+	for _, raw := range payload.Mutations {
+		expr := strings.TrimSpace(raw)
+		if expr != "" {
+			mutationExprs = append(mutationExprs, expr)
+		}
+	}
+	if len(mutationExprs) == 0 {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_body", Detail: "mutations required"}
+	}
+
+	namespaceInput := strings.TrimSpace(payload.Namespace)
+	if override := strings.TrimSpace(r.URL.Query().Get("namespace")); override != "" {
+		namespaceInput = override
+	}
+	namespace, err := h.resolveNamespace(namespaceInput)
+	if err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
+	}
+	if err := h.authorizeNamespace(r, namespace, nsauth.AccessWrite); err != nil {
+		return err
+	}
+	h.observeNamespace(namespace)
+
+	leaseID := strings.TrimSpace(r.Header.Get("X-Lease-ID"))
+	if leaseID == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_lease", Detail: "X-Lease-ID required"}
+	}
+	txnID := strings.TrimSpace(r.Header.Get("X-Txn-ID"))
+	if txnID == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_txn", Detail: "X-Txn-ID required"}
+	}
+	fencingToken, err := parseFencingToken(r)
+	if err != nil {
+		return err
+	}
+	expectVersion := int64(0)
+	expectVersionSet := false
+	if raw := strings.TrimSpace(r.Header.Get("X-If-Version")); raw != "" {
+		parsed, parseErr := strconv.ParseInt(raw, 10, 64)
+		if parseErr != nil {
+			return httpError{Status: http.StatusBadRequest, Code: "invalid_version", Detail: parseErr.Error()}
+		}
+		expectVersion = parsed
+		expectVersionSet = true
+	}
+	expectETag := strings.TrimSpace(r.Header.Get("X-If-State-ETag"))
+	if _, err := parseMetadataHeaders(r); err != nil {
+		return err
+	}
+
+	mutations, err := lql.ParseMutations(mutationExprs, h.clock.Now())
+	if err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_mutations", Detail: err.Error()}
+	}
+	plan, err := lql.NewMutateStreamPlan(mutations)
+	if err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_mutations", Detail: err.Error()}
+	}
+
+	storageKey, err := h.namespacedKey(namespace, key)
+	if err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_key", Detail: err.Error()}
+	}
+	var knownMeta *storage.Meta
+	knownETag := ""
+	if cachedMeta, cachedETag, cachedKey, ok := h.leaseSnapshot(leaseID); ok && cachedKey == storageKey {
+		knownMeta = &cachedMeta
+		knownETag = cachedETag
+	}
+
+	current, err := h.core.Get(r.Context(), core.GetCommand{
+		Namespace:    namespace,
+		Key:          key,
+		LeaseID:      leaseID,
+		FencingToken: fencingToken,
+		Public:       false,
+	})
+	if err != nil {
+		return convertCoreError(err)
+	}
+	source := current.Reader
+	if current.NoContent || source == nil {
+		source = io.NopCloser(strings.NewReader(`{}`))
+	}
+
+	pipeReader, pipeWriter := io.Pipe()
+	mutateErrCh := make(chan error, 1)
+	go func() {
+		defer close(mutateErrCh)
+		defer source.Close()
+		req := lql.MutateStreamRequest{
+			Ctx:               r.Context(),
+			Reader:            source,
+			Writer:            pipeWriter,
+			Mode:              lql.MutateSingleObjectOnly,
+			Plan:              plan,
+			MaxCandidateBytes: h.jsonMaxBytes,
+		}
+		if mutateErr := lql.MutateStream(req); mutateErr != nil {
+			_ = pipeWriter.CloseWithError(mutateErr)
+			mutateErrCh <- mutateErr
+			return
+		}
+		_ = pipeWriter.Close()
+		mutateErrCh <- nil
+	}()
+
+	res, err := h.core.Update(r.Context(), core.UpdateCommand{
+		Namespace:      namespace,
+		Key:            key,
+		LeaseID:        leaseID,
+		TxnID:          txnID,
+		FencingToken:   fencingToken,
+		IfVersion:      expectVersion,
+		IfVersionSet:   expectVersionSet,
+		IfStateETag:    expectETag,
+		Body:           pipeReader,
+		CompactWriter:  h.compactWriter,
+		MaxBytes:       h.jsonMaxBytes,
+		SpoolThreshold: h.spoolThreshold,
+		KnownMeta:      knownMeta,
+		KnownMetaETag:  knownETag,
+	})
+	if err != nil {
+		_ = pipeReader.Close()
+		if mutateErr := <-mutateErrCh; mutateErr != nil {
+			return convertMutateStreamError(mutateErr)
+		}
+		return convertCoreError(err)
+	}
+	if mutateErr := <-mutateErrCh; mutateErr != nil {
+		return convertMutateStreamError(mutateErr)
+	}
+	if res.Meta != nil && res.Meta.Lease != nil {
+		h.cacheLease(leaseID, storageKey, *res.Meta, res.MetaETag)
+	}
+	h.writeJSON(w, http.StatusOK, api.UpdateResponse{
+		NewVersion:   res.NewVersion,
+		NewStateETag: res.NewStateETag,
+		Bytes:        res.Bytes,
+		Metadata:     metadataAttributesFromMeta(res.Meta),
+	}, map[string]string{
+		"X-Key-Version": strconv.FormatInt(res.NewVersion, 10),
+		"ETag":          res.NewStateETag,
+	})
+	return nil
+}
+
+func convertMutateStreamError(err error) error {
+	if err == nil {
+		return nil
+	}
+	streamErr, ok := lql.AsStreamError(err)
+	if !ok || streamErr == nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_body", Detail: err.Error()}
+	}
+	detail := streamErr.Detail
+	if detail == "" {
+		detail = streamErr.Error()
+	}
+	switch streamErr.Code {
+	case lql.StreamErrorInvalidSelector:
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_mutations", Detail: detail}
+	case lql.StreamErrorDocumentTooLarge:
+		return httpError{Status: http.StatusRequestEntityTooLarge, Code: "document_too_large", Detail: detail}
+	case lql.StreamErrorContextCanceled:
+		return httpError{Status: http.StatusRequestTimeout, Code: "context_canceled", Detail: detail}
+	case lql.StreamErrorInternal:
+		return httpError{Status: http.StatusInternalServerError, Code: "internal", Detail: detail}
+	default:
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_body", Detail: detail}
+	}
+}
+
 // handleUpdate godoc
 // @Summary      Atomically update the JSON state for a key
 // @Description  Streams JSON from the request body, compacts it, and installs it if the caller holds the lease. Optional CAS headers guard against concurrent updates.

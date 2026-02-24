@@ -2471,6 +2471,125 @@ func TestClientUpdateMetadataSendsJSONPayload(t *testing.T) {
 	}
 }
 
+func TestClientMutateSendsRequest(t *testing.T) {
+	t.Parallel()
+
+	var (
+		capturedLease      string
+		capturedTxn        string
+		capturedToken      string
+		capturedIfETag     string
+		capturedIfVersion  string
+		capturedNamespaceQ string
+		capturedBody       api.MutateRequest
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/mutate" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		capturedNamespaceQ = r.URL.Query().Get("namespace")
+		capturedLease = r.Header.Get("X-Lease-ID")
+		capturedTxn = r.Header.Get("X-Txn-ID")
+		capturedToken = r.Header.Get("X-Fencing-Token")
+		capturedIfETag = r.Header.Get("X-If-State-ETag")
+		capturedIfVersion = r.Header.Get("X-If-Version")
+		if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+			t.Fatalf("decode mutate body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(api.UpdateResponse{
+			NewVersion:   4,
+			NewStateETag: "etag-4",
+			Bytes:        32,
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	cli, err := client.New(srv.URL,
+		client.WithDisableMTLS(true),
+		client.WithEndpointShuffle(false),
+		client.WithHTTPClient(srv.Client()),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	res, err := cli.Mutate(context.Background(), client.MutateRequest{
+		Key:       "orders",
+		LeaseID:   "lease-1",
+		Mutations: []string{`/status="ready"`, ` `, `/count=1`},
+		Options: client.UpdateOptions{
+			Namespace:    "default",
+			TxnID:        "txn-1",
+			FencingToken: client.Int64(9),
+			IfETag:       "etag-3",
+			IfVersion:    client.Int64(3),
+		},
+	})
+	if err != nil {
+		t.Fatalf("mutate call: %v", err)
+	}
+	if res.NewVersion != 4 || res.NewStateETag != "etag-4" || res.BytesWritten != 32 {
+		t.Fatalf("unexpected mutate response: %+v", res)
+	}
+	if capturedNamespaceQ != "default" {
+		t.Fatalf("expected namespace query default, got %q", capturedNamespaceQ)
+	}
+	if capturedLease != "lease-1" {
+		t.Fatalf("expected lease header, got %q", capturedLease)
+	}
+	if capturedTxn != "txn-1" {
+		t.Fatalf("expected txn header, got %q", capturedTxn)
+	}
+	if capturedToken != "9" {
+		t.Fatalf("expected fencing token header, got %q", capturedToken)
+	}
+	if capturedIfETag != "etag-3" {
+		t.Fatalf("expected if-etag header, got %q", capturedIfETag)
+	}
+	if capturedIfVersion != "3" {
+		t.Fatalf("expected if-version header, got %q", capturedIfVersion)
+	}
+	if capturedBody.Namespace != "default" {
+		t.Fatalf("expected namespace in body, got %q", capturedBody.Namespace)
+	}
+	if len(capturedBody.Mutations) != 2 {
+		t.Fatalf("expected trimmed mutation expressions, got %+v", capturedBody.Mutations)
+	}
+}
+
+func TestClientMutateRequiresMutations(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	cli, err := client.New(srv.URL,
+		client.WithDisableMTLS(true),
+		client.WithEndpointShuffle(false),
+		client.WithHTTPClient(srv.Client()),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	_, err = cli.Mutate(context.Background(), client.MutateRequest{
+		Key:       "orders",
+		LeaseID:   "lease-1",
+		Mutations: []string{" "},
+	})
+	if err == nil {
+		t.Fatal("expected error for empty mutation expressions")
+	}
+	if called {
+		t.Fatal("server should not be called when mutation expressions are empty")
+	}
+}
+
 func TestClientUpdateSendsExpectedPayloadHeaders(t *testing.T) {
 	t.Parallel()
 

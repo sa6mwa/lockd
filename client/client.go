@@ -1298,6 +1298,63 @@ func (s *QueueStateHandle) UpdateBytes(ctx context.Context, body []byte, opts ..
 	return s.Update(ctx, bytes.NewReader(body), opts...)
 }
 
+// Mutate applies server-side LQL mutations while preserving the state lease.
+func (s *QueueStateHandle) Mutate(ctx context.Context, mutations []string, opts ...UpdateOption) (*UpdateResult, error) {
+	_, _, _, _, _, _, etag, version, err := s.snapshot()
+	if err != nil {
+		return nil, err
+	}
+	options := UpdateOptions{
+		IfETag: etag,
+	}
+	if version > 0 {
+		options.IfVersion = Int64(version)
+	}
+	options.FencingToken = s.syncFencingToken()
+	if len(opts) > 0 {
+		options = applyUpdateOptions(options, opts)
+	}
+	return s.MutateWithOptions(ctx, mutations, options)
+}
+
+// MutateWithOptions applies server-side LQL mutations with explicit conditional/header overrides.
+func (s *QueueStateHandle) MutateWithOptions(ctx context.Context, mutations []string, opts UpdateOptions) (*UpdateResult, error) {
+	cli, namespace, key, leaseID, txnID, corr, etag, version, err := s.snapshot()
+	if err != nil {
+		return nil, err
+	}
+	ctx = WithCorrelationID(ctx, corr)
+	if opts.IfETag == "" {
+		opts.IfETag = etag
+	}
+	if opts.IfVersion == nil && version > 0 {
+		opts.IfVersion = Int64(version)
+	}
+	if opts.FencingToken == nil {
+		opts.FencingToken = s.syncFencingToken()
+	}
+	if opts.Namespace == "" {
+		opts.Namespace = namespace
+	}
+	if opts.TxnID == "" {
+		opts.TxnID = txnID
+	}
+	res, err := cli.Mutate(ctx, MutateRequest{
+		Key:       key,
+		LeaseID:   leaseID,
+		Mutations: append([]string(nil), mutations...),
+		Options:   opts,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if res != nil {
+		s.updateAfterMutation(res.NewStateETag, res.NewVersion)
+	}
+	s.syncFencingToken()
+	return res, nil
+}
+
 // UpdateWithOptions updates workflow state while allowing conditional/header overrides.
 func (s *QueueStateHandle) UpdateWithOptions(ctx context.Context, body io.Reader, opts UpdateOptions) (*UpdateResult, error) {
 	cli, namespace, key, leaseID, txnID, corr, etag, version, err := s.snapshot()
@@ -1896,6 +1953,24 @@ func (a *AcquireForUpdateContext) UpdateWithOptions(ctx context.Context, body io
 	return sess.UpdateWithOptions(ctx, body, opts)
 }
 
+// Mutate applies server-side LQL mutations while preserving the lease.
+func (a *AcquireForUpdateContext) Mutate(ctx context.Context, mutations []string, opts ...UpdateOption) (*UpdateResult, error) {
+	sess, err := a.session()
+	if err != nil {
+		return nil, err
+	}
+	return sess.Mutate(ctx, mutations, opts...)
+}
+
+// MutateWithOptions applies server-side LQL mutations with explicit conditional overrides.
+func (a *AcquireForUpdateContext) MutateWithOptions(ctx context.Context, mutations []string, opts UpdateOptions) (*UpdateResult, error) {
+	sess, err := a.session()
+	if err != nil {
+		return nil, err
+	}
+	return sess.MutateWithOptions(ctx, mutations, opts)
+}
+
 // KeepAlive extends the lease TTL.
 func (a *AcquireForUpdateContext) KeepAlive(ctx context.Context, ttl time.Duration) (*api.KeepAliveResponse, error) {
 	sess, err := a.session()
@@ -2064,6 +2139,59 @@ func (s *LeaseSession) Update(ctx context.Context, body io.Reader, options ...Up
 // UpdateBytes is a convenience wrapper around Update that accepts an in-memory payload.
 func (s *LeaseSession) UpdateBytes(ctx context.Context, body []byte, options ...UpdateOption) (*UpdateResult, error) {
 	return s.Update(ctx, bytes.NewReader(body), options...)
+}
+
+// Mutate applies server-side LQL mutations to the session's key while preserving the lease.
+func (s *LeaseSession) Mutate(ctx context.Context, mutations []string, options ...UpdateOption) (*UpdateResult, error) {
+	ctx = WithCorrelationID(ctx, s.correlation())
+	opts := UpdateOptions{
+		IfETag: s.StateETag,
+	}
+	if s.Version > 0 {
+		opts.IfVersion = Int64(s.Version)
+	}
+	opts.FencingToken = s.syncFencingToken()
+	if len(options) > 0 {
+		opts = applyUpdateOptions(opts, options)
+	}
+	return s.MutateWithOptions(ctx, mutations, opts)
+}
+
+// MutateWithOptions allows callers to override conditional metadata for server-side mutation.
+func (s *LeaseSession) MutateWithOptions(ctx context.Context, mutations []string, opts UpdateOptions) (*UpdateResult, error) {
+	ctx = WithCorrelationID(ctx, s.correlation())
+	if opts.IfETag == "" {
+		opts.IfETag = s.StateETag
+	}
+	if opts.IfVersion == nil && s.Version > 0 {
+		opts.IfVersion = Int64(s.Version)
+	}
+	if opts.FencingToken == nil {
+		opts.FencingToken = s.syncFencingToken()
+	}
+	if opts.Namespace == "" {
+		opts.Namespace = s.Namespace
+	}
+	if opts.TxnID == "" {
+		opts.TxnID = s.TxnID
+	}
+	res, err := s.client.Mutate(ctx, MutateRequest{
+		Key:       s.Key,
+		LeaseID:   s.LeaseID,
+		Mutations: append([]string(nil), mutations...),
+		Options:   opts,
+	})
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	s.Version = res.NewVersion
+	s.StateETag = res.NewStateETag
+	if token, tokenErr := s.client.fencingToken(s.LeaseID, nil); tokenErr == nil {
+		s.FencingToken = token
+	}
+	s.mu.Unlock()
+	return res, nil
 }
 
 // UpdateWithOptions allows callers to override conditional metadata.
@@ -2897,6 +3025,18 @@ type UpdateResult struct {
 	BytesWritten int64 `json:"bytes"`
 	// Metadata carries metadata values returned by the server for this object.
 	Metadata api.MetadataAttributes `json:"metadata,omitempty"`
+}
+
+// MutateRequest captures a server-side LQL mutation operation for one key.
+type MutateRequest struct {
+	// Key identifies the state object to mutate.
+	Key string
+	// LeaseID identifies the active lease required for protected mutations.
+	LeaseID string
+	// Mutations contains one or more LQL mutation expressions in execution order.
+	Mutations []string
+	// Options controls namespace, CAS guards, fencing, and txn headers.
+	Options UpdateOptions
 }
 
 // MetadataResult captures metadata-only mutation outcomes.
@@ -5365,6 +5505,163 @@ func (c *Client) UpdateStream(ctx context.Context, key, leaseID string, body io.
 	}
 	c.logTraceCtx(ctx, "client.update_stream.success", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", endpoint, "fencing_token", token, "new_version", result.NewVersion, "new_etag", result.NewStateETag)
 	return &result, nil
+}
+
+// Mutate applies LQL mutation expressions server-side to the key under lease protection.
+func (c *Client) Mutate(ctx context.Context, req MutateRequest) (*UpdateResult, error) {
+	key := strings.TrimSpace(req.Key)
+	if key == "" {
+		return nil, fmt.Errorf("lockd: key required")
+	}
+	leaseID := strings.TrimSpace(req.LeaseID)
+	if leaseID == "" {
+		return nil, fmt.Errorf("lockd: lease id required")
+	}
+	mutationExprs := make([]string, 0, len(req.Mutations))
+	for _, raw := range req.Mutations {
+		expr := strings.TrimSpace(raw)
+		if expr != "" {
+			mutationExprs = append(mutationExprs, expr)
+		}
+	}
+	if len(mutationExprs) == 0 {
+		return nil, fmt.Errorf("lockd: mutations required")
+	}
+
+	opts := req.Options
+	namespace, err := c.namespaceFor(opts.Namespace)
+	if err != nil {
+		return nil, err
+	}
+	opts.Namespace = namespace
+	if opts.TxnID == "" {
+		if sess := c.sessionByLease(leaseID); sess != nil {
+			opts.TxnID = sess.TxnID
+		}
+	}
+	token, err := c.fencingToken(leaseID, opts.FencingToken)
+	if err != nil {
+		return nil, err
+	}
+
+	payload := api.MutateRequest{
+		Namespace: namespace,
+		Mutations: mutationExprs,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	path := fmt.Sprintf("/v1/mutate?key=%s&namespace=%s", url.QueryEscape(key), url.QueryEscape(namespace))
+	c.logTraceCtx(ctx, "client.mutate.start", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", c.lastEndpoint, "fencing_token", token)
+	builder := func(base string) (*http.Request, context.CancelFunc, error) {
+		reqCtx, cancel := c.requestContext(ctx)
+		httpReq, reqErr := http.NewRequestWithContext(reqCtx, http.MethodPost, base+path, bytes.NewReader(body))
+		if reqErr != nil {
+			cancel()
+			return nil, nil, reqErr
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("X-Lease-ID", leaseID)
+		if opts.TxnID != "" {
+			httpReq.Header.Set(headerTxnID, opts.TxnID)
+		}
+		if opts.IfETag != "" {
+			httpReq.Header.Set("X-If-State-ETag", opts.IfETag)
+		}
+		if opts.IfVersion != nil {
+			httpReq.Header.Set("X-If-Version", strconv.FormatInt(*opts.IfVersion, 10))
+		}
+		httpReq.Header.Set(headerFencingToken, strconv.FormatInt(token, 10))
+		opts.Metadata.applyHeaders(httpReq)
+		c.applyCorrelationHeader(ctx, httpReq, "")
+		return httpReq, cancel, nil
+	}
+	retries := c.failureRetries
+	delay := 10 * time.Millisecond
+	maxRetryDelay := 500 * time.Millisecond
+	for {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		resp, cancel, endpoint, err := c.attemptEndpoints(builder, "")
+		if err != nil {
+			if cancel != nil {
+				cancel()
+			}
+			c.logErrorCtx(ctx, "client.mutate.transport_error", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", endpoint, "fencing_token", token, "error", err)
+			if retries == 0 || !isTransportError(err) || isFatalTransportError(err) {
+				return nil, err
+			}
+			if retries > 0 {
+				retries--
+			}
+			sleep := delay
+			if sleep > maxRetryDelay {
+				sleep = maxRetryDelay
+			}
+			if sleep > 0 {
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(sleep):
+				}
+			}
+			if delay < time.Second {
+				delay *= 2
+			}
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			c.logWarnCtx(ctx, "client.mutate.error", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", endpoint, "fencing_token", token, "status", resp.StatusCode)
+			err := c.decodeError(resp)
+			resp.Body.Close()
+			if cancel != nil {
+				cancel()
+			}
+			if retries == 0 || !isNodePassiveError(err) {
+				return nil, err
+			}
+			if retries > 0 {
+				retries--
+			}
+			sleep := delay
+			if retryHint := retryAfterFromError(err); retryHint > sleep {
+				sleep = retryHint
+			}
+			if sleep > maxRetryDelay {
+				sleep = maxRetryDelay
+			}
+			if sleep > 0 {
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(sleep):
+				}
+			}
+			if delay < time.Second {
+				delay *= 2
+			}
+			continue
+		}
+		var result UpdateResult
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			resp.Body.Close()
+			if cancel != nil {
+				cancel()
+			}
+			return nil, err
+		}
+		resp.Body.Close()
+		if cancel != nil {
+			cancel()
+		}
+		c.logTraceCtx(ctx, "client.mutate.success", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", endpoint, "fencing_token", token, "new_version", result.NewVersion, "new_etag", result.NewStateETag)
+		if newToken, ok := parseFencingTokenHeader(resp.Header.Get(headerFencingToken)); ok {
+			c.RegisterLeaseToken(leaseID, newToken)
+		}
+		return &result, nil
+	}
 }
 
 func (c *Client) updateWithPreferred(ctx context.Context, key, leaseID string, body io.Reader, opts UpdateOptions, preferred string) (*UpdateResult, error) {

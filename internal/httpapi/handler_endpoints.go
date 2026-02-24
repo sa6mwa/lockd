@@ -3903,6 +3903,9 @@ func (h *Handler) handleAttachmentGet(w http.ResponseWriter, r *http.Request) er
 	if res.Attachment.UpdatedAtUnix > 0 {
 		w.Header().Set(headerAttachmentUpdatedAt, strconv.FormatInt(res.Attachment.UpdatedAtUnix, 10))
 	}
+	if checksum := strings.TrimSpace(res.Attachment.PlaintextSHA256); checksum != "" {
+		w.Header().Set(headerAttachmentSHA256, checksum)
+	}
 	w.WriteHeader(http.StatusOK)
 	_, err = io.Copy(w, res.Reader)
 	return err
@@ -4034,12 +4037,13 @@ func parseMaxBytesQuery(raw string) (int64, bool, error) {
 
 func attachmentInfoToAPI(info core.AttachmentInfo) api.AttachmentInfo {
 	return api.AttachmentInfo{
-		ID:            info.ID,
-		Name:          info.Name,
-		Size:          info.Size,
-		ContentType:   info.ContentType,
-		CreatedAtUnix: info.CreatedAtUnix,
-		UpdatedAtUnix: info.UpdatedAtUnix,
+		ID:              info.ID,
+		Name:            info.Name,
+		Size:            info.Size,
+		PlaintextSHA256: info.PlaintextSHA256,
+		ContentType:     info.ContentType,
+		CreatedAtUnix:   info.CreatedAtUnix,
+		UpdatedAtUnix:   info.UpdatedAtUnix,
 	}
 }
 

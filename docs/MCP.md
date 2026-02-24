@@ -14,6 +14,8 @@ The lockd MCP service is a dedicated facade process that exposes lockd capabilit
 - query/search over namespaced state
 - attachment exchange
 
+Large payload safety is a first-class constraint: MCP tools avoid loading full state documents or attachments into process memory. Payload transfer uses streaming tools over MCP progress notifications.
+
 The MCP facade acts as a normal lockd client toward upstream lockd. In v1, authorization boundaries are inherited from the upstream client certificate and its namespace access claims.
 
 ## Runtime Model
@@ -159,7 +161,9 @@ Lock/state:
 - `lockd.get`
 - `lockd.describe`
 - `lockd.query`
+- `lockd.query.stream`
 - `lockd.state.update`
+- `lockd.state.stream`
 - `lockd.state.metadata`
 - `lockd.state.remove`
 
@@ -167,7 +171,10 @@ Attachments:
 
 - `lockd.attachments.put`
 - `lockd.attachments.list`
+- `lockd.attachments.head`
+- `lockd.attachments.checksum`
 - `lockd.attachments.get`
+- `lockd.attachments.stream`
 - `lockd.attachments.delete`
 - `lockd.attachments.delete_all`
 
@@ -175,6 +182,7 @@ Queue/messaging:
 
 - `lockd.queue.enqueue`
 - `lockd.queue.dequeue`
+- `lockd.queue.watch`
 - `lockd.queue.ack`
 - `lockd.queue.nack`
 - `lockd.queue.defer`
@@ -193,20 +201,38 @@ TC-only transaction decision tools are intentionally not exposed by MCP. XA rema
 ## Queue + SSE Behavior
 
 - MCP forwards upstream queue watch events as MCP progress notifications.
+- `lockd.queue.watch` is the bounded wake-up tool for interactive clients.
 - notifications are wake-up signals; consumers still explicitly call dequeue.
 - recommended consumer loop:
 
 1. subscribe (`lockd.queue.subscribe`) or rely on auto-subscription
-2. dequeue
-3. process
-4. ack on success
-5. nack on failure
-6. defer when message should be re-queued without failure semantics
-7. extend while long processing is in-flight
+2. or call `lockd.queue.watch` with a bounded duration/event cap
+3. dequeue
+4. process
+5. ack on success
+6. nack on failure
+7. defer when message should be re-queued without failure semantics
+8. extend while long processing is in-flight
+
+## Contract Notes
+
+- `lockd.get` returns metadata only (`found`, numeric `version`, `etag`, `stream_required`).
+- read payload via `lockd.state.stream` (chunked progress notifications; no full-buffer read).
+- `lockd.get`, `lockd.attachments.list`, and `lockd.attachments.get` default to `public=true`.
+- For those reads: `public=false` requires `lease_id`; `public=true` rejects `lease_id`.
+- `lockd.attachments.put` uses `mode=create|upsert|replace` (`create` default, safer create-only behavior).
+- `lockd.attachments.head` is metadata-only by id/name and avoids payload download.
+- `lockd.attachments.get` is metadata-only (`stream_required=true`), intended as a selector/metadata step before streaming.
+- read attachment payload via `lockd.attachments.stream` (chunked progress notifications; no full-buffer read).
+- attachment checksums are upload-time plaintext SHA-256 values persisted in lockd metadata (`plaintext_sha256`) and can be fetched directly through `lockd.attachments.checksum` without streaming payload bytes.
 
 ## Query Semantics
 
-`lockd.query` defaults to key mode unless `return=documents` is set.
+`lockd.query` returns keys only in MCP. `return=documents` is rejected on that tool.
+
+Use `lockd.query.stream` for query-document payload streaming via progress notifications. This avoids server-side buffering while preserving NDJSON-style query-document workflows.
+
+Use `lockd.get` + `lockd.state.stream` for point payload reads.
 
 Engine behavior:
 

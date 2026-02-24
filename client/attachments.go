@@ -20,6 +20,7 @@ const (
 	headerAttachmentSize      = "X-Attachment-Size"
 	headerAttachmentCreatedAt = "X-Attachment-Created-At"
 	headerAttachmentUpdatedAt = "X-Attachment-Updated-At"
+	headerAttachmentSHA256    = "X-Attachment-SHA256"
 )
 
 // AttachmentInfo describes attachment metadata.
@@ -30,6 +31,8 @@ type AttachmentInfo struct {
 	Name string
 	// Size is the payload size in bytes.
 	Size int64
+	// PlaintextSHA256 is the SHA-256 checksum of the uploaded plaintext payload.
+	PlaintextSHA256 string
 	// ContentType is the media type associated with the payload.
 	ContentType string
 	// CreatedAtUnix is the creation timestamp as Unix seconds.
@@ -908,12 +911,13 @@ func attachmentBodyFactory(body io.Reader) (func() (io.Reader, error), bool) {
 
 func attachmentInfoFromAPI(info api.AttachmentInfo) AttachmentInfo {
 	return AttachmentInfo{
-		ID:            info.ID,
-		Name:          info.Name,
-		Size:          info.Size,
-		ContentType:   info.ContentType,
-		CreatedAtUnix: info.CreatedAtUnix,
-		UpdatedAtUnix: info.UpdatedAtUnix,
+		ID:              info.ID,
+		Name:            info.Name,
+		Size:            info.Size,
+		PlaintextSHA256: strings.TrimSpace(info.PlaintextSHA256),
+		ContentType:     info.ContentType,
+		CreatedAtUnix:   info.CreatedAtUnix,
+		UpdatedAtUnix:   info.UpdatedAtUnix,
 	}
 }
 
@@ -937,9 +941,10 @@ func normalizeAttachmentSelector(sel AttachmentSelector) AttachmentSelector {
 
 func attachmentInfoFromHeaders(headers http.Header, selector AttachmentSelector) AttachmentInfo {
 	info := AttachmentInfo{
-		ID:          strings.TrimSpace(headers.Get(headerAttachmentID)),
-		Name:        strings.TrimSpace(headers.Get(headerAttachmentName)),
-		ContentType: strings.TrimSpace(headers.Get("Content-Type")),
+		ID:              strings.TrimSpace(headers.Get(headerAttachmentID)),
+		Name:            strings.TrimSpace(headers.Get(headerAttachmentName)),
+		PlaintextSHA256: strings.TrimSpace(headers.Get(headerAttachmentSHA256)),
+		ContentType:     strings.TrimSpace(headers.Get("Content-Type")),
 	}
 	if info.ID == "" {
 		info.ID = selector.ID

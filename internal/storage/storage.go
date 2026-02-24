@@ -79,14 +79,15 @@ type StateInfo struct {
 
 // Attachment captures metadata about a stored attachment object.
 type Attachment struct {
-	ID             string `json:"id,omitempty"`
-	Name           string `json:"name,omitempty"`
-	Size           int64  `json:"size,omitempty"`
-	PlaintextBytes int64  `json:"plaintext_bytes,omitempty"`
-	ContentType    string `json:"content_type,omitempty"`
-	Descriptor     []byte `json:"descriptor,omitempty"`
-	CreatedAtUnix  int64  `json:"created_at_unix,omitempty"`
-	UpdatedAtUnix  int64  `json:"updated_at_unix,omitempty"`
+	ID              string `json:"id,omitempty"`
+	Name            string `json:"name,omitempty"`
+	Size            int64  `json:"size,omitempty"`
+	PlaintextBytes  int64  `json:"plaintext_bytes,omitempty"`
+	PlaintextSHA256 string `json:"plaintext_sha256,omitempty"`
+	ContentType     string `json:"content_type,omitempty"`
+	Descriptor      []byte `json:"descriptor,omitempty"`
+	CreatedAtUnix   int64  `json:"created_at_unix,omitempty"`
+	UpdatedAtUnix   int64  `json:"updated_at_unix,omitempty"`
 }
 
 // StagedAttachment describes a pending attachment payload staged for a txn.
@@ -95,6 +96,7 @@ type StagedAttachment struct {
 	Name             string `json:"name,omitempty"`
 	Size             int64  `json:"size,omitempty"`
 	PlaintextBytes   int64  `json:"plaintext_bytes,omitempty"`
+	PlaintextSHA256  string `json:"plaintext_sha256,omitempty"`
 	ContentType      string `json:"content_type,omitempty"`
 	StagedDescriptor []byte `json:"staged_descriptor,omitempty"`
 	CreatedAtUnix    int64  `json:"created_at_unix,omitempty"`

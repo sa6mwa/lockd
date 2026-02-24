@@ -231,6 +231,87 @@ func (s *server) handleQueueDequeueTool(ctx context.Context, req *mcpsdk.CallToo
 	return nil, out, nil
 }
 
+type queueWatchToolInput struct {
+	Queue           string `json:"queue,omitempty" jsonschema:"Queue name (defaults to lockd.agent.bus)"`
+	Namespace       string `json:"namespace,omitempty" jsonschema:"Namespace (defaults to server default namespace)"`
+	DurationSeconds int64  `json:"duration_seconds,omitempty" jsonschema:"Maximum watch duration in seconds (default: 30)"`
+	MaxEvents       int    `json:"max_events,omitempty" jsonschema:"Maximum events to return before stopping (default: 1)"`
+}
+
+type queueWatchEventOutput struct {
+	Namespace     string `json:"namespace"`
+	Queue         string `json:"queue"`
+	Available     bool   `json:"available"`
+	HeadMessageID string `json:"head_message_id,omitempty"`
+	ChangedAtUnix int64  `json:"changed_at_unix,omitempty"`
+	CorrelationID string `json:"correlation_id,omitempty"`
+}
+
+type queueWatchToolOutput struct {
+	Namespace  string                  `json:"namespace"`
+	Queue      string                  `json:"queue"`
+	Events     []queueWatchEventOutput `json:"events"`
+	EventCount int                     `json:"event_count"`
+	StopReason string                  `json:"stop_reason"`
+}
+
+func (s *server) handleQueueWatchTool(ctx context.Context, _ *mcpsdk.CallToolRequest, input queueWatchToolInput) (*mcpsdk.CallToolResult, queueWatchToolOutput, error) {
+	namespace := s.resolveNamespace(input.Namespace)
+	queue := s.resolveQueue(input.Queue)
+	duration := input.DurationSeconds
+	if duration <= 0 {
+		duration = 30
+	}
+	maxEvents := input.MaxEvents
+	if maxEvents <= 0 {
+		maxEvents = 1
+	}
+
+	out := queueWatchToolOutput{
+		Namespace:  namespace,
+		Queue:      queue,
+		Events:     make([]queueWatchEventOutput, 0, maxEvents),
+		StopReason: "timeout",
+	}
+
+	watchCtx, cancel := context.WithTimeout(ctx, time.Duration(duration)*time.Second)
+	defer cancel()
+	stopErr := errors.New("lockd-mcp-watch-stop")
+	err := s.upstream.WatchQueue(watchCtx, queue, lockdclient.WatchQueueOptions{
+		Namespace: namespace,
+	}, func(_ context.Context, ev lockdclient.QueueWatchEvent) error {
+		out.Events = append(out.Events, queueWatchEventOutput{
+			Namespace:     ev.Namespace,
+			Queue:         ev.Queue,
+			Available:     ev.Available,
+			HeadMessageID: ev.HeadMessageID,
+			ChangedAtUnix: ev.ChangedAt.Unix(),
+			CorrelationID: ev.CorrelationID,
+		})
+		if len(out.Events) >= maxEvents {
+			out.StopReason = "max_events"
+			return stopErr
+		}
+		return nil
+	})
+
+	out.EventCount = len(out.Events)
+	switch {
+	case err == nil:
+		return nil, out, nil
+	case errors.Is(err, stopErr):
+		return nil, out, nil
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(watchCtx.Err(), context.DeadlineExceeded):
+		out.StopReason = "timeout"
+		return nil, out, nil
+	case errors.Is(err, context.Canceled), errors.Is(watchCtx.Err(), context.Canceled):
+		out.StopReason = "context_canceled"
+		return nil, out, nil
+	default:
+		return nil, queueWatchToolOutput{}, err
+	}
+}
+
 type queueAckToolInput struct {
 	Namespace         string `json:"namespace,omitempty" jsonschema:"Namespace (defaults to server default namespace)"`
 	Queue             string `json:"queue" jsonschema:"Queue name"`

@@ -12,6 +12,9 @@
 //   - Hosts local OAuth 2.1 endpoints for confidential clients
 //   - Enforces bearer-token auth by default when TLS is enabled
 //   - Forwards queue watch activity to MCP progress notifications (SSE path)
+//   - Exposes lockd.queue.watch for bounded interactive wakeups
+//   - Keeps `lockd.get` and `lockd.attachments.get` metadata-only and uses
+//     `lockd.state.stream` / `lockd.attachments.stream` for payload transfer
 //
 // The facade process itself is stateless for lock data: lock/state/queue/query
 // operations are delegated to upstream lockd.
@@ -33,9 +36,19 @@
 // namespace `mcp`). Queue activity is emitted as MCP progress notifications,
 // and consumers explicitly dequeue/ack/nack/defer/extend messages.
 //
+// For interactive clients that cannot maintain long-lived subscriptions, use
+// `lockd.queue.watch` with bounded duration/event limits before dequeue.
+//
 // Agents should start with the `lockd.hint` tool to retrieve namespace-access
 // hints derived from upstream client-bundle claims before selecting namespaces
 // for lock/query/queue calls.
+//
+// Large payload handling:
+//
+// State documents and attachments can be very large. The MCP facade avoids
+// full-buffer reads by exposing explicit streaming tools that emit chunked
+// progress notifications over the active MCP session, including
+// `lockd.query.stream` for query-document payloads.
 //
 // # Constructor and lifecycle
 //

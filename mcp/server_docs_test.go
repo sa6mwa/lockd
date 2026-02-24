@@ -21,6 +21,12 @@ func TestDefaultServerInstructionsIncludeNamespaceAndQueue(t *testing.T) {
 	if !strings.Contains(text, "call lockd.hint first") {
 		t.Fatalf("expected lockd.hint guidance in instructions: %q", text)
 	}
+	if !strings.Contains(text, "lockd.queue.watch") {
+		t.Fatalf("expected lockd.queue.watch guidance in instructions: %q", text)
+	}
+	if !strings.Contains(text, "lockd.state.stream") {
+		t.Fatalf("expected lockd.state.stream guidance in instructions: %q", text)
+	}
 }
 
 func TestHelpToolMessagingTopic(t *testing.T) {
@@ -35,6 +41,16 @@ func TestHelpToolMessagingTopic(t *testing.T) {
 	}
 	if len(out.Resources) == 0 || out.Resources[0] != docMessagingURI {
 		t.Fatalf("expected messaging docs resource, got %#v", out.Resources)
+	}
+	foundWatch := false
+	for _, next := range out.NextCalls {
+		if next == "lockd.queue.watch" {
+			foundWatch = true
+			break
+		}
+	}
+	if !foundWatch {
+		t.Fatalf("expected messaging next_calls to include lockd.queue.watch, got %#v", out.NextCalls)
 	}
 }
 

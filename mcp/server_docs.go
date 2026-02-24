@@ -23,10 +23,11 @@ lockd MCP facade operating manual:
 - Default coordination queue: %s
 - Discovery workflow: call lockd.hint first to learn namespace-access hints, then lockd.help for workflows.
 - Queue workflow: dequeue -> ack | nack(failure) | defer(intentional). Use queue.extend for long-running handlers.
-- Subscription workflow: lockd.queue.subscribe to receive queue availability notifications over MCP SSE progress notifications.
+- Bounded watch workflow: use lockd.queue.watch for interactive polling-compatible wakeups.
+- Subscription workflow: lockd.queue.subscribe for long-lived runtimes that can hold session-level SSE subscriptions.
 - XA workflow: optional txn_id can be attached to lock/queue/state/attachment operations; transaction decisions are applied by lockd APIs, not TC decision tools in this MCP surface.
 - Lock safety: keep lease IDs/fencing tokens from lock operations and send them back on protected writes.
-- Query first when uncertain: use lockd.query for key discovery and lockd.get for point reads.
+- Query first when uncertain: use lockd.query for key discovery, lockd.query.stream for query-document payloads, and lockd.state.stream / lockd.attachments.stream for point payload reads.
 - Documentation resources: %s, %s, %s, %s
 `, cfg.DefaultNamespace, cfg.AgentBusQueue, docOverviewURI, docLocksURI, docMessagingURI, docSyncURI))
 }
@@ -65,17 +66,18 @@ Recommended discovery sequence:
 1. Call lockd.hint for namespace-access hints.
 2. Call lockd.help.
 3. Read %s and %s.
-4. Use lockd.query + lockd.get to locate state.
+4. Use lockd.query for keys, lockd.query.stream for query documents, and lockd.get for point metadata.
 5. Use queue tools for agent coordination and messaging.
 `, s.cfg.DefaultNamespace, s.cfg.AgentBusQueue, docMessagingURI, docSyncURI)),
 		docLocksURI: strings.TrimSpace(`
 # lockd Locking Workflow
 
-1. Acquire lock/lease (outside this initial MCP surface this is exposed in lockd APIs/CLI/SDK).
+1. Acquire lock/lease with lockd.lock.acquire.
 2. Read state.
-3. Mutate state.
-4. Keepalive while work is active.
-5. Release/commit.
+3. Stream state payload with lockd.state.stream when needed.
+4. Mutate state.
+5. Keepalive while work is active.
+6. Release/commit.
 
 Critical invariants:
 - Lease ID and fencing token are authority.
@@ -86,11 +88,12 @@ Critical invariants:
 
 Primary queue loop:
 1. lockd.queue.enqueue to publish coordination events
-2. lockd.queue.dequeue (default queue %q unless overridden)
-3. If processing succeeds: lockd.queue.ack
-4. If processing fails: lockd.queue.nack
-5. If message is not for this worker: lockd.queue.defer
-6. If processing runs long: lockd.queue.extend
+2. lockd.queue.watch for bounded wakeup signals (recommended for interactive clients)
+3. lockd.queue.dequeue (default queue %q unless overridden)
+4. If processing succeeds: lockd.queue.ack
+5. If processing fails: lockd.queue.nack
+6. If message is not for this worker: lockd.queue.defer
+7. If processing runs long: lockd.queue.extend
 
 For push-notify:
 1. lockd.queue.subscribe
@@ -102,6 +105,8 @@ For push-notify:
 
 Use queues for eventing and lock/state operations for shared context updates.
 Keep queue payloads small and use key/state references for large context.
+Use lockd.query.stream for query-document payload reads and lockd.state.stream for point payload reads.
+Use lockd.attachments.head before lockd.attachments.stream when only metadata is needed.
 Use namespace scoping to isolate agent groups.
 Use txn_id only when you need cross-key atomic decisions; normal single-key operations should omit it.
 `),
@@ -154,29 +159,31 @@ func (s *server) handleHelpTool(_ context.Context, _ *mcpsdk.CallToolRequest, in
 		Invariants: []string{
 			"run lockd.hint before planning workflows so namespace choices match client claims",
 			"queue workflow is dequeue then ack/nack/defer",
+			"queue.watch is the bounded wake-up primitive for interactive clients",
 			"defer preserves message without counting as failure",
 			"extend refreshes lease for long-running handlers",
 			"namespace isolation follows client certificate claims",
 			"lock writes must preserve lease/fencing semantics",
+			"payload reads are streaming-first: use lockd.state.stream and lockd.attachments.stream for large content",
 			"XA is optional: only include txn_id when coordinating multiple participants",
 		},
 	}
 	switch topic {
 	case "overview":
-		out.Summary = "Start with lockd.hint and lockd.help, acquire lock when mutating shared state, subscribe for queue notifications, then dequeue and ack/nack/defer messages."
-		out.NextCalls = []string{"lockd.hint", "lockd.lock.acquire", "lockd.queue.subscribe", "lockd.queue.dequeue", "lockd.queue.ack", "lockd.queue.nack", "lockd.queue.defer"}
+		out.Summary = "Start with lockd.hint and lockd.help, acquire lock when mutating shared state, use queue.watch for bounded wakeups, then dequeue and ack/nack/defer messages. Use stream tools for large payload reads."
+		out.NextCalls = []string{"lockd.hint", "lockd.get", "lockd.state.stream", "lockd.lock.acquire", "lockd.queue.watch", "lockd.queue.dequeue", "lockd.queue.ack", "lockd.queue.nack", "lockd.queue.defer"}
 		out.Resources = []string{docOverviewURI, docMessagingURI, docSyncURI}
 	case "locks":
 		out.Summary = "Locks gate state mutation; keep lease identity and fencing token through the full mutation lifecycle."
 		out.NextCalls = []string{"lockd.hint", "lockd.lock.acquire", "lockd.state.update", "lockd.lock.release"}
 		out.Resources = []string{docLocksURI}
 	case "messaging":
-		out.Summary = "Messaging is dequeue-driven. Ack success, nack failures, defer when a message is not for this worker, and extend when processing runs long."
-		out.NextCalls = []string{"lockd.hint", "lockd.queue.enqueue", "lockd.queue.subscribe", "lockd.queue.dequeue", "lockd.queue.ack", "lockd.queue.nack", "lockd.queue.defer", "lockd.queue.extend"}
+		out.Summary = "Messaging is dequeue-driven. Use queue.watch for bounded wakeups, ack success, nack failures, defer when a message is not for this worker, and extend when processing runs long."
+		out.NextCalls = []string{"lockd.hint", "lockd.queue.enqueue", "lockd.queue.watch", "lockd.queue.subscribe", "lockd.queue.dequeue", "lockd.queue.ack", "lockd.queue.nack", "lockd.queue.defer", "lockd.queue.extend"}
 		out.Resources = []string{docMessagingURI}
 	case "sync":
 		out.Summary = "Coordinate through queue events and shared state; keep large context in lockd documents."
-		out.NextCalls = []string{"lockd.hint", "lockd.query", "lockd.get", "lockd.queue.subscribe"}
+		out.NextCalls = []string{"lockd.hint", "lockd.query", "lockd.query.stream", "lockd.get", "lockd.queue.subscribe"}
 		out.Resources = []string{docSyncURI, docOverviewURI}
 	default:
 		return nil, helpToolOutput{}, fmt.Errorf("unknown help topic %q", topic)

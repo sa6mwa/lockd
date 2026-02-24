@@ -303,17 +303,18 @@ func (x *LockMeta) GetStagedAttachmentsClear() bool {
 }
 
 type Attachment struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	Id             string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Name           string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	Size           int64                  `protobuf:"varint,3,opt,name=size,proto3" json:"size,omitempty"`
-	ContentType    string                 `protobuf:"bytes,4,opt,name=content_type,json=contentType,proto3" json:"content_type,omitempty"`
-	Descriptor_    []byte                 `protobuf:"bytes,5,opt,name=descriptor,proto3" json:"descriptor,omitempty"`
-	CreatedAtUnix  int64                  `protobuf:"varint,6,opt,name=created_at_unix,json=createdAtUnix,proto3" json:"created_at_unix,omitempty"`
-	UpdatedAtUnix  int64                  `protobuf:"varint,7,opt,name=updated_at_unix,json=updatedAtUnix,proto3" json:"updated_at_unix,omitempty"`
-	PlaintextBytes int64                  `protobuf:"varint,8,opt,name=plaintext_bytes,json=plaintextBytes,proto3" json:"plaintext_bytes,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Id              string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Name            string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Size            int64                  `protobuf:"varint,3,opt,name=size,proto3" json:"size,omitempty"`
+	ContentType     string                 `protobuf:"bytes,4,opt,name=content_type,json=contentType,proto3" json:"content_type,omitempty"`
+	Descriptor_     []byte                 `protobuf:"bytes,5,opt,name=descriptor,proto3" json:"descriptor,omitempty"`
+	CreatedAtUnix   int64                  `protobuf:"varint,6,opt,name=created_at_unix,json=createdAtUnix,proto3" json:"created_at_unix,omitempty"`
+	UpdatedAtUnix   int64                  `protobuf:"varint,7,opt,name=updated_at_unix,json=updatedAtUnix,proto3" json:"updated_at_unix,omitempty"`
+	PlaintextBytes  int64                  `protobuf:"varint,8,opt,name=plaintext_bytes,json=plaintextBytes,proto3" json:"plaintext_bytes,omitempty"`
+	PlaintextSha256 string                 `protobuf:"bytes,9,opt,name=plaintext_sha256,json=plaintextSha256,proto3" json:"plaintext_sha256,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *Attachment) Reset() {
@@ -402,6 +403,13 @@ func (x *Attachment) GetPlaintextBytes() int64 {
 	return 0
 }
 
+func (x *Attachment) GetPlaintextSha256() string {
+	if x != nil {
+		return x.PlaintextSha256
+	}
+	return ""
+}
+
 type StagedAttachment struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
 	Id               string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -412,6 +420,7 @@ type StagedAttachment struct {
 	CreatedAtUnix    int64                  `protobuf:"varint,6,opt,name=created_at_unix,json=createdAtUnix,proto3" json:"created_at_unix,omitempty"`
 	UpdatedAtUnix    int64                  `protobuf:"varint,7,opt,name=updated_at_unix,json=updatedAtUnix,proto3" json:"updated_at_unix,omitempty"`
 	PlaintextBytes   int64                  `protobuf:"varint,8,opt,name=plaintext_bytes,json=plaintextBytes,proto3" json:"plaintext_bytes,omitempty"`
+	PlaintextSha256  string                 `protobuf:"bytes,9,opt,name=plaintext_sha256,json=plaintextSha256,proto3" json:"plaintext_sha256,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
@@ -500,6 +509,13 @@ func (x *StagedAttachment) GetPlaintextBytes() int64 {
 		return x.PlaintextBytes
 	}
 	return 0
+}
+
+func (x *StagedAttachment) GetPlaintextSha256() string {
+	if x != nil {
+		return x.PlaintextSha256
+	}
+	return ""
 }
 
 type MetaRecord struct {
@@ -893,7 +909,7 @@ const file_storage_proto_rawDesc = "" +
 	"\x18staged_attachments_clear\x18\x14 \x01(\bR\x16stagedAttachmentsClear\x1aC\n" +
 	"\x15StagedAttributesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x80\x02\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xab\x02\n" +
 	"\n" +
 	"Attachment\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
@@ -905,7 +921,8 @@ const file_storage_proto_rawDesc = "" +
 	"descriptor\x12&\n" +
 	"\x0fcreated_at_unix\x18\x06 \x01(\x03R\rcreatedAtUnix\x12&\n" +
 	"\x0fupdated_at_unix\x18\a \x01(\x03R\rupdatedAtUnix\x12'\n" +
-	"\x0fplaintext_bytes\x18\b \x01(\x03R\x0eplaintextBytes\"\x93\x02\n" +
+	"\x0fplaintext_bytes\x18\b \x01(\x03R\x0eplaintextBytes\x12)\n" +
+	"\x10plaintext_sha256\x18\t \x01(\tR\x0fplaintextSha256\"\xbe\x02\n" +
 	"\x10StagedAttachment\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
@@ -914,7 +931,8 @@ const file_storage_proto_rawDesc = "" +
 	"\x11staged_descriptor\x18\x05 \x01(\fR\x10stagedDescriptor\x12&\n" +
 	"\x0fcreated_at_unix\x18\x06 \x01(\x03R\rcreatedAtUnix\x12&\n" +
 	"\x0fupdated_at_unix\x18\a \x01(\x03R\rupdatedAtUnix\x12'\n" +
-	"\x0fplaintext_bytes\x18\b \x01(\x03R\x0eplaintextBytes\"N\n" +
+	"\x0fplaintext_bytes\x18\b \x01(\x03R\x0eplaintextBytes\x12)\n" +
+	"\x10plaintext_sha256\x18\t \x01(\tR\x0fplaintextSha256\"N\n" +
 	"\n" +
 	"MetaRecord\x12\x12\n" +
 	"\x04etag\x18\x01 \x01(\tR\x04etag\x12,\n" +

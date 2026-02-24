@@ -12,12 +12,17 @@ const (
 	toolGet                  = "lockd.get"
 	toolDescribe             = "lockd.describe"
 	toolQuery                = "lockd.query"
+	toolQueryStream          = "lockd.query.stream"
 	toolStateUpdate          = "lockd.state.update"
+	toolStateStream          = "lockd.state.stream"
 	toolStateMetadata        = "lockd.state.metadata"
 	toolStateRemove          = "lockd.state.remove"
 	toolAttachmentsPut       = "lockd.attachments.put"
 	toolAttachmentsList      = "lockd.attachments.list"
+	toolAttachmentsHead      = "lockd.attachments.head"
+	toolAttachmentsChecksum  = "lockd.attachments.checksum"
 	toolAttachmentsGet       = "lockd.attachments.get"
+	toolAttachmentsStream    = "lockd.attachments.stream"
 	toolAttachmentsDelete    = "lockd.attachments.delete"
 	toolAttachmentsDeleteAll = "lockd.attachments.delete_all"
 	toolNamespaceGet         = "lockd.namespace.get"
@@ -27,6 +32,7 @@ const (
 	toolHelp                 = "lockd.help"
 	toolQueueEnqueue         = "lockd.queue.enqueue"
 	toolQueueDequeue         = "lockd.queue.dequeue"
+	toolQueueWatch           = "lockd.queue.watch"
 	toolQueueAck             = "lockd.queue.ack"
 	toolQueueNack            = "lockd.queue.nack"
 	toolQueueDefer           = "lockd.queue.defer"
@@ -42,12 +48,17 @@ var mcpToolNames = []string{
 	toolGet,
 	toolDescribe,
 	toolQuery,
+	toolQueryStream,
 	toolStateUpdate,
+	toolStateStream,
 	toolStateMetadata,
 	toolStateRemove,
 	toolAttachmentsPut,
 	toolAttachmentsList,
+	toolAttachmentsHead,
+	toolAttachmentsChecksum,
 	toolAttachmentsGet,
+	toolAttachmentsStream,
 	toolAttachmentsDelete,
 	toolAttachmentsDeleteAll,
 	toolNamespaceGet,
@@ -57,6 +68,7 @@ var mcpToolNames = []string{
 	toolHelp,
 	toolQueueEnqueue,
 	toolQueueDequeue,
+	toolQueueWatch,
 	toolQueueAck,
 	toolQueueNack,
 	toolQueueDefer,
@@ -123,10 +135,10 @@ func buildToolDescriptions(cfg Config) map[string]string {
 		toolGet: formatToolDescription(toolContract{
 			Purpose:  "Read committed JSON state for one key.",
 			UseWhen:  "You need current state for planning, validation, or rendering context.",
-			Requires: fmt.Sprintf("`key` is required. `namespace` defaults to %q. `public=true` enables public-read fallback; optional `lease_id` scopes lease-bound reads.", namespace),
-			Effects:  "Returns read-only state, ETag/version metadata, and `found=false` when no state exists.",
+			Requires: fmt.Sprintf("`key` is required. `namespace` defaults to %q. `public` defaults to true. If `public=false`, `lease_id` is required. If `public=true`, `lease_id` must be omitted.", namespace),
+			Effects:  "Returns metadata only (`found`, ETag, numeric version). Payload is never inlined; use `lockd.state.stream` when content is required.",
 			Retry:    "Safe to retry; this is a read operation.",
-			Next:     "Use `lockd.query` for broader discovery or acquire a lock before mutation.",
+			Next:     "Call `lockd.state.stream` for payload bytes, `lockd.query` for broader discovery, or acquire a lock before mutation.",
 		}),
 		toolDescribe: formatToolDescription(toolContract{
 			Purpose:  "Read key metadata (lease owner, version, ETag, timestamps) without returning state payload.",
@@ -137,12 +149,20 @@ func buildToolDescriptions(cfg Config) map[string]string {
 			Next:     "Use `lockd.get` to read payload or lock tools for mutation workflows.",
 		}),
 		toolQuery: formatToolDescription(toolContract{
-			Purpose:  "Run LQL queries over namespace data in key or document mode.",
-			UseWhen:  "You need to locate candidate keys/documents before reading or locking.",
-			Requires: fmt.Sprintf("`query` expression is required. `namespace` defaults to %q. Optional `limit`, `cursor`, `return`, `engine`, `refresh`, and `fields` refine execution.", namespace),
-			Effects:  "Returns matching keys or documents plus pagination/index metadata (`cursor`, `index_seq`).",
+			Purpose:  "Run LQL queries over namespace data in key mode.",
+			UseWhen:  "You need to locate candidate keys before reading or locking.",
+			Requires: fmt.Sprintf("`query` expression is required. `namespace` defaults to %q. Optional `limit`, `cursor`, `return`, `engine`, `refresh`, and `fields` refine execution. `return=documents` is rejected here.", namespace),
+			Effects:  "Returns matching keys plus pagination/index metadata (`cursor`, `index_seq`).",
 			Retry:    "Safe to retry. Cursor-based pagination should reuse the latest returned cursor.",
-			Next:     "Call `lockd.get` for point reads, then lock/mutate selected keys as needed.",
+			Next:     "Call `lockd.query.stream` for document payload streaming, or `lockd.get` and `lockd.state.stream` for point reads.",
+		}),
+		toolQueryStream: formatToolDescription(toolContract{
+			Purpose:  "Run an LQL query and stream matching documents over MCP progress notifications without buffering full result sets.",
+			UseWhen:  "You need query result documents and must keep MCP memory usage bounded.",
+			Requires: fmt.Sprintf("Active MCP session is required. `query` expression is required. `namespace` defaults to %q. Optional `limit`, `cursor`, `engine`, `refresh`, `fields`, `chunk_bytes`, `max_bytes`, and `max_documents` bound execution.", namespace),
+			Effects:  "Emits `lockd.query.document.chunk` progress notifications per document chunk and returns stream summary (`documents_streamed`, `streamed_bytes`, `chunks`, `truncated`).",
+			Retry:    "Safe to retry; each call restarts the query stream from the provided cursor/options.",
+			Next:     "Use returned `cursor` for pagination and verify document processing before issuing the next page.",
 		}),
 		toolStateUpdate: formatToolDescription(toolContract{
 			Purpose:  "Write JSON state under lease protection.",
@@ -151,6 +171,14 @@ func buildToolDescriptions(cfg Config) map[string]string {
 			Effects:  "Updates state and returns new version/ETag metadata; can also mutate `query_hidden` metadata.",
 			Retry:    "Use `if_etag`, `if_version`, and `fencing_token` for safe retries. Without guards, retries can apply duplicate writes.",
 			Next:     "Optionally update metadata/attachments, then release lease to commit or rollback.",
+		}),
+		toolStateStream: formatToolDescription(toolContract{
+			Purpose:  "Stream JSON state payload in chunks over MCP progress notifications without buffering full payload in memory.",
+			UseWhen:  "You need state content for large documents and must avoid inline payload buffering.",
+			Requires: fmt.Sprintf("Active MCP session is required. `key` is required. `namespace` defaults to %q. `public` defaults to true; set `public=false` with `lease_id` for lease-bound reads. Optional `chunk_bytes` controls chunk size.", namespace),
+			Effects:  "Emits `lockd.state.chunk` progress notifications with base64 chunk payloads and returns stream summary (`streamed_bytes`, `chunks`, `truncated`).",
+			Retry:    "Safe to retry; stream restarts from beginning on each call.",
+			Next:     "Use chunk notifications to reconstruct payload client-side or stop early with `max_bytes`.",
 		}),
 		toolStateMetadata: formatToolDescription(toolContract{
 			Purpose:  "Update state metadata without replacing JSON state payload.",
@@ -171,26 +199,50 @@ func buildToolDescriptions(cfg Config) map[string]string {
 		toolAttachmentsPut: formatToolDescription(toolContract{
 			Purpose:  "Upload or stage an attachment for a key under lease protection.",
 			UseWhen:  "You need to associate binary/text payloads with key state.",
-			Requires: fmt.Sprintf("`key`, `lease_id`, and `name` are required. `namespace` defaults to %q. Payload comes from `payload_text` or `payload_base64`. Optional `prevent_overwrite` enforces create-only behavior.", namespace),
+			Requires: fmt.Sprintf("`key`, `lease_id`, and `name` are required. `namespace` defaults to %q. Payload comes from `payload_text` or `payload_base64`. `mode` controls write semantics: `create` (default), `upsert`, `replace`.", namespace),
 			Effects:  "Stores attachment content/metadata and returns attachment id/version details.",
-			Retry:    "Not strictly idempotent by default; retries can overwrite unless guarded by `prevent_overwrite` and deterministic naming.",
+			Retry:    "In `create` mode, retries are safe against accidental overwrite. `upsert` can overwrite existing payloads. `replace` requires the named attachment to already exist.",
 			Next:     "List/get attachments for verification, then release lease when complete.",
 		}),
 		toolAttachmentsList: formatToolDescription(toolContract{
 			Purpose:  "List attachment metadata for a key.",
 			UseWhen:  "You need attachment ids/names before get/delete workflows.",
-			Requires: fmt.Sprintf("`key` is required. `namespace` defaults to %q. Provide lease fields for protected reads or set `public=true` for public-read listing.", namespace),
+			Requires: fmt.Sprintf("`key` is required. `namespace` defaults to %q. `public` defaults to true. If `public=false`, `lease_id` is required. If `public=true`, `lease_id` must be omitted.", namespace),
 			Effects:  "Returns attachment metadata only (no payload bytes).",
 			Retry:    "Safe to retry; this is a read operation.",
-			Next:     "Use `lockd.attachments.get` for payload access or delete tools for cleanup.",
+			Next:     "Use `lockd.attachments.head` for metadata-only lookup, `lockd.attachments.get` for payload access, or delete tools for cleanup.",
+		}),
+		toolAttachmentsHead: formatToolDescription(toolContract{
+			Purpose:  "Fetch metadata for one attachment by id or name without reading payload bytes.",
+			UseWhen:  "You need to inspect attachment existence/size/type before deciding whether to download content.",
+			Requires: fmt.Sprintf("`key` plus either `id` or `name` is required. `namespace` defaults to %q. `public` defaults to true. If `public=false`, `lease_id` is required. If `public=true`, `lease_id` must be omitted.", namespace),
+			Effects:  "Returns attachment metadata only (`id`, `name`, `size`, `plaintext_sha256`, timestamps, and content type).",
+			Retry:    "Safe to retry; this is a read operation.",
+			Next:     "Call `lockd.attachments.stream` when payload content is required.",
+		}),
+		toolAttachmentsChecksum: formatToolDescription(toolContract{
+			Purpose:  "Return persisted plaintext SHA-256 checksum for one attachment without reading attachment payload.",
+			UseWhen:  "You need integrity metadata quickly and cannot afford a full payload read.",
+			Requires: fmt.Sprintf("`key` plus either `id` or `name` is required. `namespace` defaults to %q. `public` defaults to true. If `public=false`, `lease_id` is required.", namespace),
+			Effects:  "Returns metadata-derived `plaintext_sha256` for the selected attachment.",
+			Retry:    "Safe to retry; this is a read operation.",
+			Next:     "Compare against client-side checksum after `lockd.attachments.stream` if payload verification is needed.",
 		}),
 		toolAttachmentsGet: formatToolDescription(toolContract{
-			Purpose:  "Fetch one attachment payload by id or name.",
-			UseWhen:  "You need the actual attachment content for processing.",
-			Requires: fmt.Sprintf("`key` plus either `id` or `name` is required. `namespace` defaults to %q. Provide lease fields for protected reads or set `public=true` for public-read access.", namespace),
-			Effects:  "Returns attachment metadata plus payload (`payload_base64`, and `payload_text` when UTF-8).",
+			Purpose:  "Resolve one attachment by id or name and return metadata for streaming decisions.",
+			UseWhen:  "You need attachment metadata and stream hints without loading payload into memory.",
+			Requires: fmt.Sprintf("`key` plus either `id` or `name` is required. `namespace` defaults to %q. `public` defaults to true. If `public=false`, `lease_id` is required. If `public=true`, `lease_id` must be omitted.", namespace),
+			Effects:  "Returns attachment metadata and persisted checksum only; payload bytes are not returned inline.",
 			Retry:    "Safe to retry; this is a read operation.",
-			Next:     "Process payload or delete/replace attachment under lease as needed.",
+			Next:     "Call `lockd.attachments.stream` to receive payload chunks over progress notifications.",
+		}),
+		toolAttachmentsStream: formatToolDescription(toolContract{
+			Purpose:  "Stream attachment payload in chunks over MCP progress notifications without buffering full payload in memory.",
+			UseWhen:  "You need attachment content, including very large files.",
+			Requires: fmt.Sprintf("Active MCP session is required. `key` plus either `id` or `name` is required. `namespace` defaults to %q. `public` defaults to true. Optional `chunk_bytes` controls chunk size.", namespace),
+			Effects:  "Emits `lockd.attachments.chunk` progress notifications with base64 chunk payloads and returns stream summary metadata.",
+			Retry:    "Safe to retry; stream restarts from beginning on each call.",
+			Next:     "Use `lockd.attachments.checksum` to verify expected hash without rereading metadata payload.",
 		}),
 		toolAttachmentsDelete: formatToolDescription(toolContract{
 			Purpose:  "Delete a single attachment under lease protection.",
@@ -264,6 +316,14 @@ func buildToolDescriptions(cfg Config) map[string]string {
 			Retry:    "Safe to retry. Duplicate retries may lease different messages when queue state changes.",
 			Next:     "If processed, call `lockd.queue.ack`; if failed call `lockd.queue.nack`; if not for this worker call `lockd.queue.defer`; extend long handlers with `lockd.queue.extend`.",
 		}),
+		toolQueueWatch: formatToolDescription(toolContract{
+			Purpose:  "Wait for queue-availability events within a bounded call window.",
+			UseWhen:  "Interactive clients need push-like wakeups without maintaining long-lived subscriptions.",
+			Requires: fmt.Sprintf("`queue` defaults to %q and `namespace` defaults to %q. Optional `duration_seconds` bounds wait time (default 30). Optional `max_events` bounds result size (default 1).", queue, namespace),
+			Effects:  "Streams watch events from upstream lockd and returns a bounded event list with `stop_reason` (`max_events`, `timeout`, or `context_canceled`).",
+			Retry:    "Safe to retry; each invocation is independent and bounded.",
+			Next:     "After any event, call `lockd.queue.dequeue` and then `ack`/`nack`/`defer`.",
+		}),
 		toolQueueAck: formatToolDescription(toolContract{
 			Purpose:  "Acknowledge successful processing of a dequeued message.",
 			UseWhen:  "Worker completed handling of a leased message.",
@@ -298,7 +358,7 @@ func buildToolDescriptions(cfg Config) map[string]string {
 		}),
 		toolQueueSubscribe: formatToolDescription(toolContract{
 			Purpose:  "Subscribe current MCP session to queue-availability notifications over SSE.",
-			UseWhen:  "You want push wake-ups instead of pure dequeue polling.",
+			UseWhen:  "You run a long-lived MCP runtime and want ongoing push wake-ups instead of pure dequeue polling.",
 			Requires: fmt.Sprintf("Active MCP session is required. `queue` defaults to %q and `namespace` defaults to %q.", queue, namespace),
 			Effects:  "Registers session subscription; future queue activity emits MCP progress notifications.",
 			Retry:    "Safe to retry; duplicate subscribe is handled as already subscribed.",

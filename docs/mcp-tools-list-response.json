@@ -1,8 +1,86 @@
 {
-  "jsonrpc": "2.0",
   "id": 1,
+  "jsonrpc": "2.0",
   "result": {
     "tools": [
+      {
+        "description": "Purpose: Return persisted plaintext SHA-256 checksum for one attachment without reading attachment payload.\nUse when: You need integrity metadata quickly and cannot afford a full payload read.\nRequires: `key` plus either `id` or `name` is required. `namespace` defaults to \"mcp\". `public` defaults to true. If `public=false`, `lease_id` is required.\nEffects: Returns metadata-derived `plaintext_sha256` for the selected attachment.\nRetry: Safe to retry; this is a read operation.\nNext: Compare against client-side checksum after `lockd.attachments.stream` if payload verification is needed.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "fencing_token": {
+              "description": "Optional fencing token override",
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "id": {
+              "description": "Attachment id selector",
+              "type": "string"
+            },
+            "key": {
+              "description": "State key",
+              "type": "string"
+            },
+            "lease_id": {
+              "description": "Lease id required when public=false",
+              "type": "string"
+            },
+            "name": {
+              "description": "Attachment name selector",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            },
+            "public": {
+              "description": "Read mode selector: true for public read (default), false for lease-bound read",
+              "type": [
+                "null",
+                "boolean"
+              ]
+            },
+            "txn_id": {
+              "description": "Optional XA transaction id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "key"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.attachments.checksum",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "attachment_id": {
+              "type": "string"
+            },
+            "attachment_name": {
+              "type": "string"
+            },
+            "key": {
+              "type": "string"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "plaintext_sha256": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "namespace",
+            "key",
+            "attachment_id",
+            "attachment_name"
+          ],
+          "type": "object"
+        }
+      },
       {
         "description": "Purpose: Delete a single attachment under lease protection.\nUse when: One attachment should be removed while keeping others.\nRequires: `key` and `lease_id` are required, plus either `id` or `name`. `namespace` defaults to \"mcp\". Optional `txn_id` enables XA staging.\nEffects: Deletes (or stages deletion of) the targeted attachment and returns success state.\nRetry: Generally safe after network errors; repeated deletes may become no-op/not-found depending on prior success.\nNext: List attachments to verify remaining items, then release lease.",
         "inputSchema": {
@@ -10,7 +88,10 @@
           "properties": {
             "fencing_token": {
               "description": "Optional fencing token override",
-              "type": "string"
+              "type": [
+                "null",
+                "integer"
+              ]
             },
             "id": {
               "description": "Attachment id selector",
@@ -68,7 +149,10 @@
           "properties": {
             "fencing_token": {
               "description": "Optional fencing token override",
-              "type": "string"
+              "type": [
+                "null",
+                "integer"
+              ]
             },
             "key": {
               "description": "State key",
@@ -112,13 +196,16 @@
         }
       },
       {
-        "description": "Purpose: Fetch one attachment payload by id or name.\nUse when: You need the actual attachment content for processing.\nRequires: `key` plus either `id` or `name` is required. `namespace` defaults to \"mcp\". Provide lease fields for protected reads or set `public=true` for public-read access.\nEffects: Returns attachment metadata plus payload (`payload_base64`, and `payload_text` when UTF-8).\nRetry: Safe to retry; this is a read operation.\nNext: Process payload or delete/replace attachment under lease as needed.",
+        "description": "Purpose: Resolve one attachment by id or name and return metadata for streaming decisions.\nUse when: You need attachment metadata and stream hints without loading payload into memory.\nRequires: `key` plus either `id` or `name` is required. `namespace` defaults to \"mcp\". `public` defaults to true. If `public=false`, `lease_id` is required. If `public=true`, `lease_id` must be omitted.\nEffects: Returns attachment metadata and persisted checksum only; payload bytes are not returned inline.\nRetry: Safe to retry; this is a read operation.\nNext: Call `lockd.attachments.stream` to receive payload chunks over progress notifications.",
         "inputSchema": {
           "additionalProperties": false,
           "properties": {
             "fencing_token": {
               "description": "Optional fencing token override",
-              "type": "string"
+              "type": [
+                "null",
+                "integer"
+              ]
             },
             "id": {
               "description": "Attachment id selector",
@@ -129,7 +216,7 @@
               "type": "string"
             },
             "lease_id": {
-              "description": "Optional lease id for protected retrieval",
+              "description": "Lease id required when public=false",
               "type": "string"
             },
             "name": {
@@ -141,8 +228,11 @@
               "type": "string"
             },
             "public": {
-              "description": "Allow public read retrieval",
-              "type": "boolean"
+              "description": "Read mode selector: true for public read (default), false for lease-bound read",
+              "type": [
+                "null",
+                "boolean"
+              ]
             },
             "txn_id": {
               "description": "Optional XA transaction id",
@@ -173,6 +263,9 @@
                 "name": {
                   "type": "string"
                 },
+                "plaintext_sha256": {
+                  "type": "string"
+                },
                 "size": {
                   "type": "integer"
                 },
@@ -187,30 +280,46 @@
               ],
               "type": "object"
             },
-            "payload_base64": {
+            "key": {
+              "type": "string"
+            },
+            "namespace": {
               "type": "string"
             },
             "payload_bytes": {
               "type": "integer"
             },
-            "payload_text": {
+            "payload_sha256": {
               "type": "string"
+            },
+            "stream_required": {
+              "type": "boolean"
             }
           },
           "required": [
+            "namespace",
+            "key",
             "attachment",
-            "payload_bytes"
+            "payload_bytes",
+            "stream_required"
           ],
           "type": "object"
         }
       },
       {
-        "description": "Purpose: List attachment metadata for a key.\nUse when: You need attachment ids/names before get/delete workflows.\nRequires: `key` is required. `namespace` defaults to \"mcp\". Provide lease fields for protected reads or set `public=true` for public-read listing.\nEffects: Returns attachment metadata only (no payload bytes).\nRetry: Safe to retry; this is a read operation.\nNext: Use `lockd.attachments.get` for payload access or delete tools for cleanup.",
+        "description": "Purpose: Fetch metadata for one attachment by id or name without reading payload bytes.\nUse when: You need to inspect attachment existence/size/type before deciding whether to download content.\nRequires: `key` plus either `id` or `name` is required. `namespace` defaults to \"mcp\". `public` defaults to true. If `public=false`, `lease_id` is required. If `public=true`, `lease_id` must be omitted.\nEffects: Returns attachment metadata only (`id`, `name`, `size`, `plaintext_sha256`, timestamps, and content type).\nRetry: Safe to retry; this is a read operation.\nNext: Call `lockd.attachments.stream` when payload content is required.",
         "inputSchema": {
           "additionalProperties": false,
           "properties": {
             "fencing_token": {
               "description": "Optional fencing token override",
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "id": {
+              "description": "Attachment id selector",
               "type": "string"
             },
             "key": {
@@ -218,7 +327,11 @@
               "type": "string"
             },
             "lease_id": {
-              "description": "Optional lease id for protected listing",
+              "description": "Lease id required when public=false",
+              "type": "string"
+            },
+            "name": {
+              "description": "Attachment name selector",
               "type": "string"
             },
             "namespace": {
@@ -226,8 +339,103 @@
               "type": "string"
             },
             "public": {
-              "description": "Allow public read listing",
-              "type": "boolean"
+              "description": "Read mode selector: true for public read (default), false for lease-bound read",
+              "type": [
+                "null",
+                "boolean"
+              ]
+            },
+            "txn_id": {
+              "description": "Optional XA transaction id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "key"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.attachments.head",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "attachment": {
+              "additionalProperties": false,
+              "properties": {
+                "content_type": {
+                  "type": "string"
+                },
+                "created_at_unix": {
+                  "type": "integer"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "plaintext_sha256": {
+                  "type": "string"
+                },
+                "size": {
+                  "type": "integer"
+                },
+                "updated_at_unix": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "size"
+              ],
+              "type": "object"
+            },
+            "key": {
+              "type": "string"
+            },
+            "namespace": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "namespace",
+            "key",
+            "attachment"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: List attachment metadata for a key.\nUse when: You need attachment ids/names before get/delete workflows.\nRequires: `key` is required. `namespace` defaults to \"mcp\". `public` defaults to true. If `public=false`, `lease_id` is required. If `public=true`, `lease_id` must be omitted.\nEffects: Returns attachment metadata only (no payload bytes).\nRetry: Safe to retry; this is a read operation.\nNext: Use `lockd.attachments.head` for metadata-only lookup, `lockd.attachments.get` for payload access, or delete tools for cleanup.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "fencing_token": {
+              "description": "Optional fencing token override",
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "key": {
+              "description": "State key",
+              "type": "string"
+            },
+            "lease_id": {
+              "description": "Lease id required when public=false",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            },
+            "public": {
+              "description": "Read mode selector: true for public read (default), false for lease-bound read",
+              "type": [
+                "null",
+                "boolean"
+              ]
             },
             "txn_id": {
               "description": "Optional XA transaction id",
@@ -257,6 +465,9 @@
                     "type": "string"
                   },
                   "name": {
+                    "type": "string"
+                  },
+                  "plaintext_sha256": {
                     "type": "string"
                   },
                   "size": {
@@ -294,7 +505,7 @@
         }
       },
       {
-        "description": "Purpose: Upload or stage an attachment for a key under lease protection.\nUse when: You need to associate binary/text payloads with key state.\nRequires: `key`, `lease_id`, and `name` are required. `namespace` defaults to \"mcp\". Payload comes from `payload_text` or `payload_base64`. Optional `prevent_overwrite` enforces create-only behavior.\nEffects: Stores attachment content/metadata and returns attachment id/version details.\nRetry: Not strictly idempotent by default; retries can overwrite unless guarded by `prevent_overwrite` and deterministic naming.\nNext: List/get attachments for verification, then release lease when complete.",
+        "description": "Purpose: Upload or stage an attachment for a key under lease protection.\nUse when: You need to associate binary/text payloads with key state.\nRequires: `key`, `lease_id`, and `name` are required. `namespace` defaults to \"mcp\". Payload comes from `payload_text` or `payload_base64`. `mode` controls write semantics: `create` (default), `upsert`, `replace`.\nEffects: Stores attachment content/metadata and returns attachment id/version details.\nRetry: In `create` mode, retries are safe against accidental overwrite. `upsert` can overwrite existing payloads. `replace` requires the named attachment to already exist.\nNext: List/get attachments for verification, then release lease when complete.",
         "inputSchema": {
           "additionalProperties": false,
           "properties": {
@@ -304,7 +515,10 @@
             },
             "fencing_token": {
               "description": "Optional fencing token override",
-              "type": "string"
+              "type": [
+                "null",
+                "integer"
+              ]
             },
             "key": {
               "description": "State key",
@@ -317,6 +531,10 @@
             "max_bytes": {
               "description": "Optional upload size cap",
               "type": "integer"
+            },
+            "mode": {
+              "description": "Write mode: create (default), upsert, or replace",
+              "type": "string"
             },
             "name": {
               "description": "Attachment name",
@@ -333,10 +551,6 @@
             "payload_text": {
               "description": "UTF-8 payload text",
               "type": "string"
-            },
-            "prevent_overwrite": {
-              "description": "Reject when attachment already exists",
-              "type": "boolean"
             },
             "txn_id": {
               "description": "Optional XA transaction id",
@@ -369,6 +583,9 @@
                 "name": {
                   "type": "string"
                 },
+                "plaintext_sha256": {
+                  "type": "string"
+                },
                 "size": {
                   "type": "integer"
                 },
@@ -394,6 +611,134 @@
             "attachment",
             "noop",
             "version"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Stream attachment payload in chunks over MCP progress notifications without buffering full payload in memory.\nUse when: You need attachment content, including very large files.\nRequires: Active MCP session is required. `key` plus either `id` or `name` is required. `namespace` defaults to \"mcp\". `public` defaults to true. Optional `chunk_bytes` controls chunk size.\nEffects: Emits `lockd.attachments.chunk` progress notifications with base64 chunk payloads and returns stream summary metadata.\nRetry: Safe to retry; stream restarts from beginning on each call.\nNext: Use `lockd.attachments.checksum` to verify expected hash without rereading metadata payload.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "chunk_bytes": {
+              "description": "Chunk size per progress event in bytes (default 65536, max 4194304)",
+              "type": "integer"
+            },
+            "fencing_token": {
+              "description": "Optional fencing token override",
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "id": {
+              "description": "Attachment id selector",
+              "type": "string"
+            },
+            "key": {
+              "description": "State key",
+              "type": "string"
+            },
+            "lease_id": {
+              "description": "Lease id required when public=false",
+              "type": "string"
+            },
+            "max_bytes": {
+              "description": "Optional maximum bytes to stream before truncating",
+              "type": "integer"
+            },
+            "name": {
+              "description": "Attachment name selector",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            },
+            "progress_token": {
+              "description": "Optional explicit progress token for chunk notifications",
+              "type": "string"
+            },
+            "public": {
+              "description": "Read mode selector: true for public read (default), false for lease-bound read",
+              "type": [
+                "null",
+                "boolean"
+              ]
+            },
+            "txn_id": {
+              "description": "Optional XA transaction id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "key"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.attachments.stream",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "attachment": {
+              "additionalProperties": false,
+              "properties": {
+                "content_type": {
+                  "type": "string"
+                },
+                "created_at_unix": {
+                  "type": "integer"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "plaintext_sha256": {
+                  "type": "string"
+                },
+                "size": {
+                  "type": "integer"
+                },
+                "updated_at_unix": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "size"
+              ],
+              "type": "object"
+            },
+            "chunks": {
+              "type": "integer"
+            },
+            "key": {
+              "type": "string"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "progress_token": {
+              "type": "string"
+            },
+            "streamed_bytes": {
+              "type": "integer"
+            },
+            "truncated": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "namespace",
+            "key",
+            "attachment",
+            "progress_token",
+            "streamed_bytes",
+            "chunks",
+            "truncated"
           ],
           "type": "object"
         }
@@ -461,7 +806,7 @@
         }
       },
       {
-        "description": "Purpose: Read committed JSON state for one key.\nUse when: You need current state for planning, validation, or rendering context.\nRequires: `key` is required. `namespace` defaults to \"mcp\". `public=true` enables public-read fallback; optional `lease_id` scopes lease-bound reads.\nEffects: Returns read-only state, ETag/version metadata, and `found=false` when no state exists.\nRetry: Safe to retry; this is a read operation.\nNext: Use `lockd.query` for broader discovery or acquire a lock before mutation.",
+        "description": "Purpose: Read committed JSON state for one key.\nUse when: You need current state for planning, validation, or rendering context.\nRequires: `key` is required. `namespace` defaults to \"mcp\". `public` defaults to true. If `public=false`, `lease_id` is required. If `public=true`, `lease_id` must be omitted.\nEffects: Returns metadata only (`found`, ETag, numeric version). Payload is never inlined; use `lockd.state.stream` when content is required.\nRetry: Safe to retry; this is a read operation.\nNext: Call `lockd.state.stream` for payload bytes, `lockd.query` for broader discovery, or acquire a lock before mutation.",
         "inputSchema": {
           "additionalProperties": false,
           "properties": {
@@ -470,7 +815,7 @@
               "type": "string"
             },
             "lease_id": {
-              "description": "Optional lease ID for lease-bound reads",
+              "description": "Lease ID required when public=false",
               "type": "string"
             },
             "namespace": {
@@ -478,8 +823,11 @@
               "type": "string"
             },
             "public": {
-              "description": "Allow public-read fallback when true",
-              "type": "boolean"
+              "description": "Read mode selector: true for public read (default), false for lease-bound read",
+              "type": [
+                "null",
+                "boolean"
+              ]
             }
           },
           "required": [
@@ -503,25 +851,18 @@
             "namespace": {
               "type": "string"
             },
-            "value": {
-              "items": {
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "type": [
-                "null",
-                "array"
-              ]
+            "stream_required": {
+              "type": "boolean"
             },
             "version": {
-              "type": "string"
+              "type": "integer"
             }
           },
           "required": [
             "namespace",
             "key",
-            "found"
+            "found",
+            "stream_required"
           ],
           "type": "object"
         }
@@ -1004,7 +1345,7 @@
         }
       },
       {
-        "description": "Purpose: Run LQL queries over namespace data in key or document mode.\nUse when: You need to locate candidate keys/documents before reading or locking.\nRequires: `query` expression is required. `namespace` defaults to \"mcp\". Optional `limit`, `cursor`, `return`, `engine`, `refresh`, and `fields` refine execution.\nEffects: Returns matching keys or documents plus pagination/index metadata (`cursor`, `index_seq`).\nRetry: Safe to retry. Cursor-based pagination should reuse the latest returned cursor.\nNext: Call `lockd.get` for point reads, then lock/mutate selected keys as needed.",
+        "description": "Purpose: Run LQL queries over namespace data in key mode.\nUse when: You need to locate candidate keys before reading or locking.\nRequires: `query` expression is required. `namespace` defaults to \"mcp\". Optional `limit`, `cursor`, `return`, `engine`, `refresh`, and `fields` refine execution. `return=documents` is rejected here.\nEffects: Returns matching keys plus pagination/index metadata (`cursor`, `index_seq`).\nRetry: Safe to retry. Cursor-based pagination should reuse the latest returned cursor.\nNext: Call `lockd.query.stream` for document payload streaming, or `lockd.get` and `lockd.state.stream` for point reads.",
         "inputSchema": {
           "additionalProperties": false,
           "properties": {
@@ -1038,7 +1379,7 @@
               "type": "string"
             },
             "return": {
-              "description": "Query return mode: keys (default) or documents",
+              "description": "Query return mode: keys (default); use lockd.query.stream for documents",
               "type": "string"
             }
           },
@@ -1053,23 +1394,6 @@
           "properties": {
             "cursor": {
               "type": "string"
-            },
-            "documents": {
-              "items": {
-                "items": {
-                  "maximum": 255,
-                  "minimum": 0,
-                  "type": "integer"
-                },
-                "type": [
-                  "null",
-                  "array"
-                ]
-              },
-              "type": [
-                "null",
-                "array"
-              ]
             },
             "index_seq": {
               "minimum": 0,
@@ -1100,6 +1424,116 @@
           "required": [
             "namespace",
             "mode"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Run an LQL query and stream matching documents over MCP progress notifications without buffering full result sets.\nUse when: You need query result documents and must keep MCP memory usage bounded.\nRequires: Active MCP session is required. `query` expression is required. `namespace` defaults to \"mcp\". Optional `limit`, `cursor`, `engine`, `refresh`, `fields`, `chunk_bytes`, `max_bytes`, and `max_documents` bound execution.\nEffects: Emits `lockd.query.document.chunk` progress notifications per document chunk and returns stream summary (`documents_streamed`, `streamed_bytes`, `chunks`, `truncated`).\nRetry: Safe to retry; each call restarts the query stream from the provided cursor/options.\nNext: Use returned `cursor` for pagination and verify document processing before issuing the next page.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "chunk_bytes": {
+              "description": "Chunk size per progress event in bytes (default 65536, max 4194304)",
+              "type": "integer"
+            },
+            "cursor": {
+              "description": "Continuation cursor",
+              "type": "string"
+            },
+            "engine": {
+              "description": "Optional query engine override: auto, index, or scan",
+              "type": "string"
+            },
+            "fields": {
+              "additionalProperties": true,
+              "description": "Optional query field projection map",
+              "type": "object"
+            },
+            "limit": {
+              "description": "Maximum rows to return",
+              "type": "integer"
+            },
+            "max_bytes": {
+              "description": "Optional maximum bytes to stream before truncating",
+              "type": "integer"
+            },
+            "max_documents": {
+              "description": "Optional maximum documents to stream before truncating",
+              "type": "integer"
+            },
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            },
+            "progress_token": {
+              "description": "Optional explicit progress token for chunk notifications",
+              "type": "string"
+            },
+            "query": {
+              "description": "LQL query expression",
+              "type": "string"
+            },
+            "refresh": {
+              "description": "Optional refresh policy, for example wait_for",
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.query.stream",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "chunks": {
+              "type": "integer"
+            },
+            "cursor": {
+              "type": "string"
+            },
+            "documents_streamed": {
+              "type": "integer"
+            },
+            "index_seq": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "metadata": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "mode": {
+              "type": "string"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "progress_token": {
+              "type": "string"
+            },
+            "stop_reason": {
+              "type": "string"
+            },
+            "streamed_bytes": {
+              "type": "integer"
+            },
+            "truncated": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "namespace",
+            "mode",
+            "progress_token",
+            "documents_streamed",
+            "streamed_bytes",
+            "chunks",
+            "truncated"
           ],
           "type": "object"
         }
@@ -1647,7 +2081,7 @@
         }
       },
       {
-        "description": "Purpose: Subscribe current MCP session to queue-availability notifications over SSE.\nUse when: You want push wake-ups instead of pure dequeue polling.\nRequires: Active MCP session is required. `queue` defaults to \"lockd.agent.bus\" and `namespace` defaults to \"mcp\".\nEffects: Registers session subscription; future queue activity emits MCP progress notifications.\nRetry: Safe to retry; duplicate subscribe is handled as already subscribed.\nNext: On notification, call `lockd.queue.dequeue` then `ack` or `defer`.",
+        "description": "Purpose: Subscribe current MCP session to queue-availability notifications over SSE.\nUse when: You run a long-lived MCP runtime and want ongoing push wake-ups instead of pure dequeue polling.\nRequires: Active MCP session is required. `queue` defaults to \"lockd.agent.bus\" and `namespace` defaults to \"mcp\".\nEffects: Registers session subscription; future queue activity emits MCP progress notifications.\nRetry: Safe to retry; duplicate subscribe is handled as already subscribed.\nNext: On notification, call `lockd.queue.dequeue` then `ack` or `defer`.",
         "inputSchema": {
           "additionalProperties": false,
           "properties": {
@@ -1723,13 +2157,102 @@
         }
       },
       {
+        "description": "Purpose: Wait for queue-availability events within a bounded call window.\nUse when: Interactive clients need push-like wakeups without maintaining long-lived subscriptions.\nRequires: `queue` defaults to \"lockd.agent.bus\" and `namespace` defaults to \"mcp\". Optional `duration_seconds` bounds wait time (default 30). Optional `max_events` bounds result size (default 1).\nEffects: Streams watch events from upstream lockd and returns a bounded event list with `stop_reason` (`max_events`, `timeout`, or `context_canceled`).\nRetry: Safe to retry; each invocation is independent and bounded.\nNext: After any event, call `lockd.queue.dequeue` and then `ack`/`nack`/`defer`.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "duration_seconds": {
+              "description": "Maximum watch duration in seconds (default: 30)",
+              "type": "integer"
+            },
+            "max_events": {
+              "description": "Maximum events to return before stopping (default: 1)",
+              "type": "integer"
+            },
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            },
+            "queue": {
+              "description": "Queue name (defaults to lockd.agent.bus)",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "name": "lockd.queue.watch",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "event_count": {
+              "type": "integer"
+            },
+            "events": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "available": {
+                    "type": "boolean"
+                  },
+                  "changed_at_unix": {
+                    "type": "integer"
+                  },
+                  "correlation_id": {
+                    "type": "string"
+                  },
+                  "head_message_id": {
+                    "type": "string"
+                  },
+                  "namespace": {
+                    "type": "string"
+                  },
+                  "queue": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "namespace",
+                  "queue",
+                  "available"
+                ],
+                "type": "object"
+              },
+              "type": [
+                "null",
+                "array"
+              ]
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "queue": {
+              "type": "string"
+            },
+            "stop_reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "namespace",
+            "queue",
+            "events",
+            "event_count",
+            "stop_reason"
+          ],
+          "type": "object"
+        }
+      },
+      {
         "description": "Purpose: Update state metadata without replacing JSON state payload.\nUse when: Only metadata (for example `query_hidden`) needs to change.\nRequires: `key`, `lease_id`, and `query_hidden` are required. `namespace` defaults to \"mcp\". Optional CAS/fencing fields protect against races.\nEffects: Persists metadata mutation and returns resulting version/metadata.\nRetry: Use CAS/fencing fields for deterministic retries; otherwise last-writer-wins behavior applies.\nNext: Continue updates under the same lease or release the lease when done.",
         "inputSchema": {
           "additionalProperties": false,
           "properties": {
             "fencing_token": {
               "description": "Optional fencing token override",
-              "type": "string"
+              "type": [
+                "null",
+                "integer"
+              ]
             },
             "if_etag": {
               "description": "Conditional ETag guard",
@@ -1737,7 +2260,10 @@
             },
             "if_version": {
               "description": "Conditional version guard",
-              "type": "string"
+              "type": [
+                "null",
+                "integer"
+              ]
             },
             "key": {
               "description": "State key",
@@ -1797,7 +2323,10 @@
           "properties": {
             "fencing_token": {
               "description": "Optional fencing token override",
-              "type": "string"
+              "type": [
+                "null",
+                "integer"
+              ]
             },
             "if_etag": {
               "description": "Conditional ETag guard",
@@ -1805,7 +2334,10 @@
             },
             "if_version": {
               "description": "Conditional version guard",
-              "type": "string"
+              "type": [
+                "null",
+                "integer"
+              ]
             },
             "key": {
               "description": "State key",
@@ -1848,13 +2380,102 @@
         }
       },
       {
+        "description": "Purpose: Stream JSON state payload in chunks over MCP progress notifications without buffering full payload in memory.\nUse when: You need state content for large documents and must avoid inline payload buffering.\nRequires: Active MCP session is required. `key` is required. `namespace` defaults to \"mcp\". `public` defaults to true; set `public=false` with `lease_id` for lease-bound reads. Optional `chunk_bytes` controls chunk size.\nEffects: Emits `lockd.state.chunk` progress notifications with base64 chunk payloads and returns stream summary (`streamed_bytes`, `chunks`, `truncated`).\nRetry: Safe to retry; stream restarts from beginning on each call.\nNext: Use chunk notifications to reconstruct payload client-side or stop early with `max_bytes`.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "chunk_bytes": {
+              "description": "Chunk size per progress event in bytes (default 65536, max 4194304)",
+              "type": "integer"
+            },
+            "key": {
+              "description": "State key",
+              "type": "string"
+            },
+            "lease_id": {
+              "description": "Lease ID required when public=false",
+              "type": "string"
+            },
+            "max_bytes": {
+              "description": "Optional maximum bytes to stream before truncating",
+              "type": "integer"
+            },
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            },
+            "progress_token": {
+              "description": "Optional explicit progress token for chunk notifications",
+              "type": "string"
+            },
+            "public": {
+              "description": "Read mode selector: true for public read (default), false for lease-bound read",
+              "type": [
+                "null",
+                "boolean"
+              ]
+            }
+          },
+          "required": [
+            "key"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.state.stream",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "chunks": {
+              "type": "integer"
+            },
+            "etag": {
+              "type": "string"
+            },
+            "found": {
+              "type": "boolean"
+            },
+            "key": {
+              "type": "string"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "progress_token": {
+              "type": "string"
+            },
+            "streamed_bytes": {
+              "type": "integer"
+            },
+            "truncated": {
+              "type": "boolean"
+            },
+            "version": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "namespace",
+            "key",
+            "found",
+            "progress_token",
+            "streamed_bytes",
+            "chunks",
+            "truncated"
+          ],
+          "type": "object"
+        }
+      },
+      {
         "description": "Purpose: Write JSON state under lease protection.\nUse when: You need to create or update state for a locked key.\nRequires: `key` and `lease_id` are required. `namespace` defaults to \"mcp\". Payload comes from `payload_text` or `payload_base64` (defaults to `{}`). Optional CAS/fencing fields harden concurrency safety.\nEffects: Updates state and returns new version/ETag metadata; can also mutate `query_hidden` metadata.\nRetry: Use `if_etag`, `if_version`, and `fencing_token` for safe retries. Without guards, retries can apply duplicate writes.\nNext: Optionally update metadata/attachments, then release lease to commit or rollback.",
         "inputSchema": {
           "additionalProperties": false,
           "properties": {
             "fencing_token": {
               "description": "Optional fencing token override",
-              "type": "string"
+              "type": [
+                "null",
+                "integer"
+              ]
             },
             "if_etag": {
               "description": "Conditional ETag guard",
@@ -1862,7 +2483,10 @@
             },
             "if_version": {
               "description": "Conditional version guard",
-              "type": "string"
+              "type": [
+                "null",
+                "integer"
+              ]
             },
             "key": {
               "description": "State key",

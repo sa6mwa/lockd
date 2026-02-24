@@ -173,14 +173,15 @@ func fillLockMeta(meta *Meta, pm *lockdproto.LockMeta) {
 		pm.Attachments = make([]*lockdproto.Attachment, 0, len(meta.Attachments))
 		for _, att := range meta.Attachments {
 			pm.Attachments = append(pm.Attachments, &lockdproto.Attachment{
-				Id:             att.ID,
-				Name:           att.Name,
-				Size:           att.Size,
-				PlaintextBytes: att.PlaintextBytes,
-				ContentType:    att.ContentType,
-				Descriptor_:    append([]byte(nil), att.Descriptor...),
-				CreatedAtUnix:  att.CreatedAtUnix,
-				UpdatedAtUnix:  att.UpdatedAtUnix,
+				Id:              att.ID,
+				Name:            att.Name,
+				Size:            att.Size,
+				PlaintextBytes:  att.PlaintextBytes,
+				PlaintextSha256: att.PlaintextSHA256,
+				ContentType:     att.ContentType,
+				Descriptor_:     append([]byte(nil), att.Descriptor...),
+				CreatedAtUnix:   att.CreatedAtUnix,
+				UpdatedAtUnix:   att.UpdatedAtUnix,
 			})
 		}
 	}
@@ -192,6 +193,7 @@ func fillLockMeta(meta *Meta, pm *lockdproto.LockMeta) {
 				Name:             att.Name,
 				Size:             att.Size,
 				PlaintextBytes:   att.PlaintextBytes,
+				PlaintextSha256:  att.PlaintextSHA256,
 				ContentType:      att.ContentType,
 				StagedDescriptor: append([]byte(nil), att.StagedDescriptor...),
 				CreatedAtUnix:    att.CreatedAtUnix,
@@ -261,14 +263,15 @@ func metaFromProto(pm *lockdproto.LockMeta) *Meta {
 				plaintextBytes = att.GetSize()
 			}
 			meta.Attachments = append(meta.Attachments, Attachment{
-				ID:             att.GetId(),
-				Name:           att.GetName(),
-				Size:           att.GetSize(),
-				PlaintextBytes: plaintextBytes,
-				ContentType:    att.GetContentType(),
-				Descriptor:     append([]byte(nil), att.GetDescriptor_()...),
-				CreatedAtUnix:  att.GetCreatedAtUnix(),
-				UpdatedAtUnix:  att.GetUpdatedAtUnix(),
+				ID:              att.GetId(),
+				Name:            att.GetName(),
+				Size:            att.GetSize(),
+				PlaintextBytes:  plaintextBytes,
+				PlaintextSHA256: att.GetPlaintextSha256(),
+				ContentType:     att.GetContentType(),
+				Descriptor:      append([]byte(nil), att.GetDescriptor_()...),
+				CreatedAtUnix:   att.GetCreatedAtUnix(),
+				UpdatedAtUnix:   att.GetUpdatedAtUnix(),
 			})
 		}
 	}
@@ -287,6 +290,7 @@ func metaFromProto(pm *lockdproto.LockMeta) *Meta {
 				Name:             att.GetName(),
 				Size:             att.GetSize(),
 				PlaintextBytes:   plaintextBytes,
+				PlaintextSHA256:  att.GetPlaintextSha256(),
 				ContentType:      att.GetContentType(),
 				StagedDescriptor: append([]byte(nil), att.GetStagedDescriptor()...),
 				CreatedAtUnix:    att.GetCreatedAtUnix(),

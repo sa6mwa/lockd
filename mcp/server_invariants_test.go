@@ -78,6 +78,102 @@ func TestHandleQueryToolValidationErrors(t *testing.T) {
 	if _, _, err := s.handleQueryTool(context.Background(), nil, queryToolInput{Query: "eq{field=/a,value=b}", Return: "bogus"}); err == nil || !strings.Contains(err.Error(), "invalid return mode") {
 		t.Fatalf("expected invalid return mode error, got %v", err)
 	}
+	if _, _, err := s.handleQueryTool(context.Background(), nil, queryToolInput{Query: "eq{field=/a,value=b}", Return: "documents"}); err == nil || !strings.Contains(err.Error(), "documents mode moved to lockd.query.stream") {
+		t.Fatalf("expected documents mode rejection error, got %v", err)
+	}
+}
+
+func TestHandleGetToolReadModeValidation(t *testing.T) {
+	t.Parallel()
+
+	s := &server{}
+	ctx := context.Background()
+
+	if _, _, err := s.handleGetTool(ctx, nil, getToolInput{
+		Key:     "k1",
+		Public:  boolPtr(true),
+		LeaseID: "lease-1",
+	}); err == nil || !strings.Contains(err.Error(), "lease_id must be empty when public=true") {
+		t.Fatalf("expected public=true lease validation error, got %v", err)
+	}
+
+	if _, _, err := s.handleGetTool(ctx, nil, getToolInput{
+		Key:    "k1",
+		Public: boolPtr(false),
+	}); err == nil || !strings.Contains(err.Error(), "lease_id is required when public=false") {
+		t.Fatalf("expected public=false lease validation error, got %v", err)
+	}
+}
+
+func TestAttachmentReadModeValidation(t *testing.T) {
+	t.Parallel()
+
+	s := &server{}
+	ctx := context.Background()
+
+	if _, _, err := s.handleAttachmentListTool(ctx, nil, attachmentListToolInput{
+		Key:     "k1",
+		Public:  boolPtr(true),
+		LeaseID: "lease-1",
+	}); err == nil || !strings.Contains(err.Error(), "lease_id must be empty when public=true") {
+		t.Fatalf("expected list public=true lease validation error, got %v", err)
+	}
+
+	if _, _, err := s.handleAttachmentListTool(ctx, nil, attachmentListToolInput{
+		Key:    "k1",
+		Public: boolPtr(false),
+	}); err == nil || !strings.Contains(err.Error(), "lease_id is required when public=false") {
+		t.Fatalf("expected list public=false lease validation error, got %v", err)
+	}
+
+	if _, _, err := s.handleAttachmentGetTool(ctx, nil, attachmentGetToolInput{
+		Key:     "k1",
+		ID:      "att-1",
+		Public:  boolPtr(true),
+		LeaseID: "lease-1",
+	}); err == nil || !strings.Contains(err.Error(), "lease_id must be empty when public=true") {
+		t.Fatalf("expected get public=true lease validation error, got %v", err)
+	}
+
+	if _, _, err := s.handleAttachmentGetTool(ctx, nil, attachmentGetToolInput{
+		Key:    "k1",
+		ID:     "att-1",
+		Public: boolPtr(false),
+	}); err == nil || !strings.Contains(err.Error(), "lease_id is required when public=false") {
+		t.Fatalf("expected get public=false lease validation error, got %v", err)
+	}
+
+	if _, _, err := s.handleAttachmentHeadTool(ctx, nil, attachmentHeadToolInput{
+		Key:     "k1",
+		ID:      "att-1",
+		Public:  boolPtr(true),
+		LeaseID: "lease-1",
+	}); err == nil || !strings.Contains(err.Error(), "lease_id must be empty when public=true") {
+		t.Fatalf("expected head public=true lease validation error, got %v", err)
+	}
+
+	if _, _, err := s.handleAttachmentHeadTool(ctx, nil, attachmentHeadToolInput{
+		Key:    "k1",
+		ID:     "att-1",
+		Public: boolPtr(false),
+	}); err == nil || !strings.Contains(err.Error(), "lease_id is required when public=false") {
+		t.Fatalf("expected head public=false lease validation error, got %v", err)
+	}
+}
+
+func TestAttachmentPutModeValidation(t *testing.T) {
+	t.Parallel()
+
+	s := &server{}
+	_, _, err := s.handleAttachmentPutTool(context.Background(), nil, attachmentPutToolInput{
+		Key:     "k1",
+		LeaseID: "lease-1",
+		Name:    "att.txt",
+		Mode:    "bogus",
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid mode") {
+		t.Fatalf("expected invalid mode error, got %v", err)
+	}
 }
 
 func TestQueueDecisionToolsRequireLeaseMaterial(t *testing.T) {
@@ -109,6 +205,41 @@ func TestQueueSubscribeToolsRequireSession(t *testing.T) {
 	}
 	if _, _, err := s.handleQueueUnsubscribeTool(context.Background(), nil, queueUnsubscribeToolInput{}); err == nil || !strings.Contains(err.Error(), "active MCP session") {
 		t.Fatalf("expected unsubscribe session error, got %v", err)
+	}
+}
+
+func TestStateStreamToolRequiresSession(t *testing.T) {
+	t.Parallel()
+
+	s := &server{}
+	_, _, err := s.handleStateStreamTool(context.Background(), nil, stateStreamToolInput{Key: "k1"})
+	if err == nil || !strings.Contains(err.Error(), "active MCP session") {
+		t.Fatalf("expected state stream session error, got %v", err)
+	}
+}
+
+func TestAttachmentStreamToolRequiresSession(t *testing.T) {
+	t.Parallel()
+
+	s := &server{}
+	_, _, err := s.handleAttachmentStreamTool(context.Background(), nil, attachmentStreamToolInput{
+		Key:  "k1",
+		Name: "att1",
+	})
+	if err == nil || !strings.Contains(err.Error(), "active MCP session") {
+		t.Fatalf("expected attachment stream session error, got %v", err)
+	}
+}
+
+func TestQueryStreamToolRequiresSession(t *testing.T) {
+	t.Parallel()
+
+	s := &server{}
+	_, _, err := s.handleQueryStreamTool(context.Background(), nil, queryStreamToolInput{
+		Query: "eq{field=/a,value=b}",
+	})
+	if err == nil || !strings.Contains(err.Error(), "active MCP session") {
+		t.Fatalf("expected query stream session error, got %v", err)
 	}
 }
 
@@ -254,4 +385,9 @@ func TestNewServerAllowsTLSDisabledWithoutBootstrapState(t *testing.T) {
 	if impl.upstream != nil {
 		_ = impl.upstream.Close()
 	}
+}
+
+func boolPtr(v bool) *bool {
+	b := v
+	return &b
 }

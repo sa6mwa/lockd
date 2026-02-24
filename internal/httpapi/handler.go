@@ -58,6 +58,7 @@ const (
 	headerAttachmentSize      = "X-Attachment-Size"
 	headerAttachmentCreatedAt = "X-Attachment-Created-At"
 	headerAttachmentUpdatedAt = "X-Attachment-Updated-At"
+	headerAttachmentSHA256    = "X-Attachment-SHA256"
 )
 const headerCorrelationID = "X-Correlation-Id"
 const headerShutdownImminent = "Shutdown-Imminent"

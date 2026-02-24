@@ -3,6 +3,8 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -165,6 +167,8 @@ func TestAttachmentContentLengthHeader(t *testing.T) {
 	token := strconv.FormatInt(acquireResp.FencingToken, 10)
 
 	payload := []byte("payload-bytes")
+	sum := sha256.Sum256(payload)
+	expectedSHA := hex.EncodeToString(sum[:])
 	attachReq, err := http.NewRequest(http.MethodPost, server.URL+"/v1/attachments?key=orders&name=payload.bin", bytes.NewReader(payload))
 	if err != nil {
 		t.Fatalf("new attach request: %v", err)
@@ -221,6 +225,9 @@ func TestAttachmentContentLengthHeader(t *testing.T) {
 		if declared != int64(len(payload)) {
 			t.Fatalf("x-attachment-size %d want %d", declared, len(payload))
 		}
+	}
+	if got := strings.TrimSpace(getResp.Header.Get("X-Attachment-SHA256")); got != expectedSHA {
+		t.Fatalf("x-attachment-sha256 %q want %q", got, expectedSHA)
 	}
 	data, err := io.ReadAll(getResp.Body)
 	if err != nil {

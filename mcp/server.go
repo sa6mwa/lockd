@@ -3,7 +3,6 @@ package mcp
 import (
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -12,6 +11,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -292,9 +292,17 @@ func (s *server) registerTools(srv *mcpsdk.Server) {
 		Description: desc(toolQuery),
 	}, s.handleQueryTool)
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        toolQueryStream,
+		Description: desc(toolQueryStream),
+	}, s.handleQueryStreamTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolStateUpdate,
 		Description: desc(toolStateUpdate),
 	}, s.handleStateUpdateTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        toolStateStream,
+		Description: desc(toolStateStream),
+	}, s.handleStateStreamTool)
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolStateMetadata,
 		Description: desc(toolStateMetadata),
@@ -313,9 +321,21 @@ func (s *server) registerTools(srv *mcpsdk.Server) {
 		Description: desc(toolAttachmentsList),
 	}, s.handleAttachmentListTool)
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        toolAttachmentsHead,
+		Description: desc(toolAttachmentsHead),
+	}, s.handleAttachmentHeadTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        toolAttachmentsChecksum,
+		Description: desc(toolAttachmentsChecksum),
+	}, s.handleAttachmentChecksumTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolAttachmentsGet,
 		Description: desc(toolAttachmentsGet),
 	}, s.handleAttachmentGetTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        toolAttachmentsStream,
+		Description: desc(toolAttachmentsStream),
+	}, s.handleAttachmentStreamTool)
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolAttachmentsDelete,
 		Description: desc(toolAttachmentsDelete),
@@ -356,6 +376,10 @@ func (s *server) registerTools(srv *mcpsdk.Server) {
 		Description: desc(toolQueueDequeue),
 	}, s.handleQueueDequeueTool)
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        toolQueueWatch,
+		Description: desc(toolQueueWatch),
+	}, s.handleQueueWatchTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolQueueAck,
 		Description: desc(toolQueueAck),
 	}, s.handleQueueAckTool)
@@ -384,17 +408,17 @@ func (s *server) registerTools(srv *mcpsdk.Server) {
 type getToolInput struct {
 	Key       string `json:"key" jsonschema:"Lock key to read"`
 	Namespace string `json:"namespace,omitempty" jsonschema:"Namespace (defaults to server default namespace)"`
-	Public    bool   `json:"public,omitempty" jsonschema:"Allow public-read fallback when true"`
-	LeaseID   string `json:"lease_id,omitempty" jsonschema:"Optional lease ID for lease-bound reads"`
+	Public    *bool  `json:"public,omitempty" jsonschema:"Read mode selector: true for public read (default), false for lease-bound read"`
+	LeaseID   string `json:"lease_id,omitempty" jsonschema:"Lease ID required when public=false"`
 }
 
 type getToolOutput struct {
-	Namespace string          `json:"namespace"`
-	Key       string          `json:"key"`
-	Found     bool            `json:"found"`
-	ETag      string          `json:"etag,omitempty"`
-	Version   string          `json:"version,omitempty"`
-	Value     json.RawMessage `json:"value,omitempty"`
+	Namespace      string `json:"namespace"`
+	Key            string `json:"key"`
+	Found          bool   `json:"found"`
+	ETag           string `json:"etag,omitempty"`
+	Version        int64  `json:"version,omitempty"`
+	StreamRequired bool   `json:"stream_required"`
 }
 
 func (s *server) handleGetTool(ctx context.Context, _ *mcpsdk.CallToolRequest, input getToolInput) (*mcpsdk.CallToolResult, getToolOutput, error) {
@@ -402,15 +426,23 @@ func (s *server) handleGetTool(ctx context.Context, _ *mcpsdk.CallToolRequest, i
 	if key == "" {
 		return nil, getToolOutput{}, fmt.Errorf("key is required")
 	}
+	leaseID := strings.TrimSpace(input.LeaseID)
+	publicRead := resolvePublicReadMode(input.Public)
+	if publicRead && leaseID != "" {
+		return nil, getToolOutput{}, fmt.Errorf("lease_id must be empty when public=true")
+	}
+	if !publicRead && leaseID == "" {
+		return nil, getToolOutput{}, fmt.Errorf("lease_id is required when public=false")
+	}
 
 	opts := []lockdclient.GetOption{}
 	if ns := strings.TrimSpace(input.Namespace); ns != "" {
 		opts = append(opts, lockdclient.WithGetNamespace(ns))
 	}
-	if lease := strings.TrimSpace(input.LeaseID); lease != "" {
-		opts = append(opts, lockdclient.WithGetLeaseID(lease))
+	if leaseID != "" {
+		opts = append(opts, lockdclient.WithGetLeaseID(leaseID))
 	}
-	if !input.Public {
+	if !publicRead {
 		opts = append(opts, lockdclient.WithGetPublicDisabled(true))
 	}
 
@@ -421,23 +453,27 @@ func (s *server) handleGetTool(ctx context.Context, _ *mcpsdk.CallToolRequest, i
 	defer resp.Close()
 
 	out := getToolOutput{
-		Namespace: resp.Namespace,
-		Key:       resp.Key,
-		Found:     resp.HasState,
-		ETag:      resp.ETag,
-		Version:   resp.Version,
+		Namespace:      resp.Namespace,
+		Key:            resp.Key,
+		Found:          resp.HasState,
+		ETag:           resp.ETag,
+		StreamRequired: resp.HasState,
 	}
-	if !resp.HasState {
-		return nil, out, nil
-	}
-	body, err := resp.Bytes()
-	if err != nil {
-		return nil, getToolOutput{}, err
-	}
-	if len(body) > 0 {
-		out.Value = json.RawMessage(append([]byte(nil), body...))
+	if ver := strings.TrimSpace(resp.Version); ver != "" {
+		parsed, parseErr := strconv.ParseInt(ver, 10, 64)
+		if parseErr != nil {
+			return nil, getToolOutput{}, fmt.Errorf("invalid upstream version %q: %w", ver, parseErr)
+		}
+		out.Version = parsed
 	}
 	return nil, out, nil
+}
+
+func resolvePublicReadMode(raw *bool) bool {
+	if raw == nil {
+		return true
+	}
+	return *raw
 }
 
 type describeToolInput struct {
@@ -490,7 +526,7 @@ type queryToolInput struct {
 	Namespace string         `json:"namespace,omitempty" jsonschema:"Namespace (defaults to server default namespace)"`
 	Limit     int            `json:"limit,omitempty" jsonschema:"Maximum rows to return"`
 	Cursor    string         `json:"cursor,omitempty" jsonschema:"Continuation cursor"`
-	Return    string         `json:"return,omitempty" jsonschema:"Query return mode: keys (default) or documents"`
+	Return    string         `json:"return,omitempty" jsonschema:"Query return mode: keys (default); use lockd.query.stream for documents"`
 	Engine    string         `json:"engine,omitempty" jsonschema:"Optional query engine override: auto, index, or scan"`
 	Refresh   string         `json:"refresh,omitempty" jsonschema:"Optional refresh policy, for example wait_for"`
 	Fields    map[string]any `json:"fields,omitempty" jsonschema:"Optional query field projection map"`
@@ -500,7 +536,6 @@ type queryToolOutput struct {
 	Namespace string            `json:"namespace"`
 	Mode      string            `json:"mode"`
 	Keys      []string          `json:"keys,omitempty"`
-	Documents []json.RawMessage `json:"documents,omitempty"`
 	Cursor    string            `json:"cursor,omitempty"`
 	IndexSeq  uint64            `json:"index_seq,omitempty"`
 	Metadata  map[string]string `json:"metadata,omitempty"`
@@ -540,9 +575,9 @@ func (s *server) handleQueryTool(ctx context.Context, _ *mcpsdk.CallToolRequest,
 	case "", "keys":
 		opts = append(opts, lockdclient.WithQueryReturnKeys())
 	case "documents", "document", "docs":
-		opts = append(opts, lockdclient.WithQueryReturnDocuments())
+		return nil, queryToolOutput{}, fmt.Errorf("documents mode moved to lockd.query.stream")
 	default:
-		return nil, queryToolOutput{}, fmt.Errorf("invalid return mode %q (expected keys|documents)", input.Return)
+		return nil, queryToolOutput{}, fmt.Errorf("invalid return mode %q (expected keys)", input.Return)
 	}
 
 	resp, err := s.upstream.Query(ctx, opts...)
@@ -561,29 +596,165 @@ func (s *server) handleQueryTool(ctx context.Context, _ *mcpsdk.CallToolRequest,
 	if out.Mode == "" {
 		out.Mode = string(lockdclient.QueryReturnKeys)
 	}
-	if resp.Mode() == lockdclient.QueryReturnDocuments {
-		keys := make([]string, 0, 16)
-		docs := make([]json.RawMessage, 0, 16)
-		if err := resp.ForEach(func(row lockdclient.QueryRow) error {
-			keys = append(keys, row.Key)
-			doc, err := row.Document()
-			if err != nil {
-				return err
-			}
-			body, err := doc.Bytes()
-			if err != nil {
-				return err
-			}
-			docs = append(docs, json.RawMessage(append([]byte(nil), body...)))
-			return nil
-		}); err != nil {
-			return nil, queryToolOutput{}, err
-		}
-		out.Keys = keys
-		out.Documents = docs
-		return nil, out, nil
-	}
 	out.Keys = resp.Keys()
+	return nil, out, nil
+}
+
+type queryStreamToolInput struct {
+	Query         string         `json:"query" jsonschema:"LQL query expression"`
+	Namespace     string         `json:"namespace,omitempty" jsonschema:"Namespace (defaults to server default namespace)"`
+	Limit         int            `json:"limit,omitempty" jsonschema:"Maximum rows to return"`
+	Cursor        string         `json:"cursor,omitempty" jsonschema:"Continuation cursor"`
+	Engine        string         `json:"engine,omitempty" jsonschema:"Optional query engine override: auto, index, or scan"`
+	Refresh       string         `json:"refresh,omitempty" jsonschema:"Optional refresh policy, for example wait_for"`
+	Fields        map[string]any `json:"fields,omitempty" jsonschema:"Optional query field projection map"`
+	ChunkBytes    int64          `json:"chunk_bytes,omitempty" jsonschema:"Chunk size per progress event in bytes (default 65536, max 4194304)"`
+	MaxBytes      int64          `json:"max_bytes,omitempty" jsonschema:"Optional maximum bytes to stream before truncating"`
+	MaxDocuments  int            `json:"max_documents,omitempty" jsonschema:"Optional maximum documents to stream before truncating"`
+	ProgressToken string         `json:"progress_token,omitempty" jsonschema:"Optional explicit progress token for chunk notifications"`
+}
+
+type queryStreamToolOutput struct {
+	Namespace         string            `json:"namespace"`
+	Mode              string            `json:"mode"`
+	Cursor            string            `json:"cursor,omitempty"`
+	IndexSeq          uint64            `json:"index_seq,omitempty"`
+	Metadata          map[string]string `json:"metadata,omitempty"`
+	ProgressToken     string            `json:"progress_token"`
+	DocumentsStreamed int               `json:"documents_streamed"`
+	StreamedBytes     int64             `json:"streamed_bytes"`
+	Chunks            int               `json:"chunks"`
+	Truncated         bool              `json:"truncated"`
+	StopReason        string            `json:"stop_reason,omitempty"`
+}
+
+func (s *server) handleQueryStreamTool(ctx context.Context, req *mcpsdk.CallToolRequest, input queryStreamToolInput) (*mcpsdk.CallToolResult, queryStreamToolOutput, error) {
+	if req == nil || req.Session == nil {
+		return nil, queryStreamToolOutput{}, fmt.Errorf("query streaming requires an active MCP session")
+	}
+	expr := strings.TrimSpace(input.Query)
+	if expr == "" {
+		return nil, queryStreamToolOutput{}, fmt.Errorf("query is required")
+	}
+	chunkBytes, err := normalizeStreamChunkBytes(input.ChunkBytes)
+	if err != nil {
+		return nil, queryStreamToolOutput{}, err
+	}
+	if input.MaxBytes < 0 {
+		return nil, queryStreamToolOutput{}, fmt.Errorf("max_bytes must be >= 0")
+	}
+	if input.MaxDocuments < 0 {
+		return nil, queryStreamToolOutput{}, fmt.Errorf("max_documents must be >= 0")
+	}
+
+	opts := []lockdclient.QueryOption{
+		lockdclient.WithQuery(expr),
+		lockdclient.WithQueryReturnDocuments(),
+	}
+	if ns := strings.TrimSpace(input.Namespace); ns != "" {
+		opts = append(opts, lockdclient.WithQueryNamespace(ns))
+	}
+	if input.Limit > 0 {
+		opts = append(opts, lockdclient.WithQueryLimit(input.Limit))
+	}
+	if cursor := strings.TrimSpace(input.Cursor); cursor != "" {
+		opts = append(opts, lockdclient.WithQueryCursor(cursor))
+	}
+	if len(input.Fields) > 0 {
+		opts = append(opts, lockdclient.WithQueryFields(cloneAnyMap(input.Fields)))
+	}
+	if engine := strings.ToLower(strings.TrimSpace(input.Engine)); engine != "" {
+		switch engine {
+		case "auto", "index", "scan":
+			opts = append(opts, lockdclient.WithQueryEngine(engine))
+		default:
+			return nil, queryStreamToolOutput{}, fmt.Errorf("invalid engine %q (expected auto|index|scan)", input.Engine)
+		}
+	}
+	if refresh := strings.TrimSpace(input.Refresh); refresh != "" {
+		opts = append(opts, lockdclient.WithQueryRefresh(refresh))
+	}
+
+	resp, err := s.upstream.Query(ctx, opts...)
+	if err != nil {
+		return nil, queryStreamToolOutput{}, err
+	}
+	defer resp.Close()
+
+	out := queryStreamToolOutput{
+		Namespace:     resp.Namespace,
+		Mode:          string(lockdclient.QueryReturnDocuments),
+		Cursor:        resp.Cursor,
+		IndexSeq:      resp.IndexSeq,
+		Metadata:      cloneStringMap(resp.Metadata),
+		ProgressToken: normalizeProgressToken(input.ProgressToken, "lockd.query.documents", resp.Namespace),
+	}
+	var stopErr error
+	if err := resp.ForEach(func(row lockdclient.QueryRow) error {
+		if input.MaxDocuments > 0 && out.DocumentsStreamed >= input.MaxDocuments {
+			out.Truncated = true
+			out.StopReason = "max_documents"
+			if stopErr == nil {
+				stopErr = errors.New("query stream truncated")
+			}
+			return stopErr
+		}
+		remaining := input.MaxBytes
+		if remaining > 0 {
+			remaining -= out.StreamedBytes
+			if remaining <= 0 {
+				out.Truncated = true
+				out.StopReason = "max_bytes"
+				if stopErr == nil {
+					stopErr = errors.New("query stream truncated")
+				}
+				return stopErr
+			}
+		}
+		reader, err := row.DocumentReader()
+		if err != nil {
+			return err
+		}
+		streamed, chunks, truncated, err := streamReaderToProgress(ctx, req.Session, reader, streamProgressRequest{
+			ProgressToken: out.ProgressToken,
+			EventType:     "lockd.query.document.chunk",
+			ChunkBytes:    chunkBytes,
+			MaxBytes:      remaining,
+			Metadata: map[string]any{
+				"namespace":      row.Namespace,
+				"key":            row.Key,
+				"version":        row.Version,
+				"document_index": out.DocumentsStreamed,
+			},
+		})
+		closeErr := reader.Close()
+		if err != nil {
+			return err
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		out.DocumentsStreamed++
+		out.StreamedBytes += streamed
+		out.Chunks += chunks
+		if truncated {
+			out.Truncated = true
+			out.StopReason = "max_bytes"
+			if stopErr == nil {
+				stopErr = errors.New("query stream truncated")
+			}
+			return stopErr
+		}
+		return nil
+	}); err != nil && (stopErr == nil || !errors.Is(err, stopErr)) {
+		return nil, queryStreamToolOutput{}, err
+	}
+	if out.StopReason == "" && out.Truncated {
+		out.StopReason = "truncated"
+	}
+	if out.StopReason == "" {
+		out.StopReason = "complete"
+	}
 	return nil, out, nil
 }
 

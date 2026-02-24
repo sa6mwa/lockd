@@ -2,6 +2,8 @@ package mcp
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"strings"
@@ -39,11 +41,21 @@ type writeStreamSession struct {
 
 	mu          sync.Mutex
 	bytes       int64
+	payloadSHA  string
 	closed      bool
 	committing  bool
 	aborted     bool
 	ingesting   bool
 	transferred bool
+}
+
+type writeStreamStatus struct {
+	BytesReceived    int64
+	PayloadSHA256    string
+	UploadCompleted  bool
+	UploadInProgress bool
+	Committing       bool
+	Aborted          bool
 }
 
 func (s *writeStreamSession) commit() (writeStreamResult, int64, error) {
@@ -122,7 +134,8 @@ func (s *writeStreamSession) uploadFrom(reader io.Reader) (int64, int64, error) 
 	s.ingesting = true
 	s.mu.Unlock()
 
-	written, err := io.Copy(s.writer, reader)
+	hasher := sha256.New()
+	written, err := io.Copy(s.writer, io.TeeReader(reader, hasher))
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -136,8 +149,27 @@ func (s *writeStreamSession) uploadFrom(reader io.Reader) (int64, int64, error) 
 		_ = s.writer.CloseWithError(err)
 		return written, total, err
 	}
+	s.payloadSHA = hex.EncodeToString(hasher.Sum(nil))
 	s.transferred = true
 	return written, total, nil
+}
+
+func (s *writeStreamSession) status() writeStreamStatus {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	payloadSHA := strings.TrimSpace(s.payloadSHA)
+	if payloadSHA == "" && s.bytes == 0 {
+		empty := sha256.Sum256(nil)
+		payloadSHA = hex.EncodeToString(empty[:])
+	}
+	return writeStreamStatus{
+		BytesReceived:    s.bytes,
+		PayloadSHA256:    payloadSHA,
+		UploadCompleted:  s.transferred,
+		UploadInProgress: s.ingesting,
+		Committing:       s.committing,
+		Aborted:          s.aborted,
+	}
 }
 
 type writeStreamManager struct {
@@ -213,17 +245,18 @@ func (m *writeStreamManager) Upload(session *mcpsdk.ServerSession, streamID stri
 	return ws.uploadFrom(reader)
 }
 
-func (m *writeStreamManager) Commit(session *mcpsdk.ServerSession, streamID string, kind writeStreamKind) (any, int64, error) {
+func (m *writeStreamManager) Commit(session *mcpsdk.ServerSession, streamID string, kind writeStreamKind) (any, writeStreamStatus, error) {
 	ws, err := m.take(session, streamID, kind)
 	if err != nil {
-		return nil, 0, err
+		return nil, writeStreamStatus{}, err
 	}
-	result, bytes, err := ws.commit()
+	result, _, err := ws.commit()
 	if err != nil {
-		return nil, bytes, err
+		return nil, ws.status(), err
 	}
-	m.logger.Debug("mcp.write_stream.commit", "session_id", ws.sessionID, "stream_id", ws.id, "kind", string(ws.kind), "bytes", bytes)
-	return result.output, bytes, nil
+	status := ws.status()
+	m.logger.Debug("mcp.write_stream.commit", "session_id", ws.sessionID, "stream_id", ws.id, "kind", string(ws.kind), "bytes", status.BytesReceived)
+	return result.output, status, nil
 }
 
 func (m *writeStreamManager) Abort(session *mcpsdk.ServerSession, streamID string, kind writeStreamKind, reason string) (int64, error) {
@@ -237,6 +270,17 @@ func (m *writeStreamManager) Abort(session *mcpsdk.ServerSession, streamID strin
 	}
 	m.logger.Debug("mcp.write_stream.abort", "session_id", ws.sessionID, "stream_id", ws.id, "kind", string(ws.kind), "bytes", bytes, "reason", strings.TrimSpace(reason))
 	return bytes, nil
+}
+
+func (m *writeStreamManager) Status(session *mcpsdk.ServerSession, streamID string, kind writeStreamKind) (writeStreamStatus, error) {
+	ws, err := m.lookup(session, streamID)
+	if err != nil {
+		return writeStreamStatus{}, err
+	}
+	if ws.kind != kind {
+		return writeStreamStatus{}, fmt.Errorf("write stream %s kind mismatch: expected %s, got %s", ws.id, kind, ws.kind)
+	}
+	return ws.status(), nil
 }
 
 func (m *writeStreamManager) Close() {

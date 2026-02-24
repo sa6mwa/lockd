@@ -181,6 +181,7 @@ Lock/state:
 - `lockd.state.update`
 - `lockd.state.patch`
 - `lockd.state.write_stream.begin`
+- `lockd.state.write_stream.status`
 - `lockd.state.write_stream.commit`
 - `lockd.state.write_stream.abort`
 - `lockd.state.stream`
@@ -191,6 +192,7 @@ Attachments:
 
 - `lockd.attachments.put`
 - `lockd.attachments.write_stream.begin`
+- `lockd.attachments.write_stream.status`
 - `lockd.attachments.write_stream.commit`
 - `lockd.attachments.write_stream.abort`
 - `lockd.attachments.list`
@@ -205,6 +207,7 @@ Queue/messaging:
 
 - `lockd.queue.enqueue`
 - `lockd.queue.write_stream.begin`
+- `lockd.queue.write_stream.status`
 - `lockd.queue.write_stream.commit`
 - `lockd.queue.write_stream.abort`
 - `lockd.queue.dequeue`
@@ -244,15 +247,19 @@ TC-only transaction decision tools are intentionally not exposed by MCP. XA rema
 9. extend while long processing is in-flight
 
 `lockd.queue.dequeue` supports `payload_mode=auto|inline|stream|none` and `state_mode=auto|inline|stream|none` (state mode applies when `stateful=true`).
+For both modes, `auto` is normative: payloads with decoded size `<= lockd.hint.inline_max_payload_bytes` are returned inline; larger payloads switch to stream-capability URLs.
 `lockd.queue.dequeue` also returns `next_cursor`; pass it back as `cursor` on later calls when continuing the same dequeue scan.
+For `stateful=true`, dequeue is all-or-nothing: if the state lease cannot be acquired, MCP does not return a partially leased message.
 
 ## Contract Notes
 
-- `lockd.get` supports `payload_mode=auto|inline|stream|none`.
+- `lockd.get` supports `payload_mode=auto|inline|stream|none` with the same auto rule (`<= inline_max_payload_bytes` => inline; otherwise stream).
 - read payload via `lockd.state.stream` for explicit streaming-only calls, or use `lockd.get payload_mode=stream`.
 - `lockd.state.update`, `lockd.queue.enqueue`, and `lockd.attachments.put` are inline writes and enforce `mcp.inline_max_bytes`.
 - `lockd.state.patch` applies RFC 7396 JSON merge patch semantics for partial updates and is also bounded by `mcp.inline_max_bytes`.
 - for larger writes, use `*.write_stream.begin` upload URLs plus `commit`.
+- use `*.write_stream.status` to inspect upload progress (`bytes_received`, checksum, readiness, capability expiry/availability) before commit.
+- `*.write_stream.commit` accepts optional `expected_bytes` / `expected_sha256`; when set, commit fails on mismatch.
 - `lockd.get`, `lockd.attachments.list`, and `lockd.attachments.get` default to `public=true`.
 - For those reads: `public=false` requires `lease_id`; `public=true` rejects `lease_id`.
 - attachment writes support both `lockd.attachments.put` (inline) and `lockd.attachments.write_stream.*` (streaming) with `mode=create|upsert|replace` (`create` default).
@@ -261,6 +268,17 @@ TC-only transaction decision tools are intentionally not exposed by MCP. XA rema
 - read attachment payload via `lockd.attachments.stream` transfer URL (`download_url`) or via `lockd.attachments.get payload_mode=stream`.
 - attachment checksums are upload-time plaintext SHA-256 values persisted in lockd metadata (`plaintext_sha256`) and can be fetched directly through `lockd.attachments.checksum` without streaming payload bytes.
 - inline-over-limit errors explicitly point to streaming tools and suggest checking `lockd.hint.inline_max_payload_bytes`.
+- state/attachment write-stream commits stage content under the lease and are finalized by `lockd.lock.release` (or discarded with `rollback=true`).
+- queue write-stream commit publishes immediately (not lease-staged).
+
+## Capability URL Hygiene
+
+Transfer URLs are bearer-style secrets. Treat them like short-lived credentials:
+
+- avoid placing capability URLs directly in shell history or process arguments when possible
+- prefer stdin/files for handoff to external tools
+- avoid copying capability URLs into tickets/chat logs
+- expect URLs to expire quickly and be single-use
 
 ## Query Semantics
 

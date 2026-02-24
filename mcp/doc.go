@@ -15,10 +15,13 @@
 //   - Exposes `lockd.queue.stats` for side-effect-free queue introspection
 //   - Exposes lockd.queue.watch for bounded interactive wakeups
 //   - Supports dual payload modes on reads/dequeue (`inline` for small payloads,
-//     `stream` for large payloads via capability URLs)
+//     `stream` for large payloads via capability URLs); `auto` resolves to
+//     inline when payload <= lockd.hint.inline_max_payload_bytes, otherwise stream
 //   - Supports one-time transfer capabilities:
 //     `*.write_stream.begin` returns an upload URL, and read tools return
 //     download URLs for direct HTTP payload transfer
+//   - Exposes `*.write_stream.status` and optional commit expectations
+//     (`expected_bytes`, `expected_sha256`) for upload observability/integrity
 //
 // The facade process itself is stateless for lock data: lock/state/queue/query
 // operations are delegated to upstream lockd.
@@ -63,6 +66,9 @@
 // Larger writes should use the write-stream tool families:
 // `lockd.state.write_stream.*`, `lockd.queue.write_stream.*`,
 // and `lockd.attachments.write_stream.*`.
+//
+// Capability URLs are bearer-style secrets. Avoid leaking them via shell history,
+// command arguments, or chat/ticket logs.
 //
 // # Constructor and lifecycle
 //

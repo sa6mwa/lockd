@@ -53,6 +53,11 @@ type transferRegistration struct {
 	ExpiresAtUnix int64
 }
 
+type writeStreamUploadCapabilityStatus struct {
+	Available     bool
+	ExpiresAtUnix int64
+}
+
 type transferDownloadRequest struct {
 	ContentType   string
 	ContentLength int64
@@ -281,6 +286,37 @@ func (m *transferManager) RevokeWriteStream(session *mcpsdk.ServerSession, strea
 	m.mu.Unlock()
 	if capability != nil {
 		capability.close()
+	}
+}
+
+func (m *transferManager) WriteStreamUploadStatus(session *mcpsdk.ServerSession, streamID string) writeStreamUploadCapabilityStatus {
+	if session == nil {
+		return writeStreamUploadCapabilityStatus{}
+	}
+	streamID = strings.TrimSpace(streamID)
+	if streamID == "" {
+		return writeStreamUploadCapabilityStatus{}
+	}
+	sid := normalizeMCPServerSessionID(session)
+	streamKey := makeTransferStreamKey(sid, streamID)
+	now := time.Now().UTC()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	id := m.byStream[streamKey]
+	if id == "" {
+		return writeStreamUploadCapabilityStatus{}
+	}
+	capability := m.byID[id]
+	if capability == nil {
+		return writeStreamUploadCapabilityStatus{}
+	}
+	if !capability.expiresAt.IsZero() && (now.After(capability.expiresAt) || now.Equal(capability.expiresAt)) {
+		return writeStreamUploadCapabilityStatus{}
+	}
+	return writeStreamUploadCapabilityStatus{
+		Available:     true,
+		ExpiresAtUnix: capability.expiresAt.Unix(),
 	}
 }
 

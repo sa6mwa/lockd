@@ -334,6 +334,10 @@ func (s *server) registerTools(srv *mcpsdk.Server) {
 		Description: desc(toolStateWriteStreamBegin),
 	}, withStructuredToolErrors(s.handleStateWriteStreamBeginTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        toolStateWriteStreamStatus,
+		Description: desc(toolStateWriteStreamStatus),
+	}, withStructuredToolErrors(s.handleStateWriteStreamStatusTool))
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolStateWriteStreamCommit,
 		Description: desc(toolStateWriteStreamCommit),
 	}, withStructuredToolErrors(s.handleStateWriteStreamCommitTool))
@@ -362,6 +366,10 @@ func (s *server) registerTools(srv *mcpsdk.Server) {
 		Name:        toolAttachmentsWriteStreamBegin,
 		Description: desc(toolAttachmentsWriteStreamBegin),
 	}, withStructuredToolErrors(s.handleAttachmentsWriteStreamBeginTool))
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        toolAttachmentsWriteStreamStatus,
+		Description: desc(toolAttachmentsWriteStreamStatus),
+	}, withStructuredToolErrors(s.handleAttachmentsWriteStreamStatusTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolAttachmentsWriteStreamCommit,
 		Description: desc(toolAttachmentsWriteStreamCommit),
@@ -429,6 +437,10 @@ func (s *server) registerTools(srv *mcpsdk.Server) {
 		Name:        toolQueueWriteStreamBegin,
 		Description: desc(toolQueueWriteStreamBegin),
 	}, withStructuredToolErrors(s.handleQueueWriteStreamBeginTool))
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        toolQueueWriteStreamStatus,
+		Description: desc(toolQueueWriteStreamStatus),
+	}, withStructuredToolErrors(s.handleQueueWriteStreamStatusTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolQueueWriteStreamCommit,
 		Description: desc(toolQueueWriteStreamCommit),

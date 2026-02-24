@@ -2,6 +2,8 @@ package mcp
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"strings"
@@ -20,12 +22,31 @@ type writeStreamBeginOutput struct {
 }
 
 type writeStreamCommitInput struct {
-	StreamID string `json:"stream_id" jsonschema:"Write stream identifier returned by begin"`
+	StreamID       string `json:"stream_id" jsonschema:"Write stream identifier returned by begin"`
+	ExpectedSHA256 string `json:"expected_sha256,omitempty" jsonschema:"Optional expected lowercase hex SHA-256 of uploaded plaintext bytes"`
+	ExpectedBytes  *int64 `json:"expected_bytes,omitempty" jsonschema:"Optional expected plaintext byte count of uploaded data"`
 }
 
 type writeStreamAbortInput struct {
 	StreamID string `json:"stream_id" jsonschema:"Write stream identifier returned by begin"`
 	Reason   string `json:"reason,omitempty" jsonschema:"Optional abort reason for diagnostics"`
+}
+
+type writeStreamStatusInput struct {
+	StreamID string `json:"stream_id" jsonschema:"Write stream identifier returned by begin"`
+}
+
+type writeStreamStatusOutput struct {
+	StreamID                  string `json:"stream_id"`
+	BytesReceived             int64  `json:"bytes_received"`
+	PayloadSHA256             string `json:"payload_sha256,omitempty"`
+	UploadCapabilityAvailable bool   `json:"upload_capability_available"`
+	UploadExpiresAtUnix       int64  `json:"upload_expires_at_unix,omitempty"`
+	UploadCompleted           bool   `json:"upload_completed"`
+	UploadInProgress          bool   `json:"upload_in_progress"`
+	Committing                bool   `json:"committing"`
+	Aborted                   bool   `json:"aborted"`
+	CanCommit                 bool   `json:"can_commit"`
 }
 
 type writeStreamAbortOutput struct {
@@ -58,6 +79,74 @@ type writeStreamTransferOutput struct {
 	UploadURL           string
 	UploadMethod        string
 	UploadExpiresAtUnix int64
+}
+
+func normalizeExpectedSHA256(raw string) (string, error) {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	if value == "" {
+		return "", nil
+	}
+	if len(value) != 64 {
+		return "", fmt.Errorf("expected_sha256 must be 64 hex characters")
+	}
+	decoded, err := hex.DecodeString(value)
+	if err != nil {
+		return "", fmt.Errorf("expected_sha256 must be valid hex")
+	}
+	return hex.EncodeToString(decoded), nil
+}
+
+func validateWriteStreamCommitExpectations(input writeStreamCommitInput, status writeStreamStatus) error {
+	if input.ExpectedBytes != nil && *input.ExpectedBytes < 0 {
+		return fmt.Errorf("expected_bytes must be >= 0")
+	}
+	if input.ExpectedBytes != nil && *input.ExpectedBytes != status.BytesReceived {
+		return fmt.Errorf("expected_bytes mismatch: expected=%d actual=%d", *input.ExpectedBytes, status.BytesReceived)
+	}
+	expectedSHA, err := normalizeExpectedSHA256(input.ExpectedSHA256)
+	if err != nil {
+		return err
+	}
+	if expectedSHA == "" {
+		return nil
+	}
+	actualSHA := strings.TrimSpace(status.PayloadSHA256)
+	if actualSHA == "" {
+		empty := sha256.Sum256(nil)
+		actualSHA = hex.EncodeToString(empty[:])
+	}
+	if expectedSHA != actualSHA {
+		return fmt.Errorf("expected_sha256 mismatch: expected=%s actual=%s", expectedSHA, actualSHA)
+	}
+	return nil
+}
+
+func (s *server) writeStreamStatus(req *mcpsdk.CallToolRequest, kind writeStreamKind, streamID string) (writeStreamStatusOutput, error) {
+	if req == nil || req.Session == nil {
+		return writeStreamStatusOutput{}, fmt.Errorf("%s write stream status requires an active MCP session", kind)
+	}
+	normalizedStreamID := strings.TrimSpace(streamID)
+	if normalizedStreamID == "" {
+		return writeStreamStatusOutput{}, fmt.Errorf("stream_id is required")
+	}
+	status, err := s.ensureWriteStreamManager().Status(req.Session, normalizedStreamID, kind)
+	if err != nil {
+		return writeStreamStatusOutput{}, err
+	}
+	upload := s.ensureTransferManager().WriteStreamUploadStatus(req.Session, normalizedStreamID)
+	canCommit := !status.Aborted && !status.Committing && !status.UploadInProgress && status.UploadCompleted
+	return writeStreamStatusOutput{
+		StreamID:                  normalizedStreamID,
+		BytesReceived:             status.BytesReceived,
+		PayloadSHA256:             strings.TrimSpace(status.PayloadSHA256),
+		UploadCapabilityAvailable: upload.Available,
+		UploadExpiresAtUnix:       upload.ExpiresAtUnix,
+		UploadCompleted:           status.UploadCompleted,
+		UploadInProgress:          status.UploadInProgress,
+		Committing:                status.Committing,
+		Aborted:                   status.Aborted,
+		CanCommit:                 canCommit,
+	}, nil
 }
 
 func (s *server) handleStateWriteStreamBeginTool(_ context.Context, req *mcpsdk.CallToolRequest, input stateWriteStreamBeginInput) (*mcpsdk.CallToolResult, writeStreamBeginOutput, error) {
@@ -115,7 +204,14 @@ func (s *server) handleStateWriteStreamCommitTool(_ context.Context, req *mcpsdk
 		return nil, stateWriteStreamCommitOutput{}, fmt.Errorf("state write stream commit requires an active MCP session")
 	}
 	mgr := s.ensureWriteStreamManager()
-	result, bytes, err := mgr.Commit(req.Session, input.StreamID, writeStreamKindState)
+	commitStatus, err := mgr.Status(req.Session, input.StreamID, writeStreamKindState)
+	if err != nil {
+		return nil, stateWriteStreamCommitOutput{}, err
+	}
+	if err := validateWriteStreamCommitExpectations(input, commitStatus); err != nil {
+		return nil, stateWriteStreamCommitOutput{}, err
+	}
+	result, status, err := mgr.Commit(req.Session, input.StreamID, writeStreamKindState)
 	if err != nil {
 		return nil, stateWriteStreamCommitOutput{}, err
 	}
@@ -126,12 +222,20 @@ func (s *server) handleStateWriteStreamCommitTool(_ context.Context, req *mcpsdk
 	}
 	return nil, stateWriteStreamCommitOutput{
 		StreamID:      strings.TrimSpace(input.StreamID),
-		BytesReceived: bytes,
+		BytesReceived: status.BytesReceived,
 		NewVersion:    stateOut.NewVersion,
 		NewStateETag:  stateOut.NewStateETag,
 		Bytes:         stateOut.Bytes,
 		QueryHidden:   stateOut.QueryHidden,
 	}, nil
+}
+
+func (s *server) handleStateWriteStreamStatusTool(_ context.Context, req *mcpsdk.CallToolRequest, input writeStreamStatusInput) (*mcpsdk.CallToolResult, writeStreamStatusOutput, error) {
+	status, err := s.writeStreamStatus(req, writeStreamKindState, input.StreamID)
+	if err != nil {
+		return nil, writeStreamStatusOutput{}, err
+	}
+	return nil, status, nil
 }
 
 func (s *server) handleStateWriteStreamAbortTool(_ context.Context, req *mcpsdk.CallToolRequest, input writeStreamAbortInput) (*mcpsdk.CallToolResult, writeStreamAbortOutput, error) {
@@ -232,7 +336,14 @@ func (s *server) handleQueueWriteStreamCommitTool(_ context.Context, req *mcpsdk
 		return nil, queueWriteStreamCommitOutput{}, fmt.Errorf("queue write stream commit requires an active MCP session")
 	}
 	mgr := s.ensureWriteStreamManager()
-	result, bytes, err := mgr.Commit(req.Session, input.StreamID, writeStreamKindQueue)
+	commitStatus, err := mgr.Status(req.Session, input.StreamID, writeStreamKindQueue)
+	if err != nil {
+		return nil, queueWriteStreamCommitOutput{}, err
+	}
+	if err := validateWriteStreamCommitExpectations(input, commitStatus); err != nil {
+		return nil, queueWriteStreamCommitOutput{}, err
+	}
+	result, status, err := mgr.Commit(req.Session, input.StreamID, writeStreamKindQueue)
 	if err != nil {
 		return nil, queueWriteStreamCommitOutput{}, err
 	}
@@ -243,7 +354,7 @@ func (s *server) handleQueueWriteStreamCommitTool(_ context.Context, req *mcpsdk
 	}
 	return nil, queueWriteStreamCommitOutput{
 		StreamID:          strings.TrimSpace(input.StreamID),
-		BytesReceived:     bytes,
+		BytesReceived:     status.BytesReceived,
 		Namespace:         queueOut.Namespace,
 		Queue:             queueOut.Queue,
 		MessageID:         queueOut.MessageID,
@@ -255,6 +366,14 @@ func (s *server) handleQueueWriteStreamCommitTool(_ context.Context, req *mcpsdk
 		PayloadBytes:      queueOut.PayloadBytes,
 		CorrelationID:     queueOut.CorrelationID,
 	}, nil
+}
+
+func (s *server) handleQueueWriteStreamStatusTool(_ context.Context, req *mcpsdk.CallToolRequest, input writeStreamStatusInput) (*mcpsdk.CallToolResult, writeStreamStatusOutput, error) {
+	status, err := s.writeStreamStatus(req, writeStreamKindQueue, input.StreamID)
+	if err != nil {
+		return nil, writeStreamStatusOutput{}, err
+	}
+	return nil, status, nil
 }
 
 func (s *server) handleQueueWriteStreamAbortTool(_ context.Context, req *mcpsdk.CallToolRequest, input writeStreamAbortInput) (*mcpsdk.CallToolResult, writeStreamAbortOutput, error) {
@@ -385,7 +504,14 @@ func (s *server) handleAttachmentsWriteStreamCommitTool(_ context.Context, req *
 		return nil, attachmentsWriteStreamCommitOutput{}, fmt.Errorf("attachments write stream commit requires an active MCP session")
 	}
 	mgr := s.ensureWriteStreamManager()
-	result, bytes, err := mgr.Commit(req.Session, input.StreamID, writeStreamKindAttachment)
+	commitStatus, err := mgr.Status(req.Session, input.StreamID, writeStreamKindAttachment)
+	if err != nil {
+		return nil, attachmentsWriteStreamCommitOutput{}, err
+	}
+	if err := validateWriteStreamCommitExpectations(input, commitStatus); err != nil {
+		return nil, attachmentsWriteStreamCommitOutput{}, err
+	}
+	result, status, err := mgr.Commit(req.Session, input.StreamID, writeStreamKindAttachment)
 	if err != nil {
 		return nil, attachmentsWriteStreamCommitOutput{}, err
 	}
@@ -396,11 +522,19 @@ func (s *server) handleAttachmentsWriteStreamCommitTool(_ context.Context, req *
 	}
 	return nil, attachmentsWriteStreamCommitOutput{
 		StreamID:      strings.TrimSpace(input.StreamID),
-		BytesReceived: bytes,
+		BytesReceived: status.BytesReceived,
 		Attachment:    attOut.Attachment,
 		Noop:          attOut.Noop,
 		Version:       attOut.Version,
 	}, nil
+}
+
+func (s *server) handleAttachmentsWriteStreamStatusTool(_ context.Context, req *mcpsdk.CallToolRequest, input writeStreamStatusInput) (*mcpsdk.CallToolResult, writeStreamStatusOutput, error) {
+	status, err := s.writeStreamStatus(req, writeStreamKindAttachment, input.StreamID)
+	if err != nil {
+		return nil, writeStreamStatusOutput{}, err
+	}
+	return nil, status, nil
 }
 
 func (s *server) handleAttachmentsWriteStreamAbortTool(_ context.Context, req *mcpsdk.CallToolRequest, input writeStreamAbortInput) (*mcpsdk.CallToolResult, writeStreamAbortOutput, error) {

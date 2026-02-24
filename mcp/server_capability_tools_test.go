@@ -556,6 +556,99 @@ func TestStateWriteStreamToolsEndToEnd(t *testing.T) {
 	}
 }
 
+func TestStateWriteStreamStatusAndCommitExpectations(t *testing.T) {
+	t.Parallel()
+
+	s, cli := newToolTestServer(t)
+	ctx := context.Background()
+	key := fmt.Sprintf("mcp-state-write-stream-status-%d", time.Now().UnixNano())
+	lease, err := cli.Acquire(ctx, api.AcquireRequest{
+		Namespace:  "mcp",
+		Key:        key,
+		TTLSeconds: 30,
+		Owner:      "mcp-test",
+		BlockSecs:  api.BlockNoWait,
+	})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	session, closeSession := newInMemoryServerSession(t)
+	defer closeSession()
+
+	_, begin, err := s.handleStateWriteStreamBeginTool(ctx, &mcpsdk.CallToolRequest{Session: session}, stateWriteStreamBeginInput{
+		Namespace: "mcp",
+		Key:       key,
+		LeaseID:   lease.LeaseID,
+		TxnID:     lease.TxnID,
+	})
+	if err != nil {
+		t.Fatalf("state write_stream.begin: %v", err)
+	}
+	_, statusBefore, err := s.handleStateWriteStreamStatusTool(ctx, &mcpsdk.CallToolRequest{Session: session}, writeStreamStatusInput{
+		StreamID: begin.StreamID,
+	})
+	if err != nil {
+		t.Fatalf("state write_stream.status before upload: %v", err)
+	}
+	if !statusBefore.UploadCapabilityAvailable {
+		t.Fatalf("expected upload capability available before upload")
+	}
+	if statusBefore.BytesReceived != 0 {
+		t.Fatalf("expected zero bytes before upload, got %d", statusBefore.BytesReceived)
+	}
+	if statusBefore.CanCommit {
+		t.Fatalf("expected can_commit=false before upload")
+	}
+
+	payload := []byte(`{"kind":"state-write-stream-status","ok":true}`)
+	sum := sha256.Sum256(payload)
+	expectedSHA := hex.EncodeToString(sum[:])
+	mustUploadTransfer(t, s, begin.UploadURL, payload)
+
+	_, statusAfter, err := s.handleStateWriteStreamStatusTool(ctx, &mcpsdk.CallToolRequest{Session: session}, writeStreamStatusInput{
+		StreamID: begin.StreamID,
+	})
+	if err != nil {
+		t.Fatalf("state write_stream.status after upload: %v", err)
+	}
+	if statusAfter.UploadCapabilityAvailable {
+		t.Fatalf("expected upload capability consumed after upload")
+	}
+	if !statusAfter.UploadCompleted {
+		t.Fatalf("expected upload_completed=true")
+	}
+	if !statusAfter.CanCommit {
+		t.Fatalf("expected can_commit=true after upload")
+	}
+	if statusAfter.BytesReceived != int64(len(payload)) {
+		t.Fatalf("unexpected bytes_received=%d want=%d", statusAfter.BytesReceived, len(payload))
+	}
+	if statusAfter.PayloadSHA256 != expectedSHA {
+		t.Fatalf("unexpected payload_sha256=%q want=%q", statusAfter.PayloadSHA256, expectedSHA)
+	}
+
+	wrongBytes := int64(len(payload) + 1)
+	if _, _, err := s.handleStateWriteStreamCommitTool(ctx, &mcpsdk.CallToolRequest{Session: session}, writeStreamCommitInput{
+		StreamID:      begin.StreamID,
+		ExpectedBytes: &wrongBytes,
+	}); err == nil || !strings.Contains(err.Error(), "expected_bytes mismatch") {
+		t.Fatalf("expected expected_bytes mismatch on commit, got %v", err)
+	}
+
+	expectedBytes := int64(len(payload))
+	_, commit, err := s.handleStateWriteStreamCommitTool(ctx, &mcpsdk.CallToolRequest{Session: session}, writeStreamCommitInput{
+		StreamID:       begin.StreamID,
+		ExpectedSHA256: expectedSHA,
+		ExpectedBytes:  &expectedBytes,
+	})
+	if err != nil {
+		t.Fatalf("state write_stream.commit with expectations: %v", err)
+	}
+	if commit.BytesReceived != int64(len(payload)) {
+		t.Fatalf("unexpected commit bytes_received=%d want=%d", commit.BytesReceived, len(payload))
+	}
+}
+
 func TestQueueWriteStreamToolsEndToEnd(t *testing.T) {
 	t.Parallel()
 
@@ -611,6 +704,49 @@ func TestQueueWriteStreamToolsEndToEnd(t *testing.T) {
 	_ = msg.ClosePayload()
 	if string(gotBytes) != string(payload) {
 		t.Fatalf("unexpected queued payload: %s", string(gotBytes))
+	}
+}
+
+func TestQueueWriteStreamCommitHonorsExpectedChecksum(t *testing.T) {
+	t.Parallel()
+
+	s, _ := newToolTestServer(t)
+	ctx := context.Background()
+	session, closeSession := newInMemoryServerSession(t)
+	defer closeSession()
+	queue := fmt.Sprintf("mcp-queue-write-expected-%d", time.Now().UnixNano())
+
+	_, begin, err := s.handleQueueWriteStreamBeginTool(ctx, &mcpsdk.CallToolRequest{Session: session}, queueWriteStreamBeginInput{
+		Namespace:   "mcp",
+		Queue:       queue,
+		ContentType: "application/json",
+	})
+	if err != nil {
+		t.Fatalf("queue write_stream.begin: %v", err)
+	}
+	payload := []byte(`{"kind":"queue-write-expected","ok":true}`)
+	sum := sha256.Sum256(payload)
+	expectedSHA := hex.EncodeToString(sum[:])
+	mustUploadTransfer(t, s, begin.UploadURL, payload)
+
+	if _, _, err := s.handleQueueWriteStreamCommitTool(ctx, &mcpsdk.CallToolRequest{Session: session}, writeStreamCommitInput{
+		StreamID:       begin.StreamID,
+		ExpectedSHA256: strings.Repeat("0", 64),
+	}); err == nil || !strings.Contains(err.Error(), "expected_sha256 mismatch") {
+		t.Fatalf("expected checksum mismatch, got %v", err)
+	}
+
+	expectedBytes := int64(len(payload))
+	_, out, err := s.handleQueueWriteStreamCommitTool(ctx, &mcpsdk.CallToolRequest{Session: session}, writeStreamCommitInput{
+		StreamID:       begin.StreamID,
+		ExpectedSHA256: expectedSHA,
+		ExpectedBytes:  &expectedBytes,
+	})
+	if err != nil {
+		t.Fatalf("queue write_stream.commit with expectations: %v", err)
+	}
+	if out.PayloadBytes != int64(len(payload)) {
+		t.Fatalf("unexpected payload_bytes=%d want=%d", out.PayloadBytes, len(payload))
 	}
 }
 
@@ -683,6 +819,59 @@ func TestAttachmentsWriteStreamToolsEndToEnd(t *testing.T) {
 	}
 	if !bytes.Equal(gotBytes, payload) {
 		t.Fatalf("attachment payload mismatch: got %d bytes", len(gotBytes))
+	}
+}
+
+func TestAttachmentsWriteStreamCommitHonorsExpectedBytes(t *testing.T) {
+	t.Parallel()
+
+	s, cli := newToolTestServer(t)
+	ctx := context.Background()
+	key := fmt.Sprintf("mcp-attachment-write-expected-%d", time.Now().UnixNano())
+	lease, err := cli.Acquire(ctx, api.AcquireRequest{
+		Namespace:  "mcp",
+		Key:        key,
+		TTLSeconds: 30,
+		Owner:      "mcp-test",
+		BlockSecs:  api.BlockNoWait,
+	})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	session, closeSession := newInMemoryServerSession(t)
+	defer closeSession()
+
+	_, begin, err := s.handleAttachmentsWriteStreamBeginTool(ctx, &mcpsdk.CallToolRequest{Session: session}, attachmentsWriteStreamBeginInput{
+		Namespace: "mcp",
+		Key:       key,
+		LeaseID:   lease.LeaseID,
+		TxnID:     lease.TxnID,
+		Name:      "expected.bin",
+	})
+	if err != nil {
+		t.Fatalf("attachments write_stream.begin: %v", err)
+	}
+	payload := bytes.Repeat([]byte{0xca, 0xfe}, 128)
+	mustUploadTransfer(t, s, begin.UploadURL, payload)
+
+	wrongBytes := int64(len(payload) + 2)
+	if _, _, err := s.handleAttachmentsWriteStreamCommitTool(ctx, &mcpsdk.CallToolRequest{Session: session}, writeStreamCommitInput{
+		StreamID:      begin.StreamID,
+		ExpectedBytes: &wrongBytes,
+	}); err == nil || !strings.Contains(err.Error(), "expected_bytes mismatch") {
+		t.Fatalf("expected bytes mismatch, got %v", err)
+	}
+
+	expectedBytes := int64(len(payload))
+	_, out, err := s.handleAttachmentsWriteStreamCommitTool(ctx, &mcpsdk.CallToolRequest{Session: session}, writeStreamCommitInput{
+		StreamID:      begin.StreamID,
+		ExpectedBytes: &expectedBytes,
+	})
+	if err != nil {
+		t.Fatalf("attachments write_stream.commit with expectations: %v", err)
+	}
+	if out.BytesReceived != int64(len(payload)) {
+		t.Fatalf("unexpected bytes_received=%d want=%d", out.BytesReceived, len(payload))
 	}
 }
 

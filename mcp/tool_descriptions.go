@@ -16,6 +16,7 @@ const (
 	toolStateUpdate                  = "lockd.state.update"
 	toolStatePatch                   = "lockd.state.patch"
 	toolStateWriteStreamBegin        = "lockd.state.write_stream.begin"
+	toolStateWriteStreamStatus       = "lockd.state.write_stream.status"
 	toolStateWriteStreamCommit       = "lockd.state.write_stream.commit"
 	toolStateWriteStreamAbort        = "lockd.state.write_stream.abort"
 	toolStateStream                  = "lockd.state.stream"
@@ -23,6 +24,7 @@ const (
 	toolStateRemove                  = "lockd.state.remove"
 	toolAttachmentsPut               = "lockd.attachments.put"
 	toolAttachmentsWriteStreamBegin  = "lockd.attachments.write_stream.begin"
+	toolAttachmentsWriteStreamStatus = "lockd.attachments.write_stream.status"
 	toolAttachmentsWriteStreamCommit = "lockd.attachments.write_stream.commit"
 	toolAttachmentsWriteStreamAbort  = "lockd.attachments.write_stream.abort"
 	toolAttachmentsList              = "lockd.attachments.list"
@@ -39,6 +41,7 @@ const (
 	toolHelp                         = "lockd.help"
 	toolQueueEnqueue                 = "lockd.queue.enqueue"
 	toolQueueWriteStreamBegin        = "lockd.queue.write_stream.begin"
+	toolQueueWriteStreamStatus       = "lockd.queue.write_stream.status"
 	toolQueueWriteStreamCommit       = "lockd.queue.write_stream.commit"
 	toolQueueWriteStreamAbort        = "lockd.queue.write_stream.abort"
 	toolQueueDequeue                 = "lockd.queue.dequeue"
@@ -63,6 +66,7 @@ var mcpToolNames = []string{
 	toolStateUpdate,
 	toolStatePatch,
 	toolStateWriteStreamBegin,
+	toolStateWriteStreamStatus,
 	toolStateWriteStreamCommit,
 	toolStateWriteStreamAbort,
 	toolStateStream,
@@ -70,6 +74,7 @@ var mcpToolNames = []string{
 	toolStateRemove,
 	toolAttachmentsPut,
 	toolAttachmentsWriteStreamBegin,
+	toolAttachmentsWriteStreamStatus,
 	toolAttachmentsWriteStreamCommit,
 	toolAttachmentsWriteStreamAbort,
 	toolAttachmentsList,
@@ -86,6 +91,7 @@ var mcpToolNames = []string{
 	toolHelp,
 	toolQueueEnqueue,
 	toolQueueWriteStreamBegin,
+	toolQueueWriteStreamStatus,
 	toolQueueWriteStreamCommit,
 	toolQueueWriteStreamAbort,
 	toolQueueDequeue,
@@ -161,7 +167,7 @@ func buildToolDescriptions(cfg Config) map[string]string {
 		toolGet: formatToolDescription(toolContract{
 			Purpose:  "Read committed JSON state for one key.",
 			UseWhen:  "You need key metadata and optionally payload bytes in inline or streaming mode.",
-			Requires: fmt.Sprintf("`key` is required. `namespace` defaults to %q. `public` defaults to true. If `public=false`, `lease_id` is required. `payload_mode` supports `auto` (default), `inline`, `stream`, or `none`.", namespace),
+			Requires: fmt.Sprintf("`key` is required. `namespace` defaults to %q. `public` defaults to true. If `public=false`, `lease_id` is required. `payload_mode` supports `auto` (default), `inline`, `stream`, or `none`; `auto` resolves to inline when payload bytes <= `lockd.hint.inline_max_payload_bytes`, otherwise stream.", namespace),
 			Effects:  "Returns metadata plus either inline payload (`payload_text` or `payload_base64`) or one-time stream download URL, depending on `payload_mode` and payload size.",
 			Retry:    "Safe to retry; this is a read operation.",
 			Next:     "Use `lockd.state.stream` for explicit streaming-only reads or acquire a lock before mutation.",
@@ -212,13 +218,21 @@ func buildToolDescriptions(cfg Config) map[string]string {
 			Requires: fmt.Sprintf("Active MCP session is required. `key` and `lease_id` are required. `namespace` defaults to %q. Optional CAS/fencing fields mirror `lockd.state.update`.", namespace),
 			Effects:  "Creates a stream session and returns `stream_id` plus one-time `upload_url` for direct HTTP PUT upload outside MCP tool payload context.",
 			Retry:    "Not idempotent; begin returns a new stream each time. Abort unused streams explicitly.",
-			Next:     "Upload bytes to `upload_url`, then call `lockd.state.write_stream.commit` (or `abort`).",
+			Next:     "Upload bytes to `upload_url`, optionally inspect progress with `lockd.state.write_stream.status`, then call `lockd.state.write_stream.commit` (or `abort`).",
+		}),
+		toolStateWriteStreamStatus: formatToolDescription(toolContract{
+			Purpose:  "Inspect in-flight state write-stream upload progress.",
+			UseWhen:  "You need upload observability before commit (for example after external HTTP upload attempts).",
+			Requires: "Active MCP session and `stream_id` are required.",
+			Effects:  "Returns `bytes_received`, computed `payload_sha256`, upload-capability availability/expiry, and commit-readiness flags.",
+			Retry:    "Safe to retry while stream exists.",
+			Next:     "If `can_commit=true`, call `lockd.state.write_stream.commit`; otherwise finish upload or `abort` and restart.",
 		}),
 		toolStateWriteStreamCommit: formatToolDescription(toolContract{
 			Purpose:  "Finalize a state write stream and commit it to upstream lockd.",
 			UseWhen:  "All payload chunks have been appended.",
-			Requires: "Active MCP session and `stream_id` are required.",
-			Effects:  "Closes the upload stream, waits for upstream completion, and returns state update result metadata.",
+			Requires: "Active MCP session and `stream_id` are required. Optional `expected_bytes` and `expected_sha256` enforce upload integrity before commit.",
+			Effects:  "Closes the upload stream, validates optional expectations, waits for upstream completion, and returns state update result metadata. State remains staged under the lease until `lockd.lock.release` commits (or `rollback=true` discards).",
 			Retry:    "Commit is terminal for a stream_id. On failure, begin a new stream and replay payload.",
 			Next:     "Release lease or proceed with additional state/attachment mutations.",
 		}),
@@ -268,13 +282,21 @@ func buildToolDescriptions(cfg Config) map[string]string {
 			Requires: fmt.Sprintf("Active MCP session is required. `key`, `lease_id`, and `name` are required. `namespace` defaults to %q. `mode` supports `create` (default), `upsert`, `replace`.", namespace),
 			Effects:  "Creates a stream session and returns one-time `upload_url` for direct HTTP PUT upload into upstream attachment flow.",
 			Retry:    "Not idempotent; begin returns a new stream each time. Abort unused streams explicitly.",
-			Next:     "Upload bytes to `upload_url`, then call `lockd.attachments.write_stream.commit` (or `abort`).",
+			Next:     "Upload bytes to `upload_url`, optionally inspect progress with `lockd.attachments.write_stream.status`, then call `lockd.attachments.write_stream.commit` (or `abort`).",
+		}),
+		toolAttachmentsWriteStreamStatus: formatToolDescription(toolContract{
+			Purpose:  "Inspect in-flight attachment write-stream upload progress.",
+			UseWhen:  "You need upload observability before attachment commit.",
+			Requires: "Active MCP session and `stream_id` are required.",
+			Effects:  "Returns `bytes_received`, computed `payload_sha256`, upload-capability availability/expiry, and commit-readiness flags.",
+			Retry:    "Safe to retry while stream exists.",
+			Next:     "If `can_commit=true`, call `lockd.attachments.write_stream.commit`; otherwise finish upload or abort.",
 		}),
 		toolAttachmentsWriteStreamCommit: formatToolDescription(toolContract{
 			Purpose:  "Finalize an attachment write stream.",
 			UseWhen:  "All attachment payload chunks have been appended.",
-			Requires: "Active MCP session and `stream_id` are required.",
-			Effects:  "Closes the upload stream, waits for upstream attach completion, and returns attachment metadata/version.",
+			Requires: "Active MCP session and `stream_id` are required. Optional `expected_bytes` and `expected_sha256` enforce upload integrity before commit.",
+			Effects:  "Closes the upload stream, validates optional expectations, waits for upstream attach completion, and returns attachment metadata/version. Attachment changes stay staged under the lease until `lockd.lock.release` commits (or rollback discards).",
 			Retry:    "Commit is terminal for a stream_id. On failure, begin a new stream and replay payload.",
 			Next:     "List/head/checksum attachments for verification, then release lease.",
 		}),
@@ -313,7 +335,7 @@ func buildToolDescriptions(cfg Config) map[string]string {
 		toolAttachmentsGet: formatToolDescription(toolContract{
 			Purpose:  "Resolve one attachment by id or name and return metadata plus optional inline/stream payload delivery.",
 			UseWhen:  "You need attachment payload in either inline or streaming mode.",
-			Requires: fmt.Sprintf("`key` plus either `id` or `name` is required. `namespace` defaults to %q. `public` defaults to true. `payload_mode` supports `auto` (default), `inline`, `stream`, or `none`.", namespace),
+			Requires: fmt.Sprintf("`key` plus either `id` or `name` is required. `namespace` defaults to %q. `public` defaults to true. `payload_mode` supports `auto` (default), `inline`, `stream`, or `none`; `auto` resolves to inline when payload bytes <= `lockd.hint.inline_max_payload_bytes`, otherwise stream.", namespace),
 			Effects:  "Returns attachment metadata/checksum and either inline payload (`payload_text` or `payload_base64`) or one-time stream URL.",
 			Retry:    "Safe to retry; this is a read operation.",
 			Next:     "Use `lockd.attachments.stream` for explicit streaming-only access and `lockd.attachments.checksum` for integrity checks.",
@@ -396,13 +418,21 @@ func buildToolDescriptions(cfg Config) map[string]string {
 			Requires: fmt.Sprintf("Active MCP session is required. `queue` defaults to %q and `namespace` defaults to %q. Delay/visibility/ttl/attributes/content_type options match `lockd.queue.enqueue`.", queue, namespace),
 			Effects:  "Creates a stream session and returns `stream_id` plus one-time `upload_url` for direct HTTP PUT upload.",
 			Retry:    "Not idempotent; begin returns a new stream each time. Abort unused streams explicitly.",
-			Next:     "Upload bytes to `upload_url`, then call `lockd.queue.write_stream.commit` (or `abort`).",
+			Next:     "Upload bytes to `upload_url`, optionally inspect progress with `lockd.queue.write_stream.status`, then call `lockd.queue.write_stream.commit` (or `abort`).",
+		}),
+		toolQueueWriteStreamStatus: formatToolDescription(toolContract{
+			Purpose:  "Inspect in-flight queue write-stream upload progress.",
+			UseWhen:  "You need upload observability before publish commit.",
+			Requires: "Active MCP session and `stream_id` are required.",
+			Effects:  "Returns `bytes_received`, computed `payload_sha256`, upload-capability availability/expiry, and commit-readiness flags.",
+			Retry:    "Safe to retry while stream exists.",
+			Next:     "If `can_commit=true`, call `lockd.queue.write_stream.commit`; otherwise finish upload or abort.",
 		}),
 		toolQueueWriteStreamCommit: formatToolDescription(toolContract{
 			Purpose:  "Finalize a queue write stream and publish the message.",
 			UseWhen:  "All payload chunks for a queued message have been appended.",
-			Requires: "Active MCP session and `stream_id` are required.",
-			Effects:  "Closes upload stream, waits for upstream enqueue completion, and returns enqueue metadata.",
+			Requires: "Active MCP session and `stream_id` are required. Optional `expected_bytes` and `expected_sha256` enforce upload integrity before commit.",
+			Effects:  "Closes upload stream, validates optional expectations, waits for upstream enqueue completion, and returns enqueue metadata.",
 			Retry:    "Commit is terminal for a stream_id. On failure, begin a new stream and replay payload.",
 			Next:     "Use dequeue/ack workflows on consuming agents.",
 		}),
@@ -417,8 +447,8 @@ func buildToolDescriptions(cfg Config) map[string]string {
 		toolQueueDequeue: formatToolDescription(toolContract{
 			Purpose:  "Receive one available message lease from a queue.",
 			UseWhen:  "A worker is ready to process the next queue item.",
-			Requires: fmt.Sprintf("`queue` defaults to %q. `namespace` defaults to %q. `owner` defaults to OAuth client id. Optional `stateful`, `visibility_seconds`, `cursor`, and `txn_id` tune dequeue behavior. `payload_mode` supports `auto` (default), `inline`, `stream`, `none`; `state_mode` (when `stateful=true`) supports the same values.", queue, namespace),
-			Effects:  "Returns `found=false` when no message is available, or lease metadata plus payload delivery according to `payload_mode` (inline fields or stream URL). For stateful dequeue, optional state payload delivery follows `state_mode`.",
+			Requires: fmt.Sprintf("`queue` defaults to %q. `namespace` defaults to %q. `owner` defaults to OAuth client id. Optional `stateful`, `visibility_seconds`, `cursor`, and `txn_id` tune dequeue behavior. `payload_mode` supports `auto` (default), `inline`, `stream`, `none`; `state_mode` (when `stateful=true`) supports the same values. For both modes, `auto` resolves inline when payload bytes <= `lockd.hint.inline_max_payload_bytes`, otherwise stream.", queue, namespace),
+			Effects:  "Returns `found=false` when no message is available, or lease metadata plus payload delivery according to `payload_mode` (inline fields or stream URL). For `stateful=true`, dequeue is all-or-nothing: state lease acquisition is required for success, and on contention/failure the call returns no leased message.",
 			Retry:    "Safe to retry. Duplicate retries may lease different messages when queue state changes.",
 			Next:     "Process payload/state and then call `lockd.queue.ack`, `lockd.queue.nack`, or `lockd.queue.defer`; use `lockd.queue.extend` for long handlers.",
 		}),

@@ -29,7 +29,9 @@ lockd MCP facade operating manual:
 - Subscription workflow: lockd.queue.subscribe for long-lived runtimes that can hold session-level SSE subscriptions.
 - XA workflow: optional txn_id can be attached to lock/queue/state/attachment operations; transaction decisions are applied by lockd APIs, not TC decision tools in this MCP surface.
 - Lock safety: keep lease IDs/fencing tokens from lock operations and send them back on protected writes.
-- Write safety: inline payloads are capped by mcp.inline_max_bytes. Use write_stream begin + upload_url + commit for larger writes (state, queue, attachments).
+- Write safety: inline payloads are capped by mcp.inline_max_bytes. For payload_mode/state_mode auto, payloads <= lockd.hint.inline_max_payload_bytes are inline and larger payloads switch to stream.
+- Stream workflow: use write_stream begin + upload_url + optional write_stream.status + commit for larger writes (state, queue, attachments). Commit accepts optional expected_bytes/expected_sha256.
+- Transfer URL hygiene: capability URLs are bearer-style secrets; avoid shell history/process-list leakage and avoid pasting capability URLs into chat/tickets.
 - Partial mutation: use lockd.state.patch for JSON merge patch updates when full replacement is unnecessary.
 - Query first when uncertain: use lockd.query for key discovery, lockd.query.stream for NDJSON document stream URLs, and lockd.state.stream / lockd.attachments.stream for point payload reads.
 - Documentation resources: %s, %s, %s, %s
@@ -72,7 +74,7 @@ Recommended discovery sequence:
 3. Read %s and %s.
 4. Use lockd.query for keys, lockd.query.stream for query documents, and lockd.get for point metadata.
 5. Use queue tools for agent coordination and messaging.
-6. For large writes, use lockd.*.write_stream.begin to get upload_url, upload bytes directly, then commit.
+6. For large writes, use lockd.*.write_stream.begin to get upload_url, upload bytes directly, optionally call write_stream.status, then commit (optionally with expected_bytes/expected_sha256).
 `, s.cfg.DefaultNamespace, s.cfg.AgentBusQueue, docMessagingURI, docSyncURI)),
 		docLocksURI: strings.TrimSpace(`
 # lockd Locking Workflow
@@ -82,7 +84,7 @@ Recommended discovery sequence:
 3. Stream state payload with lockd.state.stream when needed.
 4. Mutate state with lockd.state.update (small payload), lockd.state.patch (partial merge patch), or lockd.state.write_stream.* (large payload).
 5. Keepalive while work is active.
-6. Release/commit.
+6. Release lease to commit staged state/attachment changes (or rollback).
 
 Critical invariants:
 - Lease ID and fencing token are authority.
@@ -96,6 +98,8 @@ Primary queue loop:
    for large payloads use lockd.queue.write_stream.*
 2. lockd.queue.watch for bounded wakeup signals (recommended for interactive clients)
 3. lockd.queue.dequeue (default queue %q unless overridden)
+   payload_mode/state_mode auto => inline when payload <= lockd.hint.inline_max_payload_bytes, else stream
+   stateful dequeue is all-or-nothing (no partial message-only success when state lease cannot be acquired)
 4. If processing succeeds: lockd.queue.ack
 5. If processing fails: lockd.queue.nack
 6. If message is not for this worker: lockd.queue.defer
@@ -112,6 +116,7 @@ For push-notify:
 Use queues for eventing and lock/state operations for shared context updates.
 Keep queue payloads small and use key/state references for large context.
 Use write_stream tools for large payload writes (begin -> upload_url -> commit).
+Capability URLs are bearer-style secrets: avoid command-history and process-list leakage.
 Use lockd.query.stream for query-document NDJSON stream URLs and lockd.state.stream / lockd.attachments.stream to obtain one-time download URLs for point payload reads.
 Use lockd.attachments.head before lockd.attachments.stream when only metadata is needed.
 Use namespace scoping to isolate agent groups.
@@ -170,6 +175,8 @@ func (s *server) handleHelpTool(_ context.Context, _ *mcpsdk.CallToolRequest, in
 			"defer preserves message without counting as failure",
 			"extend refreshes lease for long-running handlers",
 			"inline payloads are capped by mcp.inline_max_bytes; use write_stream tools for larger writes",
+			"payload_mode/state_mode auto resolves inline when payload <= lockd.hint.inline_max_payload_bytes, otherwise stream",
+			"write_stream.status provides bytes/checksum/readiness before commit",
 			"namespace isolation follows client certificate claims",
 			"lock writes must preserve lease/fencing semantics",
 			"for inline payload_mode requests above the limit, use streaming variants and consult lockd.hint inline_max_payload_bytes",
@@ -179,15 +186,15 @@ func (s *server) handleHelpTool(_ context.Context, _ *mcpsdk.CallToolRequest, in
 	switch topic {
 	case "overview":
 		out.Summary = "Start with lockd.hint and lockd.help, acquire lock when mutating shared state, inspect queue readiness with lockd.queue.stats, use queue.watch for bounded wakeups, then dequeue and ack/nack/defer messages. Use payload_mode inline for small data and stream/write_stream variants for large data."
-		out.NextCalls = []string{"lockd.hint", "lockd.get", "lockd.state.stream", "lockd.lock.acquire", "lockd.state.update", "lockd.state.patch", "lockd.state.write_stream.begin", "lockd.attachments.put", "lockd.attachments.write_stream.begin", "lockd.queue.stats", "lockd.queue.enqueue", "lockd.queue.write_stream.begin", "lockd.queue.watch", "lockd.queue.dequeue", "lockd.queue.ack", "lockd.queue.nack", "lockd.queue.defer"}
+		out.NextCalls = []string{"lockd.hint", "lockd.get", "lockd.state.stream", "lockd.lock.acquire", "lockd.state.update", "lockd.state.patch", "lockd.state.write_stream.begin", "lockd.state.write_stream.status", "lockd.attachments.put", "lockd.attachments.write_stream.begin", "lockd.attachments.write_stream.status", "lockd.queue.stats", "lockd.queue.enqueue", "lockd.queue.write_stream.begin", "lockd.queue.write_stream.status", "lockd.queue.watch", "lockd.queue.dequeue", "lockd.queue.ack", "lockd.queue.nack", "lockd.queue.defer"}
 		out.Resources = []string{docOverviewURI, docMessagingURI, docSyncURI}
 	case "locks":
 		out.Summary = "Locks gate state mutation; keep lease identity and fencing token through the full mutation lifecycle."
-		out.NextCalls = []string{"lockd.hint", "lockd.lock.acquire", "lockd.state.update", "lockd.state.patch", "lockd.state.write_stream.begin", "lockd.attachments.put", "lockd.attachments.write_stream.begin", "lockd.lock.release"}
+		out.NextCalls = []string{"lockd.hint", "lockd.lock.acquire", "lockd.state.update", "lockd.state.patch", "lockd.state.write_stream.begin", "lockd.state.write_stream.status", "lockd.attachments.put", "lockd.attachments.write_stream.begin", "lockd.attachments.write_stream.status", "lockd.lock.release"}
 		out.Resources = []string{docLocksURI}
 	case "messaging":
 		out.Summary = "Messaging is dequeue-driven. Use payload_mode=auto/inline/stream on dequeue and state_mode for stateful dequeue state payloads. Use queue.stats for readiness/counters and queue.watch for bounded wakeups, ack success, nack failures, defer when a message is not for this worker, and extend when processing runs long. For large publishes, use queue.write_stream tools."
-		out.NextCalls = []string{"lockd.hint", "lockd.queue.stats", "lockd.queue.enqueue", "lockd.queue.write_stream.begin", "lockd.queue.watch", "lockd.queue.subscribe", "lockd.queue.dequeue", "lockd.queue.ack", "lockd.queue.nack", "lockd.queue.defer", "lockd.queue.extend"}
+		out.NextCalls = []string{"lockd.hint", "lockd.queue.stats", "lockd.queue.enqueue", "lockd.queue.write_stream.begin", "lockd.queue.write_stream.status", "lockd.queue.watch", "lockd.queue.subscribe", "lockd.queue.dequeue", "lockd.queue.ack", "lockd.queue.nack", "lockd.queue.defer", "lockd.queue.extend"}
 		out.Resources = []string{docMessagingURI}
 	case "sync":
 		out.Summary = "Coordinate through queue events and shared state; keep large context in lockd documents."

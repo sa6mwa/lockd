@@ -94,10 +94,15 @@ func TestAWSLockLifecycle(t *testing.T) {
 	}
 
 	payload, _ := json.Marshal(map[string]any{"cursor": 42, "source": "aws"})
-	opts := lockdclient.UpdateOptions{IfVersion: version}
-	if opts.IfVersion == "" {
-		opts.IfVersion = strconv.FormatInt(lease.Version, 10)
+	ifVersion := lockdclient.Int64(lease.Version)
+	if version != "" {
+		parsedVersion, parseErr := strconv.ParseInt(version, 10, 64)
+		if parseErr != nil {
+			t.Fatalf("parse version %q: %v", version, parseErr)
+		}
+		ifVersion = lockdclient.Int64(parsedVersion)
 	}
+	opts := lockdclient.UpdateOptions{IfVersion: ifVersion}
 	if etag != "" {
 		opts.IfETag = etag
 	}

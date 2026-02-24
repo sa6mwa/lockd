@@ -7,7 +7,7 @@
 //
 // # What this package does
 //
-//   - Serves MCP over streamable HTTP (default path /mcp)
+//   - Serves MCP over streamable HTTP (default path /)
 //   - Registers lockd tool surface for lock/state/queue/query/attachments
 //   - Hosts local OAuth 2.1 endpoints for confidential clients
 //   - Enforces bearer-token auth by default when TLS is enabled
@@ -16,8 +16,9 @@
 //   - Exposes lockd.queue.watch for bounded interactive wakeups
 //   - Keeps `lockd.get` and `lockd.attachments.get` metadata-only and uses
 //     `lockd.state.stream` / `lockd.attachments.stream` for payload transfer
-//   - Supports direct write streams for large uploads via
-//     `*.write_stream.begin|append|commit|abort` tools
+//   - Supports one-time transfer capabilities:
+//     `*.write_stream.begin` returns an upload URL, and read tools return
+//     download URLs for direct HTTP payload transfer
 //
 // The facade process itself is stateless for lock data: lock/state/queue/query
 // operations are delegated to upstream lockd.
@@ -48,10 +49,11 @@
 //
 // Large payload handling:
 //
-// State documents and attachments can be very large. The MCP facade avoids
-// full-buffer reads by exposing explicit streaming tools that emit chunked
-// progress notifications over the active MCP session, including
-// `lockd.query.stream` for query-document payloads.
+// State documents, queue payloads, and attachments can be very large. The MCP
+// facade avoids full-buffer reads by exposing transfer-capability URLs for
+// payload I/O. `lockd.state.stream`, `lockd.attachments.stream`, and
+// `lockd.queue.dequeue` return one-time download URLs. `*.write_stream.begin`
+// returns one-time upload URLs.
 //
 // For writes, small payloads can be sent inline through `lockd.state.update`
 // and `lockd.queue.enqueue`, bounded by `Config.InlineMaxBytes` (default 2MiB).
@@ -73,6 +75,7 @@
 //	srv, err := mcp.NewServer(mcp.NewServerRequest{
 //		Config: mcp.Config{
 //			Listen:                   "127.0.0.1:19341",
+//			BaseURL:                  "https://mcp.example/lockd-mcp/v1",
 //			UpstreamServer:           "https://127.0.0.1:9341",
 //			UpstreamClientBundlePath: "/home/user/.lockd/client.pem",
 //			BundlePath:               "/home/user/.lockd/server.pem",
@@ -98,6 +101,8 @@
 //		Config: mcp.Config{
 //			Listen:              "127.0.0.1:19341",
 //			DisableTLS:          true,
+//			BaseURL:             "http://127.0.0.1:19341",
+//			AllowHTTP:           true,
 //			UpstreamServer:      "http://127.0.0.1:9341",
 //			UpstreamDisableMTLS: true,
 //		},
@@ -121,7 +126,7 @@
 //   - DefaultNamespace: `mcp`
 //   - AgentBusQueue: `lockd.agent.bus`
 //   - InlineMaxBytes: `2097152`
-//   - MCPPath: `/mcp`
+//   - MCPPath: `/`
 //
 // # Surface scope
 //

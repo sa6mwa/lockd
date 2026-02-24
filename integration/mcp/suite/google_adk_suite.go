@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"iter"
-	"net/http"
 	"slices"
 	"sync"
 	"testing"
@@ -38,18 +37,17 @@ func RunGoogleADKE2E(t *testing.T, factory ServerFactory) {
 		t.Fatal("mcp suite server factory returned nil test server")
 	}
 
-	mcpEndpoint, stop := startMCPFacade(t, ts)
-	defer stop()
+	facade := startMCPFacade(t, ts)
+	defer facade.stop(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
+	accessToken := issueClientCredentialsToken(ctx, t, facade, facade.clientID, facade.clientSecret)
 
 	toolset, err := mcptoolset.New(mcptoolset.Config{
 		Transport: &mcpsdk.StreamableClientTransport{
-			Endpoint: mcpEndpoint,
-			HTTPClient: &http.Client{
-				Timeout: 10 * time.Second,
-			},
+			Endpoint:   facade.endpoint,
+			HTTPClient: facade.authHTTPClient(accessToken),
 		},
 	})
 	if err != nil {
@@ -57,7 +55,7 @@ func RunGoogleADKE2E(t *testing.T, factory ServerFactory) {
 	}
 
 	roCtx := newADKReadonlyContext(ctx)
-	tools := listADKToolsWithRetry(t, ctx, toolset, roCtx)
+	tools := listADKToolsWithRetry(ctx, t, toolset, roCtx)
 	requireADKToolsPresent(t, tools, "lockd.hint", "lockd.lock.acquire", "lockd.lock.release")
 
 	toolCtx := newADKToolContext(ctx)
@@ -149,7 +147,7 @@ func requireADKToolOutputObject(t testing.TB, out map[string]any) map[string]any
 	return output
 }
 
-func listADKToolsWithRetry(t testing.TB, ctx context.Context, toolset adktool.Toolset, roCtx agent.ReadonlyContext) []adktool.Tool {
+func listADKToolsWithRetry(ctx context.Context, t testing.TB, toolset adktool.Toolset, roCtx agent.ReadonlyContext) []adktool.Tool {
 	t.Helper()
 	if toolset == nil {
 		t.Fatalf("adk toolset required")
@@ -241,7 +239,7 @@ func (c *adkTestToolContext) SearchMemory(context.Context, string) (*adkmemory.S
 	return nil, errors.New("search memory not supported in adk mcp test context")
 }
 func (c *adkTestToolContext) ToolConfirmation() *toolconfirmation.ToolConfirmation { return nil }
-func (c *adkTestToolContext) RequestConfirmation(string, any) error                 { return nil }
+func (c *adkTestToolContext) RequestConfirmation(string, any) error                { return nil }
 
 type adkNoopArtifacts struct{}
 

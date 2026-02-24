@@ -101,9 +101,6 @@ type queueDequeueToolInput struct {
 	VisibilitySeconds int64  `json:"visibility_seconds,omitempty" jsonschema:"Optional visibility timeout override in seconds"`
 	Cursor            string `json:"cursor,omitempty" jsonschema:"Optional continuation cursor from previous dequeue response"`
 	TxnID             string `json:"txn_id,omitempty" jsonschema:"Optional transaction id to bind dequeue operations"`
-	ChunkBytes        int64  `json:"chunk_bytes,omitempty" jsonschema:"Payload stream chunk size per progress event in bytes (default 65536, max 4194304)"`
-	MaxBytes          int64  `json:"max_bytes,omitempty" jsonschema:"Optional maximum payload bytes to stream before truncating"`
-	ProgressToken     string `json:"progress_token,omitempty" jsonschema:"Optional explicit progress token for payload chunk notifications"`
 }
 
 type queueDequeueToolOutput struct {
@@ -125,17 +122,16 @@ type queueDequeueToolOutput struct {
 	CorrelationID         string `json:"correlation_id,omitempty"`
 	ContentType           string `json:"content_type,omitempty"`
 	PayloadBytes          int64  `json:"payload_bytes,omitempty"`
-	PayloadProgressToken  string `json:"payload_progress_token,omitempty"`
-	PayloadStreamedBytes  int64  `json:"payload_streamed_bytes,omitempty"`
-	PayloadChunks         int    `json:"payload_chunks,omitempty"`
-	PayloadTruncated      bool   `json:"payload_truncated,omitempty"`
+	PayloadDownloadURL    string `json:"payload_download_url,omitempty"`
+	PayloadDownloadMethod string `json:"payload_download_method,omitempty"`
+	PayloadDownloadExpiry int64  `json:"payload_download_expires_at_unix,omitempty"`
 	StateLeaseID          string `json:"state_lease_id,omitempty"`
 	StateLeaseExpiresUnix int64  `json:"state_lease_expires_at_unix,omitempty"`
 	StateFencingToken     int64  `json:"state_fencing_token,omitempty"`
 	StateETag             string `json:"state_etag,omitempty"`
 }
 
-func (s *server) handleQueueDequeueTool(ctx context.Context, req *mcpsdk.CallToolRequest, input queueDequeueToolInput) (*mcpsdk.CallToolResult, queueDequeueToolOutput, error) {
+func (s *server) handleQueueDequeueTool(_ context.Context, req *mcpsdk.CallToolRequest, input queueDequeueToolInput) (*mcpsdk.CallToolResult, queueDequeueToolOutput, error) {
 	queue := s.resolveQueue(input.Queue)
 	namespace := s.resolveNamespace(input.Namespace)
 	clientID := ""
@@ -166,12 +162,14 @@ func (s *server) handleQueueDequeueTool(ctx context.Context, req *mcpsdk.CallToo
 		msg *lockdclient.QueueMessage
 		err error
 	)
+	dequeueCtx, cancelDequeue := context.WithCancel(context.Background())
 	if input.Stateful {
-		msg, err = s.upstream.DequeueWithState(ctx, queue, opts)
+		msg, err = s.upstream.DequeueWithState(dequeueCtx, queue, opts)
 	} else {
-		msg, err = s.upstream.Dequeue(ctx, queue, opts)
+		msg, err = s.upstream.Dequeue(dequeueCtx, queue, opts)
 	}
 	if err != nil {
+		cancelDequeue()
 		var apiErr *lockdclient.APIError
 		if errors.As(err, &apiErr) && apiErr.Response.ErrorCode == "waiting" {
 			return nil, queueDequeueToolOutput{
@@ -183,6 +181,7 @@ func (s *server) handleQueueDequeueTool(ctx context.Context, req *mcpsdk.CallToo
 		return nil, queueDequeueToolOutput{}, err
 	}
 	if msg == nil {
+		cancelDequeue()
 		return nil, queueDequeueToolOutput{
 			Namespace: namespace,
 			Queue:     queue,
@@ -218,54 +217,41 @@ func (s *server) handleQueueDequeueTool(ctx context.Context, req *mcpsdk.CallToo
 	}
 	if out.PayloadBytes <= 0 {
 		_ = msg.ClosePayload()
+		cancelDequeue()
 		return nil, out, nil
 	}
 
-	chunkBytes, err := normalizeStreamChunkBytes(input.ChunkBytes)
-	if err != nil {
-		_ = msg.ClosePayload()
-		return nil, queueDequeueToolOutput{}, err
-	}
-	if input.MaxBytes < 0 {
-		_ = msg.ClosePayload()
-		return nil, queueDequeueToolOutput{}, fmt.Errorf("max_bytes must be >= 0")
-	}
 	if req == nil || req.Session == nil {
 		_ = msg.ClosePayload()
-		return nil, queueDequeueToolOutput{}, fmt.Errorf("queue payload streaming requires an active MCP session")
+		cancelDequeue()
+		return nil, queueDequeueToolOutput{}, fmt.Errorf("queue payload transfer requires an active MCP session")
 	}
 	reader, err := msg.PayloadReader()
 	if err != nil {
 		_ = msg.ClosePayload()
+		cancelDequeue()
 		return nil, queueDequeueToolOutput{}, err
 	}
-	progressToken := normalizeProgressToken(input.ProgressToken, "lockd.queue.payload", out.Namespace, out.Queue, out.MessageID)
-	streamed, chunks, truncated, err := streamReaderToProgress(ctx, req.Session, reader, streamProgressRequest{
-		ProgressToken: progressToken,
-		EventType:     "lockd.queue.payload.chunk",
-		ChunkBytes:    chunkBytes,
-		MaxBytes:      input.MaxBytes,
-		Metadata: map[string]any{
-			"namespace":      out.Namespace,
-			"queue":          out.Queue,
-			"message_id":     out.MessageID,
-			"lease_id":       out.LeaseID,
-			"content_type":   out.ContentType,
-			"correlation_id": out.CorrelationID,
+	reg, err := s.ensureTransferManager().RegisterDownload(req.Session, reader, transferDownloadRequest{
+		ContentType:   strings.TrimSpace(out.ContentType),
+		ContentLength: out.PayloadBytes,
+		Filename:      out.MessageID,
+		Headers: map[string]string{
+			"X-Lockd-Queue":         out.Queue,
+			"X-Lockd-Namespace":     out.Namespace,
+			"X-Lockd-Queue-Message": out.MessageID,
 		},
+		Cleanup: cancelDequeue,
 	})
-	closeErr := reader.Close()
-	_ = msg.ClosePayload()
 	if err != nil {
+		_ = reader.Close()
+		_ = msg.ClosePayload()
+		cancelDequeue()
 		return nil, queueDequeueToolOutput{}, err
 	}
-	if closeErr != nil {
-		return nil, queueDequeueToolOutput{}, closeErr
-	}
-	out.PayloadProgressToken = progressToken
-	out.PayloadStreamedBytes = streamed
-	out.PayloadChunks = chunks
-	out.PayloadTruncated = truncated
+	out.PayloadDownloadURL = s.transferURL(reg.ID)
+	out.PayloadDownloadMethod = reg.Method
+	out.PayloadDownloadExpiry = reg.ExpiresAtUnix
 	return nil, out, nil
 }
 

@@ -14,8 +14,11 @@ import (
 )
 
 type writeStreamBeginOutput struct {
-	StreamID      string `json:"stream_id"`
-	MaxChunkBytes int64  `json:"max_chunk_bytes"`
+	StreamID            string `json:"stream_id"`
+	MaxChunkBytes       int64  `json:"max_chunk_bytes"`
+	UploadURL           string `json:"upload_url,omitempty"`
+	UploadMethod        string `json:"upload_method,omitempty"`
+	UploadExpiresAtUnix int64  `json:"upload_expires_at_unix,omitempty"`
 }
 
 type writeStreamAppendInput struct {
@@ -64,6 +67,12 @@ type stateWriteStreamCommitOutput struct {
 	QueryHidden   *bool  `json:"query_hidden,omitempty"`
 }
 
+type writeStreamTransferOutput struct {
+	UploadURL           string
+	UploadMethod        string
+	UploadExpiresAtUnix int64
+}
+
 func (s *server) handleStateWriteStreamBeginTool(_ context.Context, req *mcpsdk.CallToolRequest, input stateWriteStreamBeginInput) (*mcpsdk.CallToolResult, writeStreamBeginOutput, error) {
 	if req == nil || req.Session == nil {
 		return nil, writeStreamBeginOutput{}, fmt.Errorf("state write stream begin requires an active MCP session")
@@ -101,7 +110,18 @@ func (s *server) handleStateWriteStreamBeginTool(_ context.Context, req *mcpsdk.
 	if err != nil {
 		return nil, writeStreamBeginOutput{}, err
 	}
-	return nil, writeStreamBeginOutput{StreamID: streamID, MaxChunkBytes: normalizedInlineMaxBytes(s.cfg.InlineMaxBytes)}, nil
+	transfer, err := s.registerWriteStreamUploadCapability(req.Session, streamID, writeStreamKindState)
+	if err != nil {
+		_, _ = mgr.Abort(req.Session, streamID, writeStreamKindState, "transfer capability setup failed")
+		return nil, writeStreamBeginOutput{}, err
+	}
+	return nil, writeStreamBeginOutput{
+		StreamID:            streamID,
+		MaxChunkBytes:       normalizedInlineMaxBytes(s.cfg.InlineMaxBytes),
+		UploadURL:           transfer.UploadURL,
+		UploadMethod:        transfer.UploadMethod,
+		UploadExpiresAtUnix: transfer.UploadExpiresAtUnix,
+	}, nil
 }
 
 func (s *server) handleStateWriteStreamAppendTool(_ context.Context, req *mcpsdk.CallToolRequest, input writeStreamAppendInput) (*mcpsdk.CallToolResult, writeStreamAppendOutput, error) {
@@ -129,6 +149,7 @@ func (s *server) handleStateWriteStreamCommitTool(_ context.Context, req *mcpsdk
 	if err != nil {
 		return nil, stateWriteStreamCommitOutput{}, err
 	}
+	s.ensureTransferManager().RevokeWriteStream(req.Session, input.StreamID)
 	stateOut, ok := result.(stateUpdateToolOutput)
 	if !ok {
 		return nil, stateWriteStreamCommitOutput{}, fmt.Errorf("state write stream %s returned invalid result type", strings.TrimSpace(input.StreamID))
@@ -152,6 +173,7 @@ func (s *server) handleStateWriteStreamAbortTool(_ context.Context, req *mcpsdk.
 	if err != nil {
 		return nil, writeStreamAbortOutput{}, err
 	}
+	s.ensureTransferManager().RevokeWriteStream(req.Session, input.StreamID)
 	return nil, writeStreamAbortOutput{StreamID: strings.TrimSpace(input.StreamID), Aborted: true, BytesReceived: bytes}, nil
 }
 
@@ -222,7 +244,18 @@ func (s *server) handleQueueWriteStreamBeginTool(_ context.Context, req *mcpsdk.
 	if err != nil {
 		return nil, writeStreamBeginOutput{}, err
 	}
-	return nil, writeStreamBeginOutput{StreamID: streamID, MaxChunkBytes: normalizedInlineMaxBytes(s.cfg.InlineMaxBytes)}, nil
+	transfer, err := s.registerWriteStreamUploadCapability(req.Session, streamID, writeStreamKindQueue)
+	if err != nil {
+		_, _ = mgr.Abort(req.Session, streamID, writeStreamKindQueue, "transfer capability setup failed")
+		return nil, writeStreamBeginOutput{}, err
+	}
+	return nil, writeStreamBeginOutput{
+		StreamID:            streamID,
+		MaxChunkBytes:       normalizedInlineMaxBytes(s.cfg.InlineMaxBytes),
+		UploadURL:           transfer.UploadURL,
+		UploadMethod:        transfer.UploadMethod,
+		UploadExpiresAtUnix: transfer.UploadExpiresAtUnix,
+	}, nil
 }
 
 func (s *server) handleQueueWriteStreamAppendTool(_ context.Context, req *mcpsdk.CallToolRequest, input writeStreamAppendInput) (*mcpsdk.CallToolResult, writeStreamAppendOutput, error) {
@@ -250,6 +283,7 @@ func (s *server) handleQueueWriteStreamCommitTool(_ context.Context, req *mcpsdk
 	if err != nil {
 		return nil, queueWriteStreamCommitOutput{}, err
 	}
+	s.ensureTransferManager().RevokeWriteStream(req.Session, input.StreamID)
 	queueOut, ok := result.(queueEnqueueToolOutput)
 	if !ok {
 		return nil, queueWriteStreamCommitOutput{}, fmt.Errorf("queue write stream %s returned invalid result type", strings.TrimSpace(input.StreamID))
@@ -279,6 +313,7 @@ func (s *server) handleQueueWriteStreamAbortTool(_ context.Context, req *mcpsdk.
 	if err != nil {
 		return nil, writeStreamAbortOutput{}, err
 	}
+	s.ensureTransferManager().RevokeWriteStream(req.Session, input.StreamID)
 	return nil, writeStreamAbortOutput{StreamID: strings.TrimSpace(input.StreamID), Aborted: true, BytesReceived: bytes}, nil
 }
 
@@ -379,7 +414,18 @@ func (s *server) handleAttachmentsWriteStreamBeginTool(ctx context.Context, req 
 	if err != nil {
 		return nil, writeStreamBeginOutput{}, err
 	}
-	return nil, writeStreamBeginOutput{StreamID: streamID, MaxChunkBytes: normalizedInlineMaxBytes(s.cfg.InlineMaxBytes)}, nil
+	transfer, err := s.registerWriteStreamUploadCapability(req.Session, streamID, writeStreamKindAttachment)
+	if err != nil {
+		_, _ = mgr.Abort(req.Session, streamID, writeStreamKindAttachment, "transfer capability setup failed")
+		return nil, writeStreamBeginOutput{}, err
+	}
+	return nil, writeStreamBeginOutput{
+		StreamID:            streamID,
+		MaxChunkBytes:       normalizedInlineMaxBytes(s.cfg.InlineMaxBytes),
+		UploadURL:           transfer.UploadURL,
+		UploadMethod:        transfer.UploadMethod,
+		UploadExpiresAtUnix: transfer.UploadExpiresAtUnix,
+	}, nil
 }
 
 func (s *server) handleAttachmentsWriteStreamAppendTool(_ context.Context, req *mcpsdk.CallToolRequest, input writeStreamAppendInput) (*mcpsdk.CallToolResult, writeStreamAppendOutput, error) {
@@ -407,6 +453,7 @@ func (s *server) handleAttachmentsWriteStreamCommitTool(_ context.Context, req *
 	if err != nil {
 		return nil, attachmentsWriteStreamCommitOutput{}, err
 	}
+	s.ensureTransferManager().RevokeWriteStream(req.Session, input.StreamID)
 	attOut, ok := result.(attachmentPutToolOutput)
 	if !ok {
 		return nil, attachmentsWriteStreamCommitOutput{}, fmt.Errorf("attachments write stream %s returned invalid result type", strings.TrimSpace(input.StreamID))
@@ -429,6 +476,7 @@ func (s *server) handleAttachmentsWriteStreamAbortTool(_ context.Context, req *m
 	if err != nil {
 		return nil, writeStreamAbortOutput{}, err
 	}
+	s.ensureTransferManager().RevokeWriteStream(req.Session, input.StreamID)
 	return nil, writeStreamAbortOutput{StreamID: strings.TrimSpace(input.StreamID), Aborted: true, BytesReceived: bytes}, nil
 }
 
@@ -438,6 +486,23 @@ func (s *server) ensureWriteStreamManager() *writeStreamManager {
 	}
 	s.writeStreams = newWriteStreamManager(s.writeStreamLog)
 	return s.writeStreams
+}
+
+func (s *server) registerWriteStreamUploadCapability(session *mcpsdk.ServerSession, streamID string, kind writeStreamKind) (writeStreamTransferOutput, error) {
+	manager := s.ensureTransferManager()
+	writeStreams := s.ensureWriteStreamManager()
+	reg, err := manager.RegisterUpload(session, streamID, func(ctx context.Context, reader io.Reader) (int64, error) {
+		_, total, uploadErr := writeStreams.Upload(session, streamID, kind, reader)
+		return total, uploadErr
+	})
+	if err != nil {
+		return writeStreamTransferOutput{}, err
+	}
+	return writeStreamTransferOutput{
+		UploadURL:           s.transferURL(reg.ID),
+		UploadMethod:        reg.Method,
+		UploadExpiresAtUnix: reg.ExpiresAtUnix,
+	}, nil
 }
 
 func decodeWriteStreamChunk(chunkBase64 string, maxBytes int64) ([]byte, error) {

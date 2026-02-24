@@ -132,6 +132,8 @@ type configDefaults struct {
 	MCPClientBundle           string   `yaml:"mcp.client-bundle"`
 	MCPBundle                 string   `yaml:"mcp.bundle"`
 	MCPDisableTLS             bool     `yaml:"mcp.disable-tls"`
+	MCPBaseURL                string   `yaml:"mcp.base-url"`
+	MCPAllowHTTP              bool     `yaml:"mcp.allow-http"`
 	MCPDisableMTLS            bool     `yaml:"mcp.disable-mtls"`
 	MCPInlineMaxBytes         int64    `yaml:"mcp.inline-max-bytes"`
 	MCPDefaultNamespace       string   `yaml:"mcp.default-namespace"`
@@ -221,6 +223,8 @@ func defaultConfigYAML(overrides ...func(*configDefaults)) ([]byte, error) {
 		MCPClientBundle:           "",
 		MCPBundle:                 "",
 		MCPDisableTLS:             false,
+		MCPBaseURL:                "",
+		MCPAllowHTTP:              false,
 		MCPDisableMTLS:            false,
 		MCPInlineMaxBytes:         2 * 1024 * 1024,
 		MCPDefaultNamespace:       "mcp",
@@ -228,7 +232,7 @@ func defaultConfigYAML(overrides ...func(*configDefaults)) ([]byte, error) {
 		MCPStateFile:              "",
 		MCPRefreshStore:           "",
 		MCPIssuer:                 "",
-		MCPPath:                   "/mcp",
+		MCPPath:                   "/",
 		MCPOAuthResourceURL:       "",
 		StoreSSE:                  "",
 		StoreKMSKeyID:             "",

@@ -31,6 +31,8 @@ import (
 type Config struct {
 	Listen                    string
 	DisableTLS                bool
+	BaseURL                   string
+	AllowHTTP                 bool
 	BundlePath                string
 	UpstreamServer            string
 	InlineMaxBytes            int64
@@ -64,18 +66,22 @@ type server struct {
 	oauthLogger    pslog.Logger
 	lifecycleLog   pslog.Logger
 	transportLog   pslog.Logger
+	transferLog    pslog.Logger
 	subscribeLog   pslog.Logger
 	writeStreamLog pslog.Logger
 	upstream       *lockdclient.Client
 	oauthManager   *oauth.Manager
 	subscriptions  *subscriptionManager
 	writeStreams   *writeStreamManager
+	transfers      *transferManager
 	httpServer     *http.Server
 	tlsBundlePath  string
 	resourceID     string
 	metadataPath   string
 	mcpHTTPPath    string
 	oauthWellKnown string
+	baseURL        *url.URL
+	transferPath   string
 }
 
 // NewServer constructs the lockd MCP facade service.
@@ -97,12 +103,19 @@ func NewServer(req NewServerRequest) (Server, error) {
 		oauthLogger:    svcfields.WithSubsystem(logger, "mcp.oauth"),
 		lifecycleLog:   svcfields.WithSubsystem(logger, "server.lifecycle.mcp"),
 		transportLog:   svcfields.WithSubsystem(logger, "mcp.transport.http"),
+		transferLog:    svcfields.WithSubsystem(logger, "mcp.transport.transfer"),
 		subscribeLog:   svcfields.WithSubsystem(logger, "mcp.queue.subscriptions"),
 		writeStreamLog: svcfields.WithSubsystem(logger, "mcp.write.streams"),
 		mcpHTTPPath:    cleanHTTPPath(cfg.MCPPath),
 		metadataPath:   "/.well-known/oauth-protected-resource",
 		oauthWellKnown: "/.well-known/oauth-authorization-server",
 	}
+	baseURL, err := parseBaseURL(cfg.BaseURL, cfg.AllowHTTP)
+	if err != nil {
+		return nil, err
+	}
+	s.baseURL = baseURL
+	s.transferPath = path.Join(s.mcpHTTPPath, "transfer")
 
 	upstream, err := newUpstreamClient(cfg, logger)
 	if err != nil {
@@ -111,6 +124,7 @@ func NewServer(req NewServerRequest) (Server, error) {
 	s.upstream = upstream
 	s.subscriptions = newSubscriptionManager(upstream, s.subscribeLog)
 	s.writeStreams = newWriteStreamManager(s.writeStreamLog)
+	s.transfers = newTransferManager(s.transferLog)
 
 	if !cfg.DisableTLS {
 		oauthMgr, err := oauth.NewManager(oauth.ManagerConfig{
@@ -174,6 +188,9 @@ func (s *server) Run(ctx context.Context) error {
 		}
 		if s.writeStreams != nil {
 			s.writeStreams.Close()
+		}
+		if s.transfers != nil {
+			s.transfers.Close()
 		}
 		if s.upstream != nil {
 			_ = s.upstream.Close()
@@ -245,6 +262,7 @@ func (s *server) buildMux() (*http.ServeMux, error) {
 
 	mux := http.NewServeMux()
 	mux.Handle(s.mcpHTTPPath, mcpHandler)
+	mux.HandleFunc(s.transferPath+"/", s.handleTransfer)
 	if s.oauthManager != nil {
 		mux.HandleFunc("/authorize", s.oauthManager.HandleAuthorize)
 		mux.HandleFunc("/token", s.oauthManager.HandleToken)
@@ -901,7 +919,7 @@ func applyDefaults(cfg *Config) {
 		cfg.UpstreamKeepAliveTimeout = lockdclient.DefaultKeepAliveTimeout
 	}
 	if strings.TrimSpace(cfg.MCPPath) == "" {
-		cfg.MCPPath = "/mcp"
+		cfg.MCPPath = "/"
 	}
 }
 
@@ -912,13 +930,19 @@ func validateConfig(cfg Config) error {
 	if strings.TrimSpace(cfg.UpstreamServer) == "" {
 		return fmt.Errorf("upstream lockd server required")
 	}
+	if strings.TrimSpace(cfg.BaseURL) == "" {
+		return fmt.Errorf("mcp base URL required: set --base-url (or LOCKD_MCP_BASE_URL) to the externally reachable MCP URL")
+	}
+	if _, err := parseBaseURL(cfg.BaseURL, cfg.AllowHTTP); err != nil {
+		return err
+	}
 	return nil
 }
 
 func cleanHTTPPath(raw string) string {
 	p := strings.TrimSpace(raw)
 	if p == "" {
-		return "/mcp"
+		return "/"
 	}
 	if !strings.HasPrefix(p, "/") {
 		p = "/" + p
@@ -941,4 +965,38 @@ func joinURL(baseURL, p string) string {
 
 func absPath(p string) (string, error) {
 	return filepath.Abs(p)
+}
+
+func parseBaseURL(raw string, allowHTTP bool) (*url.URL, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return nil, fmt.Errorf("mcp base URL required: set --base-url (or LOCKD_MCP_BASE_URL) to the externally reachable MCP URL")
+	}
+	if !strings.Contains(value, "://") {
+		value = "https://" + value
+	}
+	u, err := url.Parse(value)
+	if err != nil {
+		return nil, fmt.Errorf("parse mcp base URL %q: %w", raw, err)
+	}
+	if strings.TrimSpace(u.Scheme) == "" {
+		return nil, fmt.Errorf("mcp base URL %q requires a scheme", raw)
+	}
+	scheme := strings.ToLower(strings.TrimSpace(u.Scheme))
+	if scheme != "https" {
+		if scheme != "http" {
+			return nil, fmt.Errorf("mcp base URL %q has unsupported scheme %q (expected https)", raw, scheme)
+		}
+		if !allowHTTP {
+			return nil, fmt.Errorf("mcp base URL %q uses http; set --allow-http to permit non-TLS transfer URLs", raw)
+		}
+	}
+	if strings.TrimSpace(u.Host) == "" {
+		return nil, fmt.Errorf("mcp base URL %q requires a host", raw)
+	}
+	u.Fragment = ""
+	u.RawFragment = ""
+	u.RawQuery = ""
+	u.Path = cleanHTTPPath(u.Path)
+	return u, nil
 }

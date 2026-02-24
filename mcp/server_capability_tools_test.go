@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"path"
 	"strings"
 	"testing"
 	"time"
@@ -247,14 +250,15 @@ func TestHandleQueueDequeueStatefulNackAndExtend(t *testing.T) {
 	if delivery.PayloadBytes == 0 {
 		t.Fatalf("expected non-zero payload bytes")
 	}
-	if delivery.PayloadProgressToken == "" {
-		t.Fatalf("expected payload progress token")
+	if delivery.PayloadDownloadURL == "" {
+		t.Fatalf("expected payload download URL")
 	}
-	if delivery.PayloadChunks == 0 {
-		t.Fatalf("expected payload chunks > 0")
+	if method := delivery.PayloadDownloadMethod; method != http.MethodGet {
+		t.Fatalf("expected payload download method GET, got %q", method)
 	}
-	if delivery.PayloadStreamedBytes == 0 {
-		t.Fatalf("expected payload streamed bytes > 0")
+	body := mustDownloadTransfer(t, s, delivery.PayloadDownloadURL)
+	if string(body) != `{"kind":"mcp-queue"}` {
+		t.Fatalf("unexpected dequeue payload body: %s", string(body))
 	}
 
 	_, extendOut, err := s.handleQueueExtendTool(ctx, nil, queueExtendToolInput{
@@ -507,22 +511,11 @@ func TestStateWriteStreamToolsEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("state write_stream.begin: %v", err)
 	}
-	chunks := [][]byte{
-		[]byte(`{"kind":"state-write-stream",`),
-		[]byte(`"ok":true}`),
+	if begin.UploadURL == "" {
+		t.Fatalf("expected upload_url in state write stream begin output")
 	}
-	for _, chunk := range chunks {
-		_, appendOut, err := s.handleStateWriteStreamAppendTool(ctx, &mcpsdk.CallToolRequest{Session: session}, writeStreamAppendInput{
-			StreamID:    begin.StreamID,
-			ChunkBase64: base64.StdEncoding.EncodeToString(chunk),
-		})
-		if err != nil {
-			t.Fatalf("state write_stream.append: %v", err)
-		}
-		if appendOut.BytesAppended == 0 {
-			t.Fatalf("expected appended bytes > 0")
-		}
-	}
+	payload := []byte(`{"kind":"state-write-stream","ok":true}`)
+	mustUploadTransfer(t, s, begin.UploadURL, payload)
 	_, commit, err := s.handleStateWriteStreamCommitTool(ctx, &mcpsdk.CallToolRequest{Session: session}, writeStreamCommitInput{
 		StreamID: begin.StreamID,
 	})
@@ -550,7 +543,7 @@ func TestStateWriteStreamToolsEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get bytes: %v", err)
 	}
-	if string(gotBytes) != `{"kind":"state-write-stream","ok":true}` {
+	if string(gotBytes) != string(payload) {
 		t.Fatalf("unexpected state payload: %s", string(gotBytes))
 	}
 }
@@ -572,17 +565,11 @@ func TestQueueWriteStreamToolsEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("queue write_stream.begin: %v", err)
 	}
+	if begin.UploadURL == "" {
+		t.Fatalf("expected upload_url in queue write stream begin output")
+	}
 	payload := []byte(`{"kind":"queue-write-stream","ok":true}`)
-	_, appendOut, err := s.handleQueueWriteStreamAppendTool(ctx, &mcpsdk.CallToolRequest{Session: session}, writeStreamAppendInput{
-		StreamID:    begin.StreamID,
-		ChunkBase64: base64.StdEncoding.EncodeToString(payload),
-	})
-	if err != nil {
-		t.Fatalf("queue write_stream.append: %v", err)
-	}
-	if appendOut.TotalBytes != int64(len(payload)) {
-		t.Fatalf("expected total bytes %d, got %d", len(payload), appendOut.TotalBytes)
-	}
+	mustUploadTransfer(t, s, begin.UploadURL, payload)
 	_, commit, err := s.handleQueueWriteStreamCommitTool(ctx, &mcpsdk.CallToolRequest{Session: session}, writeStreamCommitInput{
 		StreamID: begin.StreamID,
 	})
@@ -648,17 +635,11 @@ func TestAttachmentsWriteStreamToolsEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("attachments write_stream.begin: %v", err)
 	}
+	if begin.UploadURL == "" {
+		t.Fatalf("expected upload_url in attachments write stream begin output")
+	}
 	payload := bytes.Repeat([]byte{0xde, 0xad, 0xbe, 0xef}, 256)
-	_, appendOut, err := s.handleAttachmentsWriteStreamAppendTool(ctx, &mcpsdk.CallToolRequest{Session: session}, writeStreamAppendInput{
-		StreamID:    begin.StreamID,
-		ChunkBase64: base64.StdEncoding.EncodeToString(payload),
-	})
-	if err != nil {
-		t.Fatalf("attachments write_stream.append: %v", err)
-	}
-	if appendOut.TotalBytes != int64(len(payload)) {
-		t.Fatalf("expected total bytes %d, got %d", len(payload), appendOut.TotalBytes)
-	}
+	mustUploadTransfer(t, s, begin.UploadURL, payload)
 	_, commit, err := s.handleAttachmentsWriteStreamCommitTool(ctx, &mcpsdk.CallToolRequest{Session: session}, writeStreamCommitInput{
 		StreamID: begin.StreamID,
 	})
@@ -812,10 +793,20 @@ func newToolTestServer(t *testing.T) (*server, *lockdclient.Client) {
 			DefaultNamespace:    "mcp",
 			AgentBusQueue:       "lockd.agent.bus",
 			InlineMaxBytes:      2 * 1024 * 1024,
+			MCPPath:             "/mcp",
 		},
 		upstream:       cli,
+		transferLog:    pslog.NewStructured(context.Background(), io.Discard),
 		writeStreamLog: pslog.NewStructured(context.Background(), io.Discard),
+		mcpHTTPPath:    "/mcp",
 	}
+	baseURL, err := parseBaseURL("http://mcp.local", true)
+	if err != nil {
+		t.Fatalf("parse base url: %v", err)
+	}
+	srv.baseURL = baseURL
+	srv.transferPath = path.Join(srv.mcpHTTPPath, "transfer")
+	srv.transfers = newTransferManager(srv.transferLog)
 	srv.writeStreams = newWriteStreamManager(srv.writeStreamLog)
 	return srv, cli
 }
@@ -843,4 +834,39 @@ func newInMemoryServerSession(t *testing.T) (*mcpsdk.ServerSession, func()) {
 		_ = ss.Close()
 		cancel()
 	}
+}
+
+func mustUploadTransfer(t testing.TB, s *server, transferURL string, payload []byte) {
+	t.Helper()
+	parsed, err := url.Parse(strings.TrimSpace(transferURL))
+	if err != nil {
+		t.Fatalf("parse transfer URL %q: %v", transferURL, err)
+	}
+	req := httptest.NewRequest(http.MethodPut, parsed.Path, bytes.NewReader(payload))
+	rec := httptest.NewRecorder()
+	s.handleTransfer(rec, req)
+	resp := rec.Result()
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("transfer upload status=%d body=%s", resp.StatusCode, string(body))
+	}
+}
+
+func mustDownloadTransfer(t testing.TB, s *server, transferURL string) []byte {
+	t.Helper()
+	parsed, err := url.Parse(strings.TrimSpace(transferURL))
+	if err != nil {
+		t.Fatalf("parse transfer URL %q: %v", transferURL, err)
+	}
+	req := httptest.NewRequest(http.MethodGet, parsed.Path, nil)
+	rec := httptest.NewRecorder()
+	s.handleTransfer(rec, req)
+	resp := rec.Result()
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("transfer download status=%d body=%s", resp.StatusCode, string(body))
+	}
+	return body
 }

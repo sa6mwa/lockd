@@ -26,19 +26,86 @@ func TestValidateConfigRequiresFields(t *testing.T) {
 	if err := validateConfig(Config{Listen: "127.0.0.1:19341"}); err == nil || !strings.Contains(err.Error(), "upstream lockd server required") {
 		t.Fatalf("expected upstream server error, got %v", err)
 	}
+	if err := validateConfig(Config{Listen: "127.0.0.1:19341", UpstreamServer: "http://127.0.0.1:9341"}); err == nil || !strings.Contains(err.Error(), "mcp base URL required") {
+		t.Fatalf("expected base URL error, got %v", err)
+	}
 }
 
 func TestCleanHTTPPathNormalizes(t *testing.T) {
 	t.Parallel()
 
-	if got := cleanHTTPPath(""); got != "/mcp" {
-		t.Fatalf("expected /mcp, got %q", got)
+	if got := cleanHTTPPath(""); got != "/" {
+		t.Fatalf("expected /, got %q", got)
 	}
 	if got := cleanHTTPPath("mcp"); got != "/mcp" {
 		t.Fatalf("expected /mcp, got %q", got)
 	}
 	if got := cleanHTTPPath("/foo//bar/../mcp"); got != "/foo/mcp" {
 		t.Fatalf("expected /foo/mcp, got %q", got)
+	}
+}
+
+func TestResolveConfigDefaultsMCPPathRoot(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{}
+	applyDefaults(&cfg)
+	if got := cfg.MCPPath; got != "/" {
+		t.Fatalf("expected default MCPPath=/, got %q", got)
+	}
+
+	cfg = Config{MCPPath: "/mcp/v1"}
+	applyDefaults(&cfg)
+	if got := cfg.MCPPath; got != "/mcp/v1" {
+		t.Fatalf("expected explicit MCPPath preserved, got %q", got)
+	}
+}
+
+func TestTransferURLJoinsBaseAndDocroot(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		baseURL string
+		docroot string
+		want    string
+	}{
+		{
+			name:    "base path with root docroot",
+			baseURL: "https://myserver/lockdmcp/v1",
+			docroot: "/",
+			want:    "https://myserver/lockdmcp/v1/transfer/cap-123",
+		},
+		{
+			name:    "base path merged with nested docroot",
+			baseURL: "https://mybase/mcp",
+			docroot: "/mcp/v1",
+			want:    "https://mybase/mcp/mcp/v1/transfer/cap-123",
+		},
+		{
+			name:    "root base with docroot",
+			baseURL: "https://mydomain",
+			docroot: "/mcp",
+			want:    "https://mydomain/mcp/transfer/cap-123",
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			base, err := parseBaseURL(tt.baseURL, false)
+			if err != nil {
+				t.Fatalf("parse base url: %v", err)
+			}
+			s := &server{
+				baseURL:     base,
+				mcpHTTPPath: cleanHTTPPath(tt.docroot),
+			}
+			if got := s.transferURL("cap-123"); got != tt.want {
+				t.Fatalf("unexpected transfer url: got %q want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -417,6 +484,7 @@ func TestNewServerOAuthBootstrapRequirement(t *testing.T) {
 		Config: Config{
 			DisableTLS:          false,
 			UpstreamServer:      ts.URL(),
+			BaseURL:             "https://127.0.0.1",
 			UpstreamDisableMTLS: true,
 			OAuthStatePath:      missingState,
 		},
@@ -437,6 +505,8 @@ func TestNewServerAllowsTLSDisabledWithoutBootstrapState(t *testing.T) {
 		Config: Config{
 			DisableTLS:          true,
 			UpstreamServer:      ts.URL(),
+			BaseURL:             "http://127.0.0.1",
+			AllowHTTP:           true,
 			UpstreamDisableMTLS: true,
 			OAuthStatePath:      missingState,
 		},

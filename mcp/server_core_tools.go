@@ -222,25 +222,21 @@ func (s *server) handleStateUpdateTool(ctx context.Context, _ *mcpsdk.CallToolRe
 }
 
 type stateStreamToolInput struct {
-	Key           string `json:"key" jsonschema:"State key"`
-	Namespace     string `json:"namespace,omitempty" jsonschema:"Namespace (defaults to server default namespace)"`
-	Public        *bool  `json:"public,omitempty" jsonschema:"Read mode selector: true for public read (default), false for lease-bound read"`
-	LeaseID       string `json:"lease_id,omitempty" jsonschema:"Lease ID required when public=false"`
-	ChunkBytes    int64  `json:"chunk_bytes,omitempty" jsonschema:"Chunk size per progress event in bytes (default 65536, max 4194304)"`
-	MaxBytes      int64  `json:"max_bytes,omitempty" jsonschema:"Optional maximum bytes to stream before truncating"`
-	ProgressToken string `json:"progress_token,omitempty" jsonschema:"Optional explicit progress token for chunk notifications"`
+	Key       string `json:"key" jsonschema:"State key"`
+	Namespace string `json:"namespace,omitempty" jsonschema:"Namespace (defaults to server default namespace)"`
+	Public    *bool  `json:"public,omitempty" jsonschema:"Read mode selector: true for public read (default), false for lease-bound read"`
+	LeaseID   string `json:"lease_id,omitempty" jsonschema:"Lease ID required when public=false"`
 }
 
 type stateStreamToolOutput struct {
-	Namespace     string `json:"namespace"`
-	Key           string `json:"key"`
-	Found         bool   `json:"found"`
-	ETag          string `json:"etag,omitempty"`
-	Version       int64  `json:"version,omitempty"`
-	ProgressToken string `json:"progress_token"`
-	StreamedBytes int64  `json:"streamed_bytes"`
-	Chunks        int    `json:"chunks"`
-	Truncated     bool   `json:"truncated"`
+	Namespace             string `json:"namespace"`
+	Key                   string `json:"key"`
+	Found                 bool   `json:"found"`
+	ETag                  string `json:"etag,omitempty"`
+	Version               int64  `json:"version,omitempty"`
+	DownloadURL           string `json:"download_url,omitempty"`
+	DownloadMethod        string `json:"download_method,omitempty"`
+	DownloadExpiresAtUnix int64  `json:"download_expires_at_unix,omitempty"`
 }
 
 func (s *server) handleStateStreamTool(ctx context.Context, req *mcpsdk.CallToolRequest, input stateStreamToolInput) (*mcpsdk.CallToolResult, stateStreamToolOutput, error) {
@@ -259,14 +255,6 @@ func (s *server) handleStateStreamTool(ctx context.Context, req *mcpsdk.CallTool
 	if !publicRead && leaseID == "" {
 		return nil, stateStreamToolOutput{}, fmt.Errorf("lease_id is required when public=false")
 	}
-	chunkBytes, err := normalizeStreamChunkBytes(input.ChunkBytes)
-	if err != nil {
-		return nil, stateStreamToolOutput{}, err
-	}
-	maxBytes := input.MaxBytes
-	if maxBytes < 0 {
-		return nil, stateStreamToolOutput{}, fmt.Errorf("max_bytes must be >= 0")
-	}
 
 	opts := []lockdclient.GetOption{}
 	if ns := strings.TrimSpace(input.Namespace); ns != "" {
@@ -278,48 +266,45 @@ func (s *server) handleStateStreamTool(ctx context.Context, req *mcpsdk.CallTool
 	if !publicRead {
 		opts = append(opts, lockdclient.WithGetPublicDisabled(true))
 	}
-	resp, err := s.upstream.Get(ctx, key, opts...)
+	transferCtx, cancelTransfer := context.WithCancel(context.Background())
+	resp, err := s.upstream.Get(transferCtx, key, opts...)
 	if err != nil {
+		cancelTransfer()
 		return nil, stateStreamToolOutput{}, err
 	}
-	defer resp.Close()
 
 	out := stateStreamToolOutput{
-		Namespace:     resp.Namespace,
-		Key:           resp.Key,
-		Found:         resp.HasState,
-		ETag:          resp.ETag,
-		ProgressToken: normalizeProgressToken(input.ProgressToken, "lockd.state", resp.Namespace, resp.Key),
+		Namespace: resp.Namespace,
+		Key:       resp.Key,
+		Found:     resp.HasState,
+		ETag:      resp.ETag,
 	}
 	if ver := strings.TrimSpace(resp.Version); ver != "" {
 		parsed, parseErr := strconv.ParseInt(ver, 10, 64)
 		if parseErr != nil {
+			_ = resp.Close()
+			cancelTransfer()
 			return nil, stateStreamToolOutput{}, fmt.Errorf("invalid upstream version %q: %w", ver, parseErr)
 		}
 		out.Version = parsed
 	}
 	if !resp.HasState {
+		_ = resp.Close()
+		cancelTransfer()
 		return nil, out, nil
 	}
-
-	streamed, chunks, truncated, err := streamReaderToProgress(ctx, req.Session, resp.Reader(), streamProgressRequest{
-		ProgressToken: out.ProgressToken,
-		EventType:     "lockd.state.chunk",
-		ChunkBytes:    chunkBytes,
-		MaxBytes:      maxBytes,
-		Metadata: map[string]any{
-			"namespace": resp.Namespace,
-			"key":       resp.Key,
-			"etag":      resp.ETag,
-			"version":   out.Version,
-		},
+	reg, err := s.ensureTransferManager().RegisterDownload(req.Session, resp.Reader(), transferDownloadRequest{
+		ContentType: "application/json",
+		Cleanup:     cancelTransfer,
 	})
 	if err != nil {
+		_ = resp.Close()
+		cancelTransfer()
 		return nil, stateStreamToolOutput{}, err
 	}
-	out.StreamedBytes = streamed
-	out.Chunks = chunks
-	out.Truncated = truncated
+	out.DownloadURL = s.transferURL(reg.ID)
+	out.DownloadMethod = reg.Method
+	out.DownloadExpiresAtUnix = reg.ExpiresAtUnix
 	return nil, out, nil
 }
 
@@ -597,27 +582,23 @@ func (s *server) handleAttachmentChecksumTool(ctx context.Context, _ *mcpsdk.Cal
 }
 
 type attachmentStreamToolInput struct {
-	Key           string `json:"key" jsonschema:"State key"`
-	Namespace     string `json:"namespace,omitempty" jsonschema:"Namespace (defaults to server default namespace)"`
-	LeaseID       string `json:"lease_id,omitempty" jsonschema:"Lease id required when public=false"`
-	TxnID         string `json:"txn_id,omitempty" jsonschema:"Optional XA transaction id"`
-	FencingToken  *int64 `json:"fencing_token,omitempty" jsonschema:"Optional fencing token override"`
-	Public        *bool  `json:"public,omitempty" jsonschema:"Read mode selector: true for public read (default), false for lease-bound read"`
-	ID            string `json:"id,omitempty" jsonschema:"Attachment id selector"`
-	Name          string `json:"name,omitempty" jsonschema:"Attachment name selector"`
-	ChunkBytes    int64  `json:"chunk_bytes,omitempty" jsonschema:"Chunk size per progress event in bytes (default 65536, max 4194304)"`
-	MaxBytes      int64  `json:"max_bytes,omitempty" jsonschema:"Optional maximum bytes to stream before truncating"`
-	ProgressToken string `json:"progress_token,omitempty" jsonschema:"Optional explicit progress token for chunk notifications"`
+	Key          string `json:"key" jsonschema:"State key"`
+	Namespace    string `json:"namespace,omitempty" jsonschema:"Namespace (defaults to server default namespace)"`
+	LeaseID      string `json:"lease_id,omitempty" jsonschema:"Lease id required when public=false"`
+	TxnID        string `json:"txn_id,omitempty" jsonschema:"Optional XA transaction id"`
+	FencingToken *int64 `json:"fencing_token,omitempty" jsonschema:"Optional fencing token override"`
+	Public       *bool  `json:"public,omitempty" jsonschema:"Read mode selector: true for public read (default), false for lease-bound read"`
+	ID           string `json:"id,omitempty" jsonschema:"Attachment id selector"`
+	Name         string `json:"name,omitempty" jsonschema:"Attachment name selector"`
 }
 
 type attachmentStreamToolOutput struct {
-	Namespace     string               `json:"namespace"`
-	Key           string               `json:"key"`
-	Attachment    attachmentInfoOutput `json:"attachment"`
-	ProgressToken string               `json:"progress_token"`
-	StreamedBytes int64                `json:"streamed_bytes"`
-	Chunks        int                  `json:"chunks"`
-	Truncated     bool                 `json:"truncated"`
+	Namespace             string               `json:"namespace"`
+	Key                   string               `json:"key"`
+	Attachment            attachmentInfoOutput `json:"attachment"`
+	DownloadURL           string               `json:"download_url,omitempty"`
+	DownloadMethod        string               `json:"download_method,omitempty"`
+	DownloadExpiresAtUnix int64                `json:"download_expires_at_unix,omitempty"`
 }
 
 func (s *server) handleAttachmentStreamTool(ctx context.Context, req *mcpsdk.CallToolRequest, input attachmentStreamToolInput) (*mcpsdk.CallToolResult, attachmentStreamToolOutput, error) {
@@ -641,15 +622,8 @@ func (s *server) handleAttachmentStreamTool(ctx context.Context, req *mcpsdk.Cal
 	if !publicRead && leaseID == "" {
 		return nil, attachmentStreamToolOutput{}, fmt.Errorf("lease_id is required when public=false")
 	}
-	chunkBytes, err := normalizeStreamChunkBytes(input.ChunkBytes)
-	if err != nil {
-		return nil, attachmentStreamToolOutput{}, err
-	}
-	if input.MaxBytes < 0 {
-		return nil, attachmentStreamToolOutput{}, fmt.Errorf("max_bytes must be >= 0")
-	}
-
-	att, err := s.upstream.GetAttachment(ctx, lockdclient.GetAttachmentRequest{
+	transferCtx, cancelTransfer := context.WithCancel(context.Background())
+	att, err := s.upstream.GetAttachment(transferCtx, lockdclient.GetAttachmentRequest{
 		Namespace:    s.resolveNamespace(input.Namespace),
 		Key:          key,
 		LeaseID:      leaseID,
@@ -662,36 +636,32 @@ func (s *server) handleAttachmentStreamTool(ctx context.Context, req *mcpsdk.Cal
 		},
 	})
 	if err != nil {
+		cancelTransfer()
 		return nil, attachmentStreamToolOutput{}, err
 	}
-	defer att.Close()
-
-	progressToken := normalizeProgressToken(input.ProgressToken, "lockd.attachments", s.resolveNamespace(input.Namespace), key)
-	streamed, chunks, truncated, err := streamReaderToProgress(ctx, req.Session, att, streamProgressRequest{
-		ProgressToken: progressToken,
-		EventType:     "lockd.attachments.chunk",
-		ChunkBytes:    chunkBytes,
-		MaxBytes:      input.MaxBytes,
-		Metadata: map[string]any{
-			"namespace":        s.resolveNamespace(input.Namespace),
-			"key":              key,
-			"attachment_id":    att.ID,
-			"attachment_name":  att.Name,
-			"plaintext_sha256": strings.TrimSpace(att.PlaintextSHA256),
-			"content_type":     strings.TrimSpace(att.ContentType),
+	reg, err := s.ensureTransferManager().RegisterDownload(req.Session, att, transferDownloadRequest{
+		ContentType:   strings.TrimSpace(att.ContentType),
+		ContentLength: att.Size,
+		Filename:      att.Name,
+		Headers: map[string]string{
+			"X-Lockd-Attachment-ID":               strings.TrimSpace(att.ID),
+			"X-Lockd-Attachment-Name":             strings.TrimSpace(att.Name),
+			"X-Lockd-Attachment-Plaintext-SHA256": strings.TrimSpace(att.PlaintextSHA256),
 		},
+		Cleanup: cancelTransfer,
 	})
 	if err != nil {
+		_ = att.Close()
+		cancelTransfer()
 		return nil, attachmentStreamToolOutput{}, err
 	}
 	return nil, attachmentStreamToolOutput{
-		Namespace:     s.resolveNamespace(input.Namespace),
-		Key:           key,
-		Attachment:    toAttachmentInfoOutput(att.AttachmentInfo),
-		ProgressToken: progressToken,
-		StreamedBytes: streamed,
-		Chunks:        chunks,
-		Truncated:     truncated,
+		Namespace:             s.resolveNamespace(input.Namespace),
+		Key:                   key,
+		Attachment:            toAttachmentInfoOutput(att.AttachmentInfo),
+		DownloadURL:           s.transferURL(reg.ID),
+		DownloadMethod:        reg.Method,
+		DownloadExpiresAtUnix: reg.ExpiresAtUnix,
 	}, nil
 }
 

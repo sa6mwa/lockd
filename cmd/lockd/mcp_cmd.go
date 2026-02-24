@@ -18,8 +18,7 @@ import (
 
 	"pkt.systems/lockd"
 	lockdmcp "pkt.systems/lockd/mcp"
-	"pkt.systems/lockd/mcp/oauth"
-	mcpstate "pkt.systems/lockd/mcp/state"
+	mcpadmin "pkt.systems/lockd/mcp/admin"
 	"pkt.systems/lockd/tlsutil"
 	"pkt.systems/pslog"
 )
@@ -30,6 +29,8 @@ const (
 	mcpClientBundleKey     = "mcp.client_bundle"
 	mcpBundleKey           = "mcp.bundle"
 	mcpDisableTLSKey       = "mcp.disable_tls"
+	mcpBaseURLKey          = "mcp.base_url"
+	mcpAllowHTTPKey        = "mcp.allow_http"
 	mcpDisableMTLSKey      = "mcp.disable_mtls"
 	mcpInlineMaxBytesKey   = "mcp.inline_max_bytes"
 	mcpDefaultNamespaceKey = "mcp.default_namespace"
@@ -73,10 +74,12 @@ func newMCPCommand(baseLogger pslog.Logger, inheritedServerFlag, inheritedBundle
 	flags.StringP("listen", "l", "127.0.0.1:19341", "listen address for the MCP server")
 	flags.StringP("client-bundle", "B", "", "lockd client bundle PEM used by MCP when calling upstream lockd")
 	flags.Bool("disable-tls", false, "disable TLS and OAuth enforcement for MCP HTTP endpoint")
+	flags.String("base-url", "", "externally reachable MCP base URL used for transfer capability URLs (required, e.g. https://host/mcp)")
+	flags.Bool("allow-http", false, "allow http:// base URLs for transfer capability URLs (unsafe; default requires https)")
 	flags.String("state-file", "", "MCP OAuth state file path (default $HOME/.lockd/mcp.pem)")
 	flags.String("refresh-store", "", "refresh-token store path (default $HOME/.lockd/mcp-auth-store.json)")
 	flags.String("issuer", "", "OAuth issuer URL (used by bootstrap and oauth issuer set/get)")
-	flags.String("mcp-path", "/mcp", "HTTP path for the MCP streamable endpoint")
+	flags.String("mcp-path", "/", "HTTP path (docroot) for the MCP streamable endpoint")
 	flags.String("oauth-resource-url", "", "OAuth protected resource identifier URL (default <issuer>/mcp)")
 	flags.Bool("disable-mcp-upstream-mtls", false, "disable mTLS when MCP calls upstream lockd")
 	flags.Int64("inline-max-bytes", 2*1024*1024, "maximum decoded inline payload bytes for state.update and queue.enqueue")
@@ -86,6 +89,8 @@ func newMCPCommand(baseLogger pslog.Logger, inheritedServerFlag, inheritedBundle
 	mustBindMCPFlag(mcpListenKey, "LOCKD_MCP_LISTEN", flags.Lookup("listen"))
 	mustBindMCPFlag(mcpClientBundleKey, "LOCKD_MCP_CLIENT_BUNDLE", flags.Lookup("client-bundle"))
 	mustBindMCPFlag(mcpDisableTLSKey, "LOCKD_MCP_DISABLE_TLS", flags.Lookup("disable-tls"))
+	mustBindMCPFlag(mcpBaseURLKey, "LOCKD_MCP_BASE_URL", flags.Lookup("base-url"))
+	mustBindMCPFlag(mcpAllowHTTPKey, "LOCKD_MCP_ALLOW_HTTP", flags.Lookup("allow-http"))
 	mustBindMCPFlag(mcpStateFileKey, "LOCKD_MCP_STATE_FILE", flags.Lookup("state-file"))
 	mustBindMCPFlag(mcpRefreshStoreKey, "LOCKD_MCP_REFRESH_STORE", flags.Lookup("refresh-store"))
 	mustBindMCPFlag(mcpIssuerKey, "LOCKD_MCP_ISSUER", flags.Lookup("issuer"))
@@ -130,6 +135,8 @@ func mcpConfigFromViper() (lockdmcp.Config, error) {
 	cfg := lockdmcp.Config{
 		Listen:                    strings.TrimSpace(viper.GetString(mcpListenKey)),
 		DisableTLS:                viper.GetBool(mcpDisableTLSKey),
+		BaseURL:                   strings.TrimSpace(viper.GetString(mcpBaseURLKey)),
+		AllowHTTP:                 viper.GetBool(mcpAllowHTTPKey),
 		BundlePath:                strings.TrimSpace(viper.GetString(mcpBundleKey)),
 		UpstreamServer:            strings.TrimSpace(viper.GetString(mcpServerKey)),
 		InlineMaxBytes:            viper.GetInt64(mcpInlineMaxBytesKey),
@@ -183,6 +190,10 @@ func newMCPBootstrapCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			adminSvc, err := openMCPAdmin()
+			if err != nil {
+				return err
+			}
 			issuer := strings.TrimSpace(viper.GetString(mcpIssuerKey))
 			if issuer == "" {
 				issuer, err = defaultMCPIssuer(cfg)
@@ -190,7 +201,7 @@ func newMCPBootstrapCommand() *cobra.Command {
 					return err
 				}
 			}
-			resp, err := mcpstate.Bootstrap(mcpstate.BootstrapRequest{
+			resp, err := adminSvc.Bootstrap(mcpadmin.BootstrapRequest{
 				Path:              cfg.OAuthStatePath,
 				Issuer:            issuer,
 				InitialClientName: clientName,
@@ -229,11 +240,11 @@ func newMCPOAuthIssuerCommand() *cobra.Command {
 		Use:   "get",
 		Short: "Print current OAuth issuer",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			mgr, err := openOAuthManager()
+			adminSvc, err := openMCPAdmin()
 			if err != nil {
 				return err
 			}
-			issuer, err := mgr.Issuer()
+			issuer, err := adminSvc.Issuer()
 			if err != nil {
 				return err
 			}
@@ -250,11 +261,11 @@ func newMCPOAuthIssuerCommand() *cobra.Command {
 			if value == "" {
 				return fmt.Errorf("--issuer is required")
 			}
-			mgr, err := openOAuthManager()
+			adminSvc, err := openMCPAdmin()
 			if err != nil {
 				return err
 			}
-			if err := mgr.SetIssuer(value); err != nil {
+			if err := adminSvc.SetIssuer(value); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "issuer updated: %s\n", value)
@@ -273,11 +284,11 @@ func newMCPOAuthClientCommand() *cobra.Command {
 		Use:   "list",
 		Short: "List OAuth clients",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			mgr, err := openOAuthManager()
+			adminSvc, err := openMCPAdmin()
 			if err != nil {
 				return err
 			}
-			clients, err := mgr.ListClients()
+			clients, err := adminSvc.ListClients()
 			if err != nil {
 				return err
 			}
@@ -302,19 +313,21 @@ func newMCPOAuthClientCommand() *cobra.Command {
 		Use:   "show",
 		Short: "Show OAuth client details and endpoints",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			mgr, err := openOAuthManager()
+			adminSvc, err := openMCPAdmin()
 			if err != nil {
 				return err
 			}
-			client, err := findOAuthClient(mgr, showID)
+			client, err := adminSvc.GetClient(showID)
 			if err != nil {
 				return err
 			}
-			issuer, err := mgr.Issuer()
+			credentials, err := adminSvc.Credentials(mcpadmin.CredentialsRequest{
+				ClientID: showID,
+				MCPPath:  oauthMCPPathFromConfig(),
+			})
 			if err != nil {
 				return err
 			}
-			resourceURL := oauthResourceURLFromConfig(issuer)
 			status := "active"
 			if client.Revoked {
 				status = "revoked"
@@ -323,10 +336,10 @@ func newMCPOAuthClientCommand() *cobra.Command {
 			fmt.Fprintf(cmd.OutOrStdout(), "name: %s\n", client.Name)
 			fmt.Fprintf(cmd.OutOrStdout(), "status: %s\n", status)
 			fmt.Fprintf(cmd.OutOrStdout(), "scopes: %s\n", strings.Join(client.Scopes, ","))
-			fmt.Fprintf(cmd.OutOrStdout(), "issuer: %s\n", issuer)
-			fmt.Fprintf(cmd.OutOrStdout(), "authorize_url: %s\n", joinIssuerPath(issuer, "/authorize"))
-			fmt.Fprintf(cmd.OutOrStdout(), "token_url: %s\n", joinIssuerPath(issuer, "/token"))
-			fmt.Fprintf(cmd.OutOrStdout(), "resource_url: %s\n", resourceURL)
+			fmt.Fprintf(cmd.OutOrStdout(), "issuer: %s\n", credentials.Issuer)
+			fmt.Fprintf(cmd.OutOrStdout(), "authorize_url: %s\n", credentials.AuthorizeURL)
+			fmt.Fprintf(cmd.OutOrStdout(), "token_url: %s\n", credentials.TokenURL)
+			fmt.Fprintf(cmd.OutOrStdout(), "resource_url: %s\n", credentials.ResourceURL)
 			fmt.Fprintln(cmd.OutOrStdout(), "client_secret: (not retrievable after issuance; use 'rotate-secret' or 'credentials --rotate-secret')")
 			return nil
 		},
@@ -343,34 +356,18 @@ func newMCPOAuthClientCommand() *cobra.Command {
 		Use:   "credentials",
 		Short: "Print agent configuration credentials for a client",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			mgr, err := openOAuthManager()
+			adminSvc, err := openMCPAdmin()
 			if err != nil {
 				return err
 			}
-			client, err := findOAuthClient(mgr, credentialsID)
+			payload, err := adminSvc.Credentials(mcpadmin.CredentialsRequest{
+				ClientID:     credentialsID,
+				RotateSecret: rotateSecret,
+				ResourceURL:  oauthResourceURLOverrideFromConfig(),
+				MCPPath:      oauthMCPPathFromConfig(),
+			})
 			if err != nil {
 				return err
-			}
-			issuer, err := mgr.Issuer()
-			if err != nil {
-				return err
-			}
-			secret := ""
-			if rotateSecret {
-				secret, err = mgr.RotateClientSecret(client.ID)
-				if err != nil {
-					return err
-				}
-			}
-			payload := oauthClientCredentialPayload{
-				ClientID:     client.ID,
-				ClientSecret: secret,
-				Scopes:       append([]string(nil), client.Scopes...),
-				Issuer:       issuer,
-				AuthorizeURL: joinIssuerPath(issuer, "/authorize"),
-				TokenURL:     joinIssuerPath(issuer, "/token"),
-				ResourceURL:  oauthResourceURLFromConfig(issuer),
-				SecretIssued: rotateSecret,
 			}
 			switch strings.ToLower(strings.TrimSpace(credentialsFormat)) {
 			case "json":
@@ -408,11 +405,11 @@ func newMCPOAuthClientCommand() *cobra.Command {
 		Use:   "add",
 		Short: "Create a new OAuth client",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			mgr, err := openOAuthManager()
+			adminSvc, err := openMCPAdmin()
 			if err != nil {
 				return err
 			}
-			resp, err := mgr.AddClient(oauth.AddClientRequest{Name: addName, Scopes: addScopes})
+			resp, err := adminSvc.AddClient(mcpadmin.AddClientRequest{Name: addName, Scopes: addScopes})
 			if err != nil {
 				return err
 			}
@@ -431,11 +428,11 @@ func newMCPOAuthClientCommand() *cobra.Command {
 		Use:   "remove",
 		Short: "Remove an OAuth client",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			mgr, err := openOAuthManager()
+			adminSvc, err := openMCPAdmin()
 			if err != nil {
 				return err
 			}
-			if err := mgr.RemoveClient(rmID); err != nil {
+			if err := adminSvc.RemoveClient(rmID); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "removed client %s\n", rmID)
@@ -452,11 +449,11 @@ func newMCPOAuthClientCommand() *cobra.Command {
 		Use:   "revoke",
 		Short: "Revoke an OAuth client",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			mgr, err := openOAuthManager()
+			adminSvc, err := openMCPAdmin()
 			if err != nil {
 				return err
 			}
-			if err := mgr.RevokeClient(revokeID, true); err != nil {
+			if err := adminSvc.SetClientRevoked(revokeID, true); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "revoked client %s\n", revokeID)
@@ -473,11 +470,11 @@ func newMCPOAuthClientCommand() *cobra.Command {
 		Use:   "restore",
 		Short: "Restore a revoked OAuth client",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			mgr, err := openOAuthManager()
+			adminSvc, err := openMCPAdmin()
 			if err != nil {
 				return err
 			}
-			if err := mgr.RevokeClient(restoreID, false); err != nil {
+			if err := adminSvc.SetClientRevoked(restoreID, false); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "restored client %s\n", restoreID)
@@ -494,11 +491,11 @@ func newMCPOAuthClientCommand() *cobra.Command {
 		Use:   "rotate-secret",
 		Short: "Rotate OAuth client secret",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			mgr, err := openOAuthManager()
+			adminSvc, err := openMCPAdmin()
 			if err != nil {
 				return err
 			}
-			secret, err := mgr.RotateClientSecret(rotateID)
+			secret, err := adminSvc.RotateClientSecret(rotateID)
 			if err != nil {
 				return err
 			}
@@ -522,11 +519,11 @@ func newMCPOAuthClientCommand() *cobra.Command {
 			if strings.TrimSpace(updateName) == "" && updateScopes == nil {
 				return fmt.Errorf("at least one of --name or --scope must be set")
 			}
-			mgr, err := openOAuthManager()
+			adminSvc, err := openMCPAdmin()
 			if err != nil {
 				return err
 			}
-			if err := mgr.UpdateClient(oauth.UpdateClientRequest{ClientID: updateID, Name: updateName, Scopes: updateScopes}); err != nil {
+			if err := adminSvc.UpdateClient(mcpadmin.UpdateClientRequest{ClientID: updateID, Name: updateName, Scopes: updateScopes}); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "updated client %s\n", updateID)
@@ -544,11 +541,11 @@ func newMCPOAuthClientCommand() *cobra.Command {
 }
 
 func completeMCPOAuthClientID(_ *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-	mgr, err := openOAuthManager()
+	adminSvc, err := openMCPAdmin()
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
-	clients, err := mgr.ListClients()
+	clients, err := adminSvc.ListClients()
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
@@ -579,74 +576,42 @@ func mustRegisterFlagCompletion(cmd *cobra.Command, flag string, fn cobra.Comple
 	}
 }
 
-func openOAuthManager() (*oauth.Manager, error) {
+func openMCPAdmin() (*mcpadmin.Service, error) {
 	cfg, err := mcpConfigFromViper()
 	if err != nil {
 		return nil, err
 	}
-	mgr, err := oauth.NewManager(oauth.ManagerConfig{
+	service := mcpadmin.New(mcpadmin.Config{
 		StatePath:    cfg.OAuthStatePath,
 		RefreshStore: cfg.OAuthRefreshStorePath,
 	})
-	if err != nil {
-		if errors.Is(err, mcpstate.ErrNotBootstrapped) {
+	if _, err := service.ListClients(); err != nil {
+		if errors.Is(err, mcpadmin.ErrNotBootstrapped) {
 			return nil, fmt.Errorf("mcp oauth state missing: run 'lockd mcp bootstrap'")
 		}
 		return nil, err
 	}
-	return mgr, nil
+	return service, nil
 }
 
-type oauthClientCredentialPayload struct {
-	ClientID     string   `json:"client_id"`
-	ClientSecret string   `json:"client_secret,omitempty"`
-	SecretIssued bool     `json:"secret_issued"`
-	Scopes       []string `json:"scopes,omitempty"`
-	Issuer       string   `json:"issuer"`
-	AuthorizeURL string   `json:"authorize_url"`
-	TokenURL     string   `json:"token_url"`
-	ResourceURL  string   `json:"resource_url"`
-}
-
-func findOAuthClient(mgr *oauth.Manager, clientID string) (mcpstate.Client, error) {
-	clients, err := mgr.ListClients()
-	if err != nil {
-		return mcpstate.Client{}, err
-	}
-	clientID = strings.TrimSpace(clientID)
-	for _, c := range clients {
-		if c.ID == clientID {
-			return c, nil
-		}
-	}
-	return mcpstate.Client{}, fmt.Errorf("oauth client %s not found", clientID)
-}
-
-func oauthResourceURLFromConfig(issuer string) string {
+func oauthResourceURLOverrideFromConfig() string {
 	cfg, err := mcpConfigFromViper()
 	if err != nil {
-		return joinIssuerPath(issuer, "/mcp")
+		return ""
 	}
-	if resource := strings.TrimSpace(cfg.OAuthProtectedResourceURL); resource != "" {
-		return resource
-	}
-	return joinIssuerPath(issuer, cfg.MCPPath)
+	return strings.TrimSpace(cfg.OAuthProtectedResourceURL)
 }
 
-func joinIssuerPath(issuer, p string) string {
-	issuer = strings.TrimSpace(issuer)
-	if issuer == "" {
-		return p
-	}
-	u, err := url.Parse(issuer)
+func oauthMCPPathFromConfig() string {
+	cfg, err := mcpConfigFromViper()
 	if err != nil {
-		return strings.TrimRight(issuer, "/") + p
+		return "/"
 	}
-	if !strings.HasPrefix(p, "/") {
-		p = "/" + p
+	path := strings.TrimSpace(cfg.MCPPath)
+	if path == "" {
+		return "/"
 	}
-	u.Path = strings.TrimRight(u.Path, "/") + p
-	return u.String()
+	return path
 }
 
 func newMCPExportCACommand() *cobra.Command {

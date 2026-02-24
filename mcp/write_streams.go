@@ -37,11 +37,13 @@ type writeStreamSession struct {
 	cancel context.CancelFunc
 	done   chan writeStreamResult
 
-	mu         sync.Mutex
-	bytes      int64
-	closed     bool
-	committing bool
-	aborted    bool
+	mu          sync.Mutex
+	bytes       int64
+	closed      bool
+	committing  bool
+	aborted     bool
+	ingesting   bool
+	transferred bool
 }
 
 func (s *writeStreamSession) appendChunk(chunk []byte) (int64, int64, error) {
@@ -49,6 +51,12 @@ func (s *writeStreamSession) appendChunk(chunk []byte) (int64, int64, error) {
 	defer s.mu.Unlock()
 	if s.closed || s.committing || s.aborted {
 		return 0, s.bytes, fmt.Errorf("write stream %s is not writable", s.id)
+	}
+	if s.ingesting {
+		return 0, s.bytes, fmt.Errorf("write stream %s is currently receiving transfer upload", s.id)
+	}
+	if s.transferred {
+		return 0, s.bytes, fmt.Errorf("write stream %s already received transfer upload data", s.id)
 	}
 	n, err := s.writer.Write(chunk)
 	if n > 0 {
@@ -67,6 +75,11 @@ func (s *writeStreamSession) commit() (writeStreamResult, int64, error) {
 		bytes := s.bytes
 		s.mu.Unlock()
 		return writeStreamResult{}, bytes, fmt.Errorf("write stream %s already aborted", s.id)
+	}
+	if s.ingesting {
+		bytes := s.bytes
+		s.mu.Unlock()
+		return writeStreamResult{}, bytes, fmt.Errorf("write stream %s upload in progress", s.id)
 	}
 	if s.committing {
 		bytes := s.bytes
@@ -107,6 +120,47 @@ func (s *writeStreamSession) abort(reason string) (int64, error) {
 	s.cancel()
 	<-s.done
 	return bytes, err
+}
+
+func (s *writeStreamSession) uploadFrom(reader io.Reader) (int64, int64, error) {
+	if reader == nil {
+		return 0, 0, fmt.Errorf("upload reader required")
+	}
+	s.mu.Lock()
+	if s.closed || s.committing || s.aborted {
+		total := s.bytes
+		s.mu.Unlock()
+		return 0, total, fmt.Errorf("write stream %s is not writable", s.id)
+	}
+	if s.ingesting {
+		total := s.bytes
+		s.mu.Unlock()
+		return 0, total, fmt.Errorf("write stream %s upload already in progress", s.id)
+	}
+	if s.transferred {
+		total := s.bytes
+		s.mu.Unlock()
+		return 0, total, fmt.Errorf("write stream %s already received transfer upload data", s.id)
+	}
+	s.ingesting = true
+	s.mu.Unlock()
+
+	written, err := io.Copy(s.writer, reader)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ingesting = false
+	if written > 0 {
+		s.bytes += written
+	}
+	total := s.bytes
+	if err != nil {
+		s.closed = true
+		_ = s.writer.CloseWithError(err)
+		return written, total, err
+	}
+	s.transferred = true
+	return written, total, nil
 }
 
 type writeStreamManager struct {
@@ -184,6 +238,17 @@ func (m *writeStreamManager) Append(session *mcpsdk.ServerSession, streamID stri
 		return appended, total, err
 	}
 	return appended, total, nil
+}
+
+func (m *writeStreamManager) Upload(session *mcpsdk.ServerSession, streamID string, kind writeStreamKind, reader io.Reader) (int64, int64, error) {
+	ws, err := m.lookup(session, streamID)
+	if err != nil {
+		return 0, 0, err
+	}
+	if ws.kind != kind {
+		return 0, 0, fmt.Errorf("write stream %s kind mismatch: expected %s, got %s", ws.id, kind, ws.kind)
+	}
+	return ws.uploadFrom(reader)
 }
 
 func (m *writeStreamManager) Commit(session *mcpsdk.ServerSession, streamID string, kind writeStreamKind) (any, int64, error) {

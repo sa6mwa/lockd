@@ -196,7 +196,7 @@
         }
       },
       {
-        "description": "Purpose: Resolve one attachment by id or name and return metadata for streaming decisions.\nUse when: You need attachment metadata and stream hints without loading payload into memory.\nRequires: `key` plus either `id` or `name` is required. `namespace` defaults to \"mcp\". `public` defaults to true. If `public=false`, `lease_id` is required. If `public=true`, `lease_id` must be omitted.\nEffects: Returns attachment metadata and persisted checksum only; payload bytes are not returned inline.\nRetry: Safe to retry; this is a read operation.\nNext: Call `lockd.attachments.stream` to receive payload chunks over progress notifications.",
+        "description": "Purpose: Resolve one attachment by id or name and return metadata for streaming decisions.\nUse when: You need attachment metadata and stream hints without loading payload into memory.\nRequires: `key` plus either `id` or `name` is required. `namespace` defaults to \"mcp\". `public` defaults to true. If `public=false`, `lease_id` is required. If `public=true`, `lease_id` must be omitted.\nEffects: Returns attachment metadata and persisted checksum only; payload bytes are not returned inline.\nRetry: Safe to retry; this is a read operation.\nNext: Call `lockd.attachments.stream` to get a one-time payload download URL.",
         "inputSchema": {
           "additionalProperties": false,
           "properties": {
@@ -505,14 +505,10 @@
         }
       },
       {
-        "description": "Purpose: Stream attachment payload in chunks over MCP progress notifications without buffering full payload in memory.\nUse when: You need attachment content, including very large files.\nRequires: Active MCP session is required. `key` plus either `id` or `name` is required. `namespace` defaults to \"mcp\". `public` defaults to true. Optional `chunk_bytes` controls chunk size.\nEffects: Emits `lockd.attachments.chunk` progress notifications with base64 chunk payloads and returns stream summary metadata.\nRetry: Safe to retry; stream restarts from beginning on each call.\nNext: Use `lockd.attachments.checksum` to verify expected hash without rereading metadata payload.",
+        "description": "Purpose: Create a one-time download capability URL for attachment payload bytes.\nUse when: You need attachment content without pushing payload through MCP tool responses.\nRequires: Active MCP session is required. `key` plus either `id` or `name` is required. `namespace` defaults to \"mcp\". `public` defaults to true.\nEffects: Returns attachment metadata plus one-time `download_url` and `download_method` for direct HTTP download.\nRetry: Safe to retry; each call creates a new one-time URL.\nNext: Fetch `download_url` directly and compare with `lockd.attachments.checksum` when integrity checks are needed.",
         "inputSchema": {
           "additionalProperties": false,
           "properties": {
-            "chunk_bytes": {
-              "description": "Chunk size per progress event in bytes (default 65536, max 4194304)",
-              "type": "integer"
-            },
             "fencing_token": {
               "description": "Optional fencing token override",
               "type": [
@@ -532,20 +528,12 @@
               "description": "Lease id required when public=false",
               "type": "string"
             },
-            "max_bytes": {
-              "description": "Optional maximum bytes to stream before truncating",
-              "type": "integer"
-            },
             "name": {
               "description": "Attachment name selector",
               "type": "string"
             },
             "namespace": {
               "description": "Namespace (defaults to server default namespace)",
-              "type": "string"
-            },
-            "progress_token": {
-              "description": "Optional explicit progress token for chunk notifications",
               "type": "string"
             },
             "public": {
@@ -601,33 +589,26 @@
               ],
               "type": "object"
             },
-            "chunks": {
+            "download_expires_at_unix": {
               "type": "integer"
+            },
+            "download_method": {
+              "type": "string"
+            },
+            "download_url": {
+              "type": "string"
             },
             "key": {
               "type": "string"
             },
             "namespace": {
               "type": "string"
-            },
-            "progress_token": {
-              "type": "string"
-            },
-            "streamed_bytes": {
-              "type": "integer"
-            },
-            "truncated": {
-              "type": "boolean"
             }
           },
           "required": [
             "namespace",
             "key",
-            "attachment",
-            "progress_token",
-            "streamed_bytes",
-            "chunks",
-            "truncated"
+            "attachment"
           ],
           "type": "object"
         }
@@ -716,7 +697,7 @@
         }
       },
       {
-        "description": "Purpose: Open a session-scoped streaming attachment writer.\nUse when: You need to upload attachment payloads (all attachment writes are stream-based).\nRequires: Active MCP session is required. `key`, `lease_id`, and `name` are required. `namespace` defaults to \"mcp\". `mode` supports `create` (default), `upsert`, `replace`.\nEffects: Creates a stream session and starts upstream attachment upload flow using provided metadata/options.\nRetry: Not idempotent; begin returns a new stream each time. Abort unused streams explicitly.\nNext: Call `lockd.attachments.write_stream.append` repeatedly, then `commit` (or `abort`).",
+        "description": "Purpose: Open a session-scoped streaming attachment writer.\nUse when: You need to upload attachment payloads (all attachment writes are stream-based).\nRequires: Active MCP session is required. `key`, `lease_id`, and `name` are required. `namespace` defaults to \"mcp\". `mode` supports `create` (default), `upsert`, `replace`.\nEffects: Creates a stream session and returns one-time `upload_url` for direct HTTP PUT upload into upstream attachment flow.\nRetry: Not idempotent; begin returns a new stream each time. Abort unused streams explicitly.\nNext: Upload bytes to `upload_url`, then call `lockd.attachments.write_stream.commit` (or `abort`).",
         "inputSchema": {
           "additionalProperties": false,
           "properties": {
@@ -775,6 +756,15 @@
               "type": "integer"
             },
             "stream_id": {
+              "type": "string"
+            },
+            "upload_expires_at_unix": {
+              "type": "integer"
+            },
+            "upload_method": {
+              "type": "string"
+            },
+            "upload_url": {
               "type": "string"
             }
           },
@@ -1784,7 +1774,7 @@
         }
       },
       {
-        "description": "Purpose: Receive one available message lease from a queue.\nUse when: A worker is ready to process the next queue item.\nRequires: Active MCP session is required for payload streaming. `queue` defaults to \"lockd.agent.bus\". `namespace` defaults to \"mcp\". `owner` defaults to OAuth client id. Optional `stateful`, `visibility_seconds`, `cursor`, `txn_id`, `chunk_bytes`, `max_bytes`, and `progress_token` tune dequeue and payload streaming behavior.\nEffects: Returns `found=false` when no message is available, or message metadata/lease fields plus payload stream summary. Includes `next_cursor` for continuation. Payload bytes are emitted as `lockd.queue.payload.chunk` progress notifications.\nRetry: Safe to retry. Duplicate retries may lease different messages when queue state changes.\nNext: If processed, call `lockd.queue.ack`; if failed call `lockd.queue.nack`; if not for this worker call `lockd.queue.defer`; extend long handlers with `lockd.queue.extend`.",
+        "description": "Purpose: Receive one available message lease from a queue.\nUse when: A worker is ready to process the next queue item.\nRequires: Active MCP session is required for payload transfer. `queue` defaults to \"lockd.agent.bus\". `namespace` defaults to \"mcp\". `owner` defaults to OAuth client id. Optional `stateful`, `visibility_seconds`, `cursor`, and `txn_id` tune dequeue behavior.\nEffects: Returns `found=false` when no message is available, or message metadata/lease fields plus one-time `payload_download_url` for direct payload download. Includes `next_cursor` for continuation.\nRetry: Safe to retry. Duplicate retries may lease different messages when queue state changes.\nNext: Download payload with returned URL/method, then call `lockd.queue.ack`, `lockd.queue.nack`, or `lockd.queue.defer`; use `lockd.queue.extend` for long handlers.",
         "inputSchema": {
           "additionalProperties": false,
           "properties": {
@@ -1792,17 +1782,9 @@
               "description": "Long-poll wait; -1 no wait, 0 wait forever, \u003e0 wait seconds",
               "type": "integer"
             },
-            "chunk_bytes": {
-              "description": "Payload stream chunk size per progress event in bytes (default 65536, max 4194304)",
-              "type": "integer"
-            },
             "cursor": {
               "description": "Optional continuation cursor from previous dequeue response",
               "type": "string"
-            },
-            "max_bytes": {
-              "description": "Optional maximum payload bytes to stream before truncating",
-              "type": "integer"
             },
             "namespace": {
               "description": "Namespace (defaults to server default namespace)",
@@ -1810,10 +1792,6 @@
             },
             "owner": {
               "description": "Consumer owner ID (defaults to oauth client id)",
-              "type": "string"
-            },
-            "progress_token": {
-              "description": "Optional explicit progress token for payload chunk notifications",
               "type": "string"
             },
             "queue": {
@@ -1884,17 +1862,14 @@
             "payload_bytes": {
               "type": "integer"
             },
-            "payload_chunks": {
+            "payload_download_expires_at_unix": {
               "type": "integer"
             },
-            "payload_progress_token": {
+            "payload_download_method": {
               "type": "string"
             },
-            "payload_streamed_bytes": {
-              "type": "integer"
-            },
-            "payload_truncated": {
-              "type": "boolean"
+            "payload_download_url": {
+              "type": "string"
             },
             "queue": {
               "type": "string"
@@ -1927,7 +1902,7 @@
         }
       },
       {
-        "description": "Purpose: Publish a message to a lockd queue for agent coordination.\nUse when: You need to signal work/events/context to queue consumers and payload fits inline limits.\nRequires: `queue` defaults to \"lockd.agent.bus\". `namespace` defaults to \"mcp\". Provide payload via exactly one of `payload_text` or `payload_base64`; decoded payload must be \u003c= 2097152 bytes.\nEffects: Appends a queue message and returns delivery metadata (`message_id`, visibility, attempts). Queue ordering is best-effort under retries/requeues; do not assume strict FIFO across all consumers.\nRetry: Not idempotent by default; retries can enqueue duplicates. Use application-level dedupe keys in payload/attributes.\nNext: For larger payloads use `lockd.queue.write_stream.begin`/`append`/`commit`. Consumers should dequeue then ack/nack/defer.",
+        "description": "Purpose: Publish a message to a lockd queue for agent coordination.\nUse when: You need to signal work/events/context to queue consumers and payload fits inline limits.\nRequires: `queue` defaults to \"lockd.agent.bus\". `namespace` defaults to \"mcp\". Provide payload via exactly one of `payload_text` or `payload_base64`; decoded payload must be \u003c= 2097152 bytes.\nEffects: Appends a queue message and returns delivery metadata (`message_id`, visibility, attempts). Queue ordering is best-effort under retries/requeues; do not assume strict FIFO across all consumers.\nRetry: Not idempotent by default; retries can enqueue duplicates. Use application-level dedupe keys in payload/attributes.\nNext: For larger payloads use `lockd.queue.write_stream.begin` and upload to returned `upload_url`, then `commit`. Consumers should dequeue then ack/nack/defer.",
         "inputSchema": {
           "additionalProperties": false,
           "properties": {
@@ -2503,7 +2478,7 @@
         }
       },
       {
-        "description": "Purpose: Open a session-scoped streaming queue publisher.\nUse when: Queue payload is too large for inline enqueue or you need bounded-memory uploads.\nRequires: Active MCP session is required. `queue` defaults to \"lockd.agent.bus\" and `namespace` defaults to \"mcp\". Delay/visibility/ttl/attributes/content_type options match `lockd.queue.enqueue`.\nEffects: Creates a stream session and returns `stream_id` plus `max_chunk_bytes` guidance for append calls.\nRetry: Not idempotent; begin returns a new stream each time. Abort unused streams explicitly.\nNext: Call `lockd.queue.write_stream.append` repeatedly, then `lockd.queue.write_stream.commit` (or `abort`).",
+        "description": "Purpose: Open a session-scoped streaming queue publisher.\nUse when: Queue payload is too large for inline enqueue or you need bounded-memory uploads.\nRequires: Active MCP session is required. `queue` defaults to \"lockd.agent.bus\" and `namespace` defaults to \"mcp\". Delay/visibility/ttl/attributes/content_type options match `lockd.queue.enqueue`.\nEffects: Creates a stream session and returns `stream_id` plus one-time `upload_url` for direct HTTP PUT upload.\nRetry: Not idempotent; begin returns a new stream each time. Abort unused streams explicitly.\nNext: Upload bytes to `upload_url`, then call `lockd.queue.write_stream.commit` (or `abort`).",
         "inputSchema": {
           "additionalProperties": false,
           "properties": {
@@ -2551,6 +2526,15 @@
               "type": "integer"
             },
             "stream_id": {
+              "type": "string"
+            },
+            "upload_expires_at_unix": {
+              "type": "integer"
+            },
+            "upload_method": {
+              "type": "string"
+            },
+            "upload_url": {
               "type": "string"
             }
           },
@@ -2859,14 +2843,10 @@
         }
       },
       {
-        "description": "Purpose: Stream JSON state payload in chunks over MCP progress notifications without buffering full payload in memory.\nUse when: You need state content for large documents and must avoid inline payload buffering.\nRequires: Active MCP session is required. `key` is required. `namespace` defaults to \"mcp\". `public` defaults to true; set `public=false` with `lease_id` for lease-bound reads. Optional `chunk_bytes` controls chunk size.\nEffects: Emits `lockd.state.chunk` progress notifications with base64 chunk payloads and returns stream summary (`streamed_bytes`, `chunks`, `truncated`).\nRetry: Safe to retry; stream restarts from beginning on each call.\nNext: Use chunk notifications to reconstruct payload client-side or stop early with `max_bytes`.",
+        "description": "Purpose: Create a one-time download capability URL for state payload bytes.\nUse when: You need state content (small or large) without routing payload through MCP tool responses.\nRequires: Active MCP session is required. `key` is required. `namespace` defaults to \"mcp\". `public` defaults to true; set `public=false` with `lease_id` for lease-bound reads.\nEffects: Returns metadata plus one-time `download_url` and `download_method` for direct HTTP download.\nRetry: Safe to retry; each call creates a new one-time URL.\nNext: Fetch `download_url` directly with the returned method, then continue lock/query workflow.",
         "inputSchema": {
           "additionalProperties": false,
           "properties": {
-            "chunk_bytes": {
-              "description": "Chunk size per progress event in bytes (default 65536, max 4194304)",
-              "type": "integer"
-            },
             "key": {
               "description": "State key",
               "type": "string"
@@ -2875,16 +2855,8 @@
               "description": "Lease ID required when public=false",
               "type": "string"
             },
-            "max_bytes": {
-              "description": "Optional maximum bytes to stream before truncating",
-              "type": "integer"
-            },
             "namespace": {
               "description": "Namespace (defaults to server default namespace)",
-              "type": "string"
-            },
-            "progress_token": {
-              "description": "Optional explicit progress token for chunk notifications",
               "type": "string"
             },
             "public": {
@@ -2904,8 +2876,14 @@
         "outputSchema": {
           "additionalProperties": false,
           "properties": {
-            "chunks": {
+            "download_expires_at_unix": {
               "type": "integer"
+            },
+            "download_method": {
+              "type": "string"
+            },
+            "download_url": {
+              "type": "string"
             },
             "etag": {
               "type": "string"
@@ -2919,15 +2897,6 @@
             "namespace": {
               "type": "string"
             },
-            "progress_token": {
-              "type": "string"
-            },
-            "streamed_bytes": {
-              "type": "integer"
-            },
-            "truncated": {
-              "type": "boolean"
-            },
             "version": {
               "type": "integer"
             }
@@ -2935,17 +2904,13 @@
           "required": [
             "namespace",
             "key",
-            "found",
-            "progress_token",
-            "streamed_bytes",
-            "chunks",
-            "truncated"
+            "found"
           ],
           "type": "object"
         }
       },
       {
-        "description": "Purpose: Write JSON state under lease protection.\nUse when: You need to create or update state for a locked key and payload fits inline request limits.\nRequires: `key` and `lease_id` are required. `namespace` defaults to \"mcp\". Payload comes from exactly one of `payload_text` or `payload_base64` (defaults to `{}`) and must be \u003c= 2097152 bytes after decoding.\nEffects: Updates state and returns new version/ETag metadata; can also mutate `query_hidden` metadata.\nRetry: Use `if_etag`, `if_version`, and `fencing_token` for safe retries. Without guards, retries can apply duplicate writes.\nNext: For larger payloads use `lockd.state.write_stream.begin`/`append`/`commit`, then release lease to commit or rollback.",
+        "description": "Purpose: Write JSON state under lease protection.\nUse when: You need to create or update state for a locked key and payload fits inline request limits.\nRequires: `key` and `lease_id` are required. `namespace` defaults to \"mcp\". Payload comes from exactly one of `payload_text` or `payload_base64` (defaults to `{}`) and must be \u003c= 2097152 bytes after decoding.\nEffects: Updates state and returns new version/ETag metadata; can also mutate `query_hidden` metadata.\nRetry: Use `if_etag`, `if_version`, and `fencing_token` for safe retries. Without guards, retries can apply duplicate writes.\nNext: For larger payloads use `lockd.state.write_stream.begin` and upload to returned `upload_url`, then `commit`; release lease to commit or rollback.",
         "inputSchema": {
           "additionalProperties": false,
           "properties": {
@@ -3117,7 +3082,7 @@
         }
       },
       {
-        "description": "Purpose: Open a session-scoped streaming state writer.\nUse when: State payload is too large for inline JSON or you want bounded-memory uploads.\nRequires: Active MCP session is required. `key` and `lease_id` are required. `namespace` defaults to \"mcp\". Optional CAS/fencing fields mirror `lockd.state.update`.\nEffects: Creates a stream session and returns `stream_id` plus `max_chunk_bytes` guidance for append calls.\nRetry: Not idempotent; begin returns a new stream each time. Abort unused streams explicitly.\nNext: Call `lockd.state.write_stream.append` repeatedly, then `lockd.state.write_stream.commit` (or `abort`).",
+        "description": "Purpose: Open a session-scoped streaming state writer.\nUse when: State payload is too large for inline JSON or you want bounded-memory uploads.\nRequires: Active MCP session is required. `key` and `lease_id` are required. `namespace` defaults to \"mcp\". Optional CAS/fencing fields mirror `lockd.state.update`.\nEffects: Creates a stream session and returns `stream_id` plus one-time `upload_url` for direct HTTP PUT upload outside MCP tool payload context.\nRetry: Not idempotent; begin returns a new stream each time. Abort unused streams explicitly.\nNext: Upload bytes to `upload_url`, then call `lockd.state.write_stream.commit` (or `abort`).",
         "inputSchema": {
           "additionalProperties": false,
           "properties": {
@@ -3177,6 +3142,15 @@
               "type": "integer"
             },
             "stream_id": {
+              "type": "string"
+            },
+            "upload_expires_at_unix": {
+              "type": "integer"
+            },
+            "upload_method": {
+              "type": "string"
+            },
+            "upload_url": {
               "type": "string"
             }
           },

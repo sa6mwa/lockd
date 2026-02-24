@@ -1,7 +1,6 @@
 package index
 
 import (
-	"container/heap"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -286,22 +285,6 @@ func (a *Adapter) matchesSelector(ctx context.Context, namespace, key string, me
 	return matched, nil
 }
 
-func simpleEq(sel api.Selector) (*api.Term, bool) {
-	if sel.Eq == nil {
-		return nil, false
-	}
-	if sel.Prefix != nil || sel.Range != nil || sel.In != nil || sel.Exists != "" {
-		return nil, false
-	}
-	if sel.Not != nil && !sel.Not.IsEmpty() {
-		return nil, false
-	}
-	if len(sel.And) > 0 || len(sel.Or) > 0 {
-		return nil, false
-	}
-	return sel.Eq, true
-}
-
 type segmentReader struct {
 	namespace string
 	manifest  *Manifest
@@ -509,189 +492,6 @@ func (r *segmentReader) docMetaMap(ctx context.Context) (map[string]DocumentMeta
 
 type selectorEvaluator struct {
 	reader *segmentReader
-}
-
-type postingCursor struct {
-	key  string
-	keys []string
-	idx  int
-}
-
-type postingHeap []*postingCursor
-
-func (h postingHeap) Len() int           { return len(h) }
-func (h postingHeap) Less(i, j int) bool { return h[i].key < h[j].key }
-func (h postingHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-
-func (h *postingHeap) Push(x any) {
-	*h = append(*h, x.(*postingCursor))
-}
-
-func (h *postingHeap) Pop() any {
-	old := *h
-	n := len(old)
-	item := old[n-1]
-	*h = old[:n-1]
-	return item
-}
-
-func (a *Adapter) queryEq(ctx context.Context, req search.Request, term *api.Term, reader *segmentReader, manifest *Manifest, visibility map[string]bool) (search.Result, error) {
-	field := normalizeField(term)
-	if field == "" {
-		return search.Result{IndexSeq: manifest.Seq, Format: manifest.Format}, nil
-	}
-	value := normalizeTermValue(term.Value)
-	cursorValue := ""
-	if req.Cursor != "" {
-		decoded, err := decodeCursor(req.Cursor)
-		if err != nil {
-			return search.Result{}, fmt.Errorf("%w: %v", search.ErrInvalidCursor, err)
-		}
-		cursorValue = decoded
-	}
-	var lists [][]string
-	err := reader.forEachSegment(ctx, func(seg *Segment) error {
-		block, ok := seg.Fields[field]
-		if !ok {
-			return nil
-		}
-		keys := block.Postings[value]
-		if len(keys) == 0 {
-			return nil
-		}
-		lists = append(lists, keys)
-		return nil
-	})
-	if err != nil {
-		return search.Result{}, err
-	}
-	if len(lists) == 0 {
-		return search.Result{IndexSeq: manifest.Seq, Format: manifest.Format}, nil
-	}
-	limit := req.Limit
-	if limit < 0 {
-		limit = 0
-	}
-	h := make(postingHeap, 0, len(lists))
-	for _, keys := range lists {
-		start := 0
-		if cursorValue != "" {
-			start = sort.SearchStrings(keys, cursorValue)
-			if start < len(keys) && keys[start] == cursorValue {
-				start++
-			}
-		}
-		if start >= len(keys) {
-			continue
-		}
-		h = append(h, &postingCursor{key: keys[start], keys: keys, idx: start})
-	}
-	if len(h) == 0 {
-		return search.Result{IndexSeq: manifest.Seq, Format: manifest.Format}, nil
-	}
-	heap.Init(&h)
-	visible := make([]string, 0, min(limit, 64))
-	canUseDocMeta := manifest.Format >= IndexFormatVersionV3
-	var docMeta map[string]DocumentMetadata
-	docMetaReady := false
-	getDocMeta := func() (map[string]DocumentMetadata, error) {
-		if docMetaReady {
-			return docMeta, nil
-		}
-		docMetaReady = true
-		metaMap, err := reader.docMetaMap(ctx)
-		if err != nil {
-			return nil, err
-		}
-		docMeta = metaMap
-		return docMeta, nil
-	}
-	lastKey := ""
-	for h.Len() > 0 {
-		if err := ctx.Err(); err != nil {
-			return search.Result{}, err
-		}
-		cursor := heap.Pop(&h).(*postingCursor)
-		key := cursor.key
-		cursor.idx++
-		if cursor.idx < len(cursor.keys) {
-			cursor.key = cursor.keys[cursor.idx]
-			heap.Push(&h, cursor)
-		}
-		if key == lastKey {
-			continue
-		}
-		lastKey = key
-		ledgerVisible, ok, err := a.visibleFromLedger(ctx, req.Namespace, key, visibility)
-		if err != nil {
-			return search.Result{}, err
-		}
-		if ok && !ledgerVisible {
-			continue
-		}
-		if !ok {
-			if canUseDocMeta {
-				metaMap, err := getDocMeta()
-				if err != nil {
-					return search.Result{}, err
-				}
-				if meta, ok := metaMap[key]; ok {
-					if meta.PublishedVersion == 0 || meta.QueryExcluded {
-						continue
-					}
-				} else {
-					metaRes, metaErr := a.store.backend.LoadMeta(ctx, req.Namespace, key)
-					if metaErr != nil {
-						if errors.Is(metaErr, storage.ErrNotFound) {
-							continue
-						}
-						return search.Result{}, fmt.Errorf("load meta %s: %w", key, metaErr)
-					}
-					meta := metaRes.Meta
-					if meta == nil || meta.PublishedVersion == 0 || meta.QueryExcluded() {
-						continue
-					}
-				}
-			} else {
-				metaRes, metaErr := a.store.backend.LoadMeta(ctx, req.Namespace, key)
-				if metaErr != nil {
-					if errors.Is(metaErr, storage.ErrNotFound) {
-						continue
-					}
-					return search.Result{}, fmt.Errorf("load meta %s: %w", key, metaErr)
-				}
-				meta := metaRes.Meta
-				if meta == nil || meta.PublishedVersion == 0 || meta.QueryExcluded() {
-					continue
-				}
-			}
-		}
-		visible = append(visible, key)
-		if limit > 0 && len(visible) >= limit {
-			break
-		}
-	}
-	result := search.Result{
-		Keys:     visible,
-		IndexSeq: manifest.Seq,
-		Format:   manifest.Format,
-	}
-	if req.IncludeDocMeta && len(visible) > 0 {
-		meta, err := a.collectDocMeta(ctx, visible, reader)
-		if err != nil {
-			return search.Result{}, err
-		}
-		result.DocMeta = meta
-	}
-	if manifest.UpdatedAt.Unix() > 0 {
-		result.Metadata = map[string]string{
-			"index_updated_at": manifest.UpdatedAt.UTC().Format(time.RFC3339),
-		}
-	}
-	if limit > 0 && len(visible) == limit && lastKey != "" && h.Len() > 0 {
-		result.Cursor = encodeCursor(lastKey)
-	}
-	return result, nil
 }
 
 var errDocMetaComplete = errors.New("doc meta complete")
@@ -1161,17 +961,6 @@ func normalizePointerLenient(field string) (string, error) {
 		field = "/" + field
 	}
 	return jsonpointer.Normalize(field)
-}
-
-func zeroSelector(sel api.Selector) bool {
-	return len(sel.And) == 0 &&
-		len(sel.Or) == 0 &&
-		sel.Not == nil &&
-		sel.Eq == nil &&
-		sel.Prefix == nil &&
-		sel.Range == nil &&
-		sel.In == nil &&
-		sel.Exists == ""
 }
 
 func encodeCursor(key string) string {

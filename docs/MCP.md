@@ -14,7 +14,10 @@ The lockd MCP service is a dedicated facade process that exposes lockd capabilit
 - query/search over namespaced state
 - attachment exchange
 
-Large payload safety is a first-class constraint: MCP tools avoid loading full state documents or attachments into process memory. Payload transfer uses streaming tools over MCP progress notifications.
+Large payload safety is a first-class constraint. MCP uses dual payload delivery:
+
+- inline payload fields for small payloads (bounded by `mcp.inline_max_bytes`)
+- capability URL streaming for large payloads
 
 The MCP facade acts as a normal lockd client toward upstream lockd. In v1, authorization boundaries are inherited from the upstream client certificate and its namespace access claims.
 
@@ -99,7 +102,7 @@ If OAuth state is missing and TLS is enabled, startup fails with an explicit boo
 - `--base-url`: externally reachable MCP base URL used for transfer URLs (required)
 - `--allow-http`: allow `http://` base URL (unsafe; default requires HTTPS)
 - `--disable-mcp-upstream-mtls`: disable mTLS for MCP -> upstream lockd
-- `--inline-max-bytes`: max decoded inline payload bytes for `lockd.state.update` and `lockd.queue.enqueue` (default `2097152`)
+- `--inline-max-bytes`: max decoded inline payload bytes for inline tool payloads (default `2097152`)
 - `--default-namespace`: default namespace when tools omit namespace (default `mcp`)
 - `--agent-bus-queue`: default queue and auto-subscribe queue (default `lockd.agent.bus`)
 - `--state-file`: OAuth state path
@@ -178,7 +181,6 @@ Lock/state:
 - `lockd.state.update`
 - `lockd.state.patch`
 - `lockd.state.write_stream.begin`
-- `lockd.state.write_stream.append`
 - `lockd.state.write_stream.commit`
 - `lockd.state.write_stream.abort`
 - `lockd.state.stream`
@@ -187,8 +189,8 @@ Lock/state:
 
 Attachments:
 
+- `lockd.attachments.put`
 - `lockd.attachments.write_stream.begin`
-- `lockd.attachments.write_stream.append`
 - `lockd.attachments.write_stream.commit`
 - `lockd.attachments.write_stream.abort`
 - `lockd.attachments.list`
@@ -203,7 +205,6 @@ Queue/messaging:
 
 - `lockd.queue.enqueue`
 - `lockd.queue.write_stream.begin`
-- `lockd.queue.write_stream.append`
 - `lockd.queue.write_stream.commit`
 - `lockd.queue.write_stream.abort`
 - `lockd.queue.dequeue`
@@ -242,29 +243,30 @@ TC-only transaction decision tools are intentionally not exposed by MCP. XA rema
 8. defer when message should be re-queued without failure semantics
 9. extend while long processing is in-flight
 
-`lockd.queue.dequeue` returns transfer capability metadata (`payload_download_url`, method, expiry). Payload is not returned inline.
+`lockd.queue.dequeue` supports `payload_mode=auto|inline|stream|none` and `state_mode=auto|inline|stream|none` (state mode applies when `stateful=true`).
 `lockd.queue.dequeue` also returns `next_cursor`; pass it back as `cursor` on later calls when continuing the same dequeue scan.
 
 ## Contract Notes
 
-- `lockd.get` returns metadata only (`found`, numeric `version`, `etag`, `stream_required`).
-- read payload via `lockd.state.stream` transfer URL (`download_url`; no full-buffer read).
-- `lockd.state.update` and `lockd.queue.enqueue` are inline-only and enforce `mcp.inline_max_bytes`.
+- `lockd.get` supports `payload_mode=auto|inline|stream|none`.
+- read payload via `lockd.state.stream` for explicit streaming-only calls, or use `lockd.get payload_mode=stream`.
+- `lockd.state.update`, `lockd.queue.enqueue`, and `lockd.attachments.put` are inline writes and enforce `mcp.inline_max_bytes`.
 - `lockd.state.patch` applies RFC 7396 JSON merge patch semantics for partial updates and is also bounded by `mcp.inline_max_bytes`.
-- for larger writes, use `*.write_stream.begin` upload URLs plus `commit` (or optional `append` fallback).
+- for larger writes, use `*.write_stream.begin` upload URLs plus `commit`.
 - `lockd.get`, `lockd.attachments.list`, and `lockd.attachments.get` default to `public=true`.
 - For those reads: `public=false` requires `lease_id`; `public=true` rejects `lease_id`.
-- attachment writes are streaming-only via `lockd.attachments.write_stream.*` with `mode=create|upsert|replace` (`create` default, safer create-only behavior).
+- attachment writes support both `lockd.attachments.put` (inline) and `lockd.attachments.write_stream.*` (streaming) with `mode=create|upsert|replace` (`create` default).
 - `lockd.attachments.head` is metadata-only by id/name and avoids payload download.
-- `lockd.attachments.get` is metadata-only (`stream_required=true`), intended as a selector/metadata step before streaming.
-- read attachment payload via `lockd.attachments.stream` transfer URL (`download_url`; no full-buffer read).
+- `lockd.attachments.get` supports `payload_mode=auto|inline|stream|none`.
+- read attachment payload via `lockd.attachments.stream` transfer URL (`download_url`) or via `lockd.attachments.get payload_mode=stream`.
 - attachment checksums are upload-time plaintext SHA-256 values persisted in lockd metadata (`plaintext_sha256`) and can be fetched directly through `lockd.attachments.checksum` without streaming payload bytes.
+- inline-over-limit errors explicitly point to streaming tools and suggest checking `lockd.hint.inline_max_payload_bytes`.
 
 ## Query Semantics
 
 `lockd.query` returns keys only in MCP and does not accept a `return` selector.
 
-Use `lockd.query.stream` for query-document payload streaming via progress notifications. This avoids server-side buffering while preserving NDJSON-style query-document workflows.
+Use `lockd.query.stream` for query-document payload streaming via one-time NDJSON capability URL (`download_url` + `GET`).
 
 Use `lockd.get` + `lockd.state.stream` for point payload reads.
 
@@ -331,6 +333,7 @@ When `DisableTLS` is true, OAuth/TLS enforcement is disabled. This is intended f
 At session start:
 
 1. call `lockd.hint` to discover namespace-access hints from client-bundle claims
+   and `inline_max_payload_bytes` for inline-vs-stream planning
 2. call `lockd.help` for operation sequencing
 3. run queue/query/lock workflows using hinted namespaces
 

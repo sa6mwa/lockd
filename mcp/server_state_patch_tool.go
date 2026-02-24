@@ -125,7 +125,7 @@ func (s *server) loadStateForPatch(ctx context.Context, key string, input stateP
 		return nil, fmt.Errorf("read current state for patch: %w", err)
 	}
 	if int64(len(payload)) > limit {
-		return nil, fmt.Errorf("%s current state %d bytes exceeds mcp.inline_max_bytes=%d; use %s for large-document workflows", toolStatePatch, len(payload), limit, toolStateWriteStreamBegin)
+		return nil, inlinePayloadTooLargeError(toolStatePatch, int64(len(payload)), limit, toolStateWriteStreamBegin)
 	}
 	if len(bytes.TrimSpace(payload)) == 0 {
 		return []byte("{}"), nil

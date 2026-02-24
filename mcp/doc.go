@@ -14,8 +14,8 @@
 //   - Forwards queue watch activity to MCP progress notifications (SSE path)
 //   - Exposes `lockd.queue.stats` for side-effect-free queue introspection
 //   - Exposes lockd.queue.watch for bounded interactive wakeups
-//   - Keeps `lockd.get` and `lockd.attachments.get` metadata-only and uses
-//     `lockd.state.stream` / `lockd.attachments.stream` for payload transfer
+//   - Supports dual payload modes on reads/dequeue (`inline` for small payloads,
+//     `stream` for large payloads via capability URLs)
 //   - Supports one-time transfer capabilities:
 //     `*.write_stream.begin` returns an upload URL, and read tools return
 //     download URLs for direct HTTP payload transfer
@@ -55,8 +55,9 @@
 // `lockd.queue.dequeue` return one-time download URLs. `*.write_stream.begin`
 // returns one-time upload URLs.
 //
-// For writes, small payloads can be sent inline through `lockd.state.update`
-// and `lockd.queue.enqueue`, bounded by `Config.InlineMaxBytes` (default 2MiB).
+// For writes, small payloads can be sent inline through `lockd.state.update`,
+// `lockd.queue.enqueue`, and `lockd.attachments.put`, bounded by
+// `Config.InlineMaxBytes` (default 2MiB).
 // Partial state updates are available with `lockd.state.patch` (JSON merge patch),
 // also bounded by the inline limit.
 // Larger writes should use the write-stream tool families:

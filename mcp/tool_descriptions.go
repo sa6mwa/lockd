@@ -16,14 +16,13 @@ const (
 	toolStateUpdate                  = "lockd.state.update"
 	toolStatePatch                   = "lockd.state.patch"
 	toolStateWriteStreamBegin        = "lockd.state.write_stream.begin"
-	toolStateWriteStreamAppend       = "lockd.state.write_stream.append"
 	toolStateWriteStreamCommit       = "lockd.state.write_stream.commit"
 	toolStateWriteStreamAbort        = "lockd.state.write_stream.abort"
 	toolStateStream                  = "lockd.state.stream"
 	toolStateMetadata                = "lockd.state.metadata"
 	toolStateRemove                  = "lockd.state.remove"
+	toolAttachmentsPut               = "lockd.attachments.put"
 	toolAttachmentsWriteStreamBegin  = "lockd.attachments.write_stream.begin"
-	toolAttachmentsWriteStreamAppend = "lockd.attachments.write_stream.append"
 	toolAttachmentsWriteStreamCommit = "lockd.attachments.write_stream.commit"
 	toolAttachmentsWriteStreamAbort  = "lockd.attachments.write_stream.abort"
 	toolAttachmentsList              = "lockd.attachments.list"
@@ -40,7 +39,6 @@ const (
 	toolHelp                         = "lockd.help"
 	toolQueueEnqueue                 = "lockd.queue.enqueue"
 	toolQueueWriteStreamBegin        = "lockd.queue.write_stream.begin"
-	toolQueueWriteStreamAppend       = "lockd.queue.write_stream.append"
 	toolQueueWriteStreamCommit       = "lockd.queue.write_stream.commit"
 	toolQueueWriteStreamAbort        = "lockd.queue.write_stream.abort"
 	toolQueueDequeue                 = "lockd.queue.dequeue"
@@ -65,14 +63,13 @@ var mcpToolNames = []string{
 	toolStateUpdate,
 	toolStatePatch,
 	toolStateWriteStreamBegin,
-	toolStateWriteStreamAppend,
 	toolStateWriteStreamCommit,
 	toolStateWriteStreamAbort,
 	toolStateStream,
 	toolStateMetadata,
 	toolStateRemove,
+	toolAttachmentsPut,
 	toolAttachmentsWriteStreamBegin,
-	toolAttachmentsWriteStreamAppend,
 	toolAttachmentsWriteStreamCommit,
 	toolAttachmentsWriteStreamAbort,
 	toolAttachmentsList,
@@ -89,7 +86,6 @@ var mcpToolNames = []string{
 	toolHelp,
 	toolQueueEnqueue,
 	toolQueueWriteStreamBegin,
-	toolQueueWriteStreamAppend,
 	toolQueueWriteStreamCommit,
 	toolQueueWriteStreamAbort,
 	toolQueueDequeue,
@@ -164,11 +160,11 @@ func buildToolDescriptions(cfg Config) map[string]string {
 		}),
 		toolGet: formatToolDescription(toolContract{
 			Purpose:  "Read committed JSON state for one key.",
-			UseWhen:  "You need current state for planning, validation, or rendering context.",
-			Requires: fmt.Sprintf("`key` is required. `namespace` defaults to %q. `public` defaults to true. If `public=false`, `lease_id` is required. If `public=true`, `lease_id` must be omitted.", namespace),
-			Effects:  "Returns metadata only (`found`, ETag, numeric version). Payload is never inlined; use `lockd.state.stream` when content is required.",
+			UseWhen:  "You need key metadata and optionally payload bytes in inline or streaming mode.",
+			Requires: fmt.Sprintf("`key` is required. `namespace` defaults to %q. `public` defaults to true. If `public=false`, `lease_id` is required. `payload_mode` supports `auto` (default), `inline`, `stream`, or `none`.", namespace),
+			Effects:  "Returns metadata plus either inline payload (`payload_text` or `payload_base64`) or one-time stream download URL, depending on `payload_mode` and payload size.",
 			Retry:    "Safe to retry; this is a read operation.",
-			Next:     "Call `lockd.state.stream` for payload bytes, `lockd.query` for broader discovery, or acquire a lock before mutation.",
+			Next:     "Use `lockd.state.stream` for explicit streaming-only reads or acquire a lock before mutation.",
 		}),
 		toolDescribe: formatToolDescription(toolContract{
 			Purpose:  "Read key metadata (lease owner, version, ETag, timestamps) without returning state payload.",
@@ -184,15 +180,15 @@ func buildToolDescriptions(cfg Config) map[string]string {
 			Requires: fmt.Sprintf("`query` expression is required. `namespace` defaults to %q. Optional `limit`, `cursor`, `engine`, `refresh`, and `fields` refine execution. Query output is always keys.", namespace),
 			Effects:  "Returns matching keys plus pagination/index metadata (`cursor`, `index_seq`).",
 			Retry:    "Safe to retry. Cursor-based pagination should reuse the latest returned cursor.",
-			Next:     "Call `lockd.query.stream` for document payload streaming, or `lockd.get` and `lockd.state.stream` for point reads.",
+			Next:     "Call `lockd.query.stream` for NDJSON document streaming, or `lockd.get`/`lockd.state.stream` for point reads.",
 		}),
 		toolQueryStream: formatToolDescription(toolContract{
-			Purpose:  "Run an LQL query and stream matching documents over MCP progress notifications without buffering full result sets.",
-			UseWhen:  "You need query result documents and must keep MCP memory usage bounded.",
-			Requires: fmt.Sprintf("Active MCP session is required. `query` expression is required. `namespace` defaults to %q. Optional `limit`, `cursor`, `engine`, `refresh`, `fields`, `chunk_bytes`, `max_bytes`, and `max_documents` bound execution.", namespace),
-			Effects:  "Emits `lockd.query.document.chunk` progress notifications per document chunk and returns stream summary (`documents_streamed`, `streamed_bytes`, `chunks`, `truncated`).",
-			Retry:    "Safe to retry; each call restarts the query stream from the provided cursor/options.",
-			Next:     "Use returned `cursor` for pagination and verify document processing before issuing the next page.",
+			Purpose:  "Run an LQL query and return a one-time NDJSON capability URL for document rows.",
+			UseWhen:  "You need query result documents without buffering them in MCP tool payloads.",
+			Requires: fmt.Sprintf("Active MCP session is required. `query` expression is required. `namespace` defaults to %q. Optional `limit`, `cursor`, `engine`, `refresh`, and `fields` refine execution.", namespace),
+			Effects:  "Returns query metadata plus one-time `download_url` that streams NDJSON rows (`{\"ns\",\"key\",\"ver\",\"doc\"}`) over HTTP GET.",
+			Retry:    "Safe to retry; each call returns a new one-time stream URL.",
+			Next:     "Fetch `download_url` with the returned method, then continue with pagination cursor if needed.",
 		}),
 		toolStateUpdate: formatToolDescription(toolContract{
 			Purpose:  "Write JSON state under lease protection.",
@@ -217,14 +213,6 @@ func buildToolDescriptions(cfg Config) map[string]string {
 			Effects:  "Creates a stream session and returns `stream_id` plus one-time `upload_url` for direct HTTP PUT upload outside MCP tool payload context.",
 			Retry:    "Not idempotent; begin returns a new stream each time. Abort unused streams explicitly.",
 			Next:     "Upload bytes to `upload_url`, then call `lockd.state.write_stream.commit` (or `abort`).",
-		}),
-		toolStateWriteStreamAppend: formatToolDescription(toolContract{
-			Purpose:  "Append one base64 chunk into an open state write stream.",
-			UseWhen:  "You are actively streaming large state payload content.",
-			Requires: fmt.Sprintf("Active MCP session is required. `stream_id` and `chunk_base64` are required. Decoded chunk must be <= %d bytes.", inlineMax),
-			Effects:  "Writes chunk bytes directly to the upstream update request stream and returns append/total byte counts.",
-			Retry:    "Do not blindly retry the same chunk without stream-position tracking; repeated append can duplicate bytes.",
-			Next:     "Continue appending until complete, then `lockd.state.write_stream.commit`.",
 		}),
 		toolStateWriteStreamCommit: formatToolDescription(toolContract{
 			Purpose:  "Finalize a state write stream and commit it to upstream lockd.",
@@ -266,21 +254,21 @@ func buildToolDescriptions(cfg Config) map[string]string {
 			Retry:    "Prefer CAS/fencing guards for deterministic retries; repeated deletes may be no-op or not-found depending on timing.",
 			Next:     "Release lease to finalize, or write replacement state/attachments first.",
 		}),
+		toolAttachmentsPut: formatToolDescription(toolContract{
+			Purpose:  "Write attachment payload inline under lease protection.",
+			UseWhen:  "Attachment payload fits inline limits and you want a single MCP tool call write.",
+			Requires: fmt.Sprintf("`key`, `lease_id`, and `name` are required. `namespace` defaults to %q. Payload comes from exactly one of `payload_text` or `payload_base64` and must be <= %d bytes decoded. `mode` supports `create` (default), `upsert`, `replace`.", namespace, inlineMax),
+			Effects:  "Writes attachment bytes and returns attachment metadata/version.",
+			Retry:    "Use `mode` and fencing guards for deterministic retries; retries can overwrite depending on mode.",
+			Next:     "For larger payloads use `lockd.attachments.write_stream.begin`, upload to `upload_url`, then commit.",
+		}),
 		toolAttachmentsWriteStreamBegin: formatToolDescription(toolContract{
 			Purpose:  "Open a session-scoped streaming attachment writer.",
-			UseWhen:  "You need to upload attachment payloads (all attachment writes are stream-based).",
+			UseWhen:  "Attachment payload is larger than inline limit or you want streaming upload semantics.",
 			Requires: fmt.Sprintf("Active MCP session is required. `key`, `lease_id`, and `name` are required. `namespace` defaults to %q. `mode` supports `create` (default), `upsert`, `replace`.", namespace),
 			Effects:  "Creates a stream session and returns one-time `upload_url` for direct HTTP PUT upload into upstream attachment flow.",
 			Retry:    "Not idempotent; begin returns a new stream each time. Abort unused streams explicitly.",
 			Next:     "Upload bytes to `upload_url`, then call `lockd.attachments.write_stream.commit` (or `abort`).",
-		}),
-		toolAttachmentsWriteStreamAppend: formatToolDescription(toolContract{
-			Purpose:  "Append one base64 chunk into an open attachment write stream.",
-			UseWhen:  "You are uploading attachment bytes chunk-by-chunk.",
-			Requires: fmt.Sprintf("Active MCP session is required. `stream_id` and `chunk_base64` are required. Decoded chunk must be <= %d bytes.", inlineMax),
-			Effects:  "Writes chunk bytes directly to upstream attachment body stream and returns append/total byte counts.",
-			Retry:    "Do not blindly retry the same chunk without stream-position tracking; repeated append can duplicate bytes.",
-			Next:     "Continue appending until complete, then `lockd.attachments.write_stream.commit`.",
 		}),
 		toolAttachmentsWriteStreamCommit: formatToolDescription(toolContract{
 			Purpose:  "Finalize an attachment write stream.",
@@ -323,12 +311,12 @@ func buildToolDescriptions(cfg Config) map[string]string {
 			Next:     "Compare against client-side checksum after `lockd.attachments.stream` if payload verification is needed.",
 		}),
 		toolAttachmentsGet: formatToolDescription(toolContract{
-			Purpose:  "Resolve one attachment by id or name and return metadata for streaming decisions.",
-			UseWhen:  "You need attachment metadata and stream hints without loading payload into memory.",
-			Requires: fmt.Sprintf("`key` plus either `id` or `name` is required. `namespace` defaults to %q. `public` defaults to true. If `public=false`, `lease_id` is required. If `public=true`, `lease_id` must be omitted.", namespace),
-			Effects:  "Returns attachment metadata and persisted checksum only; payload bytes are not returned inline.",
+			Purpose:  "Resolve one attachment by id or name and return metadata plus optional inline/stream payload delivery.",
+			UseWhen:  "You need attachment payload in either inline or streaming mode.",
+			Requires: fmt.Sprintf("`key` plus either `id` or `name` is required. `namespace` defaults to %q. `public` defaults to true. `payload_mode` supports `auto` (default), `inline`, `stream`, or `none`.", namespace),
+			Effects:  "Returns attachment metadata/checksum and either inline payload (`payload_text` or `payload_base64`) or one-time stream URL.",
 			Retry:    "Safe to retry; this is a read operation.",
-			Next:     "Call `lockd.attachments.stream` to get a one-time payload download URL.",
+			Next:     "Use `lockd.attachments.stream` for explicit streaming-only access and `lockd.attachments.checksum` for integrity checks.",
 		}),
 		toolAttachmentsStream: formatToolDescription(toolContract{
 			Purpose:  "Create a one-time download capability URL for attachment payload bytes.",
@@ -382,7 +370,7 @@ func buildToolDescriptions(cfg Config) map[string]string {
 			Purpose:  "Return namespace access hints so agents can choose valid namespaces before doing work.",
 			UseWhen:  "Session start, planning phase, or when namespace-forbidden errors occur.",
 			Requires: "No required fields. Uses current caller token context plus upstream client-bundle namespace claims when available.",
-			Effects:  "Returns advisory namespace access hints, default namespace, client id, and token scope context.",
+			Effects:  "Returns advisory namespace access hints, default namespace, inline payload limit (`inline_max_payload_bytes`), client id, and token scope context.",
 			Retry:    "Safe to retry; this is a read-only advisory operation.",
 			Next:     "Call `lockd.help` then use returned namespace hints when invoking lock/query/queue tools.",
 		}),
@@ -410,14 +398,6 @@ func buildToolDescriptions(cfg Config) map[string]string {
 			Retry:    "Not idempotent; begin returns a new stream each time. Abort unused streams explicitly.",
 			Next:     "Upload bytes to `upload_url`, then call `lockd.queue.write_stream.commit` (or `abort`).",
 		}),
-		toolQueueWriteStreamAppend: formatToolDescription(toolContract{
-			Purpose:  "Append one base64 chunk into an open queue write stream.",
-			UseWhen:  "You are streaming large queue payload content.",
-			Requires: fmt.Sprintf("Active MCP session is required. `stream_id` and `chunk_base64` are required. Decoded chunk must be <= %d bytes.", inlineMax),
-			Effects:  "Writes chunk bytes directly to the upstream enqueue request stream and returns append/total byte counts.",
-			Retry:    "Do not blindly retry the same chunk without stream-position tracking; repeated append can duplicate bytes.",
-			Next:     "Continue appending until complete, then `lockd.queue.write_stream.commit`.",
-		}),
 		toolQueueWriteStreamCommit: formatToolDescription(toolContract{
 			Purpose:  "Finalize a queue write stream and publish the message.",
 			UseWhen:  "All payload chunks for a queued message have been appended.",
@@ -437,10 +417,10 @@ func buildToolDescriptions(cfg Config) map[string]string {
 		toolQueueDequeue: formatToolDescription(toolContract{
 			Purpose:  "Receive one available message lease from a queue.",
 			UseWhen:  "A worker is ready to process the next queue item.",
-			Requires: fmt.Sprintf("Active MCP session is required for payload transfer. `queue` defaults to %q. `namespace` defaults to %q. `owner` defaults to OAuth client id. Optional `stateful`, `visibility_seconds`, `cursor`, and `txn_id` tune dequeue behavior.", queue, namespace),
-			Effects:  "Returns `found=false` when no message is available, or message metadata/lease fields plus one-time `payload_download_url` for direct payload download. Includes `next_cursor` for continuation.",
+			Requires: fmt.Sprintf("`queue` defaults to %q. `namespace` defaults to %q. `owner` defaults to OAuth client id. Optional `stateful`, `visibility_seconds`, `cursor`, and `txn_id` tune dequeue behavior. `payload_mode` supports `auto` (default), `inline`, `stream`, `none`; `state_mode` (when `stateful=true`) supports the same values.", queue, namespace),
+			Effects:  "Returns `found=false` when no message is available, or lease metadata plus payload delivery according to `payload_mode` (inline fields or stream URL). For stateful dequeue, optional state payload delivery follows `state_mode`.",
 			Retry:    "Safe to retry. Duplicate retries may lease different messages when queue state changes.",
-			Next:     "Download payload with returned URL/method, then call `lockd.queue.ack`, `lockd.queue.nack`, or `lockd.queue.defer`; use `lockd.queue.extend` for long handlers.",
+			Next:     "Process payload/state and then call `lockd.queue.ack`, `lockd.queue.nack`, or `lockd.queue.defer`; use `lockd.queue.extend` for long handlers.",
 		}),
 		toolQueueStats: formatToolDescription(toolContract{
 			Purpose:  "Read side-effect-free queue runtime stats and current visible head snapshot.",

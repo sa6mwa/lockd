@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"strings"
@@ -15,21 +14,9 @@ import (
 
 type writeStreamBeginOutput struct {
 	StreamID            string `json:"stream_id"`
-	MaxChunkBytes       int64  `json:"max_chunk_bytes"`
 	UploadURL           string `json:"upload_url,omitempty"`
 	UploadMethod        string `json:"upload_method,omitempty"`
 	UploadExpiresAtUnix int64  `json:"upload_expires_at_unix,omitempty"`
-}
-
-type writeStreamAppendInput struct {
-	StreamID    string `json:"stream_id" jsonschema:"Write stream identifier returned by begin"`
-	ChunkBase64 string `json:"chunk_base64" jsonschema:"Base64-encoded payload chunk bytes"`
-}
-
-type writeStreamAppendOutput struct {
-	StreamID      string `json:"stream_id"`
-	BytesAppended int64  `json:"bytes_appended"`
-	TotalBytes    int64  `json:"total_bytes"`
 }
 
 type writeStreamCommitInput struct {
@@ -117,27 +104,10 @@ func (s *server) handleStateWriteStreamBeginTool(_ context.Context, req *mcpsdk.
 	}
 	return nil, writeStreamBeginOutput{
 		StreamID:            streamID,
-		MaxChunkBytes:       normalizedInlineMaxBytes(s.cfg.InlineMaxBytes),
 		UploadURL:           transfer.UploadURL,
 		UploadMethod:        transfer.UploadMethod,
 		UploadExpiresAtUnix: transfer.UploadExpiresAtUnix,
 	}, nil
-}
-
-func (s *server) handleStateWriteStreamAppendTool(_ context.Context, req *mcpsdk.CallToolRequest, input writeStreamAppendInput) (*mcpsdk.CallToolResult, writeStreamAppendOutput, error) {
-	if req == nil || req.Session == nil {
-		return nil, writeStreamAppendOutput{}, fmt.Errorf("state write stream append requires an active MCP session")
-	}
-	chunk, err := decodeWriteStreamChunk(input.ChunkBase64, s.cfg.InlineMaxBytes)
-	if err != nil {
-		return nil, writeStreamAppendOutput{}, err
-	}
-	mgr := s.ensureWriteStreamManager()
-	appended, total, err := mgr.Append(req.Session, input.StreamID, writeStreamKindState, chunk)
-	if err != nil {
-		return nil, writeStreamAppendOutput{}, err
-	}
-	return nil, writeStreamAppendOutput{StreamID: strings.TrimSpace(input.StreamID), BytesAppended: appended, TotalBytes: total}, nil
 }
 
 func (s *server) handleStateWriteStreamCommitTool(_ context.Context, req *mcpsdk.CallToolRequest, input writeStreamCommitInput) (*mcpsdk.CallToolResult, stateWriteStreamCommitOutput, error) {
@@ -251,27 +221,10 @@ func (s *server) handleQueueWriteStreamBeginTool(_ context.Context, req *mcpsdk.
 	}
 	return nil, writeStreamBeginOutput{
 		StreamID:            streamID,
-		MaxChunkBytes:       normalizedInlineMaxBytes(s.cfg.InlineMaxBytes),
 		UploadURL:           transfer.UploadURL,
 		UploadMethod:        transfer.UploadMethod,
 		UploadExpiresAtUnix: transfer.UploadExpiresAtUnix,
 	}, nil
-}
-
-func (s *server) handleQueueWriteStreamAppendTool(_ context.Context, req *mcpsdk.CallToolRequest, input writeStreamAppendInput) (*mcpsdk.CallToolResult, writeStreamAppendOutput, error) {
-	if req == nil || req.Session == nil {
-		return nil, writeStreamAppendOutput{}, fmt.Errorf("queue write stream append requires an active MCP session")
-	}
-	chunk, err := decodeWriteStreamChunk(input.ChunkBase64, s.cfg.InlineMaxBytes)
-	if err != nil {
-		return nil, writeStreamAppendOutput{}, err
-	}
-	mgr := s.ensureWriteStreamManager()
-	appended, total, err := mgr.Append(req.Session, input.StreamID, writeStreamKindQueue, chunk)
-	if err != nil {
-		return nil, writeStreamAppendOutput{}, err
-	}
-	return nil, writeStreamAppendOutput{StreamID: strings.TrimSpace(input.StreamID), BytesAppended: appended, TotalBytes: total}, nil
 }
 
 func (s *server) handleQueueWriteStreamCommitTool(_ context.Context, req *mcpsdk.CallToolRequest, input writeStreamCommitInput) (*mcpsdk.CallToolResult, queueWriteStreamCommitOutput, error) {
@@ -421,27 +374,10 @@ func (s *server) handleAttachmentsWriteStreamBeginTool(ctx context.Context, req 
 	}
 	return nil, writeStreamBeginOutput{
 		StreamID:            streamID,
-		MaxChunkBytes:       normalizedInlineMaxBytes(s.cfg.InlineMaxBytes),
 		UploadURL:           transfer.UploadURL,
 		UploadMethod:        transfer.UploadMethod,
 		UploadExpiresAtUnix: transfer.UploadExpiresAtUnix,
 	}, nil
-}
-
-func (s *server) handleAttachmentsWriteStreamAppendTool(_ context.Context, req *mcpsdk.CallToolRequest, input writeStreamAppendInput) (*mcpsdk.CallToolResult, writeStreamAppendOutput, error) {
-	if req == nil || req.Session == nil {
-		return nil, writeStreamAppendOutput{}, fmt.Errorf("attachments write stream append requires an active MCP session")
-	}
-	chunk, err := decodeWriteStreamChunk(input.ChunkBase64, s.cfg.InlineMaxBytes)
-	if err != nil {
-		return nil, writeStreamAppendOutput{}, err
-	}
-	mgr := s.ensureWriteStreamManager()
-	appended, total, err := mgr.Append(req.Session, input.StreamID, writeStreamKindAttachment, chunk)
-	if err != nil {
-		return nil, writeStreamAppendOutput{}, err
-	}
-	return nil, writeStreamAppendOutput{StreamID: strings.TrimSpace(input.StreamID), BytesAppended: appended, TotalBytes: total}, nil
 }
 
 func (s *server) handleAttachmentsWriteStreamCommitTool(_ context.Context, req *mcpsdk.CallToolRequest, input writeStreamCommitInput) (*mcpsdk.CallToolResult, attachmentsWriteStreamCommitOutput, error) {
@@ -503,20 +439,4 @@ func (s *server) registerWriteStreamUploadCapability(session *mcpsdk.ServerSessi
 		UploadMethod:        reg.Method,
 		UploadExpiresAtUnix: reg.ExpiresAtUnix,
 	}, nil
-}
-
-func decodeWriteStreamChunk(chunkBase64 string, maxBytes int64) ([]byte, error) {
-	encoded := strings.TrimSpace(chunkBase64)
-	if encoded == "" {
-		return nil, fmt.Errorf("chunk_base64 is required")
-	}
-	decoded, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		return nil, fmt.Errorf("decode chunk_base64: %w", err)
-	}
-	limit := normalizedInlineMaxBytes(maxBytes)
-	if int64(len(decoded)) > limit {
-		return nil, fmt.Errorf("decoded chunk size %d exceeds mcp.inline_max_bytes=%d", len(decoded), limit)
-	}
-	return decoded, nil
 }

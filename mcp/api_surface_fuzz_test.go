@@ -8,36 +8,24 @@ import (
 	"testing"
 )
 
-func FuzzDecodeWriteStreamChunk(f *testing.F) {
-	f.Add(base64.StdEncoding.EncodeToString([]byte("hello")), int64(8))
-	f.Add("not-base64", int64(1024))
-	f.Add(base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("a"), 128)), int64(16))
-	f.Add("   "+base64.StdEncoding.EncodeToString([]byte("{}"))+"   ", int64(2*1024*1024))
+func FuzzParsePayloadMode(f *testing.F) {
+	f.Add("auto")
+	f.Add("inline")
+	f.Add("stream")
+	f.Add("none")
+	f.Add("  INLINE  ")
+	f.Add("invalid")
 
-	f.Fuzz(func(t *testing.T, chunkBase64 string, maxBytes int64) {
-		chunkBase64 = fuzzClampString(chunkBase64, 16*1024)
-		if maxBytes < -8*1024*1024 {
-			maxBytes = -8 * 1024 * 1024
-		}
-		if maxBytes > 8*1024*1024 {
-			maxBytes = 8 * 1024 * 1024
-		}
-
-		decoded, err := decodeWriteStreamChunk(chunkBase64, maxBytes)
+	f.Fuzz(func(t *testing.T, raw string) {
+		raw = fuzzClampString(raw, 256)
+		mode, err := parsePayloadMode(raw, payloadModeAuto)
 		if err != nil {
 			return
 		}
-
-		limit := normalizedInlineMaxBytes(maxBytes)
-		if int64(len(decoded)) > limit {
-			t.Fatalf("decoded length %d exceeds limit %d", len(decoded), limit)
-		}
-		expected, decodeErr := base64.StdEncoding.DecodeString(strings.TrimSpace(chunkBase64))
-		if decodeErr != nil {
-			t.Fatalf("decodeWriteStreamChunk succeeded while std decode failed: %v", decodeErr)
-		}
-		if !bytes.Equal(decoded, expected) {
-			t.Fatalf("decoded payload mismatch")
+		switch mode {
+		case payloadModeAuto, payloadModeInline, payloadModeStream, payloadModeNone:
+		default:
+			t.Fatalf("unexpected parsed mode %q", mode)
 		}
 	})
 }

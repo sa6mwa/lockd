@@ -24,6 +24,7 @@ type namespaceHint struct {
 type hintToolOutput struct {
 	ClientID           string          `json:"client_id,omitempty"`
 	DefaultNamespace   string          `json:"default_namespace"`
+	InlineMaxBytes     int64           `json:"inline_max_payload_bytes"`
 	NamespaceHints     []namespaceHint `json:"namespace_hints,omitempty"`
 	WildcardPermission string          `json:"wildcard_permission,omitempty"`
 	ClaimURIs          []string        `json:"claim_uris,omitempty"`
@@ -54,6 +55,7 @@ func (s *server) handleHintTool(_ context.Context, req *mcpsdk.CallToolRequest, 
 	return nil, hintToolOutput{
 		ClientID:           clientID,
 		DefaultNamespace:   s.cfg.DefaultNamespace,
+		InlineMaxBytes:     normalizedInlineMaxBytes(s.cfg.InlineMaxBytes),
 		NamespaceHints:     hints.NamespaceHints,
 		WildcardPermission: hints.WildcardPermission,
 		ClaimURIs:          hints.ClaimURIs,

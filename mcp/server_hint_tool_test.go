@@ -88,6 +88,7 @@ func TestHandleHintToolIncludesClientBundleClaimsAndTokenContext(t *testing.T) {
 
 	s := &server{cfg: Config{
 		DefaultNamespace:         "mcp",
+		InlineMaxBytes:           4096,
 		UpstreamDisableMTLS:      false,
 		UpstreamClientBundlePath: bundlePath,
 	}}
@@ -108,6 +109,9 @@ func TestHandleHintToolIncludesClientBundleClaimsAndTokenContext(t *testing.T) {
 	}
 	if out.DefaultNamespace != "mcp" {
 		t.Fatalf("expected default namespace mcp, got %q", out.DefaultNamespace)
+	}
+	if out.InlineMaxBytes != 4096 {
+		t.Fatalf("expected inline max bytes 4096, got %d", out.InlineMaxBytes)
 	}
 	if out.Source != "client_bundle_claims" {
 		t.Fatalf("expected source client_bundle_claims, got %q", out.Source)
@@ -131,6 +135,7 @@ func TestHandleHintToolWithUpstreamMTLSDisabled(t *testing.T) {
 
 	s := &server{cfg: Config{
 		DefaultNamespace:    "mcp",
+		InlineMaxBytes:      2048,
 		UpstreamDisableMTLS: true,
 	}}
 
@@ -143,5 +148,8 @@ func TestHandleHintToolWithUpstreamMTLSDisabled(t *testing.T) {
 	}
 	if len(out.NamespaceHints) != 0 {
 		t.Fatalf("expected no namespace hints, got %#v", out.NamespaceHints)
+	}
+	if out.InlineMaxBytes != 2048 {
+		t.Fatalf("expected inline max bytes 2048, got %d", out.InlineMaxBytes)
 	}
 }

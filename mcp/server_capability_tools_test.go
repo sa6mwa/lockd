@@ -99,25 +99,22 @@ func TestHandleQueryStreamToolStreamsDocuments(t *testing.T) {
 	defer closeSession()
 
 	_, out, err := s.handleQueryStreamTool(ctx, &mcpsdk.CallToolRequest{Session: session}, queryStreamToolInput{
-		Namespace:  "mcp",
-		Query:      "eq{field=/kind,value=mcp-query-stream}",
-		Engine:     "scan",
-		ChunkBytes: 8,
+		Namespace: "mcp",
+		Query:     "eq{field=/kind,value=mcp-query-stream}",
+		Engine:    "scan",
 	})
 	if err != nil {
 		t.Fatalf("query stream tool: %v", err)
 	}
-	if out.DocumentsStreamed == 0 {
-		t.Fatalf("expected at least one streamed document")
+	if out.DownloadURL == "" {
+		t.Fatalf("expected query download URL")
 	}
-	if out.StreamedBytes == 0 {
-		t.Fatalf("expected streamed bytes > 0")
+	if out.DownloadMethod != http.MethodGet {
+		t.Fatalf("expected query download method GET, got %q", out.DownloadMethod)
 	}
-	if out.Chunks == 0 {
-		t.Fatalf("expected chunk count > 0")
-	}
-	if out.ProgressToken == "" {
-		t.Fatalf("expected progress token")
+	ndjson := string(mustDownloadTransfer(t, s, out.DownloadURL))
+	if !strings.Contains(ndjson, `"key":"`+key+`"`) {
+		t.Fatalf("expected query NDJSON to include key %q: %s", key, ndjson)
 	}
 }
 
@@ -169,7 +166,7 @@ func TestHandleDescribeToolSupportsNamespaceOverride(t *testing.T) {
 	}
 }
 
-func TestHandleGetToolReturnsNumericVersionAndStreamHint(t *testing.T) {
+func TestHandleGetToolReturnsNumericVersionAndInlinePayload(t *testing.T) {
 	t.Parallel()
 
 	s, cli := newToolTestServer(t)
@@ -213,8 +210,11 @@ func TestHandleGetToolReturnsNumericVersionAndStreamHint(t *testing.T) {
 	if out.Version <= 0 {
 		t.Fatalf("expected numeric version > 0, got %d", out.Version)
 	}
-	if !out.StreamRequired {
-		t.Fatalf("expected stream_required=true for present state")
+	if out.PayloadMode != "inline" {
+		t.Fatalf("expected payload_mode=inline, got %q", out.PayloadMode)
+	}
+	if out.PayloadText != string(payload) {
+		t.Fatalf("expected inline payload %q, got %q", string(payload), out.PayloadText)
 	}
 }
 
@@ -236,6 +236,8 @@ func TestHandleQueueDequeueStatefulNackAndExtend(t *testing.T) {
 		Namespace:   "mcp",
 		Queue:       queue,
 		Stateful:    true,
+		PayloadMode: "stream",
+		StateMode:   "none",
 		BlockSecond: api.BlockNoWait,
 	})
 	if err != nil {
@@ -249,6 +251,9 @@ func TestHandleQueueDequeueStatefulNackAndExtend(t *testing.T) {
 	}
 	if delivery.PayloadBytes == 0 {
 		t.Fatalf("expected non-zero payload bytes")
+	}
+	if delivery.PayloadMode != "stream" {
+		t.Fatalf("expected payload_mode=stream, got %q", delivery.PayloadMode)
 	}
 	if delivery.PayloadDownloadURL == "" {
 		t.Fatalf("expected payload download URL")
@@ -463,8 +468,11 @@ func TestAttachmentHeadAndGetIntegrityFields(t *testing.T) {
 	if getOut.PayloadSHA256 != expectedHash {
 		t.Fatalf("expected payload_sha256 %q, got %q", expectedHash, getOut.PayloadSHA256)
 	}
-	if !getOut.StreamRequired {
-		t.Fatalf("expected stream_required=true for attachment get")
+	if getOut.PayloadMode != "inline" {
+		t.Fatalf("expected payload_mode=inline for attachment get, got %q", getOut.PayloadMode)
+	}
+	if getOut.PayloadText != string(payload) {
+		t.Fatalf("expected inline attachment payload %q, got %q", string(payload), getOut.PayloadText)
 	}
 	if getOut.PayloadBytes != int64(len(payload)) {
 		t.Fatalf("expected payload_bytes=%d, got %d", len(payload), getOut.PayloadBytes)
@@ -702,15 +710,152 @@ func TestInlinePayloadLimitEnforced(t *testing.T) {
 		LeaseID:     lease.LeaseID,
 		TxnID:       lease.TxnID,
 		PayloadText: `{"too":"large"}`,
-	}); err == nil || !strings.Contains(err.Error(), "mcp.inline_max_bytes") {
+	}); err == nil || !strings.Contains(err.Error(), "mcp.inline_max_bytes") || !strings.Contains(err.Error(), "lockd.state.write_stream.begin") || !strings.Contains(err.Error(), "lockd.hint") {
 		t.Fatalf("expected inline max error for state update, got %v", err)
 	}
 	if _, _, err := s.handleQueueEnqueueTool(ctx, nil, queueEnqueueToolInput{
 		Namespace:   "mcp",
 		Queue:       "inline-limit",
 		PayloadText: `{"too":"large"}`,
-	}); err == nil || !strings.Contains(err.Error(), "mcp.inline_max_bytes") {
+	}); err == nil || !strings.Contains(err.Error(), "mcp.inline_max_bytes") || !strings.Contains(err.Error(), "lockd.queue.write_stream.begin") || !strings.Contains(err.Error(), "lockd.hint") {
 		t.Fatalf("expected inline max error for queue enqueue, got %v", err)
+	}
+}
+
+func TestGetInlineTooLargeSuggestsStreamingAndHint(t *testing.T) {
+	t.Parallel()
+
+	s, cli := newToolTestServer(t)
+	s.cfg.InlineMaxBytes = 32
+	ctx := context.Background()
+
+	key := fmt.Sprintf("mcp-get-inline-too-large-%d", time.Now().UnixNano())
+	lease, err := cli.Acquire(ctx, api.AcquireRequest{
+		Namespace:  "mcp",
+		Key:        key,
+		TTLSeconds: 30,
+		Owner:      "mcp-test",
+		BlockSecs:  api.BlockNoWait,
+	})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	payload := strings.Repeat("a", 256)
+	if _, err := cli.UpdateBytes(ctx, key, lease.LeaseID, []byte(`{"payload":"`+payload+`"}`), lockdclient.UpdateOptions{
+		Namespace: "mcp",
+		TxnID:     lease.TxnID,
+	}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if _, err := cli.Release(ctx, api.ReleaseRequest{
+		Namespace: "mcp",
+		Key:       key,
+		LeaseID:   lease.LeaseID,
+		TxnID:     lease.TxnID,
+	}); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	if _, _, err := s.handleGetTool(ctx, nil, getToolInput{
+		Namespace:   "mcp",
+		Key:         key,
+		PayloadMode: "inline",
+	}); err == nil || !strings.Contains(err.Error(), "lockd.state.stream") || !strings.Contains(err.Error(), "lockd.hint") {
+		t.Fatalf("expected get inline-size guidance error, got %v", err)
+	}
+}
+
+func TestAttachmentPutInlineTooLargeSuggestsStreamingAndHint(t *testing.T) {
+	t.Parallel()
+
+	s, cli := newToolTestServer(t)
+	s.cfg.InlineMaxBytes = 16
+	ctx := context.Background()
+
+	key := fmt.Sprintf("mcp-attachment-inline-too-large-%d", time.Now().UnixNano())
+	lease, err := cli.Acquire(ctx, api.AcquireRequest{
+		Namespace:  "mcp",
+		Key:        key,
+		TTLSeconds: 30,
+		Owner:      "mcp-test",
+		BlockSecs:  api.BlockNoWait,
+	})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	_, _, err = s.handleAttachmentPutTool(ctx, nil, attachmentPutToolInput{
+		Namespace:   "mcp",
+		Key:         key,
+		LeaseID:     lease.LeaseID,
+		TxnID:       lease.TxnID,
+		Name:        "big.txt",
+		PayloadText: strings.Repeat("b", 1024),
+	})
+	if err == nil || !strings.Contains(err.Error(), "lockd.attachments.write_stream.begin") || !strings.Contains(err.Error(), "lockd.hint") {
+		t.Fatalf("expected attachment put inline-size guidance error, got %v", err)
+	}
+}
+
+func TestStateWriteStreamCommitHonorsBeginPreconditions(t *testing.T) {
+	t.Parallel()
+
+	s, cli := newToolTestServer(t)
+	ctx := context.Background()
+	key := fmt.Sprintf("mcp-state-write-preconditions-%d", time.Now().UnixNano())
+
+	lease, err := cli.Acquire(ctx, api.AcquireRequest{
+		Namespace:  "mcp",
+		Key:        key,
+		TTLSeconds: 30,
+		Owner:      "mcp-test",
+		BlockSecs:  api.BlockNoWait,
+	})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if _, err := cli.UpdateBytes(ctx, key, lease.LeaseID, []byte(`{"seed":1}`), lockdclient.UpdateOptions{
+		Namespace: "mcp",
+		TxnID:     lease.TxnID,
+	}); err != nil {
+		t.Fatalf("seed update: %v", err)
+	}
+	if _, err := cli.Release(ctx, api.ReleaseRequest{
+		Namespace: "mcp",
+		Key:       key,
+		LeaseID:   lease.LeaseID,
+		TxnID:     lease.TxnID,
+	}); err != nil {
+		t.Fatalf("release seed lease: %v", err)
+	}
+
+	lease2, err := cli.Acquire(ctx, api.AcquireRequest{
+		Namespace:  "mcp",
+		Key:        key,
+		TTLSeconds: 30,
+		Owner:      "mcp-test",
+		BlockSecs:  api.BlockNoWait,
+	})
+	if err != nil {
+		t.Fatalf("acquire second lease: %v", err)
+	}
+	session, closeSession := newInMemoryServerSession(t)
+	defer closeSession()
+
+	_, begin, err := s.handleStateWriteStreamBeginTool(ctx, &mcpsdk.CallToolRequest{Session: session}, stateWriteStreamBeginInput{
+		Namespace: "mcp",
+		Key:       key,
+		LeaseID:   lease2.LeaseID,
+		TxnID:     lease2.TxnID,
+		IfETag:    "invalid-etag-precondition",
+	})
+	if err != nil {
+		t.Fatalf("state write_stream.begin: %v", err)
+	}
+	mustUploadTransfer(t, s, begin.UploadURL, []byte(`{"updated":true}`))
+	if _, _, err := s.handleStateWriteStreamCommitTool(ctx, &mcpsdk.CallToolRequest{Session: session}, writeStreamCommitInput{
+		StreamID: begin.StreamID,
+	}); err == nil {
+		t.Fatalf("expected commit to fail due to begin-time if_etag precondition")
 	}
 }
 

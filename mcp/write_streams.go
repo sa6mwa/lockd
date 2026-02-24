@@ -46,29 +46,6 @@ type writeStreamSession struct {
 	transferred bool
 }
 
-func (s *writeStreamSession) appendChunk(chunk []byte) (int64, int64, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed || s.committing || s.aborted {
-		return 0, s.bytes, fmt.Errorf("write stream %s is not writable", s.id)
-	}
-	if s.ingesting {
-		return 0, s.bytes, fmt.Errorf("write stream %s is currently receiving transfer upload", s.id)
-	}
-	if s.transferred {
-		return 0, s.bytes, fmt.Errorf("write stream %s already received transfer upload data", s.id)
-	}
-	n, err := s.writer.Write(chunk)
-	if n > 0 {
-		s.bytes += int64(n)
-	}
-	if err != nil {
-		s.closed = true
-		return int64(n), s.bytes, err
-	}
-	return int64(n), s.bytes, nil
-}
-
 func (s *writeStreamSession) commit() (writeStreamResult, int64, error) {
 	s.mu.Lock()
 	if s.aborted {
@@ -223,21 +200,6 @@ func (m *writeStreamManager) Begin(session *mcpsdk.ServerSession, kind writeStre
 
 	m.logger.Debug("mcp.write_stream.begin", "session_id", sessionID, "stream_id", streamID, "kind", string(kind))
 	return streamID, nil
-}
-
-func (m *writeStreamManager) Append(session *mcpsdk.ServerSession, streamID string, kind writeStreamKind, chunk []byte) (int64, int64, error) {
-	ws, err := m.lookup(session, streamID)
-	if err != nil {
-		return 0, 0, err
-	}
-	if ws.kind != kind {
-		return 0, 0, fmt.Errorf("write stream %s kind mismatch: expected %s, got %s", ws.id, kind, ws.kind)
-	}
-	appended, total, err := ws.appendChunk(chunk)
-	if err != nil {
-		return appended, total, err
-	}
-	return appended, total, nil
 }
 
 func (m *writeStreamManager) Upload(session *mcpsdk.ServerSession, streamID string, kind writeStreamKind, reader io.Reader) (int64, int64, error) {

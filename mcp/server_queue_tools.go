@@ -101,6 +101,8 @@ type queueDequeueToolInput struct {
 	VisibilitySeconds int64  `json:"visibility_seconds,omitempty" jsonschema:"Optional visibility timeout override in seconds"`
 	Cursor            string `json:"cursor,omitempty" jsonschema:"Optional continuation cursor from previous dequeue response"`
 	TxnID             string `json:"txn_id,omitempty" jsonschema:"Optional transaction id to bind dequeue operations"`
+	PayloadMode       string `json:"payload_mode,omitempty" jsonschema:"Payload mode: auto (default), inline, stream, or none"`
+	StateMode         string `json:"state_mode,omitempty" jsonschema:"State payload mode when stateful=true: auto, inline, stream, or none (default)"`
 }
 
 type queueDequeueToolOutput struct {
@@ -122,6 +124,9 @@ type queueDequeueToolOutput struct {
 	CorrelationID         string `json:"correlation_id,omitempty"`
 	ContentType           string `json:"content_type,omitempty"`
 	PayloadBytes          int64  `json:"payload_bytes,omitempty"`
+	PayloadMode           string `json:"payload_mode"`
+	PayloadText           string `json:"payload_text,omitempty"`
+	PayloadBase64         string `json:"payload_base64,omitempty"`
 	PayloadDownloadURL    string `json:"payload_download_url,omitempty"`
 	PayloadDownloadMethod string `json:"payload_download_method,omitempty"`
 	PayloadDownloadExpiry int64  `json:"payload_download_expires_at_unix,omitempty"`
@@ -129,9 +134,26 @@ type queueDequeueToolOutput struct {
 	StateLeaseExpiresUnix int64  `json:"state_lease_expires_at_unix,omitempty"`
 	StateFencingToken     int64  `json:"state_fencing_token,omitempty"`
 	StateETag             string `json:"state_etag,omitempty"`
+	StateVersion          int64  `json:"state_version,omitempty"`
+	StateFound            bool   `json:"state_found,omitempty"`
+	StatePayloadMode      string `json:"state_payload_mode,omitempty"`
+	StatePayloadBytes     int64  `json:"state_payload_bytes,omitempty"`
+	StatePayloadText      string `json:"state_payload_text,omitempty"`
+	StatePayloadBase64    string `json:"state_payload_base64,omitempty"`
+	StateDownloadURL      string `json:"state_download_url,omitempty"`
+	StateDownloadMethod   string `json:"state_download_method,omitempty"`
+	StateDownloadExpiry   int64  `json:"state_download_expires_at_unix,omitempty"`
 }
 
 func (s *server) handleQueueDequeueTool(_ context.Context, req *mcpsdk.CallToolRequest, input queueDequeueToolInput) (*mcpsdk.CallToolResult, queueDequeueToolOutput, error) {
+	payloadMode, err := parsePayloadMode(input.PayloadMode, payloadModeAuto)
+	if err != nil {
+		return nil, queueDequeueToolOutput{}, err
+	}
+	stateMode, err := parsePayloadModeField(input.StateMode, payloadModeNone, "state_mode")
+	if err != nil {
+		return nil, queueDequeueToolOutput{}, err
+	}
 	queue := s.resolveQueue(input.Queue)
 	namespace := s.resolveNamespace(input.Namespace)
 	clientID := ""
@@ -158,10 +180,7 @@ func (s *server) handleQueueDequeueTool(_ context.Context, req *mcpsdk.CallToolR
 	if cursor := strings.TrimSpace(input.Cursor); cursor != "" {
 		opts.StartAfter = cursor
 	}
-	var (
-		msg *lockdclient.QueueMessage
-		err error
-	)
+	var msg *lockdclient.QueueMessage
 	dequeueCtx, cancelDequeue := context.WithCancel(context.Background())
 	if input.Stateful {
 		msg, err = s.upstream.DequeueWithState(dequeueCtx, queue, opts)
@@ -208,51 +227,206 @@ func (s *server) handleQueueDequeueTool(_ context.Context, req *mcpsdk.CallToolR
 		CorrelationID:       msg.CorrelationID(),
 		ContentType:         msg.ContentType(),
 		PayloadBytes:        msg.PayloadSize(),
+		PayloadMode:         string(payloadModeNone),
 	}
 	if state := msg.StateHandle(); state != nil {
 		out.StateLeaseID = state.LeaseID()
 		out.StateLeaseExpiresUnix = state.LeaseExpiresAt()
 		out.StateFencingToken = state.FencingToken()
 		out.StateETag = state.ETag()
+		out.StatePayloadMode = string(payloadModeNone)
 	}
-	if out.PayloadBytes <= 0 {
-		_ = msg.ClosePayload()
-		cancelDequeue()
-		return nil, out, nil
-	}
-
-	if req == nil || req.Session == nil {
-		_ = msg.ClosePayload()
-		cancelDequeue()
-		return nil, queueDequeueToolOutput{}, fmt.Errorf("queue payload transfer requires an active MCP session")
-	}
-	reader, err := msg.PayloadReader()
-	if err != nil {
+	if err := s.applyQueuePayloadMode(req, msg, &out, payloadMode, cancelDequeue); err != nil {
 		_ = msg.ClosePayload()
 		cancelDequeue()
 		return nil, queueDequeueToolOutput{}, err
 	}
-	reg, err := s.ensureTransferManager().RegisterDownload(req.Session, reader, transferDownloadRequest{
-		ContentType:   strings.TrimSpace(out.ContentType),
-		ContentLength: out.PayloadBytes,
-		Filename:      out.MessageID,
-		Headers: map[string]string{
-			"X-Lockd-Queue":         out.Queue,
-			"X-Lockd-Namespace":     out.Namespace,
-			"X-Lockd-Queue-Message": out.MessageID,
-		},
-		Cleanup: cancelDequeue,
-	})
-	if err != nil {
+	if input.Stateful && msg.StateHandle() != nil {
+		if err := s.applyQueueStatePayloadMode(req, msg, &out, stateMode); err != nil {
+			return nil, queueDequeueToolOutput{}, err
+		}
+	}
+	return nil, out, nil
+}
+
+func (s *server) applyQueuePayloadMode(req *mcpsdk.CallToolRequest, msg *lockdclient.QueueMessage, out *queueDequeueToolOutput, mode payloadMode, cancelDequeue context.CancelFunc) error {
+	if msg == nil || out == nil {
+		return nil
+	}
+	if out.PayloadBytes <= 0 {
+		out.PayloadMode = string(payloadModeNone)
+		_ = msg.ClosePayload()
+		cancelDequeue()
+		return nil
+	}
+	switch mode {
+	case payloadModeNone:
+		out.PayloadMode = string(payloadModeNone)
+		_ = msg.ClosePayload()
+		cancelDequeue()
+		return nil
+	case payloadModeInline:
+		limit := normalizedInlineMaxBytes(s.cfg.InlineMaxBytes)
+		if out.PayloadBytes > limit {
+			return inlinePayloadTooLargeError(toolQueueDequeue, out.PayloadBytes, limit, "lockd.queue.dequeue(payload_mode=stream)")
+		}
+		reader, err := msg.PayloadReader()
+		if err != nil {
+			return err
+		}
+		inline, err := readInlinePayloadStrict(reader, s.cfg.InlineMaxBytes, toolQueueDequeue, "lockd.queue.dequeue(payload_mode=stream)")
 		_ = reader.Close()
 		_ = msg.ClosePayload()
 		cancelDequeue()
-		return nil, queueDequeueToolOutput{}, err
+		if err != nil {
+			return err
+		}
+		out.PayloadMode = string(payloadModeInline)
+		out.PayloadBytes = inline.Bytes
+		out.PayloadText = inline.Text
+		out.PayloadBase64 = inline.Base64
+		return nil
+	case payloadModeAuto:
+		limit := normalizedInlineMaxBytes(s.cfg.InlineMaxBytes)
+		if out.PayloadBytes <= limit {
+			return s.applyQueuePayloadMode(req, msg, out, payloadModeInline, cancelDequeue)
+		}
+		return s.applyQueuePayloadMode(req, msg, out, payloadModeStream, cancelDequeue)
+	case payloadModeStream:
+		if req == nil || req.Session == nil {
+			return fmt.Errorf("payload_mode=stream requires an active MCP session")
+		}
+		reader, err := msg.PayloadReader()
+		if err != nil {
+			return err
+		}
+		reg, err := s.ensureTransferManager().RegisterDownload(req.Session, reader, transferDownloadRequest{
+			ContentType:   strings.TrimSpace(out.ContentType),
+			ContentLength: out.PayloadBytes,
+			Filename:      out.MessageID,
+			Headers: map[string]string{
+				"X-Lockd-Queue":         out.Queue,
+				"X-Lockd-Namespace":     out.Namespace,
+				"X-Lockd-Queue-Message": out.MessageID,
+			},
+			Cleanup: cancelDequeue,
+		})
+		if err != nil {
+			_ = reader.Close()
+			return err
+		}
+		out.PayloadMode = string(payloadModeStream)
+		out.PayloadDownloadURL = s.transferURL(reg.ID)
+		out.PayloadDownloadMethod = reg.Method
+		out.PayloadDownloadExpiry = reg.ExpiresAtUnix
+		return nil
+	default:
+		return fmt.Errorf("unsupported payload_mode %q", mode)
 	}
-	out.PayloadDownloadURL = s.transferURL(reg.ID)
-	out.PayloadDownloadMethod = reg.Method
-	out.PayloadDownloadExpiry = reg.ExpiresAtUnix
-	return nil, out, nil
+}
+
+func (s *server) applyQueueStatePayloadMode(req *mcpsdk.CallToolRequest, msg *lockdclient.QueueMessage, out *queueDequeueToolOutput, mode payloadMode) error {
+	if msg == nil || out == nil {
+		return nil
+	}
+	stateHandle := msg.StateHandle()
+	if stateHandle == nil {
+		out.StatePayloadMode = string(payloadModeNone)
+		return nil
+	}
+	out.StatePayloadMode = string(payloadModeNone)
+	if mode == payloadModeNone {
+		return nil
+	}
+	if mode == payloadModeStream && (req == nil || req.Session == nil) {
+		return fmt.Errorf("state_mode=stream requires an active MCP session")
+	}
+	snapshot, err := stateHandle.Get(context.Background())
+	if err != nil {
+		return err
+	}
+	if snapshot == nil {
+		out.StateFound = false
+		return nil
+	}
+	out.StateFound = snapshot.HasState
+	out.StateVersion = snapshot.Version
+	if strings.TrimSpace(snapshot.ETag) != "" {
+		out.StateETag = snapshot.ETag
+	}
+	if !snapshot.HasState || snapshot.Reader == nil {
+		_ = snapshot.Close()
+		return nil
+	}
+	switch mode {
+	case payloadModeInline:
+		inline, inlineErr := readInlinePayloadStrict(snapshot.Reader, s.cfg.InlineMaxBytes, toolQueueDequeue, "lockd.queue.dequeue(state_mode=stream)")
+		_ = snapshot.Close()
+		if inlineErr != nil {
+			return inlineErr
+		}
+		out.StatePayloadMode = string(payloadModeInline)
+		out.StatePayloadBytes = inline.Bytes
+		out.StatePayloadText = inline.Text
+		out.StatePayloadBase64 = inline.Base64
+		return nil
+	case payloadModeAuto:
+		inline, tooLarge, inlineErr := readInlinePayloadAuto(snapshot.Reader, s.cfg.InlineMaxBytes)
+		_ = snapshot.Close()
+		if inlineErr != nil {
+			return inlineErr
+		}
+		if !tooLarge {
+			out.StatePayloadMode = string(payloadModeInline)
+			out.StatePayloadBytes = inline.Bytes
+			out.StatePayloadText = inline.Text
+			out.StatePayloadBase64 = inline.Base64
+			return nil
+		}
+		if req == nil || req.Session == nil {
+			limit := normalizedInlineMaxBytes(s.cfg.InlineMaxBytes)
+			return inlinePayloadTooLargeError(toolQueueDequeue, limit+1, limit, "lockd.queue.dequeue(state_mode=stream)")
+		}
+		return s.applyQueueStatePayloadMode(req, msg, out, payloadModeStream)
+	case payloadModeStream:
+		refetch, refetchErr := stateHandle.Get(context.Background())
+		if refetchErr != nil {
+			_ = snapshot.Close()
+			return refetchErr
+		}
+		_ = snapshot.Close()
+		if refetch == nil || !refetch.HasState || refetch.Reader == nil {
+			if refetch != nil {
+				_ = refetch.Close()
+			}
+			out.StateFound = false
+			out.StatePayloadMode = string(payloadModeNone)
+			return nil
+		}
+		reg, regErr := s.ensureTransferManager().RegisterDownload(req.Session, refetch.Reader, transferDownloadRequest{
+			ContentType: "application/json",
+			Headers: map[string]string{
+				"X-Lockd-Queue-State-Queue":   out.Queue,
+				"X-Lockd-Queue-State-Message": out.MessageID,
+				"X-Lockd-Queue-State-ETag":    out.StateETag,
+			},
+			Cleanup: func() {
+				_ = refetch.Close()
+			},
+		})
+		if regErr != nil {
+			_ = refetch.Close()
+			return regErr
+		}
+		out.StatePayloadMode = string(payloadModeStream)
+		out.StateDownloadURL = s.transferURL(reg.ID)
+		out.StateDownloadMethod = reg.Method
+		out.StateDownloadExpiry = reg.ExpiresAtUnix
+		return nil
+	default:
+		_ = snapshot.Close()
+		return fmt.Errorf("unsupported state_mode %q", mode)
+	}
 }
 
 type queueWatchToolInput struct {

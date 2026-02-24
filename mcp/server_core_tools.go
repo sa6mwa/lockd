@@ -4,12 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
-	"io"
 	"strconv"
 	"strings"
-	"unicode/utf8"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -21,8 +18,6 @@ const (
 	attachmentPutModeCreate  = "create"
 	attachmentPutModeUpsert  = "upsert"
 	attachmentPutModeReplace = "replace"
-	defaultStreamChunkBytes  = 64 * 1024
-	maxStreamChunkBytes      = 4 * 1024 * 1024
 )
 
 type lockAcquireToolInput struct {
@@ -400,6 +395,104 @@ type attachmentPutToolOutput struct {
 	Version    int64                `json:"version"`
 }
 
+type attachmentPutToolInput struct {
+	Key           string `json:"key" jsonschema:"State key"`
+	Namespace     string `json:"namespace,omitempty" jsonschema:"Namespace (defaults to server default namespace)"`
+	LeaseID       string `json:"lease_id" jsonschema:"Active lease id"`
+	TxnID         string `json:"txn_id,omitempty" jsonschema:"Optional XA transaction id"`
+	FencingToken  *int64 `json:"fencing_token,omitempty" jsonschema:"Optional fencing token override"`
+	Name          string `json:"name" jsonschema:"Attachment name"`
+	ContentType   string `json:"content_type,omitempty" jsonschema:"Attachment content type"`
+	MaxBytes      int64  `json:"max_bytes,omitempty" jsonschema:"Optional upload size cap"`
+	Mode          string `json:"mode,omitempty" jsonschema:"Write mode: create (default), upsert, or replace"`
+	PayloadText   string `json:"payload_text,omitempty" jsonschema:"UTF-8 payload text"`
+	PayloadBase64 string `json:"payload_base64,omitempty" jsonschema:"Base64-encoded payload bytes"`
+}
+
+func (s *server) handleAttachmentPutTool(ctx context.Context, _ *mcpsdk.CallToolRequest, input attachmentPutToolInput) (*mcpsdk.CallToolResult, attachmentPutToolOutput, error) {
+	key := strings.TrimSpace(input.Key)
+	leaseID := strings.TrimSpace(input.LeaseID)
+	name := strings.TrimSpace(input.Name)
+	if key == "" || leaseID == "" || name == "" {
+		return nil, attachmentPutToolOutput{}, fmt.Errorf("key, lease_id, and name are required")
+	}
+	if strings.TrimSpace(input.PayloadBase64) != "" && input.PayloadText != "" {
+		return nil, attachmentPutToolOutput{}, fmt.Errorf("payload_text and payload_base64 are mutually exclusive")
+	}
+	if input.MaxBytes < 0 {
+		return nil, attachmentPutToolOutput{}, fmt.Errorf("max_bytes must be >= 0")
+	}
+	mode, err := normalizeAttachmentPutMode(input.Mode)
+	if err != nil {
+		return nil, attachmentPutToolOutput{}, err
+	}
+	if mode == attachmentPutModeReplace {
+		existing, listErr := s.upstream.ListAttachments(ctx, lockdclient.ListAttachmentsRequest{
+			Namespace:    s.resolveNamespace(input.Namespace),
+			Key:          key,
+			LeaseID:      leaseID,
+			TxnID:        strings.TrimSpace(input.TxnID),
+			FencingToken: input.FencingToken,
+			Public:       false,
+		})
+		if listErr != nil {
+			return nil, attachmentPutToolOutput{}, fmt.Errorf("replace requires listing existing attachments: %w", listErr)
+		}
+		found := false
+		for _, item := range existing.Attachments {
+			if strings.TrimSpace(item.Name) == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, attachmentPutToolOutput{}, fmt.Errorf("attachment %q does not exist; replace mode requires an existing attachment", name)
+		}
+	}
+	var payload []byte
+	if strings.TrimSpace(input.PayloadBase64) != "" {
+		decoded, decodeErr := base64.StdEncoding.DecodeString(strings.TrimSpace(input.PayloadBase64))
+		if decodeErr != nil {
+			return nil, attachmentPutToolOutput{}, fmt.Errorf("decode payload_base64: %w", decodeErr)
+		}
+		payload = decoded
+	} else {
+		payload = []byte(input.PayloadText)
+	}
+	if err := validateInlinePayloadBytes(int64(len(payload)), s.cfg.InlineMaxBytes, toolAttachmentsPut, toolAttachmentsWriteStreamBegin); err != nil {
+		return nil, attachmentPutToolOutput{}, err
+	}
+	contentType := strings.TrimSpace(input.ContentType)
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	var maxBytes *int64
+	if input.MaxBytes > 0 {
+		value := input.MaxBytes
+		maxBytes = &value
+	}
+	resp, err := s.upstream.Attach(ctx, lockdclient.AttachRequest{
+		Namespace:        s.resolveNamespace(input.Namespace),
+		Key:              key,
+		LeaseID:          leaseID,
+		TxnID:            strings.TrimSpace(input.TxnID),
+		FencingToken:     input.FencingToken,
+		Name:             name,
+		Body:             bytes.NewReader(payload),
+		ContentType:      contentType,
+		MaxBytes:         maxBytes,
+		PreventOverwrite: mode == attachmentPutModeCreate,
+	})
+	if err != nil {
+		return nil, attachmentPutToolOutput{}, err
+	}
+	return nil, attachmentPutToolOutput{
+		Attachment: toAttachmentInfoOutput(resp.Attachment),
+		Noop:       resp.Noop,
+		Version:    resp.Version,
+	}, nil
+}
+
 type attachmentListToolInput struct {
 	Key          string `json:"key" jsonschema:"State key"`
 	Namespace    string `json:"namespace,omitempty" jsonschema:"Namespace (defaults to server default namespace)"`
@@ -458,30 +551,137 @@ type attachmentGetToolInput struct {
 	Public       *bool  `json:"public,omitempty" jsonschema:"Read mode selector: true for public read (default), false for lease-bound read"`
 	ID           string `json:"id,omitempty" jsonschema:"Attachment id selector"`
 	Name         string `json:"name,omitempty" jsonschema:"Attachment name selector"`
+	PayloadMode  string `json:"payload_mode,omitempty" jsonschema:"Payload mode: auto (default), inline, stream, or none"`
 }
 
 type attachmentGetToolOutput struct {
-	Namespace      string               `json:"namespace"`
-	Key            string               `json:"key"`
-	Attachment     attachmentInfoOutput `json:"attachment"`
-	PayloadBytes   int64                `json:"payload_bytes"`
-	PayloadSHA256  string               `json:"payload_sha256,omitempty"`
-	StreamRequired bool                 `json:"stream_required"`
+	Namespace             string               `json:"namespace"`
+	Key                   string               `json:"key"`
+	Attachment            attachmentInfoOutput `json:"attachment"`
+	PayloadMode           string               `json:"payload_mode"`
+	PayloadBytes          int64                `json:"payload_bytes"`
+	PayloadSHA256         string               `json:"payload_sha256,omitempty"`
+	PayloadText           string               `json:"payload_text,omitempty"`
+	PayloadBase64         string               `json:"payload_base64,omitempty"`
+	DownloadURL           string               `json:"download_url,omitempty"`
+	DownloadMethod        string               `json:"download_method,omitempty"`
+	DownloadExpiresAtUnix int64                `json:"download_expires_at_unix,omitempty"`
 }
 
-func (s *server) handleAttachmentGetTool(ctx context.Context, _ *mcpsdk.CallToolRequest, input attachmentGetToolInput) (*mcpsdk.CallToolResult, attachmentGetToolOutput, error) {
-	_, head, err := s.handleAttachmentHeadTool(ctx, nil, attachmentHeadToolInput(input))
+func (s *server) handleAttachmentGetTool(ctx context.Context, req *mcpsdk.CallToolRequest, input attachmentGetToolInput) (*mcpsdk.CallToolResult, attachmentGetToolOutput, error) {
+	headIn := attachmentHeadToolInput{
+		Key:          input.Key,
+		Namespace:    input.Namespace,
+		LeaseID:      input.LeaseID,
+		TxnID:        input.TxnID,
+		FencingToken: input.FencingToken,
+		Public:       input.Public,
+		ID:           input.ID,
+		Name:         input.Name,
+	}
+	_, head, err := s.handleAttachmentHeadTool(ctx, nil, headIn)
 	if err != nil {
 		return nil, attachmentGetToolOutput{}, err
 	}
-	return nil, attachmentGetToolOutput{
-		Namespace:      head.Namespace,
-		Key:            head.Key,
-		Attachment:     head.Attachment,
-		PayloadBytes:   head.Attachment.Size,
-		PayloadSHA256:  strings.TrimSpace(head.Attachment.PlaintextSHA256),
-		StreamRequired: true,
-	}, nil
+	mode, err := parsePayloadMode(input.PayloadMode, payloadModeAuto)
+	if err != nil {
+		return nil, attachmentGetToolOutput{}, err
+	}
+	out := attachmentGetToolOutput{
+		Namespace:     head.Namespace,
+		Key:           head.Key,
+		Attachment:    head.Attachment,
+		PayloadMode:   string(payloadModeNone),
+		PayloadBytes:  head.Attachment.Size,
+		PayloadSHA256: strings.TrimSpace(head.Attachment.PlaintextSHA256),
+	}
+	switch mode {
+	case payloadModeNone:
+		return nil, out, nil
+	case payloadModeInline:
+		limit := normalizedInlineMaxBytes(s.cfg.InlineMaxBytes)
+		if head.Attachment.Size > limit {
+			return nil, attachmentGetToolOutput{}, inlinePayloadTooLargeError(toolAttachmentsGet, head.Attachment.Size, limit, toolAttachmentsStream)
+		}
+		readerCtx, cancel := context.WithCancel(context.Background())
+		att, getErr := s.upstream.GetAttachment(readerCtx, lockdclient.GetAttachmentRequest{
+			Namespace:    s.resolveNamespace(input.Namespace),
+			Key:          strings.TrimSpace(input.Key),
+			LeaseID:      strings.TrimSpace(input.LeaseID),
+			TxnID:        strings.TrimSpace(input.TxnID),
+			FencingToken: input.FencingToken,
+			Public:       resolvePublicReadMode(input.Public),
+			Selector: lockdclient.AttachmentSelector{
+				ID:   strings.TrimSpace(input.ID),
+				Name: strings.TrimSpace(input.Name),
+			},
+		})
+		if getErr != nil {
+			cancel()
+			return nil, attachmentGetToolOutput{}, getErr
+		}
+		inline, inlineErr := readInlinePayloadStrict(att, s.cfg.InlineMaxBytes, toolAttachmentsGet, toolAttachmentsStream)
+		_ = att.Close()
+		cancel()
+		if inlineErr != nil {
+			return nil, attachmentGetToolOutput{}, inlineErr
+		}
+		out.PayloadMode = string(payloadModeInline)
+		out.PayloadBytes = inline.Bytes
+		out.PayloadText = inline.Text
+		out.PayloadBase64 = inline.Base64
+		return nil, out, nil
+	case payloadModeStream:
+		if req == nil || req.Session == nil {
+			return nil, attachmentGetToolOutput{}, fmt.Errorf("payload_mode=stream requires an active MCP session")
+		}
+		_, streamOut, streamErr := s.handleAttachmentStreamTool(ctx, req, attachmentStreamToolInput{
+			Key:          input.Key,
+			Namespace:    input.Namespace,
+			LeaseID:      input.LeaseID,
+			TxnID:        input.TxnID,
+			FencingToken: input.FencingToken,
+			Public:       input.Public,
+			ID:           input.ID,
+			Name:         input.Name,
+		})
+		if streamErr != nil {
+			return nil, attachmentGetToolOutput{}, streamErr
+		}
+		out.PayloadMode = string(payloadModeStream)
+		out.DownloadURL = streamOut.DownloadURL
+		out.DownloadMethod = streamOut.DownloadMethod
+		out.DownloadExpiresAtUnix = streamOut.DownloadExpiresAtUnix
+		return nil, out, nil
+	case payloadModeAuto:
+		limit := normalizedInlineMaxBytes(s.cfg.InlineMaxBytes)
+		if head.Attachment.Size <= limit {
+			return s.handleAttachmentGetTool(ctx, req, attachmentGetToolInput{
+				Key:          input.Key,
+				Namespace:    input.Namespace,
+				LeaseID:      input.LeaseID,
+				TxnID:        input.TxnID,
+				FencingToken: input.FencingToken,
+				Public:       input.Public,
+				ID:           input.ID,
+				Name:         input.Name,
+				PayloadMode:  string(payloadModeInline),
+			})
+		}
+		return s.handleAttachmentGetTool(ctx, req, attachmentGetToolInput{
+			Key:          input.Key,
+			Namespace:    input.Namespace,
+			LeaseID:      input.LeaseID,
+			TxnID:        input.TxnID,
+			FencingToken: input.FencingToken,
+			Public:       input.Public,
+			ID:           input.ID,
+			Name:         input.Name,
+			PayloadMode:  string(payloadModeStream),
+		})
+	default:
+		return nil, attachmentGetToolOutput{}, fmt.Errorf("unsupported payload_mode %q", mode)
+	}
 }
 
 type attachmentHeadToolInput struct {
@@ -834,123 +1034,6 @@ func (s *server) handleIndexFlushTool(ctx context.Context, _ *mcpsdk.CallToolReq
 		IndexSeq:  resp.IndexSeq,
 		FlushID:   resp.FlushID,
 	}, nil
-}
-
-type streamProgressRequest struct {
-	ProgressToken string
-	EventType     string
-	ChunkBytes    int64
-	MaxBytes      int64
-	Metadata      map[string]any
-}
-
-func streamReaderToProgress(ctx context.Context, session *mcpsdk.ServerSession, reader io.Reader, req streamProgressRequest) (int64, int, bool, error) {
-	if session == nil {
-		return 0, 0, false, fmt.Errorf("active MCP session required")
-	}
-	if reader == nil {
-		return 0, 0, false, nil
-	}
-	if req.ProgressToken == "" {
-		req.ProgressToken = "lockd.stream"
-	}
-	chunkBytes, err := normalizeStreamChunkBytes(req.ChunkBytes)
-	if err != nil {
-		return 0, 0, false, err
-	}
-	if req.MaxBytes < 0 {
-		return 0, 0, false, fmt.Errorf("max_bytes must be >= 0")
-	}
-
-	buffer := make([]byte, chunkBytes)
-	var (
-		offset    int64
-		chunks    int
-		truncated bool
-	)
-	for {
-		if req.MaxBytes > 0 && offset >= req.MaxBytes {
-			truncated = true
-			break
-		}
-		readLimit := int64(len(buffer))
-		if req.MaxBytes > 0 {
-			remaining := req.MaxBytes - offset
-			if remaining <= 0 {
-				truncated = true
-				break
-			}
-			if remaining < readLimit {
-				readLimit = remaining
-			}
-		}
-		n, readErr := reader.Read(buffer[:readLimit])
-		if n > 0 {
-			payload := append([]byte(nil), buffer[:n]...)
-			message := map[string]any{
-				"type":           req.EventType,
-				"offset":         offset,
-				"bytes":          n,
-				"payload_base64": base64.StdEncoding.EncodeToString(payload),
-			}
-			for key, value := range req.Metadata {
-				message[key] = value
-			}
-			if utf8.Valid(payload) {
-				message["payload_text"] = string(payload)
-			}
-			raw, err := json.Marshal(message)
-			if err != nil {
-				return offset, chunks, truncated, err
-			}
-			chunks++
-			offset += int64(n)
-			if err := session.NotifyProgress(ctx, &mcpsdk.ProgressNotificationParams{
-				ProgressToken: req.ProgressToken,
-				Progress:      float64(chunks),
-				Message:       string(raw),
-			}); err != nil {
-				return offset, chunks, truncated, err
-			}
-		}
-		if readErr == nil {
-			continue
-		}
-		if readErr == io.EOF {
-			break
-		}
-		return offset, chunks, truncated, readErr
-	}
-	return offset, chunks, truncated, nil
-}
-
-func normalizeStreamChunkBytes(raw int64) (int64, error) {
-	if raw == 0 {
-		return defaultStreamChunkBytes, nil
-	}
-	if raw < 0 {
-		return 0, fmt.Errorf("chunk_bytes must be > 0")
-	}
-	if raw > maxStreamChunkBytes {
-		return 0, fmt.Errorf("chunk_bytes must be <= %d", maxStreamChunkBytes)
-	}
-	return raw, nil
-}
-
-func normalizeProgressToken(raw, prefix string, parts ...string) string {
-	if token := strings.TrimSpace(raw); token != "" {
-		return token
-	}
-	trimmed := make([]string, 0, len(parts))
-	for _, part := range parts {
-		if value := strings.TrimSpace(part); value != "" {
-			trimmed = append(trimmed, value)
-		}
-	}
-	if len(trimmed) == 0 {
-		return prefix
-	}
-	return prefix + "/" + strings.Join(trimmed, "/")
 }
 
 func toAttachmentInfoOutput(info lockdclient.AttachmentInfo) attachmentInfoOutput {

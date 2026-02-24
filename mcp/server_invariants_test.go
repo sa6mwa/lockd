@@ -349,9 +349,6 @@ func TestWriteStreamToolsRequireSession(t *testing.T) {
 	if _, _, err := s.handleAttachmentsWriteStreamBeginTool(ctx, nil, attachmentsWriteStreamBeginInput{Key: "k1", LeaseID: "l1", Name: "a.bin"}); err == nil || !strings.Contains(err.Error(), "active MCP session") {
 		t.Fatalf("expected attachments write stream begin session error, got %v", err)
 	}
-	if _, _, err := s.handleStateWriteStreamAppendTool(ctx, nil, writeStreamAppendInput{StreamID: "s1", ChunkBase64: "e30="}); err == nil || !strings.Contains(err.Error(), "active MCP session") {
-		t.Fatalf("expected state write stream append session error, got %v", err)
-	}
 	if _, _, err := s.handleQueueWriteStreamCommitTool(ctx, nil, writeStreamCommitInput{StreamID: "s1"}); err == nil || !strings.Contains(err.Error(), "active MCP session") {
 		t.Fatalf("expected queue write stream commit session error, got %v", err)
 	}
@@ -375,6 +372,7 @@ func TestQueueDequeueRequiresSessionForPayloadStreaming(t *testing.T) {
 		Namespace:   "mcp",
 		Queue:       queue,
 		BlockSecond: api.BlockNoWait,
+		PayloadMode: "stream",
 	})
 	if err == nil || !strings.Contains(err.Error(), "active MCP session") {
 		t.Fatalf("expected active MCP session error for payload streaming, got %v", err)

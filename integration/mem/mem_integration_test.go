@@ -220,8 +220,7 @@ func TestMemPublicGetAfterRelease(t *testing.T) {
 	}
 
 	// Attempt a normal leased GET using the old lease id/token – expect lease_required.
-	token := strconv.FormatInt(lease.FencingToken, 10)
-	cli.RegisterLeaseToken(lease.LeaseID, token)
+	cli.RegisterLeaseToken(lease.LeaseID, lease.FencingToken)
 	staleCtx, staleCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer staleCancel()
 	_, err := cli.Get(staleCtx, key,
@@ -572,7 +571,7 @@ func TestMemRemoveCASMismatch(t *testing.T) {
 
 	staleOpts := lockdclient.RemoveOptions{
 		IfETag:    staleETag,
-		IfVersion: strconv.FormatInt(currentVersion, 10),
+		IfVersion: lockdclient.Int64(currentVersion),
 	}
 	if _, err := lease.RemoveWithOptions(ctx, staleOpts); err == nil {
 		t.Fatalf("expected stale remove to fail")
@@ -628,7 +627,7 @@ func TestMemRemoveKeepAlive(t *testing.T) {
 
 	staleUpdate := lockdclient.UpdateOptions{
 		IfETag:    originalETag,
-		IfVersion: strconv.FormatInt(originalVersion, 10),
+		IfVersion: lockdclient.Int64(originalVersion),
 	}
 	if _, err := lease.UpdateWithOptions(ctx, bytes.NewReader([]byte(`{"payload":"stale"}`)), staleUpdate); err == nil {
 		t.Fatalf("expected stale update to fail")

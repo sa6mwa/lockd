@@ -1591,7 +1591,7 @@ func RunLeaderFailoverScenarioMulti(t testing.TB, tcs []*lockd.TestServer, islan
 			}
 			cli := ensureClient(t, target)
 			if pending.fencingToken > 0 {
-				cli.RegisterLeaseToken(pending.leaseID, strconv.FormatInt(pending.fencingToken, 10))
+				cli.RegisterLeaseToken(pending.leaseID, pending.fencingToken)
 			}
 			releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			_, err := cli.Release(releaseCtx, api.ReleaseRequest{

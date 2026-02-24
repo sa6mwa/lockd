@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -95,6 +96,31 @@ type SubscribeOptions struct {
 	// OnCloseDelay applies a delay before auto-nack when handlers close without ack.
 	OnCloseDelay time.Duration
 }
+
+// WatchQueueOptions configures non-consuming queue visibility watches.
+type WatchQueueOptions struct {
+	// Namespace scopes the queue operation. Empty uses the client's default namespace.
+	Namespace string
+}
+
+// QueueStatsOptions configures queue stats reads.
+type QueueStatsOptions struct {
+	// Namespace scopes the queue operation. Empty uses the client's default namespace.
+	Namespace string
+}
+
+// QueueWatchEvent describes queue visibility changes emitted by WatchQueue.
+type QueueWatchEvent struct {
+	Namespace     string
+	Queue         string
+	Available     bool
+	HeadMessageID string
+	ChangedAt     time.Time
+	CorrelationID string
+}
+
+// QueueWatchHandler is invoked for each WatchQueue event.
+type QueueWatchHandler func(context.Context, QueueWatchEvent) error
 
 // ConsumerMessage bundles the runtime context provided to ConsumerMessageHandler.
 // The same handler can be reused across multiple ConsumerConfig entries and inspect
@@ -1157,29 +1183,27 @@ func (s *QueueStateHandle) clearStateAfterRemove(newVersion int64) {
 	s.mu.Unlock()
 }
 
-func (s *QueueStateHandle) syncFencingToken() string {
+func (s *QueueStateHandle) syncFencingToken() *int64 {
 	if s == nil || s.client == nil {
-		return ""
+		return nil
 	}
 	leaseID := s.LeaseID()
 	if leaseID == "" {
-		return ""
+		return nil
 	}
-	token, err := s.client.fencingToken(leaseID, "")
+	token, err := s.client.fencingToken(leaseID, nil)
 	if err != nil {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		if s.fencingToken <= 0 {
-			return ""
+			return nil
 		}
-		return strconv.FormatInt(s.fencingToken, 10)
+		return Int64(s.fencingToken)
 	}
-	if parsed, parseErr := strconv.ParseInt(token, 10, 64); parseErr == nil {
-		s.mu.Lock()
-		s.fencingToken = parsed
-		s.mu.Unlock()
-	}
-	return token
+	s.mu.Lock()
+	s.fencingToken = token
+	s.mu.Unlock()
+	return Int64(token)
 }
 
 // Get reads the current workflow state snapshot for the message's state lease.
@@ -1260,7 +1284,7 @@ func (s *QueueStateHandle) Update(ctx context.Context, body io.Reader, opts ...U
 		IfETag: etag,
 	}
 	if version > 0 {
-		options.IfVersion = strconv.FormatInt(version, 10)
+		options.IfVersion = Int64(version)
 	}
 	options.FencingToken = s.syncFencingToken()
 	if len(opts) > 0 {
@@ -1284,10 +1308,10 @@ func (s *QueueStateHandle) UpdateWithOptions(ctx context.Context, body io.Reader
 	if opts.IfETag == "" {
 		opts.IfETag = etag
 	}
-	if opts.IfVersion == "" && version > 0 {
-		opts.IfVersion = strconv.FormatInt(version, 10)
+	if opts.IfVersion == nil && version > 0 {
+		opts.IfVersion = Int64(version)
 	}
-	if opts.FencingToken == "" {
+	if opts.FencingToken == nil {
 		opts.FencingToken = s.syncFencingToken()
 	}
 	if opts.Namespace == "" {
@@ -1351,7 +1375,7 @@ func (s *QueueStateHandle) UpdateMetadata(ctx context.Context, meta MetadataOpti
 		opts.TxnID = txnID
 	}
 	if version > 0 {
-		opts.IfVersion = strconv.FormatInt(version, 10)
+		opts.IfVersion = Int64(version)
 	}
 	opts.FencingToken = s.syncFencingToken()
 	res, err := cli.UpdateMetadata(ctx, key, leaseID, opts)
@@ -1372,7 +1396,7 @@ func (s *QueueStateHandle) Remove(ctx context.Context) (*api.RemoveResponse, err
 		IfETag: etag,
 	}
 	if version > 0 {
-		opts.IfVersion = strconv.FormatInt(version, 10)
+		opts.IfVersion = Int64(version)
 	}
 	opts.FencingToken = s.syncFencingToken()
 	return s.RemoveWithOptions(ctx, opts)
@@ -1388,10 +1412,10 @@ func (s *QueueStateHandle) RemoveWithOptions(ctx context.Context, opts RemoveOpt
 	if opts.IfETag == "" {
 		opts.IfETag = etag
 	}
-	if opts.IfVersion == "" && version > 0 {
-		opts.IfVersion = strconv.FormatInt(version, 10)
+	if opts.IfVersion == nil && version > 0 {
+		opts.IfVersion = Int64(version)
 	}
-	if opts.FencingToken == "" {
+	if opts.FencingToken == nil {
 		opts.FencingToken = s.syncFencingToken()
 	}
 	if opts.Namespace == "" {
@@ -1419,6 +1443,8 @@ const headerQueryMetadata = "X-Lockd-Query-Metadata"
 const headerQueryReturn = "X-Lockd-Query-Return"
 const contentTypeNDJSON = "application/x-ndjson"
 const headerShutdownImminent = "Shutdown-Imminent"
+const headerExpectedSHA256 = "X-Expected-SHA256"
+const headerExpectedBytes = "X-Expected-Bytes"
 const (
 	minQueueAutoExtendInterval = 250 * time.Millisecond
 	maxQueueAutoExtendInterval = 30 * time.Second
@@ -1806,7 +1832,6 @@ func applyDefaultTransportTuning(tr *http.Transport) {
 type LeaseSession struct {
 	client *Client
 	api.AcquireResponse
-	fencingToken   string
 	mu             sync.Mutex
 	closed         bool
 	closeErr       error
@@ -1961,11 +1986,10 @@ func (s *StateSnapshot) Decode(v any) error {
 	return json.NewDecoder(s.Reader).Decode(v)
 }
 
-func newLeaseSession(c *Client, resp api.AcquireResponse, token string, endpoint string) *LeaseSession {
+func newLeaseSession(c *Client, resp api.AcquireResponse, endpoint string) *LeaseSession {
 	session := &LeaseSession{
 		client:          c,
 		AcquireResponse: resp,
-		fencingToken:    token,
 		correlationID:   resp.CorrelationID,
 		endpoint:        endpoint,
 	}
@@ -1973,17 +1997,17 @@ func newLeaseSession(c *Client, resp api.AcquireResponse, token string, endpoint
 	return session
 }
 
-func (s *LeaseSession) fencing() string {
+func (s *LeaseSession) syncFencingToken() *int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.fencingToken != "" {
-		return s.fencingToken
+	if s.FencingToken > 0 {
+		return Int64(s.FencingToken)
 	}
-	if token, err := s.client.fencingToken(s.LeaseID, ""); err == nil {
-		s.fencingToken = token
-		return token
+	if token, err := s.client.fencingToken(s.LeaseID, nil); err == nil {
+		s.FencingToken = token
+		return Int64(token)
 	}
-	return ""
+	return nil
 }
 
 func (s *LeaseSession) correlation() string {
@@ -2012,21 +2036,13 @@ func (s *LeaseSession) closeContext() (context.Context, context.CancelFunc) {
 	return s.client.closeContext()
 }
 
-// FencingTokenString returns the current fencing token associated with the lease.
-func (s *LeaseSession) FencingTokenString() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.fencingToken != "" {
-		return s.fencingToken
+// CurrentFencingToken returns the current fencing token associated with the lease.
+func (s *LeaseSession) CurrentFencingToken() int64 {
+	token := s.syncFencingToken()
+	if token == nil {
+		return 0
 	}
-	if token, err := s.client.fencingToken(s.LeaseID, ""); err == nil {
-		s.fencingToken = token
-		if v, err := strconv.ParseInt(token, 10, 64); err == nil {
-			s.FencingToken = v
-		}
-		return token
-	}
-	return ""
+	return *token
 }
 
 // Update streams new JSON state for the session's key while preserving the lease.
@@ -2036,9 +2052,9 @@ func (s *LeaseSession) Update(ctx context.Context, body io.Reader, options ...Up
 		IfETag: s.StateETag,
 	}
 	if s.Version > 0 {
-		opts.IfVersion = strconv.FormatInt(s.Version, 10)
+		opts.IfVersion = Int64(s.Version)
 	}
-	opts.FencingToken = s.fencing()
+	opts.FencingToken = s.syncFencingToken()
 	if len(options) > 0 {
 		opts = applyUpdateOptions(opts, options)
 	}
@@ -2056,11 +2072,11 @@ func (s *LeaseSession) UpdateWithOptions(ctx context.Context, body io.Reader, op
 	if opts.IfETag == "" {
 		opts.IfETag = s.StateETag
 	}
-	if opts.IfVersion == "" && s.Version > 0 {
-		opts.IfVersion = strconv.FormatInt(s.Version, 10)
+	if opts.IfVersion == nil && s.Version > 0 {
+		opts.IfVersion = Int64(s.Version)
 	}
-	if opts.FencingToken == "" {
-		opts.FencingToken = s.fencing()
+	if opts.FencingToken == nil {
+		opts.FencingToken = s.syncFencingToken()
 	}
 	return s.applyUpdate(ctx, body, opts)
 }
@@ -2080,11 +2096,8 @@ func (s *LeaseSession) applyUpdate(ctx context.Context, body io.Reader, opts Upd
 	s.mu.Lock()
 	s.Version = res.NewVersion
 	s.StateETag = res.NewStateETag
-	if token, err := s.client.fencingToken(s.LeaseID, ""); err == nil {
-		s.fencingToken = token
-		if v, err := strconv.ParseInt(token, 10, 64); err == nil {
-			s.FencingToken = v
-		}
+	if token, err := s.client.fencingToken(s.LeaseID, nil); err == nil {
+		s.FencingToken = token
 	}
 	s.mu.Unlock()
 	return res, nil
@@ -2098,9 +2111,9 @@ func (s *LeaseSession) Remove(ctx context.Context) (*api.RemoveResponse, error) 
 		IfETag: s.StateETag,
 	}
 	if s.Version > 0 {
-		opts.IfVersion = strconv.FormatInt(s.Version, 10)
+		opts.IfVersion = Int64(s.Version)
 	}
-	opts.FencingToken = s.fencing()
+	opts.FencingToken = s.syncFencingToken()
 	return s.applyRemove(ctx, opts)
 }
 
@@ -2110,11 +2123,11 @@ func (s *LeaseSession) RemoveWithOptions(ctx context.Context, opts RemoveOptions
 	if opts.IfETag == "" {
 		opts.IfETag = s.StateETag
 	}
-	if opts.IfVersion == "" && s.Version > 0 {
-		opts.IfVersion = strconv.FormatInt(s.Version, 10)
+	if opts.IfVersion == nil && s.Version > 0 {
+		opts.IfVersion = Int64(s.Version)
 	}
-	if opts.FencingToken == "" {
-		opts.FencingToken = s.fencing()
+	if opts.FencingToken == nil {
+		opts.FencingToken = s.syncFencingToken()
 	}
 	return s.applyRemove(ctx, opts)
 }
@@ -2137,11 +2150,8 @@ func (s *LeaseSession) applyRemove(ctx context.Context, opts RemoveOptions) (*ap
 	}
 	s.StateETag = ""
 	s.lastSnapshot = nil
-	if token, err := s.client.fencingToken(s.LeaseID, ""); err == nil {
-		s.fencingToken = token
-		if v, err := strconv.ParseInt(token, 10, 64); err == nil {
-			s.FencingToken = v
-		}
+	if token, err := s.client.fencingToken(s.LeaseID, nil); err == nil {
+		s.FencingToken = token
 	}
 	s.mu.Unlock()
 	return res, nil
@@ -2180,11 +2190,8 @@ func (s *LeaseSession) Get(ctx context.Context) (*StateSnapshot, error) {
 	if snap.Version > 0 {
 		s.Version = snap.Version
 	}
-	if token, errToken := s.client.fencingToken(s.LeaseID, ""); errToken == nil {
-		s.fencingToken = token
-		if v, errParse := strconv.ParseInt(token, 10, 64); errParse == nil {
-			s.FencingToken = v
-		}
+	if token, errToken := s.client.fencingToken(s.LeaseID, nil); errToken == nil {
+		s.FencingToken = token
 	}
 	s.lastSnapshot = snap
 	s.mu.Unlock()
@@ -2260,9 +2267,9 @@ func (s *LeaseSession) UpdateMetadata(ctx context.Context, meta MetadataOptions)
 		opts.TxnID = s.TxnID
 	}
 	if s.Version > 0 {
-		opts.IfVersion = strconv.FormatInt(s.Version, 10)
+		opts.IfVersion = Int64(s.Version)
 	}
-	opts.FencingToken = s.fencing()
+	opts.FencingToken = s.syncFencingToken()
 	return s.client.updateMetadataWithPreferred(ctx, s.Key, s.LeaseID, opts, s.endpoint)
 }
 
@@ -2880,9 +2887,13 @@ type UpdateOptions struct {
 	// IfETag sets a conditional ETag guard (maps to If-Match semantics).
 	IfETag string
 	// IfVersion sets a conditional version guard (X-If-Version).
-	IfVersion string
+	IfVersion *int64
+	// ExpectedSHA256 enforces the submitted JSON payload SHA-256 (pre-compaction).
+	ExpectedSHA256 string
+	// ExpectedBytes enforces the submitted JSON payload byte length (pre-compaction).
+	ExpectedBytes *int64
 	// FencingToken provides explicit fencing when not already registered on the client.
-	FencingToken string
+	FencingToken *int64
 	// Namespace scopes the mutation. Empty uses the client's default namespace.
 	Namespace string
 	// Metadata applies metadata mutations alongside the state update.
@@ -2978,6 +2989,12 @@ func Bool(v bool) *bool {
 	return &b
 }
 
+// Int64 returns a pointer to v.
+func Int64(v int64) *int64 {
+	n := v
+	return &n
+}
+
 func (o MetadataOptions) empty() bool {
 	return o.QueryHidden == nil
 }
@@ -3003,9 +3020,9 @@ type RemoveOptions struct {
 	// IfETag sets a conditional ETag guard (maps to If-Match semantics).
 	IfETag string
 	// IfVersion sets a conditional version guard (X-If-Version).
-	IfVersion string
+	IfVersion *int64
 	// FencingToken provides explicit fencing when not already registered on the client.
-	FencingToken string
+	FencingToken *int64
 	// Namespace scopes the delete. Empty uses the client's default namespace.
 	Namespace string
 	// TxnID binds the delete to a transaction coordinator record.
@@ -3095,8 +3112,8 @@ type Client struct {
 // RegisterLeaseToken stores a lease -> fencing token mapping for subsequent
 // requests. This is useful when the token is obtained out-of-band (for example
 // via environment variables between CLI invocations).
-func (c *Client) RegisterLeaseToken(leaseID, token string) {
-	if leaseID == "" || token == "" {
+func (c *Client) RegisterLeaseToken(leaseID string, token int64) {
+	if leaseID == "" || token <= 0 {
 		return
 	}
 	c.leaseTokens.Store(leaseID, token)
@@ -3176,19 +3193,34 @@ func (c *Client) defaultLease() string {
 	return leaseID
 }
 
-func (c *Client) fencingToken(leaseID, override string) (string, error) {
-	if override != "" {
-		return override, nil
+func (c *Client) fencingToken(leaseID string, override *int64) (int64, error) {
+	if override != nil {
+		if *override <= 0 {
+			return 0, ErrMissingFencingToken
+		}
+		return *override, nil
 	}
 	if leaseID == "" {
-		return "", ErrMissingFencingToken
+		return 0, ErrMissingFencingToken
 	}
 	if v, ok := c.leaseTokens.Load(leaseID); ok {
-		if token, ok := v.(string); ok && token != "" {
+		if token, ok := v.(int64); ok && token > 0 {
 			return token, nil
 		}
 	}
-	return "", ErrMissingFencingToken
+	return 0, ErrMissingFencingToken
+}
+
+func parseFencingTokenHeader(value string) (int64, bool) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return 0, false
+	}
+	token, err := strconv.ParseInt(trimmed, 10, 64)
+	if err != nil || token <= 0 {
+		return 0, false
+	}
+	return token, true
 }
 
 func (c *Client) closeContext() (context.Context, context.CancelFunc) {
@@ -3923,12 +3955,10 @@ func (c *Client) Acquire(ctx context.Context, req api.AcquireRequest, opts ...Ac
 			if keyForLog == "" {
 				keyForLog = req.Key
 			}
-			token := ""
-			if resp.FencingToken != 0 {
-				token = strconv.FormatInt(resp.FencingToken, 10)
-				c.RegisterLeaseToken(resp.LeaseID, token)
+			if resp.FencingToken > 0 {
+				c.RegisterLeaseToken(resp.LeaseID, resp.FencingToken)
 			}
-			session := newLeaseSession(c, resp, token, endpoint)
+			session := newLeaseSession(c, resp, endpoint)
 			session.setCorrelation(resp.CorrelationID)
 			c.logInfoCtx(ctx, "client.acquire.success", "key", keyForLog, "lease_id", resp.LeaseID, "txn_id", resp.TxnID, "endpoint", c.lastEndpoint, "attempt", attempt)
 			return session, nil
@@ -4400,12 +4430,12 @@ func (c *Client) KeepAlive(ctx context.Context, req api.KeepAliveRequest) (*api.
 	}
 	req.Namespace = namespace
 	c.logTraceCtx(ctx, "client.keepalive.start", "key", req.Key, "lease_id", req.LeaseID, "ttl_seconds", req.TTLSeconds)
-	token, err := c.fencingToken(req.LeaseID, "")
+	token, err := c.fencingToken(req.LeaseID, nil)
 	if err != nil {
 		return nil, err
 	}
 	headers := http.Header{}
-	headers.Set(headerFencingToken, token)
+	headers.Set(headerFencingToken, strconv.FormatInt(token, 10))
 	if txn := strings.TrimSpace(req.TxnID); txn != "" {
 		headers.Set(headerTxnID, txn)
 	}
@@ -4439,7 +4469,7 @@ func (c *Client) releaseInternal(ctx context.Context, req api.ReleaseRequest, pr
 	}
 	req.Namespace = namespace
 	c.logTraceCtx(ctx, "client.release.start", "key", req.Key, "lease_id", req.LeaseID, "txn_id", req.TxnID)
-	token, err := c.fencingToken(req.LeaseID, "")
+	token, err := c.fencingToken(req.LeaseID, nil)
 	if err != nil {
 		if errors.Is(err, ErrMissingFencingToken) {
 			c.logDebugCtx(ctx, "client.release.no_token", "key", req.Key, "lease_id", req.LeaseID, "txn_id", req.TxnID)
@@ -4448,7 +4478,7 @@ func (c *Client) releaseInternal(ctx context.Context, req api.ReleaseRequest, pr
 		return nil, err
 	}
 	headers := http.Header{}
-	headers.Set(headerFencingToken, token)
+	headers.Set(headerFencingToken, strconv.FormatInt(token, 10))
 	if corr := CorrelationIDFromContext(ctx); corr != "" {
 		headers.Set(headerCorrelationID, corr)
 	}
@@ -5081,9 +5111,9 @@ func (c *Client) getWithOptions(ctx context.Context, key string, opts GetOptions
 	if !public && leaseID == "" {
 		return nil, fmt.Errorf("lockd: lease_id required for key %s", key)
 	}
-	token := ""
+	token := int64(0)
 	if leaseID != "" {
-		token, err = c.fencingToken(leaseID, "")
+		token, err = c.fencingToken(leaseID, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -5112,7 +5142,7 @@ func (c *Client) getWithOptions(ctx context.Context, key string, opts GetOptions
 		}
 		if !public {
 			req.Header.Set("X-Lease-ID", leaseID)
-			req.Header.Set(headerFencingToken, token)
+			req.Header.Set(headerFencingToken, strconv.FormatInt(token, 10))
 		}
 		c.applyCorrelationHeader(ctx, req, "")
 		return req, cancel, nil
@@ -5153,7 +5183,7 @@ func (c *Client) getWithOptions(ctx context.Context, key string, opts GetOptions
 		return nil, c.decodeError(resp)
 	}
 	if !public {
-		if newToken := resp.Header.Get(headerFencingToken); newToken != "" {
+		if newToken, ok := parseFencingTokenHeader(resp.Header.Get(headerFencingToken)); ok {
 			c.RegisterLeaseToken(leaseID, newToken)
 		}
 	}
@@ -5226,6 +5256,87 @@ func (c *Client) Update(ctx context.Context, key, leaseID string, body io.Reader
 	return c.updateWithPreferred(ctx, key, leaseID, body, opts, "")
 }
 
+// UpdateStream uploads JSON state from a non-replayable reader without buffering.
+//
+// This variant is intended for streaming callers (for example MCP write streams)
+// and performs a single transport attempt. On retry/failover requirements, callers
+// must begin a new stream and replay bytes from their source of truth.
+func (c *Client) UpdateStream(ctx context.Context, key, leaseID string, body io.Reader, opts UpdateOptions) (*UpdateResult, error) {
+	namespace, err := c.namespaceFor(opts.Namespace)
+	if err != nil {
+		return nil, err
+	}
+	opts.Namespace = namespace
+	if opts.TxnID == "" {
+		if sess := c.sessionByLease(leaseID); sess != nil {
+			opts.TxnID = sess.TxnID
+		}
+	}
+	token, err := c.fencingToken(leaseID, opts.FencingToken)
+	if err != nil {
+		return nil, err
+	}
+	path := fmt.Sprintf("/v1/update?key=%s&namespace=%s", url.QueryEscape(key), url.QueryEscape(namespace))
+	used := false
+	builder := func(base string) (*http.Request, context.CancelFunc, error) {
+		if used {
+			return nil, nil, fmt.Errorf("lockd: update stream body is not replayable")
+		}
+		used = true
+		reqBody := body
+		if reqBody == nil {
+			reqBody = http.NoBody
+		}
+		reqCtx, cancel := c.requestContext(ctx)
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, base+path, reqBody)
+		if err != nil {
+			cancel()
+			return nil, nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Lease-ID", leaseID)
+		if opts.TxnID != "" {
+			req.Header.Set(headerTxnID, opts.TxnID)
+		}
+		if opts.IfETag != "" {
+			req.Header.Set("X-If-State-ETag", opts.IfETag)
+		}
+		if opts.IfVersion != nil {
+			req.Header.Set("X-If-Version", strconv.FormatInt(*opts.IfVersion, 10))
+		}
+		if checksum := strings.TrimSpace(opts.ExpectedSHA256); checksum != "" {
+			req.Header.Set(headerExpectedSHA256, checksum)
+		}
+		if opts.ExpectedBytes != nil {
+			req.Header.Set(headerExpectedBytes, strconv.FormatInt(*opts.ExpectedBytes, 10))
+		}
+		req.Header.Set(headerFencingToken, strconv.FormatInt(token, 10))
+		opts.Metadata.applyHeaders(req)
+		c.applyCorrelationHeader(ctx, req, "")
+		return req, cancel, nil
+	}
+	resp, cancel, endpoint, err := c.attemptEndpoints(builder, "")
+	if err != nil {
+		c.logErrorCtx(ctx, "client.update_stream.transport_error", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", endpoint, "fencing_token", token, "error", err)
+		return nil, err
+	}
+	defer cancel()
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		c.logWarnCtx(ctx, "client.update_stream.error", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", endpoint, "fencing_token", token, "status", resp.StatusCode)
+		return nil, c.decodeError(resp)
+	}
+	var result UpdateResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	if newToken, ok := parseFencingTokenHeader(resp.Header.Get(headerFencingToken)); ok {
+		c.RegisterLeaseToken(leaseID, newToken)
+	}
+	c.logTraceCtx(ctx, "client.update_stream.success", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", endpoint, "fencing_token", token, "new_version", result.NewVersion, "new_etag", result.NewStateETag)
+	return &result, nil
+}
+
 func (c *Client) updateWithPreferred(ctx context.Context, key, leaseID string, body io.Reader, opts UpdateOptions, preferred string) (*UpdateResult, error) {
 	namespace, err := c.namespaceFor(opts.Namespace)
 	if err != nil {
@@ -5266,10 +5377,16 @@ func (c *Client) updateWithPreferred(ctx context.Context, key, leaseID string, b
 		if opts.IfETag != "" {
 			req.Header.Set("X-If-State-ETag", opts.IfETag)
 		}
-		if opts.IfVersion != "" {
-			req.Header.Set("X-If-Version", opts.IfVersion)
+		if opts.IfVersion != nil {
+			req.Header.Set("X-If-Version", strconv.FormatInt(*opts.IfVersion, 10))
 		}
-		req.Header.Set(headerFencingToken, token)
+		if checksum := strings.TrimSpace(opts.ExpectedSHA256); checksum != "" {
+			req.Header.Set(headerExpectedSHA256, checksum)
+		}
+		if opts.ExpectedBytes != nil {
+			req.Header.Set(headerExpectedBytes, strconv.FormatInt(*opts.ExpectedBytes, 10))
+		}
+		req.Header.Set(headerFencingToken, strconv.FormatInt(token, 10))
 		opts.Metadata.applyHeaders(req)
 		c.applyCorrelationHeader(ctx, req, "")
 		return req, cancel, nil
@@ -5354,7 +5471,7 @@ func (c *Client) updateWithPreferred(ctx context.Context, key, leaseID string, b
 			cancel()
 		}
 		c.logTraceCtx(ctx, "client.update.success", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", endpoint, "fencing_token", token, "new_version", result.NewVersion, "new_etag", result.NewStateETag)
-		if newToken := resp.Header.Get(headerFencingToken); newToken != "" {
+		if newToken, ok := parseFencingTokenHeader(resp.Header.Get(headerFencingToken)); ok {
 			c.RegisterLeaseToken(leaseID, newToken)
 		}
 		return &result, nil
@@ -5410,10 +5527,10 @@ func (c *Client) updateMetadataWithPreferred(ctx context.Context, key, leaseID s
 		if opts.TxnID != "" {
 			req.Header.Set(headerTxnID, opts.TxnID)
 		}
-		if opts.IfVersion != "" {
-			req.Header.Set("X-If-Version", opts.IfVersion)
+		if opts.IfVersion != nil {
+			req.Header.Set("X-If-Version", strconv.FormatInt(*opts.IfVersion, 10))
 		}
-		req.Header.Set(headerFencingToken, token)
+		req.Header.Set(headerFencingToken, strconv.FormatInt(token, 10))
 		c.applyCorrelationHeader(ctx, req, "")
 		return req, cancel, nil
 	}
@@ -5432,7 +5549,7 @@ func (c *Client) updateMetadataWithPreferred(ctx context.Context, key, leaseID s
 	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
 		return nil, err
 	}
-	if newToken := resp.Header.Get(headerFencingToken); newToken != "" {
+	if newToken, ok := parseFencingTokenHeader(resp.Header.Get(headerFencingToken)); ok {
 		c.RegisterLeaseToken(leaseID, newToken)
 	}
 	c.logTraceCtx(ctx, "client.metadata.success", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "namespace", namespace, "endpoint", endpoint, "version", apiResp.Version)
@@ -5475,10 +5592,10 @@ func (c *Client) Remove(ctx context.Context, key, leaseID string, opts RemoveOpt
 		if opts.IfETag != "" {
 			req.Header.Set("X-If-State-ETag", opts.IfETag)
 		}
-		if opts.IfVersion != "" {
-			req.Header.Set("X-If-Version", opts.IfVersion)
+		if opts.IfVersion != nil {
+			req.Header.Set("X-If-Version", strconv.FormatInt(*opts.IfVersion, 10))
 		}
-		req.Header.Set(headerFencingToken, token)
+		req.Header.Set(headerFencingToken, strconv.FormatInt(token, 10))
 		c.applyCorrelationHeader(ctx, req, "")
 		return req, cancel, nil
 	}
@@ -5498,7 +5615,7 @@ func (c *Client) Remove(ctx context.Context, key, leaseID string, opts RemoveOpt
 		return nil, err
 	}
 	c.logTraceCtx(ctx, "client.remove.success", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", endpoint, "fencing_token", token, "removed", result.Removed, "new_version", result.NewVersion)
-	if newToken := resp.Header.Get(headerFencingToken); newToken != "" {
+	if newToken, ok := parseFencingTokenHeader(resp.Header.Get(headerFencingToken)); ok {
 		c.RegisterLeaseToken(leaseID, newToken)
 	}
 	return &result, nil
@@ -5829,6 +5946,34 @@ func qrfStateFromError(err error) string {
 		return apiErr.QRFState
 	}
 	return ""
+}
+
+// QueueStats reads side-effect-free runtime and head snapshot stats for a queue.
+func (c *Client) QueueStats(ctx context.Context, queue string, opts QueueStatsOptions) (*api.QueueStatsResponse, error) {
+	queue = strings.TrimSpace(queue)
+	if queue == "" {
+		return nil, fmt.Errorf("lockd: queue is required")
+	}
+	namespace, err := c.namespaceFor(opts.Namespace)
+	if err != nil {
+		return nil, err
+	}
+	req := api.QueueStatsRequest{
+		Namespace: namespace,
+		Queue:     queue,
+	}
+	c.logTraceCtx(ctx, "client.queue.stats.start", "queue", queue, "namespace", namespace)
+	var res api.QueueStatsResponse
+	if _, err := c.postJSON(ctx, "/v1/queue/stats", req, &res, nil, ""); err != nil {
+		return nil, err
+	}
+	if res.CorrelationID == "" {
+		if cid := CorrelationIDFromContext(ctx); cid != "" {
+			res.CorrelationID = cid
+		}
+	}
+	c.logTraceCtx(ctx, "client.queue.stats.success", "queue", queue, "namespace", namespace, "available", res.Available, "head_message_id", res.HeadMessageID)
+	return &res, nil
 }
 
 // QueueAck acknowledges a queue message via the /v1/queue/ack API.
@@ -6181,7 +6326,7 @@ func (c *Client) dequeueInternal(ctx context.Context, queue string, opts Dequeue
 			payloadStream: payloadRC,
 		}
 		if handle.msg.LeaseID != "" {
-			c.RegisterLeaseToken(handle.msg.LeaseID, strconv.FormatInt(handle.msg.FencingToken, 10))
+			c.RegisterLeaseToken(handle.msg.LeaseID, handle.msg.FencingToken)
 		}
 		if stateful && handle.msg.StateLeaseID != "" {
 			handle.state = &QueueStateHandle{
@@ -6197,7 +6342,7 @@ func (c *Client) dequeueInternal(ctx context.Context, queue string, opts Dequeue
 				queueStateETag: handle.msg.StateETag,
 				correlationID:  handle.msg.CorrelationID,
 			}
-			c.RegisterLeaseToken(handle.state.LeaseID(), strconv.FormatInt(handle.state.FencingToken(), 10))
+			c.RegisterLeaseToken(handle.state.LeaseID(), handle.state.FencingToken())
 		}
 		handles = append(handles, handle)
 		lastCursor = apiResp.NextCursor
@@ -6418,6 +6563,106 @@ func (c *Client) DequeueWithState(ctx context.Context, queue string, opts Dequeu
 	}
 	msg := newQueueMessage(res.Message, nil, opts.OnCloseDelay)
 	return msg, nil
+}
+
+// WatchQueue streams non-consuming queue visibility changes over SSE.
+func (c *Client) WatchQueue(ctx context.Context, queue string, opts WatchQueueOptions, handler QueueWatchHandler) error {
+	if handler == nil {
+		return fmt.Errorf("lockd: queue watch handler required")
+	}
+	queue = strings.TrimSpace(queue)
+	if queue == "" {
+		return fmt.Errorf("lockd: queue is required")
+	}
+	namespace, err := c.namespaceFor(opts.Namespace)
+	if err != nil {
+		return err
+	}
+	body, err := json.Marshal(api.QueueWatchRequest{
+		Namespace: namespace,
+		Queue:     queue,
+	})
+	if err != nil {
+		return err
+	}
+	builder := func(base string) (*http.Request, context.CancelFunc, error) {
+		reqCtx, cancel := c.requestContextNoTimeout(ctx)
+		httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, base+"/v1/queue/watch", bytes.NewReader(body))
+		if err != nil {
+			cancel()
+			return nil, nil, err
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Accept", "text/event-stream")
+		c.applyCorrelationHeader(ctx, httpReq, "")
+		return httpReq, cancel, nil
+	}
+
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		resp, cancel, endpoint, err := c.attemptEndpoints(builder, "")
+		if err != nil {
+			return err
+		}
+		c.observeShutdown(endpoint, resp)
+		if resp.StatusCode != http.StatusOK {
+			apiErr := c.decodeError(resp)
+			resp.Body.Close()
+			cancel()
+			if apiErr != nil {
+				return apiErr
+			}
+			return fmt.Errorf("lockd: watch queue unexpected status %d", resp.StatusCode)
+		}
+
+		r := bufio.NewReader(resp.Body)
+		streamErr := func() error {
+			for {
+				ev, err := readSSEEvent(r)
+				if err != nil {
+					return err
+				}
+				if ev.data == "" {
+					continue
+				}
+				if ev.event != "" && ev.event != "queue_watch" {
+					continue
+				}
+				var payload api.QueueWatchEvent
+				if err := json.Unmarshal([]byte(ev.data), &payload); err != nil {
+					return fmt.Errorf("lockd: decode queue watch event: %w", err)
+				}
+				event := QueueWatchEvent{
+					Namespace:     payload.Namespace,
+					Queue:         payload.Queue,
+					Available:     payload.Available,
+					HeadMessageID: payload.HeadMessageID,
+					CorrelationID: payload.CorrelationID,
+				}
+				if payload.ChangedAtUnix > 0 {
+					event.ChangedAt = time.Unix(payload.ChangedAtUnix, 0).UTC()
+				}
+				if err := handler(ctx, event); err != nil {
+					return err
+				}
+			}
+		}()
+		resp.Body.Close()
+		cancel()
+		if streamErr == nil {
+			continue
+		}
+		if errors.Is(streamErr, io.EOF) || errors.Is(streamErr, context.Canceled) {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		return streamErr
+	}
 }
 
 // Subscribe streams queue messages continuously and invokes handler for each delivery.
@@ -6655,7 +6900,7 @@ func (c *Client) subscribe(ctx context.Context, queue string, opts SubscribeOpti
 				payloadStream: payloadRC,
 			}
 			if handle.msg.LeaseID != "" {
-				c.RegisterLeaseToken(handle.msg.LeaseID, strconv.FormatInt(handle.msg.FencingToken, 10))
+				c.RegisterLeaseToken(handle.msg.LeaseID, handle.msg.FencingToken)
 			}
 			if stateful && handle.msg.StateLeaseID != "" {
 				handle.state = &QueueStateHandle{
@@ -6671,7 +6916,7 @@ func (c *Client) subscribe(ctx context.Context, queue string, opts SubscribeOpti
 					queueStateETag: handle.msg.StateETag,
 					correlationID:  handle.msg.CorrelationID,
 				}
-				c.RegisterLeaseToken(handle.state.LeaseID(), strconv.FormatInt(handle.state.FencingToken(), 10))
+				c.RegisterLeaseToken(handle.state.LeaseID(), handle.state.FencingToken())
 			}
 
 			msg := newQueueMessage(handle, nil, opts.OnCloseDelay)
@@ -6704,6 +6949,53 @@ func (c *Client) subscribe(ctx context.Context, queue string, opts SubscribeOpti
 		resp.Body.Close()
 		cancel()
 		return nil
+	}
+}
+
+type sseEvent struct {
+	event string
+	data  string
+}
+
+func readSSEEvent(r *bufio.Reader) (sseEvent, error) {
+	ev := sseEvent{}
+	var dataLines []string
+	seenAny := false
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			if errors.Is(err, io.EOF) && !seenAny {
+				return sseEvent{}, io.EOF
+			}
+			if errors.Is(err, io.EOF) {
+				line = strings.TrimRight(line, "\r\n")
+				if line == "" {
+					ev.data = strings.Join(dataLines, "\n")
+					return ev, nil
+				}
+			} else {
+				return sseEvent{}, err
+			}
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if line == "" {
+			ev.data = strings.Join(dataLines, "\n")
+			return ev, nil
+		}
+		seenAny = true
+		if strings.HasPrefix(line, ":") {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(line, "event:"):
+			ev.event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		case strings.HasPrefix(line, "data:"):
+			dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+		}
+		if err != nil && errors.Is(err, io.EOF) {
+			ev.data = strings.Join(dataLines, "\n")
+			return ev, nil
+		}
 	}
 }
 

@@ -94,10 +94,15 @@ func TestAWSLockLifecycle(t *testing.T) {
 	}
 
 	payload, _ := json.Marshal(map[string]any{"cursor": 42, "source": "aws"})
-	opts := lockdclient.UpdateOptions{IfVersion: version}
-	if opts.IfVersion == "" {
-		opts.IfVersion = strconv.FormatInt(lease.Version, 10)
+	ifVersion := lockdclient.Int64(lease.Version)
+	if version != "" {
+		parsedVersion, parseErr := strconv.ParseInt(version, 10, 64)
+		if parseErr != nil {
+			t.Fatalf("parse version %q: %v", version, parseErr)
+		}
+		ifVersion = lockdclient.Int64(parsedVersion)
 	}
+	opts := lockdclient.UpdateOptions{IfVersion: ifVersion}
 	if etag != "" {
 		opts.IfETag = etag
 	}
@@ -1147,7 +1152,7 @@ func TestAWSRemoveCASMismatch(t *testing.T) {
 
 	staleOpts := lockdclient.RemoveOptions{
 		IfETag:    staleETag,
-		IfVersion: strconv.FormatInt(currentVersion, 10),
+		IfVersion: lockdclient.Int64(currentVersion),
 	}
 	if _, err := lease.RemoveWithOptions(ctx, staleOpts); err == nil {
 		t.Fatalf("expected stale remove to fail")
@@ -1207,7 +1212,7 @@ func TestAWSRemoveKeepAlive(t *testing.T) {
 
 	staleUpdate := lockdclient.UpdateOptions{
 		IfETag:    originalETag,
-		IfVersion: strconv.FormatInt(originalVersion, 10),
+		IfVersion: lockdclient.Int64(originalVersion),
 	}
 	if _, err := lease.UpdateWithOptions(ctx, bytes.NewReader([]byte(`{"payload":"stale"}`)), staleUpdate); err == nil {
 		t.Fatalf("expected stale update to fail")

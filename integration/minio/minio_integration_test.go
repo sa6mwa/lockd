@@ -94,10 +94,15 @@ func TestMinioLockLifecycle(t *testing.T) {
 	}
 
 	payload, _ := json.Marshal(map[string]any{"cursor": 7, "source": "minio"})
-	opts := lockdclient.UpdateOptions{IfVersion: version, IfETag: etag}
-	if opts.IfVersion == "" {
-		opts.IfVersion = strconv.FormatInt(lease.Version, 10)
+	ifVersion := lockdclient.Int64(lease.Version)
+	if version != "" {
+		parsedVersion, parseErr := strconv.ParseInt(version, 10, 64)
+		if parseErr != nil {
+			t.Fatalf("parse version %q: %v", version, parseErr)
+		}
+		ifVersion = lockdclient.Int64(parsedVersion)
 	}
+	opts := lockdclient.UpdateOptions{IfVersion: ifVersion, IfETag: etag}
 	if _, err := cli.UpdateBytes(ctx, key, lease.LeaseID, payload, opts); err != nil {
 		t.Fatalf("update state: %v", err)
 	}
@@ -212,8 +217,13 @@ func TestMinioLockConcurrency(t *testing.T) {
 					_ = releaseLease(t, ctx, lease)
 					continue
 				}
-				if version == "" {
-					version = strconv.FormatInt(lease.Version, 10)
+				ifVersion := lockdclient.Int64(lease.Version)
+				if version != "" {
+					parsedVersion, parseErr := strconv.ParseInt(version, 10, 64)
+					if parseErr != nil {
+						t.Fatalf("parse version %q: %v", version, parseErr)
+					}
+					ifVersion = lockdclient.Int64(parsedVersion)
 				}
 				var counter float64
 				if state != nil {
@@ -223,7 +233,7 @@ func TestMinioLockConcurrency(t *testing.T) {
 				}
 				counter++
 				body, _ := json.Marshal(map[string]any{"counter": counter, "last": owner})
-				if _, err := cli.UpdateBytes(ctx, key, lease.LeaseID, body, lockdclient.UpdateOptions{IfETag: etag, IfVersion: version}); err != nil {
+				if _, err := cli.UpdateBytes(ctx, key, lease.LeaseID, body, lockdclient.UpdateOptions{IfETag: etag, IfVersion: ifVersion}); err != nil {
 					t.Fatalf("update state: %v", err)
 				}
 				_ = releaseLease(t, ctx, lease)
@@ -1085,7 +1095,7 @@ func TestMinioRemoveCASMismatch(t *testing.T) {
 
 	staleOpts := lockdclient.RemoveOptions{
 		IfETag:    staleETag,
-		IfVersion: strconv.FormatInt(currentVersion, 10),
+		IfVersion: lockdclient.Int64(currentVersion),
 	}
 	if _, err := lease.RemoveWithOptions(ctx, staleOpts); err == nil {
 		t.Fatalf("expected stale remove to fail")
@@ -1145,7 +1155,7 @@ func TestMinioRemoveKeepAlive(t *testing.T) {
 
 	staleUpdate := lockdclient.UpdateOptions{
 		IfETag:    originalETag,
-		IfVersion: strconv.FormatInt(originalVersion, 10),
+		IfVersion: lockdclient.Int64(originalVersion),
 	}
 	if _, err := lease.UpdateWithOptions(ctx, bytes.NewReader([]byte(`{"payload":"stale"}`)), staleUpdate); err == nil {
 		t.Fatalf("expected stale update to fail")

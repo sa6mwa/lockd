@@ -2386,7 +2386,7 @@ func TestClientUpdateWithMetadataHeader(t *testing.T) {
 	}
 
 	opts := client.UpdateOptions{
-		FencingToken: "token-9",
+		FencingToken: client.Int64(9),
 		Metadata:     client.MetadataOptions{QueryHidden: client.Bool(true)},
 	}
 	res, err := cli.Update(context.Background(), "orders", "lease-1", bytes.NewReader([]byte(`{"status":"open"}`)), opts)
@@ -2444,8 +2444,8 @@ func TestClientUpdateMetadataSendsJSONPayload(t *testing.T) {
 	}
 
 	opts := client.UpdateOptions{
-		FencingToken: "tok-1",
-		IfVersion:    "3",
+		FencingToken: client.Int64(1),
+		IfVersion:    client.Int64(3),
 		Metadata:     client.MetadataOptions{QueryHidden: client.Bool(true)},
 	}
 	res, err := cli.UpdateMetadata(context.Background(), "orders", "lease-7", opts)
@@ -2455,7 +2455,7 @@ func TestClientUpdateMetadataSendsJSONPayload(t *testing.T) {
 	if capturedIfVersion != "3" {
 		t.Fatalf("expected X-If-Version header, got %q", capturedIfVersion)
 	}
-	if capturedToken != "tok-1" {
+	if capturedToken != "1" {
 		t.Fatalf("expected fencing token header, got %q", capturedToken)
 	}
 	var payload map[string]any
@@ -2468,6 +2468,81 @@ func TestClientUpdateMetadataSendsJSONPayload(t *testing.T) {
 	}
 	if res.Metadata.QueryHidden == nil || !*res.Metadata.QueryHidden {
 		t.Fatalf("expected metadata in response, got %+v", res.Metadata)
+	}
+}
+
+func TestClientUpdateSendsExpectedPayloadHeaders(t *testing.T) {
+	t.Parallel()
+
+	type observed struct {
+		SHA   string
+		Bytes string
+	}
+	var (
+		mu           sync.Mutex
+		observedReqs []observed
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/update" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		mu.Lock()
+		observedReqs = append(observedReqs, observed{
+			SHA:   r.Header.Get("X-Expected-SHA256"),
+			Bytes: r.Header.Get("X-Expected-Bytes"),
+		})
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(api.UpdateResponse{
+			NewVersion:   2,
+			NewStateETag: "etag-2",
+			Bytes:        16,
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	cli, err := client.New(srv.URL,
+		client.WithDisableMTLS(true),
+		client.WithEndpointShuffle(false),
+		client.WithHTTPClient(srv.Client()),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	expectedBytes := int64(16)
+	_, err = cli.Update(context.Background(), "orders", "lease-1", bytes.NewReader([]byte(`{"status":"open"}`)), client.UpdateOptions{
+		FencingToken:   client.Int64(9),
+		ExpectedSHA256: strings.Repeat("a", 64),
+		ExpectedBytes:  &expectedBytes,
+	})
+	if err != nil {
+		t.Fatalf("update call with expected headers: %v", err)
+	}
+	_, err = cli.Update(context.Background(), "orders", "lease-1", bytes.NewReader([]byte(`{"status":"open"}`)), client.UpdateOptions{
+		FencingToken: client.Int64(9),
+	})
+	if err != nil {
+		t.Fatalf("update call without expected headers: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(observedReqs) != 2 {
+		t.Fatalf("expected 2 update requests, got %d", len(observedReqs))
+	}
+	if observedReqs[0].SHA != strings.Repeat("a", 64) {
+		t.Fatalf("expected X-Expected-SHA256 on first request, got %q", observedReqs[0].SHA)
+	}
+	if observedReqs[0].Bytes != "16" {
+		t.Fatalf("expected X-Expected-Bytes on first request, got %q", observedReqs[0].Bytes)
+	}
+	if observedReqs[1].SHA != "" {
+		t.Fatalf("expected empty X-Expected-SHA256 on second request, got %q", observedReqs[1].SHA)
+	}
+	if observedReqs[1].Bytes != "" {
+		t.Fatalf("expected empty X-Expected-Bytes on second request, got %q", observedReqs[1].Bytes)
 	}
 }
 
@@ -3007,8 +3082,8 @@ func TestQueueStateHandleHelperOverrides(t *testing.T) {
 		Namespace:    "override-ns",
 		TxnID:        "override-update-txn",
 		IfETag:       "override-etag",
-		IfVersion:    "42",
-		FencingToken: "777",
+		IfVersion:    client.Int64(42),
+		FencingToken: client.Int64(777),
 	}); err != nil {
 		t.Fatalf("update with options: %v", err)
 	}
@@ -3017,8 +3092,8 @@ func TestQueueStateHandleHelperOverrides(t *testing.T) {
 		Namespace:    "override-ns",
 		TxnID:        "override-remove-txn",
 		IfETag:       "override-remove-etag",
-		IfVersion:    "43",
-		FencingToken: "778",
+		IfVersion:    client.Int64(43),
+		FencingToken: client.Int64(778),
 	}); err != nil {
 		t.Fatalf("remove with options: %v", err)
 	}

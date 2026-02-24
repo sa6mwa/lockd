@@ -130,12 +130,13 @@ type GetResult struct {
 
 // AttachmentInfo surfaces metadata about a stored attachment.
 type AttachmentInfo struct {
-	ID            string
-	Name          string
-	Size          int64
-	ContentType   string
-	CreatedAtUnix int64
-	UpdatedAtUnix int64
+	ID              string
+	Name            string
+	Size            int64
+	PlaintextSHA256 string
+	ContentType     string
+	CreatedAtUnix   int64
+	UpdatedAtUnix   int64
 }
 
 // AttachmentSelector identifies an attachment by name or id.

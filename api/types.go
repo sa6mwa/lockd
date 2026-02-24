@@ -253,6 +253,66 @@ type DequeueRequest struct {
 	StartAfter string `json:"start_after,omitempty"`
 }
 
+// QueueWatchRequest drives POST /v1/queue/watch.
+type QueueWatchRequest struct {
+	// Namespace scopes the request or response to a lockd namespace.
+	Namespace string `json:"namespace,omitempty"`
+	// Queue is the queue name targeted by the operation.
+	Queue string `json:"queue,omitempty"`
+}
+
+// QueueStatsRequest drives POST /v1/queue/stats.
+type QueueStatsRequest struct {
+	// Namespace scopes the request or response to a lockd namespace.
+	Namespace string `json:"namespace,omitempty"`
+	// Queue is the queue name targeted by the operation.
+	Queue string `json:"queue,omitempty"`
+}
+
+// QueueStatsResponse captures side-effect-free runtime and head snapshot metrics for one queue.
+type QueueStatsResponse struct {
+	// Namespace scopes the request or response to a lockd namespace.
+	Namespace string `json:"namespace"`
+	// Queue is the queue name targeted by the operation.
+	Queue string `json:"queue"`
+	// WaitingConsumers is the number of active consumers currently blocked waiting for work on this queue.
+	WaitingConsumers int `json:"waiting_consumers"`
+	// PendingCandidates is the number of ready candidates currently buffered for this queue by the dispatcher.
+	PendingCandidates int `json:"pending_candidates"`
+	// TotalConsumers is the number of active consumers across all queues for this server process.
+	TotalConsumers int `json:"total_consumers"`
+	// HasActiveWatcher indicates whether the dispatcher currently maintains a live watcher for this queue.
+	HasActiveWatcher bool `json:"has_active_watcher"`
+	// Available reports whether a visible head message is currently available.
+	Available bool `json:"available"`
+	// HeadMessageID is the current visible head message identifier when available.
+	HeadMessageID string `json:"head_message_id,omitempty"`
+	// HeadEnqueuedAtUnix is when the visible head message was originally enqueued, as Unix seconds.
+	HeadEnqueuedAtUnix int64 `json:"head_enqueued_at_unix,omitempty"`
+	// HeadNotVisibleUntilUnix is when the head message became visible, as Unix seconds.
+	HeadNotVisibleUntilUnix int64 `json:"head_not_visible_until_unix,omitempty"`
+	// HeadAgeSeconds is the age of the visible head message in seconds.
+	HeadAgeSeconds int64 `json:"head_age_seconds,omitempty"`
+	// CorrelationID links related operations across request/response logs.
+	CorrelationID string `json:"correlation_id,omitempty"`
+}
+
+// QueueWatchEvent is emitted over SSE by /v1/queue/watch when queue visibility changes.
+type QueueWatchEvent struct {
+	// Namespace scopes the request or response to a lockd namespace.
+	Namespace string `json:"namespace"`
+	// Queue is the queue name targeted by the operation.
+	Queue string `json:"queue"`
+	// Available reports whether at least one visible message is currently available.
+	Available bool `json:"available"`
+	// HeadMessageID is the current visible head message identifier when available.
+	HeadMessageID string `json:"head_message_id,omitempty"`
+	// ChangedAtUnix is when the server observed this queue state, as Unix seconds.
+	ChangedAtUnix int64 `json:"changed_at_unix"`
+	// CorrelationID links related operations across request/response logs.
+	CorrelationID string `json:"correlation_id,omitempty"`
+}
+
 // Message carries message metadata and payload delivery info.
 type Message struct {
 	// Namespace scopes the request or response to a lockd namespace.

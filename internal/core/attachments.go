@@ -2,8 +2,11 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"net/http"
 	"path"
@@ -191,6 +194,7 @@ func (s *Service) Attach(ctx context.Context, cmd AttachCommand) (res *AttachRes
 				Name:             name,
 				Size:             stagedSize,
 				PlaintextBytes:   stagedSize,
+				PlaintextSHA256:  payload.counter.SumHex(),
 				ContentType:      contentType,
 				StagedDescriptor: stagedDescriptor,
 				CreatedAtUnix:    createdAt,
@@ -801,12 +805,13 @@ func attachmentInfoFromAttachment(att storage.Attachment) AttachmentInfo {
 		size = att.Size
 	}
 	return AttachmentInfo{
-		ID:            att.ID,
-		Name:          att.Name,
-		Size:          size,
-		ContentType:   att.ContentType,
-		CreatedAtUnix: att.CreatedAtUnix,
-		UpdatedAtUnix: att.UpdatedAtUnix,
+		ID:              att.ID,
+		Name:            att.Name,
+		Size:            size,
+		PlaintextSHA256: strings.TrimSpace(att.PlaintextSHA256),
+		ContentType:     att.ContentType,
+		CreatedAtUnix:   att.CreatedAtUnix,
+		UpdatedAtUnix:   att.UpdatedAtUnix,
 	}
 }
 
@@ -816,12 +821,13 @@ func attachmentInfoFromStaged(att storage.StagedAttachment) AttachmentInfo {
 		size = att.Size
 	}
 	return AttachmentInfo{
-		ID:            att.ID,
-		Name:          att.Name,
-		Size:          size,
-		ContentType:   att.ContentType,
-		CreatedAtUnix: att.CreatedAtUnix,
-		UpdatedAtUnix: att.UpdatedAtUnix,
+		ID:              att.ID,
+		Name:            att.Name,
+		Size:            size,
+		PlaintextSHA256: strings.TrimSpace(att.PlaintextSHA256),
+		ContentType:     att.ContentType,
+		CreatedAtUnix:   att.CreatedAtUnix,
+		UpdatedAtUnix:   att.UpdatedAtUnix,
 	}
 }
 
@@ -913,7 +919,7 @@ type attachmentPayload struct {
 }
 
 func (s *Service) prepareAttachmentPayload(ctx context.Context, namespace, objectKey, contextKey string, body io.Reader, maxBytes int64, contentType string) (attachmentPayload, error) {
-	counting := &countingReader{r: body}
+	counting := &countingReader{r: body, hash: sha256.New()}
 	reader := io.Reader(counting)
 	if maxBytes > 0 {
 		limit := maxBytes + 1
@@ -1101,14 +1107,15 @@ func (s *Service) promoteStagedAttachment(ctx context.Context, namespace, key, t
 					size = staged.Size
 				}
 				return &storage.Attachment{
-					ID:             staged.ID,
-					Name:           staged.Name,
-					Size:           size,
-					PlaintextBytes: size,
-					ContentType:    staged.ContentType,
-					Descriptor:     append([]byte(nil), staged.StagedDescriptor...),
-					CreatedAtUnix:  staged.CreatedAtUnix,
-					UpdatedAtUnix:  staged.UpdatedAtUnix,
+					ID:              staged.ID,
+					Name:            staged.Name,
+					Size:            size,
+					PlaintextBytes:  size,
+					PlaintextSHA256: strings.TrimSpace(staged.PlaintextSHA256),
+					ContentType:     staged.ContentType,
+					Descriptor:      append([]byte(nil), staged.StagedDescriptor...),
+					CreatedAtUnix:   staged.CreatedAtUnix,
+					UpdatedAtUnix:   staged.UpdatedAtUnix,
 				}, nil
 			}
 		}
@@ -1141,28 +1148,49 @@ func (s *Service) promoteStagedAttachment(ctx context.Context, namespace, key, t
 		return nil, err
 	}
 	return &storage.Attachment{
-		ID:             staged.ID,
-		Name:           staged.Name,
-		Size:           size,
-		PlaintextBytes: size,
-		ContentType:    contentType,
-		Descriptor:     payload.descriptor,
-		CreatedAtUnix:  staged.CreatedAtUnix,
-		UpdatedAtUnix:  staged.UpdatedAtUnix,
+		ID:              staged.ID,
+		Name:            staged.Name,
+		Size:            size,
+		PlaintextBytes:  size,
+		PlaintextSHA256: firstNonEmpty(strings.TrimSpace(staged.PlaintextSHA256), payload.counter.SumHex()),
+		ContentType:     contentType,
+		Descriptor:      payload.descriptor,
+		CreatedAtUnix:   staged.CreatedAtUnix,
+		UpdatedAtUnix:   staged.UpdatedAtUnix,
 	}, nil
 }
 
 type countingReader struct {
 	r     io.Reader
 	count int64
+	hash  hash.Hash
 }
 
 func (c *countingReader) Read(p []byte) (int, error) {
 	n, err := c.r.Read(p)
 	c.count += int64(n)
+	if c.hash != nil && n > 0 {
+		_, _ = c.hash.Write(p[:n])
+	}
 	return n, err
 }
 
 func (c *countingReader) Count() int64 {
 	return c.count
+}
+
+func (c *countingReader) SumHex() string {
+	if c == nil || c.hash == nil {
+		return ""
+	}
+	return hex.EncodeToString(c.hash.Sum(nil))
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }

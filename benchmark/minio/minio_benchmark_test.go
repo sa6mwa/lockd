@@ -227,7 +227,7 @@ func BenchmarkLockdLargeJSON(b *testing.B) {
 		if err != nil {
 			b.Fatalf("acquire: %v", err)
 		}
-		opts := lockdclient.UpdateOptions{IfVersion: strconv.FormatInt(lease.Version, 10)}
+		opts := lockdclient.UpdateOptions{IfVersion: lockdclient.Int64(lease.Version)}
 		if _, err := client.UpdateBytes(ctx, key, lease.LeaseID, payload, opts); err != nil {
 			b.Fatalf("update state: %v", err)
 		}
@@ -258,7 +258,7 @@ func BenchmarkLockdLargeJSONStream(b *testing.B) {
 		if err != nil {
 			b.Fatalf("acquire: %v", err)
 		}
-		opts := lockdclient.UpdateOptions{IfVersion: strconv.FormatInt(lease.Version, 10)}
+		opts := lockdclient.UpdateOptions{IfVersion: lockdclient.Int64(lease.Version)}
 		reader := newJSONPayloadStream(largeJSONSize)
 		if _, err := client.Update(ctx, key, lease.LeaseID, reader, opts); err != nil {
 			b.Fatalf("update state (stream): %v", err)
@@ -515,7 +515,7 @@ func BenchmarkLockdConcurrentDistinctKeys(b *testing.B) {
 			if err != nil {
 				b.Fatalf("acquire: %v", err)
 			}
-			opts := lockdclient.UpdateOptions{IfVersion: strconv.FormatInt(lease.Version, 10)}
+			opts := lockdclient.UpdateOptions{IfVersion: lockdclient.Int64(lease.Version)}
 			if _, err := client.UpdateBytes(ctx, key, lease.LeaseID, payload, opts); err != nil {
 				b.Fatalf("update state: %v", err)
 			}
@@ -610,7 +610,7 @@ func BenchmarkLockdConcurrentLarge(b *testing.B) {
 			if err != nil {
 				b.Fatalf("acquire: %v", err)
 			}
-			opts := lockdclient.UpdateOptions{IfVersion: strconv.FormatInt(lease.Version, 10)}
+			opts := lockdclient.UpdateOptions{IfVersion: lockdclient.Int64(lease.Version)}
 			if _, err := client.UpdateBytes(ctx, key, lease.LeaseID, payload, opts); err != nil {
 				b.Fatalf("update state: %v", err)
 			}

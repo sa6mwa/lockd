@@ -3,6 +3,8 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -165,6 +167,8 @@ func TestAttachmentContentLengthHeader(t *testing.T) {
 	token := strconv.FormatInt(acquireResp.FencingToken, 10)
 
 	payload := []byte("payload-bytes")
+	sum := sha256.Sum256(payload)
+	expectedSHA := hex.EncodeToString(sum[:])
 	attachReq, err := http.NewRequest(http.MethodPost, server.URL+"/v1/attachments?key=orders&name=payload.bin", bytes.NewReader(payload))
 	if err != nil {
 		t.Fatalf("new attach request: %v", err)
@@ -221,6 +225,9 @@ func TestAttachmentContentLengthHeader(t *testing.T) {
 		if declared != int64(len(payload)) {
 			t.Fatalf("x-attachment-size %d want %d", declared, len(payload))
 		}
+	}
+	if got := strings.TrimSpace(getResp.Header.Get("X-Attachment-SHA256")); got != expectedSHA {
+		t.Fatalf("x-attachment-sha256 %q want %q", got, expectedSHA)
 	}
 	data, err := io.ReadAll(getResp.Body)
 	if err != nil {
@@ -1076,6 +1083,105 @@ func TestUpdateVersionMismatch(t *testing.T) {
 	}
 	if errResp.ErrorCode != "version_conflict" {
 		t.Fatalf("expected version_conflict, got %s", errResp.ErrorCode)
+	}
+}
+
+func TestUpdateExpectedPayloadHeaders(t *testing.T) {
+	server := newTestHTTPServer(t)
+
+	req := api.AcquireRequest{Key: "stream-expected", Owner: "worker-a", TTLSeconds: 5}
+	var acquire api.AcquireResponse
+	if status := doJSON(t, server, http.MethodPost, "/v1/acquire", nil, req, &acquire); status != http.StatusOK {
+		t.Fatalf("acquire: expected 200, got %d", status)
+	}
+
+	payload := []byte("{\n  \"pos\": 1\n}\n")
+	sum := sha256.Sum256(payload)
+	expectedSHA := hex.EncodeToString(sum[:])
+
+	updateReq, err := http.NewRequest(http.MethodPost, server.URL+"/v1/update?key=stream-expected", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	updateReq.Header.Set("Content-Type", "application/json")
+	updateReq.Header.Set("X-Lease-ID", acquire.LeaseID)
+	updateReq.Header.Set("X-Txn-ID", acquire.TxnID)
+	updateReq.Header.Set("X-Fencing-Token", strconv.FormatInt(acquire.FencingToken, 10))
+	updateReq.Header.Set(headerExpectedSHA256, expectedSHA)
+	updateReq.Header.Set(headerExpectedBytes, strconv.FormatInt(int64(len(payload)), 10))
+
+	updateResp, err := http.DefaultClient.Do(updateReq)
+	if err != nil {
+		t.Fatalf("do update request: %v", err)
+	}
+	defer updateResp.Body.Close()
+	if updateResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(updateResp.Body)
+		t.Fatalf("expected 200, got %d: %s", updateResp.StatusCode, strings.TrimSpace(string(body)))
+	}
+}
+
+func TestUpdateExpectedPayloadHeaderErrors(t *testing.T) {
+	server := newTestHTTPServer(t)
+
+	req := api.AcquireRequest{Key: "stream-expected-errors", Owner: "worker-a", TTLSeconds: 5}
+	var acquire api.AcquireResponse
+	if status := doJSON(t, server, http.MethodPost, "/v1/acquire", nil, req, &acquire); status != http.StatusOK {
+		t.Fatalf("acquire: expected 200, got %d", status)
+	}
+
+	payload := []byte(`{"pos":1}`)
+
+	invalidBytesReq, err := http.NewRequest(http.MethodPost, server.URL+"/v1/update?key=stream-expected-errors", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	invalidBytesReq.Header.Set("Content-Type", "application/json")
+	invalidBytesReq.Header.Set("X-Lease-ID", acquire.LeaseID)
+	invalidBytesReq.Header.Set("X-Txn-ID", acquire.TxnID)
+	invalidBytesReq.Header.Set("X-Fencing-Token", strconv.FormatInt(acquire.FencingToken, 10))
+	invalidBytesReq.Header.Set(headerExpectedBytes, "abc")
+
+	invalidBytesResp, err := http.DefaultClient.Do(invalidBytesReq)
+	if err != nil {
+		t.Fatalf("do invalid bytes request: %v", err)
+	}
+	defer invalidBytesResp.Body.Close()
+	if invalidBytesResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid bytes header, got %d", invalidBytesResp.StatusCode)
+	}
+	var invalidBytesErr api.ErrorResponse
+	if err := json.NewDecoder(invalidBytesResp.Body).Decode(&invalidBytesErr); err != nil {
+		t.Fatalf("decode invalid bytes error: %v", err)
+	}
+	if invalidBytesErr.ErrorCode != "invalid_expected_bytes" {
+		t.Fatalf("expected invalid_expected_bytes, got %s", invalidBytesErr.ErrorCode)
+	}
+
+	mismatchReq, err := http.NewRequest(http.MethodPost, server.URL+"/v1/update?key=stream-expected-errors", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("new mismatch request: %v", err)
+	}
+	mismatchReq.Header.Set("Content-Type", "application/json")
+	mismatchReq.Header.Set("X-Lease-ID", acquire.LeaseID)
+	mismatchReq.Header.Set("X-Txn-ID", acquire.TxnID)
+	mismatchReq.Header.Set("X-Fencing-Token", strconv.FormatInt(acquire.FencingToken, 10))
+	mismatchReq.Header.Set(headerExpectedSHA256, strings.Repeat("0", 64))
+
+	mismatchResp, err := http.DefaultClient.Do(mismatchReq)
+	if err != nil {
+		t.Fatalf("do mismatch request: %v", err)
+	}
+	defer mismatchResp.Body.Close()
+	if mismatchResp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409 for sha mismatch, got %d", mismatchResp.StatusCode)
+	}
+	var mismatchErr api.ErrorResponse
+	if err := json.NewDecoder(mismatchResp.Body).Decode(&mismatchErr); err != nil {
+		t.Fatalf("decode mismatch error: %v", err)
+	}
+	if mismatchErr.ErrorCode != "expected_sha256_mismatch" {
+		t.Fatalf("expected expected_sha256_mismatch, got %s", mismatchErr.ErrorCode)
 	}
 }
 

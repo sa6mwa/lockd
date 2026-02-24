@@ -3,6 +3,8 @@ package core
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"testing"
@@ -24,6 +26,8 @@ func TestAttachmentLifecycle(t *testing.T) {
 	}
 
 	payload := []byte("hello")
+	sum := sha256.Sum256(payload)
+	expectedSHA := hex.EncodeToString(sum[:])
 	res, err := svc.Attach(ctx, AttachCommand{
 		Namespace:    "default",
 		Key:          key,
@@ -45,6 +49,9 @@ func TestAttachmentLifecycle(t *testing.T) {
 	if res.Attachment.Size != int64(len(payload)) {
 		t.Fatalf("expected attachment size %d, got %d", len(payload), res.Attachment.Size)
 	}
+	if res.Attachment.PlaintextSHA256 != expectedSHA {
+		t.Fatalf("expected attachment checksum %q, got %q", expectedSHA, res.Attachment.PlaintextSHA256)
+	}
 
 	listRes, err := svc.ListAttachments(ctx, ListAttachmentsCommand{
 		Namespace:    "default",
@@ -62,6 +69,9 @@ func TestAttachmentLifecycle(t *testing.T) {
 	if listRes.Attachments[0].Size != int64(len(payload)) {
 		t.Fatalf("expected list attachment size %d, got %d", len(payload), listRes.Attachments[0].Size)
 	}
+	if listRes.Attachments[0].PlaintextSHA256 != expectedSHA {
+		t.Fatalf("expected list checksum %q, got %q", expectedSHA, listRes.Attachments[0].PlaintextSHA256)
+	}
 
 	getRes, err := svc.RetrieveAttachment(ctx, RetrieveAttachmentCommand{
 		Namespace:    "default",
@@ -76,6 +86,9 @@ func TestAttachmentLifecycle(t *testing.T) {
 	}
 	if getRes.Attachment.Size != int64(len(payload)) {
 		t.Fatalf("expected retrieve attachment size %d, got %d", len(payload), getRes.Attachment.Size)
+	}
+	if getRes.Attachment.PlaintextSHA256 != expectedSHA {
+		t.Fatalf("expected retrieve checksum %q, got %q", expectedSHA, getRes.Attachment.PlaintextSHA256)
 	}
 	data, err := io.ReadAll(getRes.Reader)
 	getRes.Reader.Close()
@@ -106,6 +119,9 @@ func TestAttachmentLifecycle(t *testing.T) {
 	}
 	if len(publicList.Attachments) != 1 {
 		t.Fatalf("expected public attachment, got %d", len(publicList.Attachments))
+	}
+	if publicList.Attachments[0].PlaintextSHA256 != expectedSHA {
+		t.Fatalf("expected public checksum %q, got %q", expectedSHA, publicList.Attachments[0].PlaintextSHA256)
 	}
 }
 

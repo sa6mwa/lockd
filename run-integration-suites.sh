@@ -47,14 +47,15 @@ done
 
 ### Suite definitions #########################################################
 declare -a SUITE_NAMES=()
-declare -A SUITE_ENV SUITE_TAGS SUITE_ENVFILE
+declare -A SUITE_ENV SUITE_TAGS SUITE_ENVFILE SUITE_PKG
 
 add_suite() {
-  local name=$1 env=$2 tags=$3 env_file=$4
+  local name=$1 env=$2 tags=$3 env_file=$4 pkg_pattern=${5:-"./integration/..."}
   SUITE_NAMES+=("$name")
   SUITE_ENV["$name"]=$env
   SUITE_TAGS["$name"]=$tags
   SUITE_ENVFILE["$name"]=$env_file
+  SUITE_PKG["$name"]=$pkg_pattern
 }
 
 add_backend() {
@@ -74,17 +75,23 @@ add_backend() {
 
 add_backend mem 1 0 0
 add_suite "mem/query" "mem" "integration mem query" ""
+add_suite "mem/mcp" "mem" "integration mem mcp" "" "./integration/mem/mcp"
 add_suite "mem/crypto" "mem" "integration mem crypto" ""
 add_backend disk 1 1 1
 add_suite "disk/query" "disk" "integration disk query" ".env.disk"
+add_suite "disk/mcp" "disk" "integration disk mcp" ".env.disk" "./integration/disk/mcp"
 add_backend nfs 1 0 1
 add_suite "nfs/query" "nfs" "integration nfs query" ".env.nfs"
+add_suite "nfs/mcp" "nfs" "integration nfs mcp" ".env.nfs" "./integration/nfs/mcp"
 add_backend aws 1 1 1
 add_suite "aws/query" "aws" "integration aws query" ".env.aws"
+add_suite "aws/mcp" "aws" "integration aws mcp" ".env.aws" "./integration/aws/mcp"
 add_backend azure 1 1 1
 add_suite "azure/query" "azure" "integration azure query" ".env.azure"
+add_suite "azure/mcp" "azure" "integration azure mcp" ".env.azure" "./integration/azure/mcp"
 add_backend minio 1 1 1
 add_suite "minio/query" "minio" "integration minio query" ".env.minio"
+add_suite "minio/mcp" "minio" "integration minio mcp" ".env.minio" "./integration/minio/mcp"
 add_suite "mixed" "mixed" "integration mixed" ".env.minio .env.aws .env.azure"
 
 format_duration() {
@@ -188,6 +195,7 @@ for suite in "${SUITES_TO_RUN[@]}"; do
     done
   fi
   tags=${SUITE_TAGS[$suite]}
+  pkg_pattern=${SUITE_PKG[$suite]:-"./integration/..."}
   log_file="$LOG_DIR/${suite//\//-}.log"
   echo "==> Running $suite (tags: $tags)"
   if [[ -n $env_file ]]; then
@@ -257,14 +265,14 @@ for file in $env_file; do
     *azure*) capture_azure ;;
   esac
 done
-go test -timeout $suite_timeout -v -tags '$tags' -count=1 ./integration/...
+go test -timeout $suite_timeout -v -tags '$tags' -count=1 $pkg_pattern
 EOF
 )
     else
-      cmd_string="set -a && source '$env_file' && set +a && go test -timeout $suite_timeout -v -tags '$tags' -count=1 ./integration/..."
+      cmd_string="set -a && source '$env_file' && set +a && go test -timeout $suite_timeout -v -tags '$tags' -count=1 $pkg_pattern"
     fi
   else
-    cmd_string="go test -timeout $suite_timeout -v -tags '$tags' -count=1 ./integration/..."
+    cmd_string="go test -timeout $suite_timeout -v -tags '$tags' -count=1 $pkg_pattern"
   fi
   echo "Command: $cmd_string"
   cmd_goflags="${GOFLAGS:-}"

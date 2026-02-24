@@ -17,6 +17,7 @@ const (
 	benchETag    = `"etag-1"`
 	benchVersion = "1"
 	benchFence   = "1"
+	benchFenceV  = int64(1)
 )
 
 func newClientBenchmarkServer(payload []byte) *httptest.Server {
@@ -160,7 +161,7 @@ func BenchmarkClientGetBytes(b *testing.B) {
 	if err != nil {
 		b.Fatalf("new client: %v", err)
 	}
-	cli.RegisterLeaseToken(benchLease, benchFence)
+	cli.RegisterLeaseToken(benchLease, benchFenceV)
 	ctx := context.Background()
 
 	b.ReportAllocs()
@@ -195,7 +196,7 @@ func BenchmarkClientGetStream(b *testing.B) {
 	if err != nil {
 		b.Fatalf("new client: %v", err)
 	}
-	cli.RegisterLeaseToken(benchLease, benchFence)
+	cli.RegisterLeaseToken(benchLease, benchFenceV)
 	ctx := context.Background()
 
 	b.ReportAllocs()

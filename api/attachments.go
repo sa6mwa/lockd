@@ -8,6 +8,8 @@ type AttachmentInfo struct {
 	Name string `json:"name"`
 	// Size is the payload size in bytes.
 	Size int64 `json:"size"`
+	// PlaintextSHA256 is the SHA-256 checksum of the uploaded plaintext payload.
+	PlaintextSHA256 string `json:"plaintext_sha256,omitempty"`
 	// ContentType is the media type associated with the payload.
 	ContentType string `json:"content_type,omitempty"`
 	// CreatedAtUnix is the creation timestamp as Unix seconds.

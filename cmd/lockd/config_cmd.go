@@ -127,6 +127,22 @@ type configDefaults struct {
 	TCFanoutMultiplier        float64  `yaml:"tc-fanout-multiplier"`
 	TCDecisionRetention       string   `yaml:"tc-decision-retention"`
 	TCClientBundle            string   `yaml:"tc-client-bundle"`
+	MCPListen                 string   `yaml:"mcp.listen"`
+	MCPServer                 string   `yaml:"mcp.server"`
+	MCPClientBundle           string   `yaml:"mcp.client-bundle"`
+	MCPBundle                 string   `yaml:"mcp.bundle"`
+	MCPDisableTLS             bool     `yaml:"mcp.disable-tls"`
+	MCPBaseURL                string   `yaml:"mcp.base-url"`
+	MCPAllowHTTP              bool     `yaml:"mcp.allow-http"`
+	MCPDisableMTLS            bool     `yaml:"mcp.disable-mtls"`
+	MCPInlineMaxBytes         int64    `yaml:"mcp.inline-max-bytes"`
+	MCPDefaultNamespace       string   `yaml:"mcp.default-namespace"`
+	MCPAgentBusQueue          string   `yaml:"mcp.agent-bus-queue"`
+	MCPStateFile              string   `yaml:"mcp.state-file"`
+	MCPRefreshStore           string   `yaml:"mcp.refresh-store"`
+	MCPIssuer                 string   `yaml:"mcp.issuer"`
+	MCPPath                   string   `yaml:"mcp.path"`
+	MCPOAuthResourceURL       string   `yaml:"mcp.oauth-resource-url"`
 	StoreSSE                  string   `yaml:"s3-sse"`
 	StoreKMSKeyID             string   `yaml:"s3-kms-key-id"`
 	StoreMaxPartSize          string   `yaml:"s3-max-part-size"`
@@ -202,6 +218,22 @@ func defaultConfigYAML(overrides ...func(*configDefaults)) ([]byte, error) {
 		TCFanoutMultiplier:        lockd.DefaultTCFanoutMultiplier,
 		TCDecisionRetention:       lockd.DefaultTCDecisionRetention.String(),
 		TCClientBundle:            "",
+		MCPListen:                 "127.0.0.1:19341",
+		MCPServer:                 "https://127.0.0.1:9341",
+		MCPClientBundle:           "",
+		MCPBundle:                 "",
+		MCPDisableTLS:             false,
+		MCPBaseURL:                "",
+		MCPAllowHTTP:              false,
+		MCPDisableMTLS:            false,
+		MCPInlineMaxBytes:         2 * 1024 * 1024,
+		MCPDefaultNamespace:       "mcp",
+		MCPAgentBusQueue:          "lockd.agent.bus",
+		MCPStateFile:              "",
+		MCPRefreshStore:           "",
+		MCPIssuer:                 "",
+		MCPPath:                   "/",
+		MCPOAuthResourceURL:       "",
 		StoreSSE:                  "",
 		StoreKMSKeyID:             "",
 		StoreMaxPartSize:          configHumanizeBytes(lockd.DefaultS3MaxPartSize),

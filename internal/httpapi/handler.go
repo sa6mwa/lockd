@@ -58,6 +58,9 @@ const (
 	headerAttachmentSize      = "X-Attachment-Size"
 	headerAttachmentCreatedAt = "X-Attachment-Created-At"
 	headerAttachmentUpdatedAt = "X-Attachment-Updated-At"
+	headerAttachmentSHA256    = "X-Attachment-SHA256"
+	headerExpectedSHA256      = "X-Expected-SHA256"
+	headerExpectedBytes       = "X-Expected-Bytes"
 )
 const headerCorrelationID = "X-Correlation-Id"
 const headerShutdownImminent = "Shutdown-Imminent"
@@ -856,8 +859,10 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle("/v1/index/flush", h.wrap("index.flush", h.handleIndexFlush))
 	mux.Handle("/v1/namespace", h.wrap("namespace", h.handleNamespaceConfig))
 	mux.Handle("/v1/queue/enqueue", h.wrap("queue.enqueue", h.handleQueueEnqueue))
+	mux.Handle("/v1/queue/stats", h.wrap("queue.stats", h.handleQueueStats))
 	mux.Handle("/v1/queue/dequeue", h.wrap("queue.dequeue", h.handleQueueDequeue))
 	mux.Handle("/v1/queue/dequeueWithState", h.wrap("queue.dequeue_with_state", h.handleQueueDequeueWithState))
+	mux.Handle("/v1/queue/watch", h.wrap("queue.watch", h.handleQueueWatch))
 	mux.Handle("/v1/queue/subscribe", h.wrap("queue.subscribe", h.handleQueueSubscribe))
 	mux.Handle("/v1/queue/subscribeWithState", h.wrap("queue.subscribe_with_state", h.handleQueueSubscribeWithState))
 	mux.Handle("/v1/queue/ack", h.wrap("queue.ack", h.handleQueueAck))

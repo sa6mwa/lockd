@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/internal/clock"
 	"pkt.systems/lockd/internal/core"
 	"pkt.systems/lockd/internal/queue"
@@ -178,6 +180,54 @@ func TestHandleQueueAckLogsTxnID(t *testing.T) {
 	fields := entry.toMap()
 	if got := fields["txn_id"]; got != acq.TxnID {
 		t.Fatalf("expected txn_id %s, got %v", acq.TxnID, got)
+	}
+}
+
+func TestHandleQueueStatsReturnsHeadSnapshot(t *testing.T) {
+	store := memorystore.NewWithConfig(memorystore.Config{QueueWatch: false})
+	handler := New(Config{
+		Store:             store,
+		Logger:            pslog.NoopLogger(),
+		JSONMaxBytes:      1 << 20,
+		QueueMaxConsumers: 8,
+	})
+
+	ctx := context.Background()
+	msg, err := handler.queueSvc.Enqueue(ctx, "default", "stats", bytes.NewReader([]byte("payload")), queue.EnqueueOptions{})
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	body := bytes.NewBufferString(`{"namespace":"default","queue":"stats"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/queue/stats", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	if err := handler.handleQueueStats(rec, req); err != nil {
+		t.Fatalf("handleQueueStats returned error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d", rec.Code)
+	}
+
+	var out api.QueueStatsResponse
+	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if out.Namespace != "default" || out.Queue != "stats" {
+		t.Fatalf("unexpected identity %#v", out)
+	}
+	if !out.Available {
+		t.Fatalf("expected available=true")
+	}
+	if out.HeadMessageID != msg.ID {
+		t.Fatalf("expected head message %q, got %q", msg.ID, out.HeadMessageID)
+	}
+	if out.HeadEnqueuedAtUnix <= 0 {
+		t.Fatalf("expected head enqueue timestamp, got %d", out.HeadEnqueuedAtUnix)
+	}
+	if out.TotalConsumers != 0 || out.WaitingConsumers != 0 {
+		t.Fatalf("unexpected consumer counters: total=%d waiting=%d", out.TotalConsumers, out.WaitingConsumers)
 	}
 }
 

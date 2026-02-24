@@ -4,6 +4,7 @@ import (
 	"container/heap"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -14,8 +15,10 @@ import (
 	"time"
 
 	"pkt.systems/lockd/api"
+	"pkt.systems/lockd/internal/jsonpointer"
 	"pkt.systems/lockd/internal/search"
 	"pkt.systems/lockd/internal/storage"
+	"pkt.systems/lql"
 	"pkt.systems/pslog"
 )
 
@@ -78,15 +81,31 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 	if err != nil {
 		return search.Result{}, err
 	}
-	if term, ok := simpleEq(req.Selector); ok {
-		return a.queryEq(ctx, req, term, reader, manifest, visibility)
+	var (
+		matches         keySet
+		postFilterPlan  lql.QueryStreamPlan
+		requirePostEval bool
+	)
+	selector := cloneSelector(req.Selector)
+	useLegacyFilter := selectorSupportsLegacyIndexFilter(req.Selector)
+	if !selector.IsEmpty() {
+		if normalizeErr := normalizeSelectorFieldsForLQL(&selector); normalizeErr != nil {
+			return search.Result{}, fmt.Errorf("normalize selector: %w", normalizeErr)
+		}
 	}
-	var matches keySet
-	if zeroSelector(req.Selector) {
+	if selector.IsEmpty() || !useLegacyFilter {
 		matches, err = reader.allKeys(ctx)
 	} else {
 		eval := selectorEvaluator{reader: reader}
 		matches, err = eval.evaluate(ctx, req.Selector)
+	}
+	if !selector.IsEmpty() {
+		compiled, compileErr := lql.NewQueryStreamPlan(selector)
+		if compileErr != nil {
+			return search.Result{}, fmt.Errorf("compile selector: %w", compileErr)
+		}
+		postFilterPlan = compiled
+		requirePostEval = true
 	}
 	if err != nil {
 		return search.Result{}, err
@@ -180,6 +199,26 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 				}
 			}
 		}
+		if requirePostEval {
+			metaRes, metaErr := a.store.backend.LoadMeta(ctx, req.Namespace, key)
+			if metaErr != nil {
+				if errors.Is(metaErr, storage.ErrNotFound) {
+					continue
+				}
+				return search.Result{}, fmt.Errorf("load meta %s: %w", key, metaErr)
+			}
+			meta := metaRes.Meta
+			if meta == nil || meta.StateETag == "" {
+				continue
+			}
+			matched, matchErr := a.matchesSelector(ctx, req.Namespace, key, meta, postFilterPlan)
+			if matchErr != nil {
+				return search.Result{}, fmt.Errorf("evaluate selector %s: %w", key, matchErr)
+			}
+			if !matched {
+				continue
+			}
+		}
 		visible = append(visible, key)
 		lastReturned = key
 		nextIndex = i + 1
@@ -206,6 +245,45 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 		result.Cursor = encodeCursor(lastReturned)
 	}
 	return result, nil
+}
+
+func (a *Adapter) matchesSelector(ctx context.Context, namespace, key string, meta *storage.Meta, plan lql.QueryStreamPlan) (bool, error) {
+	stateCtx := ctx
+	if meta != nil && len(meta.StateDescriptor) > 0 {
+		stateCtx = storage.ContextWithStateDescriptor(stateCtx, meta.StateDescriptor)
+	}
+	if meta != nil && meta.StatePlaintextBytes > 0 {
+		stateCtx = storage.ContextWithStatePlaintextSize(stateCtx, meta.StatePlaintextBytes)
+	}
+	stateRes, err := a.store.backend.ReadState(stateCtx, namespace, key)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) || storage.IsTransient(err) {
+			return true, nil
+		}
+		return false, err
+	}
+	defer stateRes.Reader.Close()
+
+	matched := false
+	_, err = lql.QueryStreamWithResult(lql.QueryStreamRequest{
+		Ctx:               stateCtx,
+		Reader:            stateRes.Reader,
+		Plan:              plan,
+		Mode:              lql.QueryDecisionOnly,
+		MaxMatches:        1,
+		MaxCandidateBytes: 100 * 1024 * 1024,
+		OnDecision: func(d lql.QueryStreamDecision) error {
+			if !d.Matched {
+				return nil
+			}
+			matched = true
+			return lql.ErrStreamStop
+		},
+	})
+	if err != nil {
+		return false, err
+	}
+	return matched, nil
 }
 
 func simpleEq(sel api.Selector) (*api.Term, bool) {
@@ -914,6 +992,51 @@ func subtract(a, b keySet) keySet {
 	return out
 }
 
+func selectorSupportsLegacyIndexFilter(sel api.Selector) bool {
+	if sel.IsEmpty() {
+		return true
+	}
+	caps := lql.InspectSelectorCapabilities(sel)
+	if caps.Contains || caps.WildcardPath || caps.RecursivePath {
+		return false
+	}
+	payload, err := json.Marshal(sel)
+	if err != nil {
+		return false
+	}
+	if len(payload) == 0 || string(payload) == "{}" {
+		return true
+	}
+	raw := make(map[string]json.RawMessage)
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return false
+	}
+	for key := range raw {
+		switch key {
+		case "and", "or", "not", "eq", "prefix", "range", "in", "exists":
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func cloneSelector(sel api.Selector) api.Selector {
+	payload, err := json.Marshal(sel)
+	if err != nil {
+		return sel
+	}
+	if len(payload) == 0 || string(payload) == "{}" {
+		return api.Selector{}
+	}
+	var out api.Selector
+	if err := json.Unmarshal(payload, &out); err != nil {
+		return sel
+	}
+	return out
+}
+
 func normalizeField(term *api.Term) string {
 	if term == nil {
 		return ""
@@ -949,6 +1072,95 @@ func rangeMatches(term *api.RangeTerm, value float64) bool {
 		return false
 	}
 	return true
+}
+
+func normalizeSelectorFieldsForLQL(sel *api.Selector) error {
+	if sel == nil {
+		return nil
+	}
+	if sel.Eq != nil {
+		normalized, err := normalizePointerLenient(sel.Eq.Field)
+		if err != nil {
+			return fmt.Errorf("eq.field: %w", err)
+		}
+		sel.Eq.Field = normalized
+	}
+	if sel.Contains != nil {
+		normalized, err := normalizePointerLenient(sel.Contains.Field)
+		if err != nil {
+			return fmt.Errorf("contains.field: %w", err)
+		}
+		sel.Contains.Field = normalized
+	}
+	if sel.IContains != nil {
+		normalized, err := normalizePointerLenient(sel.IContains.Field)
+		if err != nil {
+			return fmt.Errorf("icontains.field: %w", err)
+		}
+		sel.IContains.Field = normalized
+	}
+	if sel.Prefix != nil {
+		normalized, err := normalizePointerLenient(sel.Prefix.Field)
+		if err != nil {
+			return fmt.Errorf("prefix.field: %w", err)
+		}
+		sel.Prefix.Field = normalized
+	}
+	if sel.IPrefix != nil {
+		normalized, err := normalizePointerLenient(sel.IPrefix.Field)
+		if err != nil {
+			return fmt.Errorf("iprefix.field: %w", err)
+		}
+		sel.IPrefix.Field = normalized
+	}
+	if sel.Range != nil {
+		normalized, err := normalizePointerLenient(sel.Range.Field)
+		if err != nil {
+			return fmt.Errorf("range.field: %w", err)
+		}
+		sel.Range.Field = normalized
+	}
+	if sel.In != nil {
+		normalized, err := normalizePointerLenient(sel.In.Field)
+		if err != nil {
+			return fmt.Errorf("in.field: %w", err)
+		}
+		sel.In.Field = normalized
+	}
+	if sel.Exists != "" {
+		normalized, err := normalizePointerLenient(sel.Exists)
+		if err != nil {
+			return fmt.Errorf("exists.field: %w", err)
+		}
+		sel.Exists = normalized
+	}
+	for i := range sel.And {
+		if err := normalizeSelectorFieldsForLQL(&sel.And[i]); err != nil {
+			return err
+		}
+	}
+	for i := range sel.Or {
+		if err := normalizeSelectorFieldsForLQL(&sel.Or[i]); err != nil {
+			return err
+		}
+	}
+	if sel.Not != nil {
+		if err := normalizeSelectorFieldsForLQL(sel.Not); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func normalizePointerLenient(field string) (string, error) {
+	field = strings.TrimSpace(field)
+	if field == "" || field == "/" {
+		return "", nil
+	}
+	if !strings.HasPrefix(field, "/") {
+		field = "/" + field
+	}
+	return jsonpointer.Normalize(field)
 }
 
 func zeroSelector(sel api.Selector) bool {

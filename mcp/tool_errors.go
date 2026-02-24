@@ -77,7 +77,12 @@ func classifyToolError(err error) toolErrorEnvelope {
 	}
 	lower := strings.ToLower(env.Detail)
 	switch {
-	case strings.Contains(lower, "required"), strings.Contains(lower, "must be"), strings.Contains(lower, "invalid"):
+	case strings.Contains(lower, "required"),
+		strings.Contains(lower, "must be"),
+		strings.Contains(lower, "invalid"),
+		strings.Contains(lower, "mutually exclusive"),
+		strings.Contains(lower, "exceed"),
+		strings.Contains(lower, "decode "):
 		env.ErrorCode = "invalid_argument"
 	case strings.Contains(lower, "timeout"), strings.Contains(lower, "deadline"):
 		env.ErrorCode = "timeout"

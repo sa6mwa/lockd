@@ -2113,6 +2113,100 @@ func (h *Handler) handleQueueEnqueue(w http.ResponseWriter, r *http.Request) err
 	return nil
 }
 
+// handleQueueStats godoc
+// @Summary      Read queue runtime stats
+// @Description  Returns side-effect-free queue stats for one namespace/queue, including dispatcher waiter metrics and current head availability snapshot.
+// @Tags         queue
+// @Accept       json
+// @Produce      json
+// @Param        namespace  query    string  false  "Namespace override when the request body omits it"
+// @Param        queue      query    string  false  "Queue name override when the request body omits it"
+// @Param        request  body      api.QueueStatsRequest  true  "Queue stats parameters"
+// @Success      200      {object}  api.QueueStatsResponse
+// @Failure      400      {object}  api.ErrorResponse
+// @Failure      503      {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/queue/stats [post]
+func (h *Handler) handleQueueStats(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
+	reqBody := http.MaxBytesReader(w, r.Body, h.jsonMaxBytes)
+	defer reqBody.Close()
+
+	var req api.QueueStatsRequest
+	if err := decodeJSONBody(reqBody, &req, jsonDecodeOptions{
+		allowEmpty:       true,
+		disallowUnknowns: true,
+	}); err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_body", Detail: fmt.Sprintf("failed to parse request: %v", err)}
+	}
+
+	namespace := strings.TrimSpace(req.Namespace)
+	if namespace == "" {
+		namespace = strings.TrimSpace(r.URL.Query().Get("namespace"))
+	}
+	resolvedNamespace, err := h.resolveNamespace(namespace)
+	if err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
+	}
+	if err := h.authorizeNamespace(r, resolvedNamespace, nsauth.AccessRead); err != nil {
+		return err
+	}
+	h.observeNamespace(resolvedNamespace)
+
+	queueName := strings.TrimSpace(req.Queue)
+	if queueName == "" {
+		queueName = strings.TrimSpace(r.URL.Query().Get("queue"))
+	}
+	if queueName == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_queue", Detail: "queue is required"}
+	}
+
+	qsvc, err := h.requireQueueService()
+	if err != nil {
+		return err
+	}
+
+	dispatcherStats := h.queueDisp.QueueStats(resolvedNamespace, queueName)
+	resp := api.QueueStatsResponse{
+		Namespace:         resolvedNamespace,
+		Queue:             queueName,
+		WaitingConsumers:  dispatcherStats.WaitingConsumers,
+		PendingCandidates: dispatcherStats.PendingCandidates,
+		TotalConsumers:    dispatcherStats.TotalConsumers,
+		HasActiveWatcher:  h.queueDisp.HasActiveWatcher(resolvedNamespace, queueName),
+		CorrelationID:     correlation.ID(ctx),
+	}
+	candidate, err := qsvc.NextCandidate(ctx, resolvedNamespace, queueName, "", 1)
+	switch {
+	case err == nil && candidate.Descriptor != nil:
+		head := candidate.Descriptor.Document
+		resp.Available = true
+		resp.HeadMessageID = strings.TrimSpace(head.ID)
+		resp.HeadEnqueuedAtUnix = head.EnqueuedAt.UTC().Unix()
+		resp.HeadNotVisibleUntilUnix = head.NotVisibleUntil.UTC().Unix()
+		now := time.Now().UTC()
+		if h.clock != nil {
+			now = h.clock.Now().UTC()
+		}
+		if !head.EnqueuedAt.IsZero() {
+			age := now.Sub(head.EnqueuedAt).Seconds()
+			if age < 0 {
+				age = 0
+			}
+			resp.HeadAgeSeconds = int64(age)
+		}
+	case errors.Is(err, storage.ErrNotFound):
+		// Queue currently has no visible head candidate.
+	case errors.Is(err, queue.ErrInvalidQueue):
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_queue", Detail: err.Error()}
+	case err != nil:
+		return convertCoreError(err)
+	}
+
+	h.writeJSON(w, http.StatusOK, resp, nil)
+	return nil
+}
+
 // handleQueueDequeue godoc
 // @Summary      Dequeue messages
 // @Description  Dequeues one or more messages from the specified queue. Supports long polling via wait_seconds. If txn_id is provided, the message is enlisted as a transaction participant.

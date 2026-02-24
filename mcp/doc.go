@@ -12,6 +12,7 @@
 //   - Hosts local OAuth 2.1 endpoints for confidential clients
 //   - Enforces bearer-token auth by default when TLS is enabled
 //   - Forwards queue watch activity to MCP progress notifications (SSE path)
+//   - Exposes `lockd.queue.stats` for side-effect-free queue introspection
 //   - Exposes lockd.queue.watch for bounded interactive wakeups
 //   - Keeps `lockd.get` and `lockd.attachments.get` metadata-only and uses
 //     `lockd.state.stream` / `lockd.attachments.stream` for payload transfer

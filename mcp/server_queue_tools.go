@@ -276,6 +276,51 @@ type queueWatchToolInput struct {
 	MaxEvents       int    `json:"max_events,omitempty" jsonschema:"Maximum events to return before stopping (default: 1)"`
 }
 
+type queueStatsToolInput struct {
+	Queue     string `json:"queue,omitempty" jsonschema:"Queue name (defaults to lockd.agent.bus)"`
+	Namespace string `json:"namespace,omitempty" jsonschema:"Namespace (defaults to server default namespace)"`
+}
+
+type queueStatsToolOutput struct {
+	Namespace               string `json:"namespace"`
+	Queue                   string `json:"queue"`
+	WaitingConsumers        int    `json:"waiting_consumers"`
+	PendingCandidates       int    `json:"pending_candidates"`
+	TotalConsumers          int    `json:"total_consumers"`
+	HasActiveWatcher        bool   `json:"has_active_watcher"`
+	Available               bool   `json:"available"`
+	HeadMessageID           string `json:"head_message_id,omitempty"`
+	HeadEnqueuedAtUnix      int64  `json:"head_enqueued_at_unix,omitempty"`
+	HeadNotVisibleUntilUnix int64  `json:"head_not_visible_until_unix,omitempty"`
+	HeadAgeSeconds          int64  `json:"head_age_seconds,omitempty"`
+	CorrelationID           string `json:"correlation_id,omitempty"`
+}
+
+func (s *server) handleQueueStatsTool(ctx context.Context, _ *mcpsdk.CallToolRequest, input queueStatsToolInput) (*mcpsdk.CallToolResult, queueStatsToolOutput, error) {
+	namespace := s.resolveNamespace(input.Namespace)
+	queue := s.resolveQueue(input.Queue)
+	resp, err := s.upstream.QueueStats(ctx, queue, lockdclient.QueueStatsOptions{
+		Namespace: namespace,
+	})
+	if err != nil {
+		return nil, queueStatsToolOutput{}, err
+	}
+	return nil, queueStatsToolOutput{
+		Namespace:               resp.Namespace,
+		Queue:                   resp.Queue,
+		WaitingConsumers:        resp.WaitingConsumers,
+		PendingCandidates:       resp.PendingCandidates,
+		TotalConsumers:          resp.TotalConsumers,
+		HasActiveWatcher:        resp.HasActiveWatcher,
+		Available:               resp.Available,
+		HeadMessageID:           resp.HeadMessageID,
+		HeadEnqueuedAtUnix:      resp.HeadEnqueuedAtUnix,
+		HeadNotVisibleUntilUnix: resp.HeadNotVisibleUntilUnix,
+		HeadAgeSeconds:          resp.HeadAgeSeconds,
+		CorrelationID:           resp.CorrelationID,
+	}, nil
+}
+
 type queueWatchEventOutput struct {
 	Namespace     string `json:"namespace"`
 	Queue         string `json:"queue"`

@@ -44,6 +44,7 @@ const (
 	toolQueueWriteStreamCommit       = "lockd.queue.write_stream.commit"
 	toolQueueWriteStreamAbort        = "lockd.queue.write_stream.abort"
 	toolQueueDequeue                 = "lockd.queue.dequeue"
+	toolQueueStats                   = "lockd.queue.stats"
 	toolQueueWatch                   = "lockd.queue.watch"
 	toolQueueAck                     = "lockd.queue.ack"
 	toolQueueNack                    = "lockd.queue.nack"
@@ -92,6 +93,7 @@ var mcpToolNames = []string{
 	toolQueueWriteStreamCommit,
 	toolQueueWriteStreamAbort,
 	toolQueueDequeue,
+	toolQueueStats,
 	toolQueueWatch,
 	toolQueueAck,
 	toolQueueNack,
@@ -439,6 +441,14 @@ func buildToolDescriptions(cfg Config) map[string]string {
 			Effects:  "Returns `found=false` when no message is available, or message metadata/lease fields plus payload stream summary. Includes `next_cursor` for continuation. Payload bytes are emitted as `lockd.queue.payload.chunk` progress notifications.",
 			Retry:    "Safe to retry. Duplicate retries may lease different messages when queue state changes.",
 			Next:     "If processed, call `lockd.queue.ack`; if failed call `lockd.queue.nack`; if not for this worker call `lockd.queue.defer`; extend long handlers with `lockd.queue.extend`.",
+		}),
+		toolQueueStats: formatToolDescription(toolContract{
+			Purpose:  "Read side-effect-free queue runtime stats and current visible head snapshot.",
+			UseWhen:  "You need queue health/introspection signals before deciding whether to watch/dequeue.",
+			Requires: fmt.Sprintf("`queue` defaults to %q and `namespace` defaults to %q.", queue, namespace),
+			Effects:  "Returns dispatcher counters (`waiting_consumers`, `pending_candidates`, `total_consumers`), watcher state (`has_active_watcher`), and head availability fields when a visible message exists.",
+			Retry:    "Safe to retry; read-only operation.",
+			Next:     "Use `lockd.queue.watch` for bounded wakeups and `lockd.queue.dequeue` for actual message leasing/consumption.",
 		}),
 		toolQueueWatch: formatToolDescription(toolContract{
 			Purpose:  "Wait for queue-availability events within a bounded call window.",

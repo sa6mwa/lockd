@@ -105,6 +105,11 @@ func TestMutationUnknownRejectsStrictQueueEndpointsTable(t *testing.T) {
 		body string
 	}{
 		{
+			name: "stats",
+			path: "/v1/queue/stats",
+			body: `{"namespace":"default","queue":"jobs","unknown":1}`,
+		},
+		{
 			name: "dequeue",
 			path: "/v1/queue/dequeue",
 			body: `{"namespace":"default","queue":"jobs","owner":"w1","unknown":1}`,

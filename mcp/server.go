@@ -432,6 +432,10 @@ func (s *server) registerTools(srv *mcpsdk.Server) {
 		Description: desc(toolQueueDequeue),
 	}, withStructuredToolErrors(s.handleQueueDequeueTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        toolQueueStats,
+		Description: desc(toolQueueStats),
+	}, withStructuredToolErrors(s.handleQueueStatsTool))
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolQueueWatch,
 		Description: desc(toolQueueWatch),
 	}, withStructuredToolErrors(s.handleQueueWatchTool))

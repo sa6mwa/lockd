@@ -103,6 +103,12 @@ type WatchQueueOptions struct {
 	Namespace string
 }
 
+// QueueStatsOptions configures queue stats reads.
+type QueueStatsOptions struct {
+	// Namespace scopes the queue operation. Empty uses the client's default namespace.
+	Namespace string
+}
+
 // QueueWatchEvent describes queue visibility changes emitted by WatchQueue.
 type QueueWatchEvent struct {
 	Namespace     string
@@ -5922,6 +5928,34 @@ func qrfStateFromError(err error) string {
 		return apiErr.QRFState
 	}
 	return ""
+}
+
+// QueueStats reads side-effect-free runtime and head snapshot stats for a queue.
+func (c *Client) QueueStats(ctx context.Context, queue string, opts QueueStatsOptions) (*api.QueueStatsResponse, error) {
+	queue = strings.TrimSpace(queue)
+	if queue == "" {
+		return nil, fmt.Errorf("lockd: queue is required")
+	}
+	namespace, err := c.namespaceFor(opts.Namespace)
+	if err != nil {
+		return nil, err
+	}
+	req := api.QueueStatsRequest{
+		Namespace: namespace,
+		Queue:     queue,
+	}
+	c.logTraceCtx(ctx, "client.queue.stats.start", "queue", queue, "namespace", namespace)
+	var res api.QueueStatsResponse
+	if _, err := c.postJSON(ctx, "/v1/queue/stats", req, &res, nil, ""); err != nil {
+		return nil, err
+	}
+	if res.CorrelationID == "" {
+		if cid := CorrelationIDFromContext(ctx); cid != "" {
+			res.CorrelationID = cid
+		}
+	}
+	c.logTraceCtx(ctx, "client.queue.stats.success", "queue", queue, "namespace", namespace, "available", res.Available, "head_message_id", res.HeadMessageID)
+	return &res, nil
 }
 
 // QueueAck acknowledges a queue message via the /v1/queue/ack API.

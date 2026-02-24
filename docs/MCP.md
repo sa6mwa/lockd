@@ -196,6 +196,7 @@ Queue/messaging:
 - `lockd.queue.write_stream.commit`
 - `lockd.queue.write_stream.abort`
 - `lockd.queue.dequeue`
+- `lockd.queue.stats`
 - `lockd.queue.watch`
 - `lockd.queue.ack`
 - `lockd.queue.nack`
@@ -215,18 +216,20 @@ TC-only transaction decision tools are intentionally not exposed by MCP. XA rema
 ## Queue + SSE Behavior
 
 - MCP forwards upstream queue watch events as MCP progress notifications.
+- `lockd.queue.stats` is the side-effect-free introspection primitive (availability + dispatcher counters).
 - `lockd.queue.watch` is the bounded wake-up tool for interactive clients.
 - notifications are wake-up signals; consumers still explicitly call dequeue.
 - recommended consumer loop:
 
 1. subscribe (`lockd.queue.subscribe`) or rely on auto-subscription
-2. or call `lockd.queue.watch` with a bounded duration/event cap
-3. dequeue
-4. process
-5. ack on success
-6. nack on failure
-7. defer when message should be re-queued without failure semantics
-8. extend while long processing is in-flight
+2. call `lockd.queue.stats` for readiness snapshot/counters
+3. or call `lockd.queue.watch` with a bounded duration/event cap
+4. dequeue
+5. process
+6. ack on success
+7. nack on failure
+8. defer when message should be re-queued without failure semantics
+9. extend while long processing is in-flight
 
 `lockd.queue.dequeue` streams payload bytes as progress notifications (`lockd.queue.payload.chunk`) and returns payload stream metadata in the tool result. Payload is not returned inline.
 `lockd.queue.dequeue` also returns `next_cursor`; pass it back as `cursor` on later calls when continuing the same dequeue scan.

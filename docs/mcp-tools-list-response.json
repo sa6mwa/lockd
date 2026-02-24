@@ -2189,6 +2189,75 @@
         }
       },
       {
+        "description": "Purpose: Read side-effect-free queue runtime stats and current visible head snapshot.\nUse when: You need queue health/introspection signals before deciding whether to watch/dequeue.\nRequires: `queue` defaults to \"lockd.agent.bus\" and `namespace` defaults to \"mcp\".\nEffects: Returns dispatcher counters (`waiting_consumers`, `pending_candidates`, `total_consumers`), watcher state (`has_active_watcher`), and head availability fields when a visible message exists.\nRetry: Safe to retry; read-only operation.\nNext: Use `lockd.queue.watch` for bounded wakeups and `lockd.queue.dequeue` for actual message leasing/consumption.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            },
+            "queue": {
+              "description": "Queue name (defaults to lockd.agent.bus)",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "name": "lockd.queue.stats",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "available": {
+              "type": "boolean"
+            },
+            "correlation_id": {
+              "type": "string"
+            },
+            "has_active_watcher": {
+              "type": "boolean"
+            },
+            "head_age_seconds": {
+              "type": "integer"
+            },
+            "head_enqueued_at_unix": {
+              "type": "integer"
+            },
+            "head_message_id": {
+              "type": "string"
+            },
+            "head_not_visible_until_unix": {
+              "type": "integer"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "pending_candidates": {
+              "type": "integer"
+            },
+            "queue": {
+              "type": "string"
+            },
+            "total_consumers": {
+              "type": "integer"
+            },
+            "waiting_consumers": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "namespace",
+            "queue",
+            "waiting_consumers",
+            "pending_candidates",
+            "total_consumers",
+            "has_active_watcher",
+            "available"
+          ],
+          "type": "object"
+        }
+      },
+      {
         "description": "Purpose: Subscribe current MCP session to queue-availability notifications over SSE.\nUse when: You run a long-lived MCP runtime and want ongoing push wake-ups instead of pure dequeue polling.\nRequires: Active MCP session is required. `queue` defaults to \"lockd.agent.bus\" and `namespace` defaults to \"mcp\".\nEffects: Registers session subscription; future queue activity emits MCP progress notifications.\nRetry: Safe to retry; duplicate subscribe is handled as already subscribed.\nNext: On notification, call `lockd.queue.dequeue` then `ack` or `defer`.",
         "inputSchema": {
           "additionalProperties": false,

@@ -360,6 +360,37 @@ func TestHandleQueueWatchToolTimeout(t *testing.T) {
 	}
 }
 
+func TestHandleQueueStatsToolReportsHeadAvailability(t *testing.T) {
+	t.Parallel()
+
+	s, cli := newToolTestServer(t)
+	ctx := context.Background()
+	queue := fmt.Sprintf("mcp-stats-%d", time.Now().UnixNano())
+	enqueued, err := cli.EnqueueBytes(ctx, queue, []byte(`{"kind":"stats"}`), lockdclient.EnqueueOptions{
+		Namespace: "mcp",
+	})
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	_, out, err := s.handleQueueStatsTool(ctx, nil, queueStatsToolInput{
+		Namespace: "mcp",
+		Queue:     queue,
+	})
+	if err != nil {
+		t.Fatalf("queue stats tool: %v", err)
+	}
+	if out.Namespace != "mcp" || out.Queue != queue {
+		t.Fatalf("unexpected identity: namespace=%q queue=%q", out.Namespace, out.Queue)
+	}
+	if !out.Available {
+		t.Fatalf("expected available=true")
+	}
+	if out.HeadMessageID != enqueued.MessageID {
+		t.Fatalf("expected head message %q, got %q", enqueued.MessageID, out.HeadMessageID)
+	}
+}
+
 func TestAttachmentHeadAndGetIntegrityFields(t *testing.T) {
 	t.Parallel()
 

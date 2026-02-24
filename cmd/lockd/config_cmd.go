@@ -133,6 +133,7 @@ type configDefaults struct {
 	MCPBundle                 string   `yaml:"mcp.bundle"`
 	MCPDisableTLS             bool     `yaml:"mcp.disable-tls"`
 	MCPDisableMTLS            bool     `yaml:"mcp.disable-mtls"`
+	MCPInlineMaxBytes         int64    `yaml:"mcp.inline-max-bytes"`
 	MCPDefaultNamespace       string   `yaml:"mcp.default-namespace"`
 	MCPAgentBusQueue          string   `yaml:"mcp.agent-bus-queue"`
 	MCPStateFile              string   `yaml:"mcp.state-file"`
@@ -221,6 +222,7 @@ func defaultConfigYAML(overrides ...func(*configDefaults)) ([]byte, error) {
 		MCPBundle:                 "",
 		MCPDisableTLS:             false,
 		MCPDisableMTLS:            false,
+		MCPInlineMaxBytes:         2 * 1024 * 1024,
 		MCPDefaultNamespace:       "mcp",
 		MCPAgentBusQueue:          "lockd.agent.bus",
 		MCPStateFile:              "",

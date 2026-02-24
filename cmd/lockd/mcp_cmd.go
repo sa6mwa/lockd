@@ -31,6 +31,7 @@ const (
 	mcpBundleKey           = "mcp.bundle"
 	mcpDisableTLSKey       = "mcp.disable_tls"
 	mcpDisableMTLSKey      = "mcp.disable_mtls"
+	mcpInlineMaxBytesKey   = "mcp.inline_max_bytes"
 	mcpDefaultNamespaceKey = "mcp.default_namespace"
 	mcpAgentBusQueueKey    = "mcp.agent_bus_queue"
 	mcpStateFileKey        = "mcp.state_file"
@@ -78,6 +79,7 @@ func newMCPCommand(baseLogger pslog.Logger, inheritedServerFlag, inheritedBundle
 	flags.String("mcp-path", "/mcp", "HTTP path for the MCP streamable endpoint")
 	flags.String("oauth-resource-url", "", "OAuth protected resource identifier URL (default <issuer>/mcp)")
 	flags.Bool("disable-mcp-upstream-mtls", false, "disable mTLS when MCP calls upstream lockd")
+	flags.Int64("inline-max-bytes", 2*1024*1024, "maximum decoded inline payload bytes for state.update and queue.enqueue")
 	flags.String("default-namespace", "mcp", "default namespace used by MCP tools when not explicitly set")
 	flags.String("agent-bus-queue", "lockd.agent.bus", "queue auto-subscribed for each MCP session")
 
@@ -90,6 +92,7 @@ func newMCPCommand(baseLogger pslog.Logger, inheritedServerFlag, inheritedBundle
 	mustBindMCPFlag(mcpPathKey, "LOCKD_MCP_PATH", flags.Lookup("mcp-path"))
 	mustBindMCPFlag(mcpOAuthResourceURLKey, "LOCKD_MCP_OAUTH_RESOURCE_URL", flags.Lookup("oauth-resource-url"))
 	mustBindMCPFlag(mcpDisableMTLSKey, "LOCKD_MCP_DISABLE_MTLS", flags.Lookup("disable-mcp-upstream-mtls"))
+	mustBindMCPFlag(mcpInlineMaxBytesKey, "LOCKD_MCP_INLINE_MAX_BYTES", flags.Lookup("inline-max-bytes"))
 	mustBindMCPFlag(mcpDefaultNamespaceKey, "LOCKD_MCP_DEFAULT_NAMESPACE", flags.Lookup("default-namespace"))
 	mustBindMCPFlag(mcpAgentBusQueueKey, "LOCKD_MCP_AGENT_BUS_QUEUE", flags.Lookup("agent-bus-queue"))
 
@@ -129,6 +132,7 @@ func mcpConfigFromViper() (lockdmcp.Config, error) {
 		DisableTLS:                viper.GetBool(mcpDisableTLSKey),
 		BundlePath:                strings.TrimSpace(viper.GetString(mcpBundleKey)),
 		UpstreamServer:            strings.TrimSpace(viper.GetString(mcpServerKey)),
+		InlineMaxBytes:            viper.GetInt64(mcpInlineMaxBytesKey),
 		DefaultNamespace:          strings.TrimSpace(viper.GetString(mcpDefaultNamespaceKey)),
 		AgentBusQueue:             strings.TrimSpace(viper.GetString(mcpAgentBusQueueKey)),
 		UpstreamDisableMTLS:       viper.GetBool(mcpDisableMTLSKey),

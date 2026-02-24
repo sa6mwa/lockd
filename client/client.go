@@ -5244,6 +5244,81 @@ func (c *Client) Update(ctx context.Context, key, leaseID string, body io.Reader
 	return c.updateWithPreferred(ctx, key, leaseID, body, opts, "")
 }
 
+// UpdateStream uploads JSON state from a non-replayable reader without buffering.
+//
+// This variant is intended for streaming callers (for example MCP write streams)
+// and performs a single transport attempt. On retry/failover requirements, callers
+// must begin a new stream and replay bytes from their source of truth.
+func (c *Client) UpdateStream(ctx context.Context, key, leaseID string, body io.Reader, opts UpdateOptions) (*UpdateResult, error) {
+	namespace, err := c.namespaceFor(opts.Namespace)
+	if err != nil {
+		return nil, err
+	}
+	opts.Namespace = namespace
+	if opts.TxnID == "" {
+		if sess := c.sessionByLease(leaseID); sess != nil {
+			opts.TxnID = sess.TxnID
+		}
+	}
+	token, err := c.fencingToken(leaseID, opts.FencingToken)
+	if err != nil {
+		return nil, err
+	}
+	path := fmt.Sprintf("/v1/update?key=%s&namespace=%s", url.QueryEscape(key), url.QueryEscape(namespace))
+	used := false
+	builder := func(base string) (*http.Request, context.CancelFunc, error) {
+		if used {
+			return nil, nil, fmt.Errorf("lockd: update stream body is not replayable")
+		}
+		used = true
+		reqBody := body
+		if reqBody == nil {
+			reqBody = http.NoBody
+		}
+		reqCtx, cancel := c.requestContext(ctx)
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, base+path, reqBody)
+		if err != nil {
+			cancel()
+			return nil, nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Lease-ID", leaseID)
+		if opts.TxnID != "" {
+			req.Header.Set(headerTxnID, opts.TxnID)
+		}
+		if opts.IfETag != "" {
+			req.Header.Set("X-If-State-ETag", opts.IfETag)
+		}
+		if opts.IfVersion != nil {
+			req.Header.Set("X-If-Version", strconv.FormatInt(*opts.IfVersion, 10))
+		}
+		req.Header.Set(headerFencingToken, strconv.FormatInt(token, 10))
+		opts.Metadata.applyHeaders(req)
+		c.applyCorrelationHeader(ctx, req, "")
+		return req, cancel, nil
+	}
+	resp, cancel, endpoint, err := c.attemptEndpoints(builder, "")
+	if err != nil {
+		c.logErrorCtx(ctx, "client.update_stream.transport_error", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", endpoint, "fencing_token", token, "error", err)
+		return nil, err
+	}
+	defer cancel()
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		c.logWarnCtx(ctx, "client.update_stream.error", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", endpoint, "fencing_token", token, "status", resp.StatusCode)
+		return nil, c.decodeError(resp)
+	}
+	var result UpdateResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	if newToken, ok := parseFencingTokenHeader(resp.Header.Get(headerFencingToken)); ok {
+		c.RegisterLeaseToken(leaseID, newToken)
+	}
+	c.logTraceCtx(ctx, "client.update_stream.success", "key", key, "lease_id", leaseID, "txn_id", opts.TxnID, "endpoint", endpoint, "fencing_token", token, "new_version", result.NewVersion, "new_etag", result.NewStateETag)
+	return &result, nil
+}
+
 func (c *Client) updateWithPreferred(ctx context.Context, key, leaseID string, body io.Reader, opts UpdateOptions, preferred string) (*UpdateResult, error) {
 	namespace, err := c.namespaceFor(opts.Namespace)
 	if err != nil {

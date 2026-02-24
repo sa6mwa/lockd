@@ -33,6 +33,7 @@ type Config struct {
 	DisableTLS                bool
 	BundlePath                string
 	UpstreamServer            string
+	InlineMaxBytes            int64
 	DefaultNamespace          string
 	AgentBusQueue             string
 	UpstreamDisableMTLS       bool
@@ -64,9 +65,11 @@ type server struct {
 	lifecycleLog   pslog.Logger
 	transportLog   pslog.Logger
 	subscribeLog   pslog.Logger
+	writeStreamLog pslog.Logger
 	upstream       *lockdclient.Client
 	oauthManager   *oauth.Manager
 	subscriptions  *subscriptionManager
+	writeStreams   *writeStreamManager
 	httpServer     *http.Server
 	tlsBundlePath  string
 	resourceID     string
@@ -95,6 +98,7 @@ func NewServer(req NewServerRequest) (Server, error) {
 		lifecycleLog:   svcfields.WithSubsystem(logger, "server.lifecycle.mcp"),
 		transportLog:   svcfields.WithSubsystem(logger, "mcp.transport.http"),
 		subscribeLog:   svcfields.WithSubsystem(logger, "mcp.queue.subscriptions"),
+		writeStreamLog: svcfields.WithSubsystem(logger, "mcp.write.streams"),
 		mcpHTTPPath:    cleanHTTPPath(cfg.MCPPath),
 		metadataPath:   "/.well-known/oauth-protected-resource",
 		oauthWellKnown: "/.well-known/oauth-authorization-server",
@@ -106,6 +110,7 @@ func NewServer(req NewServerRequest) (Server, error) {
 	}
 	s.upstream = upstream
 	s.subscriptions = newSubscriptionManager(upstream, s.subscribeLog)
+	s.writeStreams = newWriteStreamManager(s.writeStreamLog)
 
 	if !cfg.DisableTLS {
 		oauthMgr, err := oauth.NewManager(oauth.ManagerConfig{
@@ -166,6 +171,9 @@ func (s *server) Run(ctx context.Context) error {
 	defer func() {
 		if s.subscriptions != nil {
 			s.subscriptions.Close()
+		}
+		if s.writeStreams != nil {
+			s.writeStreams.Close()
 		}
 		if s.upstream != nil {
 			_ = s.upstream.Close()
@@ -300,6 +308,22 @@ func (s *server) registerTools(srv *mcpsdk.Server) {
 		Description: desc(toolStateUpdate),
 	}, s.handleStateUpdateTool)
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        toolStateWriteStreamBegin,
+		Description: desc(toolStateWriteStreamBegin),
+	}, s.handleStateWriteStreamBeginTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        toolStateWriteStreamAppend,
+		Description: desc(toolStateWriteStreamAppend),
+	}, s.handleStateWriteStreamAppendTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        toolStateWriteStreamCommit,
+		Description: desc(toolStateWriteStreamCommit),
+	}, s.handleStateWriteStreamCommitTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        toolStateWriteStreamAbort,
+		Description: desc(toolStateWriteStreamAbort),
+	}, s.handleStateWriteStreamAbortTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolStateStream,
 		Description: desc(toolStateStream),
 	}, s.handleStateStreamTool)
@@ -313,9 +337,21 @@ func (s *server) registerTools(srv *mcpsdk.Server) {
 	}, s.handleStateRemoveTool)
 
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
-		Name:        toolAttachmentsPut,
-		Description: desc(toolAttachmentsPut),
-	}, s.handleAttachmentPutTool)
+		Name:        toolAttachmentsWriteStreamBegin,
+		Description: desc(toolAttachmentsWriteStreamBegin),
+	}, s.handleAttachmentsWriteStreamBeginTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        toolAttachmentsWriteStreamAppend,
+		Description: desc(toolAttachmentsWriteStreamAppend),
+	}, s.handleAttachmentsWriteStreamAppendTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        toolAttachmentsWriteStreamCommit,
+		Description: desc(toolAttachmentsWriteStreamCommit),
+	}, s.handleAttachmentsWriteStreamCommitTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        toolAttachmentsWriteStreamAbort,
+		Description: desc(toolAttachmentsWriteStreamAbort),
+	}, s.handleAttachmentsWriteStreamAbortTool)
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolAttachmentsList,
 		Description: desc(toolAttachmentsList),
@@ -371,6 +407,22 @@ func (s *server) registerTools(srv *mcpsdk.Server) {
 		Name:        toolQueueEnqueue,
 		Description: desc(toolQueueEnqueue),
 	}, s.handleQueueEnqueueTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        toolQueueWriteStreamBegin,
+		Description: desc(toolQueueWriteStreamBegin),
+	}, s.handleQueueWriteStreamBeginTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        toolQueueWriteStreamAppend,
+		Description: desc(toolQueueWriteStreamAppend),
+	}, s.handleQueueWriteStreamAppendTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        toolQueueWriteStreamCommit,
+		Description: desc(toolQueueWriteStreamCommit),
+	}, s.handleQueueWriteStreamCommitTool)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        toolQueueWriteStreamAbort,
+		Description: desc(toolQueueWriteStreamAbort),
+	}, s.handleQueueWriteStreamAbortTool)
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolQueueDequeue,
 		Description: desc(toolQueueDequeue),
@@ -526,7 +578,6 @@ type queryToolInput struct {
 	Namespace string         `json:"namespace,omitempty" jsonschema:"Namespace (defaults to server default namespace)"`
 	Limit     int            `json:"limit,omitempty" jsonschema:"Maximum rows to return"`
 	Cursor    string         `json:"cursor,omitempty" jsonschema:"Continuation cursor"`
-	Return    string         `json:"return,omitempty" jsonschema:"Query return mode: keys (default); use lockd.query.stream for documents"`
 	Engine    string         `json:"engine,omitempty" jsonschema:"Optional query engine override: auto, index, or scan"`
 	Refresh   string         `json:"refresh,omitempty" jsonschema:"Optional refresh policy, for example wait_for"`
 	Fields    map[string]any `json:"fields,omitempty" jsonschema:"Optional query field projection map"`
@@ -534,7 +585,6 @@ type queryToolInput struct {
 
 type queryToolOutput struct {
 	Namespace string            `json:"namespace"`
-	Mode      string            `json:"mode"`
 	Keys      []string          `json:"keys,omitempty"`
 	Cursor    string            `json:"cursor,omitempty"`
 	IndexSeq  uint64            `json:"index_seq,omitempty"`
@@ -571,14 +621,7 @@ func (s *server) handleQueryTool(ctx context.Context, _ *mcpsdk.CallToolRequest,
 	if refresh := strings.TrimSpace(input.Refresh); refresh != "" {
 		opts = append(opts, lockdclient.WithQueryRefresh(refresh))
 	}
-	switch mode := strings.ToLower(strings.TrimSpace(input.Return)); mode {
-	case "", "keys":
-		opts = append(opts, lockdclient.WithQueryReturnKeys())
-	case "documents", "document", "docs":
-		return nil, queryToolOutput{}, fmt.Errorf("documents mode moved to lockd.query.stream")
-	default:
-		return nil, queryToolOutput{}, fmt.Errorf("invalid return mode %q (expected keys)", input.Return)
-	}
+	opts = append(opts, lockdclient.WithQueryReturnKeys())
 
 	resp, err := s.upstream.Query(ctx, opts...)
 	if err != nil {
@@ -588,13 +631,9 @@ func (s *server) handleQueryTool(ctx context.Context, _ *mcpsdk.CallToolRequest,
 
 	out := queryToolOutput{
 		Namespace: resp.Namespace,
-		Mode:      string(resp.Mode()),
 		Cursor:    resp.Cursor,
 		IndexSeq:  resp.IndexSeq,
 		Metadata:  cloneStringMap(resp.Metadata),
-	}
-	if out.Mode == "" {
-		out.Mode = string(lockdclient.QueryReturnKeys)
 	}
 	out.Keys = resp.Keys()
 	return nil, out, nil
@@ -616,7 +655,6 @@ type queryStreamToolInput struct {
 
 type queryStreamToolOutput struct {
 	Namespace         string            `json:"namespace"`
-	Mode              string            `json:"mode"`
 	Cursor            string            `json:"cursor,omitempty"`
 	IndexSeq          uint64            `json:"index_seq,omitempty"`
 	Metadata          map[string]string `json:"metadata,omitempty"`
@@ -683,7 +721,6 @@ func (s *server) handleQueryStreamTool(ctx context.Context, req *mcpsdk.CallTool
 
 	out := queryStreamToolOutput{
 		Namespace:     resp.Namespace,
-		Mode:          string(lockdclient.QueryReturnDocuments),
 		Cursor:        resp.Cursor,
 		IndexSeq:      resp.IndexSeq,
 		Metadata:      cloneStringMap(resp.Metadata),
@@ -845,6 +882,7 @@ func applyDefaults(cfg *Config) {
 		cfg.AgentBusQueue = "lockd.agent.bus"
 	}
 	cfg.AgentBusQueue = strings.TrimSpace(cfg.AgentBusQueue)
+	cfg.InlineMaxBytes = normalizedInlineMaxBytes(cfg.InlineMaxBytes)
 	if cfg.UpstreamHTTPTimeout <= 0 {
 		cfg.UpstreamHTTPTimeout = lockdclient.DefaultHTTPTimeout
 	}

@@ -17,6 +17,9 @@ func TestApplyDefaultsSetsMCPNamespace(t *testing.T) {
 	if cfg.AgentBusQueue != "lockd.agent.bus" {
 		t.Fatalf("expected default agent bus queue lockd.agent.bus, got %q", cfg.AgentBusQueue)
 	}
+	if cfg.InlineMaxBytes != 2*1024*1024 {
+		t.Fatalf("expected default inline max bytes 2097152, got %d", cfg.InlineMaxBytes)
+	}
 }
 
 func TestNewUpstreamClientUsesConfiguredDefaultNamespace(t *testing.T) {

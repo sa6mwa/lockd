@@ -14,9 +14,7 @@ import (
 	"pkt.systems/lockd/tlsutil"
 )
 
-type hintToolInput struct {
-	Topic string `json:"topic,omitempty" jsonschema:"Optional hint topic; defaults to namespace_access"`
-}
+type hintToolInput struct{}
 
 type namespaceHint struct {
 	Namespace  string `json:"namespace"`
@@ -24,7 +22,6 @@ type namespaceHint struct {
 }
 
 type hintToolOutput struct {
-	Topic              string          `json:"topic"`
 	ClientID           string          `json:"client_id,omitempty"`
 	DefaultNamespace   string          `json:"default_namespace"`
 	NamespaceHints     []namespaceHint `json:"namespace_hints,omitempty"`
@@ -43,14 +40,7 @@ type namespaceHintSnapshot struct {
 	Notes              []string
 }
 
-func (s *server) handleHintTool(_ context.Context, req *mcpsdk.CallToolRequest, input hintToolInput) (*mcpsdk.CallToolResult, hintToolOutput, error) {
-	topic := strings.ToLower(strings.TrimSpace(input.Topic))
-	if topic == "" {
-		topic = "namespace_access"
-	}
-	if topic != "namespace_access" {
-		return nil, hintToolOutput{}, fmt.Errorf("unknown hint topic %q", topic)
-	}
+func (s *server) handleHintTool(_ context.Context, req *mcpsdk.CallToolRequest, _ hintToolInput) (*mcpsdk.CallToolResult, hintToolOutput, error) {
 	clientID := ""
 	scopes := []string(nil)
 	if req != nil && req.Extra != nil && req.Extra.TokenInfo != nil {
@@ -62,7 +52,6 @@ func (s *server) handleHintTool(_ context.Context, req *mcpsdk.CallToolRequest, 
 	}
 	hints := namespaceHintsFromConfig(s.cfg)
 	return nil, hintToolOutput{
-		Topic:              topic,
 		ClientID:           clientID,
 		DefaultNamespace:   s.cfg.DefaultNamespace,
 		NamespaceHints:     hints.NamespaceHints,

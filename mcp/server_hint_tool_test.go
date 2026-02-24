@@ -103,9 +103,6 @@ func TestHandleHintToolIncludesClientBundleClaimsAndTokenContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hint tool: %v", err)
 	}
-	if out.Topic != "namespace_access" {
-		t.Fatalf("expected namespace_access topic, got %q", out.Topic)
-	}
 	if out.ClientID != "agent-1" {
 		t.Fatalf("expected client id agent-1, got %q", out.ClientID)
 	}
@@ -146,14 +143,5 @@ func TestHandleHintToolWithUpstreamMTLSDisabled(t *testing.T) {
 	}
 	if len(out.NamespaceHints) != 0 {
 		t.Fatalf("expected no namespace hints, got %#v", out.NamespaceHints)
-	}
-}
-
-func TestHandleHintToolUnknownTopic(t *testing.T) {
-	t.Parallel()
-
-	s := &server{cfg: Config{DefaultNamespace: "mcp", UpstreamDisableMTLS: true}}
-	if _, _, err := s.handleHintTool(context.Background(), nil, hintToolInput{Topic: "queue"}); err == nil {
-		t.Fatalf("expected unknown topic error")
 	}
 }

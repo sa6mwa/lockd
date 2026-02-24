@@ -6,39 +6,50 @@ import (
 )
 
 const (
-	toolLockAcquire          = "lockd.lock.acquire"
-	toolLockKeepAlive        = "lockd.lock.keepalive"
-	toolLockRelease          = "lockd.lock.release"
-	toolGet                  = "lockd.get"
-	toolDescribe             = "lockd.describe"
-	toolQuery                = "lockd.query"
-	toolQueryStream          = "lockd.query.stream"
-	toolStateUpdate          = "lockd.state.update"
-	toolStateStream          = "lockd.state.stream"
-	toolStateMetadata        = "lockd.state.metadata"
-	toolStateRemove          = "lockd.state.remove"
-	toolAttachmentsPut       = "lockd.attachments.put"
-	toolAttachmentsList      = "lockd.attachments.list"
-	toolAttachmentsHead      = "lockd.attachments.head"
-	toolAttachmentsChecksum  = "lockd.attachments.checksum"
-	toolAttachmentsGet       = "lockd.attachments.get"
-	toolAttachmentsStream    = "lockd.attachments.stream"
-	toolAttachmentsDelete    = "lockd.attachments.delete"
-	toolAttachmentsDeleteAll = "lockd.attachments.delete_all"
-	toolNamespaceGet         = "lockd.namespace.get"
-	toolNamespaceUpdate      = "lockd.namespace.update"
-	toolIndexFlush           = "lockd.index.flush"
-	toolHint                 = "lockd.hint"
-	toolHelp                 = "lockd.help"
-	toolQueueEnqueue         = "lockd.queue.enqueue"
-	toolQueueDequeue         = "lockd.queue.dequeue"
-	toolQueueWatch           = "lockd.queue.watch"
-	toolQueueAck             = "lockd.queue.ack"
-	toolQueueNack            = "lockd.queue.nack"
-	toolQueueDefer           = "lockd.queue.defer"
-	toolQueueExtend          = "lockd.queue.extend"
-	toolQueueSubscribe       = "lockd.queue.subscribe"
-	toolQueueUnsubscribe     = "lockd.queue.unsubscribe"
+	toolLockAcquire                  = "lockd.lock.acquire"
+	toolLockKeepAlive                = "lockd.lock.keepalive"
+	toolLockRelease                  = "lockd.lock.release"
+	toolGet                          = "lockd.get"
+	toolDescribe                     = "lockd.describe"
+	toolQuery                        = "lockd.query"
+	toolQueryStream                  = "lockd.query.stream"
+	toolStateUpdate                  = "lockd.state.update"
+	toolStateWriteStreamBegin        = "lockd.state.write_stream.begin"
+	toolStateWriteStreamAppend       = "lockd.state.write_stream.append"
+	toolStateWriteStreamCommit       = "lockd.state.write_stream.commit"
+	toolStateWriteStreamAbort        = "lockd.state.write_stream.abort"
+	toolStateStream                  = "lockd.state.stream"
+	toolStateMetadata                = "lockd.state.metadata"
+	toolStateRemove                  = "lockd.state.remove"
+	toolAttachmentsWriteStreamBegin  = "lockd.attachments.write_stream.begin"
+	toolAttachmentsWriteStreamAppend = "lockd.attachments.write_stream.append"
+	toolAttachmentsWriteStreamCommit = "lockd.attachments.write_stream.commit"
+	toolAttachmentsWriteStreamAbort  = "lockd.attachments.write_stream.abort"
+	toolAttachmentsList              = "lockd.attachments.list"
+	toolAttachmentsHead              = "lockd.attachments.head"
+	toolAttachmentsChecksum          = "lockd.attachments.checksum"
+	toolAttachmentsGet               = "lockd.attachments.get"
+	toolAttachmentsStream            = "lockd.attachments.stream"
+	toolAttachmentsDelete            = "lockd.attachments.delete"
+	toolAttachmentsDeleteAll         = "lockd.attachments.delete_all"
+	toolNamespaceGet                 = "lockd.namespace.get"
+	toolNamespaceUpdate              = "lockd.namespace.update"
+	toolIndexFlush                   = "lockd.index.flush"
+	toolHint                         = "lockd.hint"
+	toolHelp                         = "lockd.help"
+	toolQueueEnqueue                 = "lockd.queue.enqueue"
+	toolQueueWriteStreamBegin        = "lockd.queue.write_stream.begin"
+	toolQueueWriteStreamAppend       = "lockd.queue.write_stream.append"
+	toolQueueWriteStreamCommit       = "lockd.queue.write_stream.commit"
+	toolQueueWriteStreamAbort        = "lockd.queue.write_stream.abort"
+	toolQueueDequeue                 = "lockd.queue.dequeue"
+	toolQueueWatch                   = "lockd.queue.watch"
+	toolQueueAck                     = "lockd.queue.ack"
+	toolQueueNack                    = "lockd.queue.nack"
+	toolQueueDefer                   = "lockd.queue.defer"
+	toolQueueExtend                  = "lockd.queue.extend"
+	toolQueueSubscribe               = "lockd.queue.subscribe"
+	toolQueueUnsubscribe             = "lockd.queue.unsubscribe"
 )
 
 var mcpToolNames = []string{
@@ -50,10 +61,17 @@ var mcpToolNames = []string{
 	toolQuery,
 	toolQueryStream,
 	toolStateUpdate,
+	toolStateWriteStreamBegin,
+	toolStateWriteStreamAppend,
+	toolStateWriteStreamCommit,
+	toolStateWriteStreamAbort,
 	toolStateStream,
 	toolStateMetadata,
 	toolStateRemove,
-	toolAttachmentsPut,
+	toolAttachmentsWriteStreamBegin,
+	toolAttachmentsWriteStreamAppend,
+	toolAttachmentsWriteStreamCommit,
+	toolAttachmentsWriteStreamAbort,
 	toolAttachmentsList,
 	toolAttachmentsHead,
 	toolAttachmentsChecksum,
@@ -67,6 +85,10 @@ var mcpToolNames = []string{
 	toolHint,
 	toolHelp,
 	toolQueueEnqueue,
+	toolQueueWriteStreamBegin,
+	toolQueueWriteStreamAppend,
+	toolQueueWriteStreamCommit,
+	toolQueueWriteStreamAbort,
 	toolQueueDequeue,
 	toolQueueWatch,
 	toolQueueAck,
@@ -105,6 +127,10 @@ func buildToolDescriptions(cfg Config) map[string]string {
 	queue := strings.TrimSpace(cfg.AgentBusQueue)
 	if queue == "" {
 		queue = "lockd.agent.bus"
+	}
+	inlineMax := cfg.InlineMaxBytes
+	if inlineMax <= 0 {
+		inlineMax = 2 * 1024 * 1024
 	}
 
 	return map[string]string{
@@ -151,7 +177,7 @@ func buildToolDescriptions(cfg Config) map[string]string {
 		toolQuery: formatToolDescription(toolContract{
 			Purpose:  "Run LQL queries over namespace data in key mode.",
 			UseWhen:  "You need to locate candidate keys before reading or locking.",
-			Requires: fmt.Sprintf("`query` expression is required. `namespace` defaults to %q. Optional `limit`, `cursor`, `return`, `engine`, `refresh`, and `fields` refine execution. `return=documents` is rejected here.", namespace),
+			Requires: fmt.Sprintf("`query` expression is required. `namespace` defaults to %q. Optional `limit`, `cursor`, `engine`, `refresh`, and `fields` refine execution. Query output is always keys.", namespace),
 			Effects:  "Returns matching keys plus pagination/index metadata (`cursor`, `index_seq`).",
 			Retry:    "Safe to retry. Cursor-based pagination should reuse the latest returned cursor.",
 			Next:     "Call `lockd.query.stream` for document payload streaming, or `lockd.get` and `lockd.state.stream` for point reads.",
@@ -166,11 +192,43 @@ func buildToolDescriptions(cfg Config) map[string]string {
 		}),
 		toolStateUpdate: formatToolDescription(toolContract{
 			Purpose:  "Write JSON state under lease protection.",
-			UseWhen:  "You need to create or update state for a locked key.",
-			Requires: fmt.Sprintf("`key` and `lease_id` are required. `namespace` defaults to %q. Payload comes from `payload_text` or `payload_base64` (defaults to `{}`). Optional CAS/fencing fields harden concurrency safety.", namespace),
+			UseWhen:  "You need to create or update state for a locked key and payload fits inline request limits.",
+			Requires: fmt.Sprintf("`key` and `lease_id` are required. `namespace` defaults to %q. Payload comes from exactly one of `payload_text` or `payload_base64` (defaults to `{}`) and must be <= %d bytes after decoding.", namespace, inlineMax),
 			Effects:  "Updates state and returns new version/ETag metadata; can also mutate `query_hidden` metadata.",
 			Retry:    "Use `if_etag`, `if_version`, and `fencing_token` for safe retries. Without guards, retries can apply duplicate writes.",
-			Next:     "Optionally update metadata/attachments, then release lease to commit or rollback.",
+			Next:     "For larger payloads use `lockd.state.write_stream.begin`/`append`/`commit`, then release lease to commit or rollback.",
+		}),
+		toolStateWriteStreamBegin: formatToolDescription(toolContract{
+			Purpose:  "Open a session-scoped streaming state writer.",
+			UseWhen:  "State payload is too large for inline JSON or you want bounded-memory uploads.",
+			Requires: fmt.Sprintf("Active MCP session is required. `key` and `lease_id` are required. `namespace` defaults to %q. Optional CAS/fencing fields mirror `lockd.state.update`.", namespace),
+			Effects:  "Creates a stream session and returns `stream_id` plus `max_chunk_bytes` guidance for append calls.",
+			Retry:    "Not idempotent; begin returns a new stream each time. Abort unused streams explicitly.",
+			Next:     "Call `lockd.state.write_stream.append` repeatedly, then `lockd.state.write_stream.commit` (or `abort`).",
+		}),
+		toolStateWriteStreamAppend: formatToolDescription(toolContract{
+			Purpose:  "Append one base64 chunk into an open state write stream.",
+			UseWhen:  "You are actively streaming large state payload content.",
+			Requires: fmt.Sprintf("Active MCP session is required. `stream_id` and `chunk_base64` are required. Decoded chunk must be <= %d bytes.", inlineMax),
+			Effects:  "Writes chunk bytes directly to the upstream update request stream and returns append/total byte counts.",
+			Retry:    "Do not blindly retry the same chunk without stream-position tracking; repeated append can duplicate bytes.",
+			Next:     "Continue appending until complete, then `lockd.state.write_stream.commit`.",
+		}),
+		toolStateWriteStreamCommit: formatToolDescription(toolContract{
+			Purpose:  "Finalize a state write stream and commit it to upstream lockd.",
+			UseWhen:  "All payload chunks have been appended.",
+			Requires: "Active MCP session and `stream_id` are required.",
+			Effects:  "Closes the upload stream, waits for upstream completion, and returns state update result metadata.",
+			Retry:    "Commit is terminal for a stream_id. On failure, begin a new stream and replay payload.",
+			Next:     "Release lease or proceed with additional state/attachment mutations.",
+		}),
+		toolStateWriteStreamAbort: formatToolDescription(toolContract{
+			Purpose:  "Abort an in-flight state write stream.",
+			UseWhen:  "Upload should be canceled or discarded before commit.",
+			Requires: "Active MCP session and `stream_id` are required. Optional `reason` is advisory.",
+			Effects:  "Terminates the stream, cancels upstream request flow, and frees stream resources.",
+			Retry:    "Safe to retry; absent streams return not-found style errors.",
+			Next:     "Begin a new stream if upload should be retried.",
 		}),
 		toolStateStream: formatToolDescription(toolContract{
 			Purpose:  "Stream JSON state payload in chunks over MCP progress notifications without buffering full payload in memory.",
@@ -196,13 +254,37 @@ func buildToolDescriptions(cfg Config) map[string]string {
 			Retry:    "Prefer CAS/fencing guards for deterministic retries; repeated deletes may be no-op or not-found depending on timing.",
 			Next:     "Release lease to finalize, or write replacement state/attachments first.",
 		}),
-		toolAttachmentsPut: formatToolDescription(toolContract{
-			Purpose:  "Upload or stage an attachment for a key under lease protection.",
-			UseWhen:  "You need to associate binary/text payloads with key state.",
-			Requires: fmt.Sprintf("`key`, `lease_id`, and `name` are required. `namespace` defaults to %q. Payload comes from `payload_text` or `payload_base64`. `mode` controls write semantics: `create` (default), `upsert`, `replace`.", namespace),
-			Effects:  "Stores attachment content/metadata and returns attachment id/version details.",
-			Retry:    "In `create` mode, retries are safe against accidental overwrite. `upsert` can overwrite existing payloads. `replace` requires the named attachment to already exist.",
-			Next:     "List/get attachments for verification, then release lease when complete.",
+		toolAttachmentsWriteStreamBegin: formatToolDescription(toolContract{
+			Purpose:  "Open a session-scoped streaming attachment writer.",
+			UseWhen:  "You need to upload attachment payloads (all attachment writes are stream-based).",
+			Requires: fmt.Sprintf("Active MCP session is required. `key`, `lease_id`, and `name` are required. `namespace` defaults to %q. `mode` supports `create` (default), `upsert`, `replace`.", namespace),
+			Effects:  "Creates a stream session and starts upstream attachment upload flow using provided metadata/options.",
+			Retry:    "Not idempotent; begin returns a new stream each time. Abort unused streams explicitly.",
+			Next:     "Call `lockd.attachments.write_stream.append` repeatedly, then `commit` (or `abort`).",
+		}),
+		toolAttachmentsWriteStreamAppend: formatToolDescription(toolContract{
+			Purpose:  "Append one base64 chunk into an open attachment write stream.",
+			UseWhen:  "You are uploading attachment bytes chunk-by-chunk.",
+			Requires: fmt.Sprintf("Active MCP session is required. `stream_id` and `chunk_base64` are required. Decoded chunk must be <= %d bytes.", inlineMax),
+			Effects:  "Writes chunk bytes directly to upstream attachment body stream and returns append/total byte counts.",
+			Retry:    "Do not blindly retry the same chunk without stream-position tracking; repeated append can duplicate bytes.",
+			Next:     "Continue appending until complete, then `lockd.attachments.write_stream.commit`.",
+		}),
+		toolAttachmentsWriteStreamCommit: formatToolDescription(toolContract{
+			Purpose:  "Finalize an attachment write stream.",
+			UseWhen:  "All attachment payload chunks have been appended.",
+			Requires: "Active MCP session and `stream_id` are required.",
+			Effects:  "Closes the upload stream, waits for upstream attach completion, and returns attachment metadata/version.",
+			Retry:    "Commit is terminal for a stream_id. On failure, begin a new stream and replay payload.",
+			Next:     "List/head/checksum attachments for verification, then release lease.",
+		}),
+		toolAttachmentsWriteStreamAbort: formatToolDescription(toolContract{
+			Purpose:  "Abort an in-flight attachment write stream.",
+			UseWhen:  "Attachment upload should be canceled.",
+			Requires: "Active MCP session and `stream_id` are required. Optional `reason` is advisory.",
+			Effects:  "Terminates upload flow and frees stream resources.",
+			Retry:    "Safe to retry; absent streams return not-found style errors.",
+			Next:     "Begin a new attachment stream if upload should be retried.",
 		}),
 		toolAttachmentsList: formatToolDescription(toolContract{
 			Purpose:  "List attachment metadata for a key.",
@@ -302,17 +384,49 @@ func buildToolDescriptions(cfg Config) map[string]string {
 		}),
 		toolQueueEnqueue: formatToolDescription(toolContract{
 			Purpose:  "Publish a message to a lockd queue for agent coordination.",
-			UseWhen:  "You need to signal work/events/context to queue consumers.",
-			Requires: fmt.Sprintf("`queue` defaults to %q. `namespace` defaults to %q. Provide payload via `payload_text` or `payload_base64`; optional delay/visibility/ttl/attributes tune delivery.", queue, namespace),
+			UseWhen:  "You need to signal work/events/context to queue consumers and payload fits inline limits.",
+			Requires: fmt.Sprintf("`queue` defaults to %q. `namespace` defaults to %q. Provide payload via exactly one of `payload_text` or `payload_base64`; decoded payload must be <= %d bytes.", queue, namespace, inlineMax),
 			Effects:  "Appends a queue message and returns delivery metadata (`message_id`, visibility, attempts).",
 			Retry:    "Not idempotent by default; retries can enqueue duplicates. Use application-level dedupe keys in payload/attributes.",
-			Next:     "Consumers should `lockd.queue.dequeue` then `lockd.queue.ack` or `lockd.queue.defer`.",
+			Next:     "For larger payloads use `lockd.queue.write_stream.begin`/`append`/`commit`. Consumers should dequeue then ack/nack/defer.",
+		}),
+		toolQueueWriteStreamBegin: formatToolDescription(toolContract{
+			Purpose:  "Open a session-scoped streaming queue publisher.",
+			UseWhen:  "Queue payload is too large for inline enqueue or you need bounded-memory uploads.",
+			Requires: fmt.Sprintf("Active MCP session is required. `queue` defaults to %q and `namespace` defaults to %q. Delay/visibility/ttl/attributes/content_type options match `lockd.queue.enqueue`.", queue, namespace),
+			Effects:  "Creates a stream session and returns `stream_id` plus `max_chunk_bytes` guidance for append calls.",
+			Retry:    "Not idempotent; begin returns a new stream each time. Abort unused streams explicitly.",
+			Next:     "Call `lockd.queue.write_stream.append` repeatedly, then `lockd.queue.write_stream.commit` (or `abort`).",
+		}),
+		toolQueueWriteStreamAppend: formatToolDescription(toolContract{
+			Purpose:  "Append one base64 chunk into an open queue write stream.",
+			UseWhen:  "You are streaming large queue payload content.",
+			Requires: fmt.Sprintf("Active MCP session is required. `stream_id` and `chunk_base64` are required. Decoded chunk must be <= %d bytes.", inlineMax),
+			Effects:  "Writes chunk bytes directly to the upstream enqueue request stream and returns append/total byte counts.",
+			Retry:    "Do not blindly retry the same chunk without stream-position tracking; repeated append can duplicate bytes.",
+			Next:     "Continue appending until complete, then `lockd.queue.write_stream.commit`.",
+		}),
+		toolQueueWriteStreamCommit: formatToolDescription(toolContract{
+			Purpose:  "Finalize a queue write stream and publish the message.",
+			UseWhen:  "All payload chunks for a queued message have been appended.",
+			Requires: "Active MCP session and `stream_id` are required.",
+			Effects:  "Closes upload stream, waits for upstream enqueue completion, and returns enqueue metadata.",
+			Retry:    "Commit is terminal for a stream_id. On failure, begin a new stream and replay payload.",
+			Next:     "Use dequeue/ack workflows on consuming agents.",
+		}),
+		toolQueueWriteStreamAbort: formatToolDescription(toolContract{
+			Purpose:  "Abort an in-flight queue write stream.",
+			UseWhen:  "Queued payload upload should be canceled.",
+			Requires: "Active MCP session and `stream_id` are required. Optional `reason` is advisory.",
+			Effects:  "Terminates upload flow and frees stream resources.",
+			Retry:    "Safe to retry; absent streams return not-found style errors.",
+			Next:     "Begin a new queue stream if publish should be retried.",
 		}),
 		toolQueueDequeue: formatToolDescription(toolContract{
 			Purpose:  "Receive one available message lease from a queue.",
 			UseWhen:  "A worker is ready to process the next queue item.",
-			Requires: fmt.Sprintf("`queue` defaults to %q. `namespace` defaults to %q. `owner` defaults to OAuth client id. Optional `stateful`, `visibility_seconds`, `page_size`, `start_after`, and `txn_id` tune dequeue semantics.", queue, namespace),
-			Effects:  "Returns `found=false` when no message is available, or message payload plus lease fields required for ack/nack/defer/extend.",
+			Requires: fmt.Sprintf("Active MCP session is required for payload streaming. `queue` defaults to %q. `namespace` defaults to %q. `owner` defaults to OAuth client id. Optional `stateful`, `visibility_seconds`, `page_size`, `start_after`, `txn_id`, `chunk_bytes`, `max_bytes`, and `progress_token` tune dequeue and payload streaming behavior.", queue, namespace),
+			Effects:  "Returns `found=false` when no message is available, or message metadata/lease fields plus payload stream summary. Payload bytes are emitted as `lockd.queue.payload.chunk` progress notifications.",
 			Retry:    "Safe to retry. Duplicate retries may lease different messages when queue state changes.",
 			Next:     "If processed, call `lockd.queue.ack`; if failed call `lockd.queue.nack`; if not for this worker call `lockd.queue.defer`; extend long handlers with `lockd.queue.extend`.",
 		}),

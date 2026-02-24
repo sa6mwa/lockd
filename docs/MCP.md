@@ -96,6 +96,7 @@ If OAuth state is missing and TLS is enabled, startup fails with an explicit boo
 - `--bundle`, `-b`: MCP TLS server bundle
 - `--disable-tls`: disable TLS and disable OAuth bearer-token enforcement
 - `--disable-mcp-upstream-mtls`: disable mTLS for MCP -> upstream lockd
+- `--inline-max-bytes`: max decoded inline payload bytes for `lockd.state.update` and `lockd.queue.enqueue` (default `2097152`)
 - `--default-namespace`: default namespace when tools omit namespace (default `mcp`)
 - `--agent-bus-queue`: default queue and auto-subscribe queue (default `lockd.agent.bus`)
 - `--state-file`: OAuth state path
@@ -135,6 +136,7 @@ All MCP settings are exposed through viper keys and `LOCKD_` env vars.
 - `mcp.bundle` -> `LOCKD_MCP_BUNDLE`
 - `mcp.disable_tls` -> `LOCKD_MCP_DISABLE_TLS`
 - `mcp.disable_mtls` -> `LOCKD_MCP_DISABLE_MTLS`
+- `mcp.inline_max_bytes` -> `LOCKD_MCP_INLINE_MAX_BYTES`
 - `mcp.default_namespace` -> `LOCKD_MCP_DEFAULT_NAMESPACE`
 - `mcp.agent_bus_queue` -> `LOCKD_MCP_AGENT_BUS_QUEUE`
 - `mcp.state_file` -> `LOCKD_MCP_STATE_FILE`
@@ -163,13 +165,20 @@ Lock/state:
 - `lockd.query`
 - `lockd.query.stream`
 - `lockd.state.update`
+- `lockd.state.write_stream.begin`
+- `lockd.state.write_stream.append`
+- `lockd.state.write_stream.commit`
+- `lockd.state.write_stream.abort`
 - `lockd.state.stream`
 - `lockd.state.metadata`
 - `lockd.state.remove`
 
 Attachments:
 
-- `lockd.attachments.put`
+- `lockd.attachments.write_stream.begin`
+- `lockd.attachments.write_stream.append`
+- `lockd.attachments.write_stream.commit`
+- `lockd.attachments.write_stream.abort`
 - `lockd.attachments.list`
 - `lockd.attachments.head`
 - `lockd.attachments.checksum`
@@ -181,6 +190,10 @@ Attachments:
 Queue/messaging:
 
 - `lockd.queue.enqueue`
+- `lockd.queue.write_stream.begin`
+- `lockd.queue.write_stream.append`
+- `lockd.queue.write_stream.commit`
+- `lockd.queue.write_stream.abort`
 - `lockd.queue.dequeue`
 - `lockd.queue.watch`
 - `lockd.queue.ack`
@@ -214,13 +227,17 @@ TC-only transaction decision tools are intentionally not exposed by MCP. XA rema
 7. defer when message should be re-queued without failure semantics
 8. extend while long processing is in-flight
 
+`lockd.queue.dequeue` streams payload bytes as progress notifications (`lockd.queue.payload.chunk`) and returns payload stream metadata in the tool result. Payload is not returned inline.
+
 ## Contract Notes
 
 - `lockd.get` returns metadata only (`found`, numeric `version`, `etag`, `stream_required`).
 - read payload via `lockd.state.stream` (chunked progress notifications; no full-buffer read).
+- `lockd.state.update` and `lockd.queue.enqueue` are inline-only and enforce `mcp.inline_max_bytes`.
+- for larger writes, use `*.write_stream.begin/append/commit` tools.
 - `lockd.get`, `lockd.attachments.list`, and `lockd.attachments.get` default to `public=true`.
 - For those reads: `public=false` requires `lease_id`; `public=true` rejects `lease_id`.
-- `lockd.attachments.put` uses `mode=create|upsert|replace` (`create` default, safer create-only behavior).
+- attachment writes are streaming-only via `lockd.attachments.write_stream.*` with `mode=create|upsert|replace` (`create` default, safer create-only behavior).
 - `lockd.attachments.head` is metadata-only by id/name and avoids payload download.
 - `lockd.attachments.get` is metadata-only (`stream_required=true`), intended as a selector/metadata step before streaming.
 - read attachment payload via `lockd.attachments.stream` (chunked progress notifications; no full-buffer read).
@@ -228,7 +245,7 @@ TC-only transaction decision tools are intentionally not exposed by MCP. XA rema
 
 ## Query Semantics
 
-`lockd.query` returns keys only in MCP. `return=documents` is rejected on that tool.
+`lockd.query` returns keys only in MCP and does not accept a `return` selector.
 
 Use `lockd.query.stream` for query-document payload streaming via progress notifications. This avoids server-side buffering while preserving NDJSON-style query-document workflows.
 

@@ -50,6 +50,11 @@ func TestMCPCommandFlags(t *testing.T) {
 	} else if flag.DefValue != "lockd.agent.bus" {
 		t.Fatalf("expected default agent bus queue lockd.agent.bus, got %q", flag.DefValue)
 	}
+	if flag := mcpCmd.Flags().Lookup("inline-max-bytes"); flag == nil {
+		t.Fatalf("expected --inline-max-bytes on mcp command")
+	} else if flag.DefValue != "2097152" {
+		t.Fatalf("expected inline max default 2097152, got %q", flag.DefValue)
+	}
 	if inherited := mcpCmd.InheritedFlags().Lookup("bundle"); inherited == nil || inherited.Shorthand != "b" {
 		t.Fatalf("expected inherited --bundle/-b on mcp command")
 	}

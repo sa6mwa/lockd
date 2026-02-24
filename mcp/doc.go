@@ -15,6 +15,8 @@
 //   - Exposes lockd.queue.watch for bounded interactive wakeups
 //   - Keeps `lockd.get` and `lockd.attachments.get` metadata-only and uses
 //     `lockd.state.stream` / `lockd.attachments.stream` for payload transfer
+//   - Supports direct write streams for large uploads via
+//     `*.write_stream.begin|append|commit|abort` tools
 //
 // The facade process itself is stateless for lock data: lock/state/queue/query
 // operations are delegated to upstream lockd.
@@ -49,6 +51,12 @@
 // full-buffer reads by exposing explicit streaming tools that emit chunked
 // progress notifications over the active MCP session, including
 // `lockd.query.stream` for query-document payloads.
+//
+// For writes, small payloads can be sent inline through `lockd.state.update`
+// and `lockd.queue.enqueue`, bounded by `Config.InlineMaxBytes` (default 2MiB).
+// Larger writes should use the write-stream tool families:
+// `lockd.state.write_stream.*`, `lockd.queue.write_stream.*`,
+// and `lockd.attachments.write_stream.*`.
 //
 // # Constructor and lifecycle
 //
@@ -100,7 +108,8 @@
 //   - upstream lockd client connectivity (`UpstreamServer`,
 //     `UpstreamClientBundlePath`, `UpstreamDisableMTLS`)
 //   - OAuth/TLS and defaults (`DisableTLS`, `BundlePath`, `OAuthStatePath`,
-//     `OAuthRefreshStorePath`, `DefaultNamespace`, `AgentBusQueue`)
+//     `OAuthRefreshStorePath`, `InlineMaxBytes`, `DefaultNamespace`,
+//     `AgentBusQueue`)
 //
 // Defaults applied by this package include:
 //
@@ -108,6 +117,7 @@
 //   - UpstreamServer: `https://127.0.0.1:9341`
 //   - DefaultNamespace: `mcp`
 //   - AgentBusQueue: `lockd.agent.bus`
+//   - InlineMaxBytes: `2097152`
 //   - MCPPath: `/mcp`
 //
 // # Surface scope

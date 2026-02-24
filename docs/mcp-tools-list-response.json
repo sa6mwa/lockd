@@ -505,117 +505,6 @@
         }
       },
       {
-        "description": "Purpose: Upload or stage an attachment for a key under lease protection.\nUse when: You need to associate binary/text payloads with key state.\nRequires: `key`, `lease_id`, and `name` are required. `namespace` defaults to \"mcp\". Payload comes from `payload_text` or `payload_base64`. `mode` controls write semantics: `create` (default), `upsert`, `replace`.\nEffects: Stores attachment content/metadata and returns attachment id/version details.\nRetry: In `create` mode, retries are safe against accidental overwrite. `upsert` can overwrite existing payloads. `replace` requires the named attachment to already exist.\nNext: List/get attachments for verification, then release lease when complete.",
-        "inputSchema": {
-          "additionalProperties": false,
-          "properties": {
-            "content_type": {
-              "description": "Attachment content type",
-              "type": "string"
-            },
-            "fencing_token": {
-              "description": "Optional fencing token override",
-              "type": [
-                "null",
-                "integer"
-              ]
-            },
-            "key": {
-              "description": "State key",
-              "type": "string"
-            },
-            "lease_id": {
-              "description": "Active lease id",
-              "type": "string"
-            },
-            "max_bytes": {
-              "description": "Optional upload size cap",
-              "type": "integer"
-            },
-            "mode": {
-              "description": "Write mode: create (default), upsert, or replace",
-              "type": "string"
-            },
-            "name": {
-              "description": "Attachment name",
-              "type": "string"
-            },
-            "namespace": {
-              "description": "Namespace (defaults to server default namespace)",
-              "type": "string"
-            },
-            "payload_base64": {
-              "description": "Base64 payload bytes",
-              "type": "string"
-            },
-            "payload_text": {
-              "description": "UTF-8 payload text",
-              "type": "string"
-            },
-            "txn_id": {
-              "description": "Optional XA transaction id",
-              "type": "string"
-            }
-          },
-          "required": [
-            "key",
-            "lease_id",
-            "name"
-          ],
-          "type": "object"
-        },
-        "name": "lockd.attachments.put",
-        "outputSchema": {
-          "additionalProperties": false,
-          "properties": {
-            "attachment": {
-              "additionalProperties": false,
-              "properties": {
-                "content_type": {
-                  "type": "string"
-                },
-                "created_at_unix": {
-                  "type": "integer"
-                },
-                "id": {
-                  "type": "string"
-                },
-                "name": {
-                  "type": "string"
-                },
-                "plaintext_sha256": {
-                  "type": "string"
-                },
-                "size": {
-                  "type": "integer"
-                },
-                "updated_at_unix": {
-                  "type": "integer"
-                }
-              },
-              "required": [
-                "id",
-                "name",
-                "size"
-              ],
-              "type": "object"
-            },
-            "noop": {
-              "type": "boolean"
-            },
-            "version": {
-              "type": "integer"
-            }
-          },
-          "required": [
-            "attachment",
-            "noop",
-            "version"
-          ],
-          "type": "object"
-        }
-      },
-      {
         "description": "Purpose: Stream attachment payload in chunks over MCP progress notifications without buffering full payload in memory.\nUse when: You need attachment content, including very large files.\nRequires: Active MCP session is required. `key` plus either `id` or `name` is required. `namespace` defaults to \"mcp\". `public` defaults to true. Optional `chunk_bytes` controls chunk size.\nEffects: Emits `lockd.attachments.chunk` progress notifications with base64 chunk payloads and returns stream summary metadata.\nRetry: Safe to retry; stream restarts from beginning on each call.\nNext: Use `lockd.attachments.checksum` to verify expected hash without rereading metadata payload.",
         "inputSchema": {
           "additionalProperties": false,
@@ -739,6 +628,233 @@
             "streamed_bytes",
             "chunks",
             "truncated"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Abort an in-flight attachment write stream.\nUse when: Attachment upload should be canceled.\nRequires: Active MCP session and `stream_id` are required. Optional `reason` is advisory.\nEffects: Terminates upload flow and frees stream resources.\nRetry: Safe to retry; absent streams return not-found style errors.\nNext: Begin a new attachment stream if upload should be retried.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "reason": {
+              "description": "Optional abort reason for diagnostics",
+              "type": "string"
+            },
+            "stream_id": {
+              "description": "Write stream identifier returned by begin",
+              "type": "string"
+            }
+          },
+          "required": [
+            "stream_id"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.attachments.write_stream.abort",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "aborted": {
+              "type": "boolean"
+            },
+            "bytes_received": {
+              "type": "integer"
+            },
+            "stream_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "stream_id",
+            "aborted",
+            "bytes_received"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Append one base64 chunk into an open attachment write stream.\nUse when: You are uploading attachment bytes chunk-by-chunk.\nRequires: Active MCP session is required. `stream_id` and `chunk_base64` are required. Decoded chunk must be \u003c= 2097152 bytes.\nEffects: Writes chunk bytes directly to upstream attachment body stream and returns append/total byte counts.\nRetry: Do not blindly retry the same chunk without stream-position tracking; repeated append can duplicate bytes.\nNext: Continue appending until complete, then `lockd.attachments.write_stream.commit`.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "chunk_base64": {
+              "description": "Base64-encoded payload chunk bytes",
+              "type": "string"
+            },
+            "stream_id": {
+              "description": "Write stream identifier returned by begin",
+              "type": "string"
+            }
+          },
+          "required": [
+            "stream_id",
+            "chunk_base64"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.attachments.write_stream.append",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "bytes_appended": {
+              "type": "integer"
+            },
+            "stream_id": {
+              "type": "string"
+            },
+            "total_bytes": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "stream_id",
+            "bytes_appended",
+            "total_bytes"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Open a session-scoped streaming attachment writer.\nUse when: You need to upload attachment payloads (all attachment writes are stream-based).\nRequires: Active MCP session is required. `key`, `lease_id`, and `name` are required. `namespace` defaults to \"mcp\". `mode` supports `create` (default), `upsert`, `replace`.\nEffects: Creates a stream session and starts upstream attachment upload flow using provided metadata/options.\nRetry: Not idempotent; begin returns a new stream each time. Abort unused streams explicitly.\nNext: Call `lockd.attachments.write_stream.append` repeatedly, then `commit` (or `abort`).",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "content_type": {
+              "description": "Attachment content type",
+              "type": "string"
+            },
+            "fencing_token": {
+              "description": "Optional fencing token override",
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "key": {
+              "description": "State key",
+              "type": "string"
+            },
+            "lease_id": {
+              "description": "Active lease id",
+              "type": "string"
+            },
+            "max_bytes": {
+              "description": "Optional upload size cap",
+              "type": "integer"
+            },
+            "mode": {
+              "description": "Write mode: create (default), upsert, or replace",
+              "type": "string"
+            },
+            "name": {
+              "description": "Attachment name",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            },
+            "txn_id": {
+              "description": "Optional XA transaction id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "lease_id",
+            "name"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.attachments.write_stream.begin",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "max_chunk_bytes": {
+              "type": "integer"
+            },
+            "stream_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "stream_id",
+            "max_chunk_bytes"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Finalize an attachment write stream.\nUse when: All attachment payload chunks have been appended.\nRequires: Active MCP session and `stream_id` are required.\nEffects: Closes the upload stream, waits for upstream attach completion, and returns attachment metadata/version.\nRetry: Commit is terminal for a stream_id. On failure, begin a new stream and replay payload.\nNext: List/head/checksum attachments for verification, then release lease.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "stream_id": {
+              "description": "Write stream identifier returned by begin",
+              "type": "string"
+            }
+          },
+          "required": [
+            "stream_id"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.attachments.write_stream.commit",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "attachment": {
+              "additionalProperties": false,
+              "properties": {
+                "content_type": {
+                  "type": "string"
+                },
+                "created_at_unix": {
+                  "type": "integer"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "plaintext_sha256": {
+                  "type": "string"
+                },
+                "size": {
+                  "type": "integer"
+                },
+                "updated_at_unix": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "size"
+              ],
+              "type": "object"
+            },
+            "bytes_received": {
+              "type": "integer"
+            },
+            "noop": {
+              "type": "boolean"
+            },
+            "stream_id": {
+              "type": "string"
+            },
+            "version": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "stream_id",
+            "bytes_received",
+            "attachment",
+            "noop",
+            "version"
           ],
           "type": "object"
         }
@@ -938,12 +1054,6 @@
         "description": "Purpose: Return namespace access hints so agents can choose valid namespaces before doing work.\nUse when: Session start, planning phase, or when namespace-forbidden errors occur.\nRequires: No required fields. Uses current caller token context plus upstream client-bundle namespace claims when available.\nEffects: Returns advisory namespace access hints, default namespace, client id, and token scope context.\nRetry: Safe to retry; this is a read-only advisory operation.\nNext: Call `lockd.help` then use returned namespace hints when invoking lock/query/queue tools.",
         "inputSchema": {
           "additionalProperties": false,
-          "properties": {
-            "topic": {
-              "description": "Optional hint topic; defaults to namespace_access",
-              "type": "string"
-            }
-          },
           "type": "object"
         },
         "name": "lockd.hint",
@@ -1008,15 +1118,11 @@
                 "array"
               ]
             },
-            "topic": {
-              "type": "string"
-            },
             "wildcard_permission": {
               "type": "string"
             }
           },
           "required": [
-            "topic",
             "default_namespace",
             "source"
           ],
@@ -1345,7 +1451,7 @@
         }
       },
       {
-        "description": "Purpose: Run LQL queries over namespace data in key mode.\nUse when: You need to locate candidate keys before reading or locking.\nRequires: `query` expression is required. `namespace` defaults to \"mcp\". Optional `limit`, `cursor`, `return`, `engine`, `refresh`, and `fields` refine execution. `return=documents` is rejected here.\nEffects: Returns matching keys plus pagination/index metadata (`cursor`, `index_seq`).\nRetry: Safe to retry. Cursor-based pagination should reuse the latest returned cursor.\nNext: Call `lockd.query.stream` for document payload streaming, or `lockd.get` and `lockd.state.stream` for point reads.",
+        "description": "Purpose: Run LQL queries over namespace data in key mode.\nUse when: You need to locate candidate keys before reading or locking.\nRequires: `query` expression is required. `namespace` defaults to \"mcp\". Optional `limit`, `cursor`, `engine`, `refresh`, and `fields` refine execution. Query output is always keys.\nEffects: Returns matching keys plus pagination/index metadata (`cursor`, `index_seq`).\nRetry: Safe to retry. Cursor-based pagination should reuse the latest returned cursor.\nNext: Call `lockd.query.stream` for document payload streaming, or `lockd.get` and `lockd.state.stream` for point reads.",
         "inputSchema": {
           "additionalProperties": false,
           "properties": {
@@ -1376,10 +1482,6 @@
             },
             "refresh": {
               "description": "Optional refresh policy, for example wait_for",
-              "type": "string"
-            },
-            "return": {
-              "description": "Query return mode: keys (default); use lockd.query.stream for documents",
               "type": "string"
             }
           },
@@ -1414,16 +1516,12 @@
               },
               "type": "object"
             },
-            "mode": {
-              "type": "string"
-            },
             "namespace": {
               "type": "string"
             }
           },
           "required": [
-            "namespace",
-            "mode"
+            "namespace"
           ],
           "type": "object"
         }
@@ -1507,9 +1605,6 @@
               },
               "type": "object"
             },
-            "mode": {
-              "type": "string"
-            },
             "namespace": {
               "type": "string"
             },
@@ -1528,7 +1623,6 @@
           },
           "required": [
             "namespace",
-            "mode",
             "progress_token",
             "documents_streamed",
             "streamed_bytes",
@@ -1690,12 +1784,20 @@
         }
       },
       {
-        "description": "Purpose: Receive one available message lease from a queue.\nUse when: A worker is ready to process the next queue item.\nRequires: `queue` defaults to \"lockd.agent.bus\". `namespace` defaults to \"mcp\". `owner` defaults to OAuth client id. Optional `stateful`, `visibility_seconds`, `page_size`, `start_after`, and `txn_id` tune dequeue semantics.\nEffects: Returns `found=false` when no message is available, or message payload plus lease fields required for ack/nack/defer/extend.\nRetry: Safe to retry. Duplicate retries may lease different messages when queue state changes.\nNext: If processed, call `lockd.queue.ack`; if failed call `lockd.queue.nack`; if not for this worker call `lockd.queue.defer`; extend long handlers with `lockd.queue.extend`.",
+        "description": "Purpose: Receive one available message lease from a queue.\nUse when: A worker is ready to process the next queue item.\nRequires: Active MCP session is required for payload streaming. `queue` defaults to \"lockd.agent.bus\". `namespace` defaults to \"mcp\". `owner` defaults to OAuth client id. Optional `stateful`, `visibility_seconds`, `page_size`, `start_after`, `txn_id`, `chunk_bytes`, `max_bytes`, and `progress_token` tune dequeue and payload streaming behavior.\nEffects: Returns `found=false` when no message is available, or message metadata/lease fields plus payload stream summary. Payload bytes are emitted as `lockd.queue.payload.chunk` progress notifications.\nRetry: Safe to retry. Duplicate retries may lease different messages when queue state changes.\nNext: If processed, call `lockd.queue.ack`; if failed call `lockd.queue.nack`; if not for this worker call `lockd.queue.defer`; extend long handlers with `lockd.queue.extend`.",
         "inputSchema": {
           "additionalProperties": false,
           "properties": {
             "block_seconds": {
               "description": "Long-poll wait; -1 no wait, 0 wait forever, \u003e0 wait seconds",
+              "type": "integer"
+            },
+            "chunk_bytes": {
+              "description": "Payload stream chunk size per progress event in bytes (default 65536, max 4194304)",
+              "type": "integer"
+            },
+            "max_bytes": {
+              "description": "Optional maximum payload bytes to stream before truncating",
               "type": "integer"
             },
             "namespace": {
@@ -1709,6 +1811,10 @@
             "page_size": {
               "description": "Optional dequeue page size hint",
               "type": "integer"
+            },
+            "progress_token": {
+              "description": "Optional explicit progress token for payload chunk notifications",
+              "type": "string"
             },
             "queue": {
               "description": "Queue name (defaults to lockd.agent.bus)",
@@ -1779,14 +1885,20 @@
             "not_visible_until_unix": {
               "type": "integer"
             },
-            "payload_base64": {
-              "type": "string"
-            },
             "payload_bytes": {
               "type": "integer"
             },
-            "payload_text": {
+            "payload_chunks": {
+              "type": "integer"
+            },
+            "payload_progress_token": {
               "type": "string"
+            },
+            "payload_streamed_bytes": {
+              "type": "integer"
+            },
+            "payload_truncated": {
+              "type": "boolean"
             },
             "queue": {
               "type": "string"
@@ -1819,7 +1931,7 @@
         }
       },
       {
-        "description": "Purpose: Publish a message to a lockd queue for agent coordination.\nUse when: You need to signal work/events/context to queue consumers.\nRequires: `queue` defaults to \"lockd.agent.bus\". `namespace` defaults to \"mcp\". Provide payload via `payload_text` or `payload_base64`; optional delay/visibility/ttl/attributes tune delivery.\nEffects: Appends a queue message and returns delivery metadata (`message_id`, visibility, attempts).\nRetry: Not idempotent by default; retries can enqueue duplicates. Use application-level dedupe keys in payload/attributes.\nNext: Consumers should `lockd.queue.dequeue` then `lockd.queue.ack` or `lockd.queue.defer`.",
+        "description": "Purpose: Publish a message to a lockd queue for agent coordination.\nUse when: You need to signal work/events/context to queue consumers and payload fits inline limits.\nRequires: `queue` defaults to \"lockd.agent.bus\". `namespace` defaults to \"mcp\". Provide payload via exactly one of `payload_text` or `payload_base64`; decoded payload must be \u003c= 2097152 bytes.\nEffects: Appends a queue message and returns delivery metadata (`message_id`, visibility, attempts).\nRetry: Not idempotent by default; retries can enqueue duplicates. Use application-level dedupe keys in payload/attributes.\nNext: For larger payloads use `lockd.queue.write_stream.begin`/`append`/`commit`. Consumers should dequeue then ack/nack/defer.",
         "inputSchema": {
           "additionalProperties": false,
           "properties": {
@@ -2243,6 +2355,219 @@
         }
       },
       {
+        "description": "Purpose: Abort an in-flight queue write stream.\nUse when: Queued payload upload should be canceled.\nRequires: Active MCP session and `stream_id` are required. Optional `reason` is advisory.\nEffects: Terminates upload flow and frees stream resources.\nRetry: Safe to retry; absent streams return not-found style errors.\nNext: Begin a new queue stream if publish should be retried.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "reason": {
+              "description": "Optional abort reason for diagnostics",
+              "type": "string"
+            },
+            "stream_id": {
+              "description": "Write stream identifier returned by begin",
+              "type": "string"
+            }
+          },
+          "required": [
+            "stream_id"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.queue.write_stream.abort",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "aborted": {
+              "type": "boolean"
+            },
+            "bytes_received": {
+              "type": "integer"
+            },
+            "stream_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "stream_id",
+            "aborted",
+            "bytes_received"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Append one base64 chunk into an open queue write stream.\nUse when: You are streaming large queue payload content.\nRequires: Active MCP session is required. `stream_id` and `chunk_base64` are required. Decoded chunk must be \u003c= 2097152 bytes.\nEffects: Writes chunk bytes directly to the upstream enqueue request stream and returns append/total byte counts.\nRetry: Do not blindly retry the same chunk without stream-position tracking; repeated append can duplicate bytes.\nNext: Continue appending until complete, then `lockd.queue.write_stream.commit`.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "chunk_base64": {
+              "description": "Base64-encoded payload chunk bytes",
+              "type": "string"
+            },
+            "stream_id": {
+              "description": "Write stream identifier returned by begin",
+              "type": "string"
+            }
+          },
+          "required": [
+            "stream_id",
+            "chunk_base64"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.queue.write_stream.append",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "bytes_appended": {
+              "type": "integer"
+            },
+            "stream_id": {
+              "type": "string"
+            },
+            "total_bytes": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "stream_id",
+            "bytes_appended",
+            "total_bytes"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Open a session-scoped streaming queue publisher.\nUse when: Queue payload is too large for inline enqueue or you need bounded-memory uploads.\nRequires: Active MCP session is required. `queue` defaults to \"lockd.agent.bus\" and `namespace` defaults to \"mcp\". Delay/visibility/ttl/attributes/content_type options match `lockd.queue.enqueue`.\nEffects: Creates a stream session and returns `stream_id` plus `max_chunk_bytes` guidance for append calls.\nRetry: Not idempotent; begin returns a new stream each time. Abort unused streams explicitly.\nNext: Call `lockd.queue.write_stream.append` repeatedly, then `lockd.queue.write_stream.commit` (or `abort`).",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "attributes": {
+              "additionalProperties": true,
+              "description": "Message attributes metadata",
+              "type": "object"
+            },
+            "content_type": {
+              "description": "Payload content type",
+              "type": "string"
+            },
+            "delay_seconds": {
+              "description": "Initial invisibility delay",
+              "type": "integer"
+            },
+            "max_attempts": {
+              "description": "Maximum failed attempts before terminal handling",
+              "type": "integer"
+            },
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            },
+            "queue": {
+              "description": "Queue name (defaults to lockd.agent.bus)",
+              "type": "string"
+            },
+            "ttl_seconds": {
+              "description": "Message retention TTL in seconds",
+              "type": "integer"
+            },
+            "visibility_seconds": {
+              "description": "Visibility timeout for dequeued lease",
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "name": "lockd.queue.write_stream.begin",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "max_chunk_bytes": {
+              "type": "integer"
+            },
+            "stream_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "stream_id",
+            "max_chunk_bytes"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Finalize a queue write stream and publish the message.\nUse when: All payload chunks for a queued message have been appended.\nRequires: Active MCP session and `stream_id` are required.\nEffects: Closes upload stream, waits for upstream enqueue completion, and returns enqueue metadata.\nRetry: Commit is terminal for a stream_id. On failure, begin a new stream and replay payload.\nNext: Use dequeue/ack workflows on consuming agents.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "stream_id": {
+              "description": "Write stream identifier returned by begin",
+              "type": "string"
+            }
+          },
+          "required": [
+            "stream_id"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.queue.write_stream.commit",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "attempts": {
+              "type": "integer"
+            },
+            "bytes_received": {
+              "type": "integer"
+            },
+            "correlation_id": {
+              "type": "string"
+            },
+            "failure_attempts": {
+              "type": "integer"
+            },
+            "max_attempts": {
+              "type": "integer"
+            },
+            "message_id": {
+              "type": "string"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "not_visible_until_unix": {
+              "type": "integer"
+            },
+            "payload_bytes": {
+              "type": "integer"
+            },
+            "queue": {
+              "type": "string"
+            },
+            "stream_id": {
+              "type": "string"
+            },
+            "visibility_timeout_seconds": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "stream_id",
+            "bytes_received",
+            "namespace",
+            "queue",
+            "message_id",
+            "attempts",
+            "max_attempts",
+            "not_visible_until_unix",
+            "visibility_timeout_seconds",
+            "payload_bytes"
+          ],
+          "type": "object"
+        }
+      },
+      {
         "description": "Purpose: Update state metadata without replacing JSON state payload.\nUse when: Only metadata (for example `query_hidden`) needs to change.\nRequires: `key`, `lease_id`, and `query_hidden` are required. `namespace` defaults to \"mcp\". Optional CAS/fencing fields protect against races.\nEffects: Persists metadata mutation and returns resulting version/metadata.\nRetry: Use CAS/fencing fields for deterministic retries; otherwise last-writer-wins behavior applies.\nNext: Continue updates under the same lease or release the lease when done.",
         "inputSchema": {
           "additionalProperties": false,
@@ -2466,7 +2791,7 @@
         }
       },
       {
-        "description": "Purpose: Write JSON state under lease protection.\nUse when: You need to create or update state for a locked key.\nRequires: `key` and `lease_id` are required. `namespace` defaults to \"mcp\". Payload comes from `payload_text` or `payload_base64` (defaults to `{}`). Optional CAS/fencing fields harden concurrency safety.\nEffects: Updates state and returns new version/ETag metadata; can also mutate `query_hidden` metadata.\nRetry: Use `if_etag`, `if_version`, and `fencing_token` for safe retries. Without guards, retries can apply duplicate writes.\nNext: Optionally update metadata/attachments, then release lease to commit or rollback.",
+        "description": "Purpose: Write JSON state under lease protection.\nUse when: You need to create or update state for a locked key and payload fits inline request limits.\nRequires: `key` and `lease_id` are required. `namespace` defaults to \"mcp\". Payload comes from exactly one of `payload_text` or `payload_base64` (defaults to `{}`) and must be \u003c= 2097152 bytes after decoding.\nEffects: Updates state and returns new version/ETag metadata; can also mutate `query_hidden` metadata.\nRetry: Use `if_etag`, `if_version`, and `fencing_token` for safe retries. Without guards, retries can apply duplicate writes.\nNext: For larger payloads use `lockd.state.write_stream.begin`/`append`/`commit`, then release lease to commit or rollback.",
         "inputSchema": {
           "additionalProperties": false,
           "properties": {
@@ -2547,6 +2872,211 @@
             }
           },
           "required": [
+            "new_version",
+            "new_state_etag",
+            "bytes"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Abort an in-flight state write stream.\nUse when: Upload should be canceled or discarded before commit.\nRequires: Active MCP session and `stream_id` are required. Optional `reason` is advisory.\nEffects: Terminates the stream, cancels upstream request flow, and frees stream resources.\nRetry: Safe to retry; absent streams return not-found style errors.\nNext: Begin a new stream if upload should be retried.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "reason": {
+              "description": "Optional abort reason for diagnostics",
+              "type": "string"
+            },
+            "stream_id": {
+              "description": "Write stream identifier returned by begin",
+              "type": "string"
+            }
+          },
+          "required": [
+            "stream_id"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.state.write_stream.abort",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "aborted": {
+              "type": "boolean"
+            },
+            "bytes_received": {
+              "type": "integer"
+            },
+            "stream_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "stream_id",
+            "aborted",
+            "bytes_received"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Append one base64 chunk into an open state write stream.\nUse when: You are actively streaming large state payload content.\nRequires: Active MCP session is required. `stream_id` and `chunk_base64` are required. Decoded chunk must be \u003c= 2097152 bytes.\nEffects: Writes chunk bytes directly to the upstream update request stream and returns append/total byte counts.\nRetry: Do not blindly retry the same chunk without stream-position tracking; repeated append can duplicate bytes.\nNext: Continue appending until complete, then `lockd.state.write_stream.commit`.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "chunk_base64": {
+              "description": "Base64-encoded payload chunk bytes",
+              "type": "string"
+            },
+            "stream_id": {
+              "description": "Write stream identifier returned by begin",
+              "type": "string"
+            }
+          },
+          "required": [
+            "stream_id",
+            "chunk_base64"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.state.write_stream.append",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "bytes_appended": {
+              "type": "integer"
+            },
+            "stream_id": {
+              "type": "string"
+            },
+            "total_bytes": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "stream_id",
+            "bytes_appended",
+            "total_bytes"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Open a session-scoped streaming state writer.\nUse when: State payload is too large for inline JSON or you want bounded-memory uploads.\nRequires: Active MCP session is required. `key` and `lease_id` are required. `namespace` defaults to \"mcp\". Optional CAS/fencing fields mirror `lockd.state.update`.\nEffects: Creates a stream session and returns `stream_id` plus `max_chunk_bytes` guidance for append calls.\nRetry: Not idempotent; begin returns a new stream each time. Abort unused streams explicitly.\nNext: Call `lockd.state.write_stream.append` repeatedly, then `lockd.state.write_stream.commit` (or `abort`).",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "fencing_token": {
+              "description": "Optional fencing token override",
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "if_etag": {
+              "description": "Conditional ETag guard",
+              "type": "string"
+            },
+            "if_version": {
+              "description": "Conditional version guard",
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "key": {
+              "description": "State key",
+              "type": "string"
+            },
+            "lease_id": {
+              "description": "Active lease id",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            },
+            "query_hidden": {
+              "description": "Optional query-hidden metadata mutation",
+              "type": [
+                "null",
+                "boolean"
+              ]
+            },
+            "txn_id": {
+              "description": "Optional XA transaction id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "lease_id"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.state.write_stream.begin",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "max_chunk_bytes": {
+              "type": "integer"
+            },
+            "stream_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "stream_id",
+            "max_chunk_bytes"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Finalize a state write stream and commit it to upstream lockd.\nUse when: All payload chunks have been appended.\nRequires: Active MCP session and `stream_id` are required.\nEffects: Closes the upload stream, waits for upstream completion, and returns state update result metadata.\nRetry: Commit is terminal for a stream_id. On failure, begin a new stream and replay payload.\nNext: Release lease or proceed with additional state/attachment mutations.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "stream_id": {
+              "description": "Write stream identifier returned by begin",
+              "type": "string"
+            }
+          },
+          "required": [
+            "stream_id"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.state.write_stream.commit",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "bytes": {
+              "type": "integer"
+            },
+            "bytes_received": {
+              "type": "integer"
+            },
+            "new_state_etag": {
+              "type": "string"
+            },
+            "new_version": {
+              "type": "integer"
+            },
+            "query_hidden": {
+              "type": [
+                "null",
+                "boolean"
+              ]
+            },
+            "stream_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "stream_id",
+            "bytes_received",
             "new_version",
             "new_state_etag",
             "bytes"

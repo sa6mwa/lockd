@@ -13,6 +13,7 @@ import (
 
 	"pkt.systems/lockd"
 	"pkt.systems/lockd/api"
+	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/pslog"
 )
 
@@ -74,12 +75,6 @@ func TestHandleQueryToolValidationErrors(t *testing.T) {
 	}
 	if _, _, err := s.handleQueryTool(context.Background(), nil, queryToolInput{Query: "eq{field=/a,value=b}", Engine: "bogus"}); err == nil || !strings.Contains(err.Error(), "invalid engine") {
 		t.Fatalf("expected invalid engine error, got %v", err)
-	}
-	if _, _, err := s.handleQueryTool(context.Background(), nil, queryToolInput{Query: "eq{field=/a,value=b}", Return: "bogus"}); err == nil || !strings.Contains(err.Error(), "invalid return mode") {
-		t.Fatalf("expected invalid return mode error, got %v", err)
-	}
-	if _, _, err := s.handleQueryTool(context.Background(), nil, queryToolInput{Query: "eq{field=/a,value=b}", Return: "documents"}); err == nil || !strings.Contains(err.Error(), "documents mode moved to lockd.query.stream") {
-		t.Fatalf("expected documents mode rejection error, got %v", err)
 	}
 }
 
@@ -165,7 +160,9 @@ func TestAttachmentPutModeValidation(t *testing.T) {
 	t.Parallel()
 
 	s := &server{}
-	_, _, err := s.handleAttachmentPutTool(context.Background(), nil, attachmentPutToolInput{
+	session, closeSession := newInMemoryServerSession(t)
+	defer closeSession()
+	_, _, err := s.handleAttachmentsWriteStreamBeginTool(context.Background(), &mcpsdk.CallToolRequest{Session: session}, attachmentsWriteStreamBeginInput{
 		Key:     "k1",
 		LeaseID: "lease-1",
 		Name:    "att.txt",
@@ -173,6 +170,26 @@ func TestAttachmentPutModeValidation(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "invalid mode") {
 		t.Fatalf("expected invalid mode error, got %v", err)
+	}
+}
+
+func TestPayloadInputsMutuallyExclusive(t *testing.T) {
+	t.Parallel()
+
+	s := &server{}
+	if _, _, err := s.handleStateUpdateTool(context.Background(), nil, stateUpdateToolInput{
+		Key:           "k1",
+		LeaseID:       "lease-1",
+		PayloadText:   "{}",
+		PayloadBase64: "e30=",
+	}); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("expected state update payload exclusivity error, got %v", err)
+	}
+	if _, _, err := s.handleQueueEnqueueTool(context.Background(), nil, queueEnqueueToolInput{
+		PayloadText:   "x",
+		PayloadBase64: "eA==",
+	}); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("expected queue enqueue payload exclusivity error, got %v", err)
 	}
 }
 
@@ -243,11 +260,59 @@ func TestQueryStreamToolRequiresSession(t *testing.T) {
 	}
 }
 
+func TestWriteStreamToolsRequireSession(t *testing.T) {
+	t.Parallel()
+
+	s := &server{}
+	ctx := context.Background()
+	if _, _, err := s.handleStateWriteStreamBeginTool(ctx, nil, stateWriteStreamBeginInput{Key: "k1", LeaseID: "l1"}); err == nil || !strings.Contains(err.Error(), "active MCP session") {
+		t.Fatalf("expected state write stream begin session error, got %v", err)
+	}
+	if _, _, err := s.handleQueueWriteStreamBeginTool(ctx, nil, queueWriteStreamBeginInput{}); err == nil || !strings.Contains(err.Error(), "active MCP session") {
+		t.Fatalf("expected queue write stream begin session error, got %v", err)
+	}
+	if _, _, err := s.handleAttachmentsWriteStreamBeginTool(ctx, nil, attachmentsWriteStreamBeginInput{Key: "k1", LeaseID: "l1", Name: "a.bin"}); err == nil || !strings.Contains(err.Error(), "active MCP session") {
+		t.Fatalf("expected attachments write stream begin session error, got %v", err)
+	}
+	if _, _, err := s.handleStateWriteStreamAppendTool(ctx, nil, writeStreamAppendInput{StreamID: "s1", ChunkBase64: "e30="}); err == nil || !strings.Contains(err.Error(), "active MCP session") {
+		t.Fatalf("expected state write stream append session error, got %v", err)
+	}
+	if _, _, err := s.handleQueueWriteStreamCommitTool(ctx, nil, writeStreamCommitInput{StreamID: "s1"}); err == nil || !strings.Contains(err.Error(), "active MCP session") {
+		t.Fatalf("expected queue write stream commit session error, got %v", err)
+	}
+	if _, _, err := s.handleAttachmentsWriteStreamAbortTool(ctx, nil, writeStreamAbortInput{StreamID: "s1"}); err == nil || !strings.Contains(err.Error(), "active MCP session") {
+		t.Fatalf("expected attachments write stream abort session error, got %v", err)
+	}
+}
+
+func TestQueueDequeueRequiresSessionForPayloadStreaming(t *testing.T) {
+	t.Parallel()
+
+	s, cli := newToolTestServer(t)
+	ctx := context.Background()
+	queue := "session-required-queue"
+	if _, err := cli.EnqueueBytes(ctx, queue, []byte(`{"kind":"session-required"}`), lockdclient.EnqueueOptions{
+		Namespace: "mcp",
+	}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	_, _, err := s.handleQueueDequeueTool(ctx, nil, queueDequeueToolInput{
+		Namespace:   "mcp",
+		Queue:       queue,
+		BlockSecond: api.BlockNoWait,
+	})
+	if err == nil || !strings.Contains(err.Error(), "active MCP session") {
+		t.Fatalf("expected active MCP session error for payload streaming, got %v", err)
+	}
+}
+
 func TestHandleQueueEnqueueAndDequeueUseConfiguredDefaults(t *testing.T) {
 	t.Parallel()
 
 	s, _ := newToolTestServer(t)
 	ctx := context.Background()
+	session, closeSession := newInMemoryServerSession(t)
+	defer closeSession()
 
 	_, enq, err := s.handleQueueEnqueueTool(ctx, nil, queueEnqueueToolInput{PayloadText: `{"kind":"default-route"}`})
 	if err != nil {
@@ -260,7 +325,7 @@ func TestHandleQueueEnqueueAndDequeueUseConfiguredDefaults(t *testing.T) {
 		t.Fatalf("expected default queue lockd.agent.bus, got %q", enq.Queue)
 	}
 
-	_, deq, err := s.handleQueueDequeueTool(ctx, nil, queueDequeueToolInput{BlockSecond: api.BlockNoWait})
+	_, deq, err := s.handleQueueDequeueTool(ctx, &mcpsdk.CallToolRequest{Session: session}, queueDequeueToolInput{BlockSecond: api.BlockNoWait})
 	if err != nil {
 		t.Fatalf("dequeue tool: %v", err)
 	}

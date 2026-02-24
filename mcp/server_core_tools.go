@@ -180,6 +180,9 @@ func (s *server) handleStateUpdateTool(ctx context.Context, _ *mcpsdk.CallToolRe
 	if strings.TrimSpace(input.Key) == "" || strings.TrimSpace(input.LeaseID) == "" {
 		return nil, stateUpdateToolOutput{}, fmt.Errorf("key and lease_id are required")
 	}
+	if strings.TrimSpace(input.PayloadBase64) != "" && input.PayloadText != "" {
+		return nil, stateUpdateToolOutput{}, fmt.Errorf("payload_text and payload_base64 are mutually exclusive")
+	}
 	var payload []byte
 	if strings.TrimSpace(input.PayloadBase64) != "" {
 		decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(input.PayloadBase64))
@@ -191,6 +194,9 @@ func (s *server) handleStateUpdateTool(ctx context.Context, _ *mcpsdk.CallToolRe
 		payload = []byte(input.PayloadText)
 	} else {
 		payload = []byte("{}")
+	}
+	if err := validateInlinePayloadBytes(int64(len(payload)), s.cfg.InlineMaxBytes, toolStateUpdate, toolStateWriteStreamBegin); err != nil {
+		return nil, stateUpdateToolOutput{}, err
 	}
 	opts := lockdclient.UpdateOptions{
 		Namespace:    s.resolveNamespace(input.Namespace),
@@ -393,20 +399,6 @@ func (s *server) handleStateRemoveTool(ctx context.Context, _ *mcpsdk.CallToolRe
 	return nil, stateRemoveToolOutput{Removed: resp.Removed, NewVersion: resp.NewVersion}, nil
 }
 
-type attachmentPutToolInput struct {
-	Key           string `json:"key" jsonschema:"State key"`
-	Namespace     string `json:"namespace,omitempty" jsonschema:"Namespace (defaults to server default namespace)"`
-	LeaseID       string `json:"lease_id" jsonschema:"Active lease id"`
-	TxnID         string `json:"txn_id,omitempty" jsonschema:"Optional XA transaction id"`
-	FencingToken  *int64 `json:"fencing_token,omitempty" jsonschema:"Optional fencing token override"`
-	Name          string `json:"name" jsonschema:"Attachment name"`
-	ContentType   string `json:"content_type,omitempty" jsonschema:"Attachment content type"`
-	MaxBytes      int64  `json:"max_bytes,omitempty" jsonschema:"Optional upload size cap"`
-	Mode          string `json:"mode,omitempty" jsonschema:"Write mode: create (default), upsert, or replace"`
-	PayloadText   string `json:"payload_text,omitempty" jsonschema:"UTF-8 payload text"`
-	PayloadBase64 string `json:"payload_base64,omitempty" jsonschema:"Base64 payload bytes"`
-}
-
 type attachmentInfoOutput struct {
 	ID              string `json:"id"`
 	Name            string `json:"name"`
@@ -421,81 +413,6 @@ type attachmentPutToolOutput struct {
 	Attachment attachmentInfoOutput `json:"attachment"`
 	Noop       bool                 `json:"noop"`
 	Version    int64                `json:"version"`
-}
-
-func (s *server) handleAttachmentPutTool(ctx context.Context, _ *mcpsdk.CallToolRequest, input attachmentPutToolInput) (*mcpsdk.CallToolResult, attachmentPutToolOutput, error) {
-	if strings.TrimSpace(input.Key) == "" || strings.TrimSpace(input.LeaseID) == "" || strings.TrimSpace(input.Name) == "" {
-		return nil, attachmentPutToolOutput{}, fmt.Errorf("key, lease_id, and name are required")
-	}
-	mode, err := normalizeAttachmentPutMode(input.Mode)
-	if err != nil {
-		return nil, attachmentPutToolOutput{}, err
-	}
-	var payload []byte
-	if strings.TrimSpace(input.PayloadBase64) != "" {
-		decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(input.PayloadBase64))
-		if err != nil {
-			return nil, attachmentPutToolOutput{}, fmt.Errorf("decode payload_base64: %w", err)
-		}
-		payload = decoded
-	} else {
-		payload = []byte(input.PayloadText)
-	}
-	namespace := s.resolveNamespace(input.Namespace)
-	key := strings.TrimSpace(input.Key)
-	leaseID := strings.TrimSpace(input.LeaseID)
-	txnID := strings.TrimSpace(input.TxnID)
-	name := strings.TrimSpace(input.Name)
-	if mode == attachmentPutModeReplace {
-		existing, listErr := s.upstream.ListAttachments(ctx, lockdclient.ListAttachmentsRequest{
-			Namespace:    namespace,
-			Key:          key,
-			LeaseID:      leaseID,
-			TxnID:        txnID,
-			FencingToken: input.FencingToken,
-			Public:       false,
-		})
-		if listErr != nil {
-			return nil, attachmentPutToolOutput{}, fmt.Errorf("replace requires listing existing attachments: %w", listErr)
-		}
-		found := false
-		for _, item := range existing.Attachments {
-			if strings.TrimSpace(item.Name) == name {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return nil, attachmentPutToolOutput{}, fmt.Errorf("attachment %q does not exist; replace mode requires an existing attachment", name)
-		}
-	}
-	req := lockdclient.AttachRequest{
-		Namespace:        namespace,
-		Key:              key,
-		LeaseID:          leaseID,
-		TxnID:            txnID,
-		FencingToken:     input.FencingToken,
-		Name:             name,
-		Body:             bytes.NewReader(payload),
-		ContentType:      strings.TrimSpace(input.ContentType),
-		PreventOverwrite: mode == attachmentPutModeCreate,
-	}
-	if req.ContentType == "" {
-		req.ContentType = "application/octet-stream"
-	}
-	if input.MaxBytes > 0 {
-		maxBytes := input.MaxBytes
-		req.MaxBytes = &maxBytes
-	}
-	resp, err := s.upstream.Attach(ctx, req)
-	if err != nil {
-		return nil, attachmentPutToolOutput{}, err
-	}
-	return nil, attachmentPutToolOutput{
-		Attachment: toAttachmentInfoOutput(resp.Attachment),
-		Noop:       resp.Noop,
-		Version:    resp.Version,
-	}, nil
 }
 
 type attachmentListToolInput struct {

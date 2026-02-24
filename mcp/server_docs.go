@@ -32,7 +32,7 @@ lockd MCP facade operating manual:
 - Write safety: inline payloads are capped by mcp.inline_max_bytes. For payload_mode/state_mode auto, payloads <= lockd.hint.inline_max_payload_bytes are inline and larger payloads switch to stream.
 - Stream workflow: use write_stream begin + upload_url + optional write_stream.status + commit for larger writes (state, queue, attachments). Commit accepts optional expected_bytes/expected_sha256.
 - Transfer URL hygiene: capability URLs are bearer-style secrets; avoid shell history/process-list leakage and avoid pasting capability URLs into chat/tickets.
-- Partial mutation: use lockd.state.patch for JSON merge patch updates when full replacement is unnecessary.
+- Partial mutation: use lockd.state.mutate for LQL expression-based updates and lockd.state.patch for RFC 7396 merge patch updates.
 - Query first when uncertain: use lockd.query for key discovery, lockd.query.stream for NDJSON document stream URLs, and lockd.state.stream / lockd.attachments.stream for point payload reads.
 - Documentation resources: %s, %s, %s, %s
 `, cfg.DefaultNamespace, cfg.AgentBusQueue, docOverviewURI, docLocksURI, docMessagingURI, docSyncURI))
@@ -82,7 +82,7 @@ Recommended discovery sequence:
 1. Acquire lock/lease with lockd.lock.acquire.
 2. Read state.
 3. Stream state payload with lockd.state.stream when needed.
-4. Mutate state with lockd.state.update (small payload), lockd.state.patch (partial merge patch), or lockd.state.write_stream.* (large payload).
+4. Mutate state with lockd.state.update (small payload), lockd.state.mutate (LQL expressions), lockd.state.patch (partial merge patch), or lockd.state.write_stream.* (large payload).
 5. Keepalive while work is active.
 6. Release lease to commit staged state/attachment changes (or rollback).
 
@@ -186,11 +186,11 @@ func (s *server) handleHelpTool(_ context.Context, _ *mcpsdk.CallToolRequest, in
 	switch topic {
 	case "overview":
 		out.Summary = "Start with lockd.hint and lockd.help, acquire lock when mutating shared state, inspect queue readiness with lockd.queue.stats, use queue.watch for bounded wakeups, then dequeue and ack/nack/defer messages. Use payload_mode inline for small data and stream/write_stream variants for large data."
-		out.NextCalls = []string{"lockd.hint", "lockd.get", "lockd.state.stream", "lockd.lock.acquire", "lockd.state.update", "lockd.state.patch", "lockd.state.write_stream.begin", "lockd.state.write_stream.status", "lockd.attachments.put", "lockd.attachments.write_stream.begin", "lockd.attachments.write_stream.status", "lockd.queue.stats", "lockd.queue.enqueue", "lockd.queue.write_stream.begin", "lockd.queue.write_stream.status", "lockd.queue.watch", "lockd.queue.dequeue", "lockd.queue.ack", "lockd.queue.nack", "lockd.queue.defer"}
+		out.NextCalls = []string{"lockd.hint", "lockd.get", "lockd.state.stream", "lockd.lock.acquire", "lockd.state.update", "lockd.state.mutate", "lockd.state.patch", "lockd.state.write_stream.begin", "lockd.state.write_stream.status", "lockd.attachments.put", "lockd.attachments.write_stream.begin", "lockd.attachments.write_stream.status", "lockd.queue.stats", "lockd.queue.enqueue", "lockd.queue.write_stream.begin", "lockd.queue.write_stream.status", "lockd.queue.watch", "lockd.queue.dequeue", "lockd.queue.ack", "lockd.queue.nack", "lockd.queue.defer"}
 		out.Resources = []string{docOverviewURI, docMessagingURI, docSyncURI}
 	case "locks":
 		out.Summary = "Locks gate state mutation; keep lease identity and fencing token through the full mutation lifecycle."
-		out.NextCalls = []string{"lockd.hint", "lockd.lock.acquire", "lockd.state.update", "lockd.state.patch", "lockd.state.write_stream.begin", "lockd.state.write_stream.status", "lockd.attachments.put", "lockd.attachments.write_stream.begin", "lockd.attachments.write_stream.status", "lockd.lock.release"}
+		out.NextCalls = []string{"lockd.hint", "lockd.lock.acquire", "lockd.state.update", "lockd.state.mutate", "lockd.state.patch", "lockd.state.write_stream.begin", "lockd.state.write_stream.status", "lockd.attachments.put", "lockd.attachments.write_stream.begin", "lockd.attachments.write_stream.status", "lockd.lock.release"}
 		out.Resources = []string{docLocksURI}
 	case "messaging":
 		out.Summary = "Messaging is dequeue-driven. Use payload_mode=auto/inline/stream on dequeue and state_mode for stateful dequeue state payloads. Use queue.stats for readiness/counters and queue.watch for bounded wakeups, ack success, nack failures, defer when a message is not for this worker, and extend when processing runs long. For large publishes, use queue.write_stream tools."

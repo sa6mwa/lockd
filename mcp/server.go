@@ -326,6 +326,10 @@ func (s *server) registerTools(srv *mcpsdk.Server) {
 		Description: desc(toolStateUpdate),
 	}, withStructuredToolErrors(s.handleStateUpdateTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        toolStateMutate,
+		Description: desc(toolStateMutate),
+	}, withStructuredToolErrors(s.handleStateMutateTool))
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolStatePatch,
 		Description: desc(toolStatePatch),
 	}, withStructuredToolErrors(s.handleStatePatchTool))

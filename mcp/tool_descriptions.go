@@ -14,6 +14,7 @@ const (
 	toolQuery                        = "lockd.query"
 	toolQueryStream                  = "lockd.query.stream"
 	toolStateUpdate                  = "lockd.state.update"
+	toolStateMutate                  = "lockd.state.mutate"
 	toolStatePatch                   = "lockd.state.patch"
 	toolStateWriteStreamBegin        = "lockd.state.write_stream.begin"
 	toolStateWriteStreamStatus       = "lockd.state.write_stream.status"
@@ -64,6 +65,7 @@ var mcpToolNames = []string{
 	toolQuery,
 	toolQueryStream,
 	toolStateUpdate,
+	toolStateMutate,
 	toolStatePatch,
 	toolStateWriteStreamBegin,
 	toolStateWriteStreamStatus,
@@ -203,6 +205,14 @@ func buildToolDescriptions(cfg Config) map[string]string {
 			Effects:  "Updates state and returns new version/ETag metadata; can also mutate `query_hidden` metadata.",
 			Retry:    "Use `if_etag`, `if_version`, and `fencing_token` for safe retries. Without guards, retries can apply duplicate writes.",
 			Next:     "For larger payloads use `lockd.state.write_stream.begin` and upload to returned `upload_url`, then `commit`; release lease to commit or rollback.",
+		}),
+		toolStateMutate: formatToolDescription(toolContract{
+			Purpose:  "Apply LQL mutations to existing JSON state under lease protection without round-tripping payload bytes through MCP.",
+			UseWhen:  "You need server-side structured updates and want bounded-memory mutation execution.",
+			Requires: fmt.Sprintf("`key`, `lease_id`, and at least one `mutations` expression are required. `namespace` defaults to %q. Optional CAS/fencing fields (`if_etag`, `if_version`, `fencing_token`) are supported.", namespace),
+			Effects:  "Loads lease-visible state, applies LQL mutations server-side, and writes updated state. Returns new version/ETag metadata.",
+			Retry:    "Use CAS/fencing fields for deterministic retries. Without guards, retries can reapply logical mutations.",
+			Next:     "Use `lockd.get`/`lockd.state.stream` to inspect results, then release lease.",
 		}),
 		toolStatePatch: formatToolDescription(toolContract{
 			Purpose:  "Apply an RFC 7396 JSON merge patch to current state under lease protection.",

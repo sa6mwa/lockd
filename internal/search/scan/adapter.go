@@ -1,18 +1,16 @@
 package scan
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"sort"
 	"strings"
 
 	"pkt.systems/lockd/internal/search"
 	"pkt.systems/lockd/internal/storage"
+	"pkt.systems/lql"
 	"pkt.systems/pslog"
 )
 
@@ -56,7 +54,7 @@ func (a *Adapter) Capabilities(context.Context, string) (search.Capabilities, er
 	return search.Capabilities{Scan: true}, nil
 }
 
-// Query enumerates namespace keys, applying selector filters in-memory.
+// Query enumerates namespace keys, applying selector filters via LQL streaming.
 func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result, error) {
 	if req.Namespace == "" {
 		return search.Result{}, fmt.Errorf("scan: namespace required")
@@ -76,8 +74,15 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 	if startIdx >= len(keys) {
 		return search.Result{}, nil
 	}
-	matchAll := zeroSelector(req.Selector)
-	eval := newEvaluator(req.Selector)
+	matchAll := req.Selector.IsEmpty()
+	var plan lql.QueryStreamPlan
+	if !matchAll {
+		compiled, compileErr := lql.NewQueryStreamPlan(req.Selector)
+		if compileErr != nil {
+			return search.Result{}, fmt.Errorf("scan: compile selector: %w", compileErr)
+		}
+		plan = compiled
+	}
 	limit := req.Limit
 	if limit <= 0 || limit > len(keys) {
 		limit = len(keys)
@@ -125,18 +130,18 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 		if meta.StateETag == "" {
 			continue
 		}
-		doc, err := a.loadDocument(ctx, req.Namespace, key, meta)
-		if err != nil {
-			if shouldSkipReadError(err) {
-				a.logDebug("search.scan.load_state", "namespace", req.Namespace, "key", key, "error", err)
-				continue
+			matched, err := a.matchesSelector(ctx, req.Namespace, key, meta, plan)
+			if err != nil {
+				if shouldSkipReadError(err) {
+					a.logDebug("search.scan.load_state", "namespace", req.Namespace, "key", key, "error", err)
+					continue
+				}
+				return search.Result{}, fmt.Errorf("scan: load state %s: %w", key, err)
 			}
-			return search.Result{}, fmt.Errorf("scan: load state %s: %w", key, err)
-		}
-		if eval.matches(doc) {
-			matches = append(matches, key)
-			lastMatch = key
-		}
+			if matched {
+				matches = append(matches, key)
+				lastMatch = key
+			}
 	}
 	result := search.Result{Keys: matches}
 	if len(matches) == limit && more && lastMatch != "" {
@@ -145,7 +150,7 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 	return result, nil
 }
 
-func (a *Adapter) loadDocument(ctx context.Context, namespace, key string, meta *storage.Meta) (map[string]any, error) {
+func (a *Adapter) matchesSelector(ctx context.Context, namespace, key string, meta *storage.Meta, plan lql.QueryStreamPlan) (bool, error) {
 	stateCtx := ctx
 	if len(meta.StateDescriptor) > 0 {
 		stateCtx = storage.ContextWithStateDescriptor(stateCtx, meta.StateDescriptor)
@@ -155,35 +160,30 @@ func (a *Adapter) loadDocument(ctx context.Context, namespace, key string, meta 
 	}
 	stateRes, err := a.backend.ReadState(stateCtx, namespace, key)
 	if err != nil {
-		return nil, err
+		return false, err
 	}
 	defer stateRes.Reader.Close()
-	data, err := readAllLimited(stateRes.Reader, a.maxDocumentBytes)
-	if err != nil {
-		return nil, err
-	}
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.UseNumber()
-	var doc map[string]any
-	if err := dec.Decode(&doc); err != nil {
-		return nil, err
-	}
-	return doc, nil
-}
 
-func readAllLimited(r io.Reader, limit int64) ([]byte, error) {
-	if limit <= 0 {
-		return io.ReadAll(r)
-	}
-	lr := &io.LimitedReader{R: r, N: limit + 1}
-	data, err := io.ReadAll(lr)
+	matched := false
+	_, err = lql.QueryStreamWithResult(lql.QueryStreamRequest{
+		Ctx:               stateCtx,
+		Reader:            stateRes.Reader,
+		Plan:              plan,
+		Mode:              lql.QueryDecisionOnly,
+		MaxCandidateBytes: a.maxDocumentBytes,
+		MaxMatches:        1,
+		OnDecision: func(d lql.QueryStreamDecision) error {
+			if !d.Matched {
+				return nil
+			}
+			matched = true
+			return lql.ErrStreamStop
+		},
+	})
 	if err != nil {
-		return nil, err
+		return false, err
 	}
-	if int64(len(data)) > limit {
-		return nil, fmt.Errorf("payload exceeds %d bytes", limit)
-	}
-	return data, nil
+	return matched, nil
 }
 
 func startIndexFromCursor(cursor string, keys []string) (int, error) {

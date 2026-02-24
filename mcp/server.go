@@ -276,185 +276,189 @@ func (s *server) registerTools(srv *mcpsdk.Server) {
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolLockAcquire,
 		Description: desc(toolLockAcquire),
-	}, s.handleLockAcquireTool)
+	}, withStructuredToolErrors(s.handleLockAcquireTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolLockKeepAlive,
 		Description: desc(toolLockKeepAlive),
-	}, s.handleLockKeepAliveTool)
+	}, withStructuredToolErrors(s.handleLockKeepAliveTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolLockRelease,
 		Description: desc(toolLockRelease),
-	}, s.handleLockReleaseTool)
+	}, withStructuredToolErrors(s.handleLockReleaseTool))
 
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolGet,
 		Description: desc(toolGet),
-	}, s.handleGetTool)
+	}, withStructuredToolErrors(s.handleGetTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolDescribe,
 		Description: desc(toolDescribe),
-	}, s.handleDescribeTool)
+	}, withStructuredToolErrors(s.handleDescribeTool))
 
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolQuery,
 		Description: desc(toolQuery),
-	}, s.handleQueryTool)
+	}, withStructuredToolErrors(s.handleQueryTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolQueryStream,
 		Description: desc(toolQueryStream),
-	}, s.handleQueryStreamTool)
+	}, withStructuredToolErrors(s.handleQueryStreamTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolStateUpdate,
 		Description: desc(toolStateUpdate),
-	}, s.handleStateUpdateTool)
+	}, withStructuredToolErrors(s.handleStateUpdateTool))
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{
+		Name:        toolStatePatch,
+		Description: desc(toolStatePatch),
+	}, withStructuredToolErrors(s.handleStatePatchTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolStateWriteStreamBegin,
 		Description: desc(toolStateWriteStreamBegin),
-	}, s.handleStateWriteStreamBeginTool)
+	}, withStructuredToolErrors(s.handleStateWriteStreamBeginTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolStateWriteStreamAppend,
 		Description: desc(toolStateWriteStreamAppend),
-	}, s.handleStateWriteStreamAppendTool)
+	}, withStructuredToolErrors(s.handleStateWriteStreamAppendTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolStateWriteStreamCommit,
 		Description: desc(toolStateWriteStreamCommit),
-	}, s.handleStateWriteStreamCommitTool)
+	}, withStructuredToolErrors(s.handleStateWriteStreamCommitTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolStateWriteStreamAbort,
 		Description: desc(toolStateWriteStreamAbort),
-	}, s.handleStateWriteStreamAbortTool)
+	}, withStructuredToolErrors(s.handleStateWriteStreamAbortTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolStateStream,
 		Description: desc(toolStateStream),
-	}, s.handleStateStreamTool)
+	}, withStructuredToolErrors(s.handleStateStreamTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolStateMetadata,
 		Description: desc(toolStateMetadata),
-	}, s.handleStateMetadataTool)
+	}, withStructuredToolErrors(s.handleStateMetadataTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolStateRemove,
 		Description: desc(toolStateRemove),
-	}, s.handleStateRemoveTool)
+	}, withStructuredToolErrors(s.handleStateRemoveTool))
 
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolAttachmentsWriteStreamBegin,
 		Description: desc(toolAttachmentsWriteStreamBegin),
-	}, s.handleAttachmentsWriteStreamBeginTool)
+	}, withStructuredToolErrors(s.handleAttachmentsWriteStreamBeginTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolAttachmentsWriteStreamAppend,
 		Description: desc(toolAttachmentsWriteStreamAppend),
-	}, s.handleAttachmentsWriteStreamAppendTool)
+	}, withStructuredToolErrors(s.handleAttachmentsWriteStreamAppendTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolAttachmentsWriteStreamCommit,
 		Description: desc(toolAttachmentsWriteStreamCommit),
-	}, s.handleAttachmentsWriteStreamCommitTool)
+	}, withStructuredToolErrors(s.handleAttachmentsWriteStreamCommitTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolAttachmentsWriteStreamAbort,
 		Description: desc(toolAttachmentsWriteStreamAbort),
-	}, s.handleAttachmentsWriteStreamAbortTool)
+	}, withStructuredToolErrors(s.handleAttachmentsWriteStreamAbortTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolAttachmentsList,
 		Description: desc(toolAttachmentsList),
-	}, s.handleAttachmentListTool)
+	}, withStructuredToolErrors(s.handleAttachmentListTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolAttachmentsHead,
 		Description: desc(toolAttachmentsHead),
-	}, s.handleAttachmentHeadTool)
+	}, withStructuredToolErrors(s.handleAttachmentHeadTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolAttachmentsChecksum,
 		Description: desc(toolAttachmentsChecksum),
-	}, s.handleAttachmentChecksumTool)
+	}, withStructuredToolErrors(s.handleAttachmentChecksumTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolAttachmentsGet,
 		Description: desc(toolAttachmentsGet),
-	}, s.handleAttachmentGetTool)
+	}, withStructuredToolErrors(s.handleAttachmentGetTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolAttachmentsStream,
 		Description: desc(toolAttachmentsStream),
-	}, s.handleAttachmentStreamTool)
+	}, withStructuredToolErrors(s.handleAttachmentStreamTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolAttachmentsDelete,
 		Description: desc(toolAttachmentsDelete),
-	}, s.handleAttachmentDeleteTool)
+	}, withStructuredToolErrors(s.handleAttachmentDeleteTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolAttachmentsDeleteAll,
 		Description: desc(toolAttachmentsDeleteAll),
-	}, s.handleAttachmentDeleteAllTool)
+	}, withStructuredToolErrors(s.handleAttachmentDeleteAllTool))
 
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolNamespaceGet,
 		Description: desc(toolNamespaceGet),
-	}, s.handleNamespaceGetTool)
+	}, withStructuredToolErrors(s.handleNamespaceGetTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolNamespaceUpdate,
 		Description: desc(toolNamespaceUpdate),
-	}, s.handleNamespaceUpdateTool)
+	}, withStructuredToolErrors(s.handleNamespaceUpdateTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolIndexFlush,
 		Description: desc(toolIndexFlush),
-	}, s.handleIndexFlushTool)
+	}, withStructuredToolErrors(s.handleIndexFlushTool))
 
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolHint,
 		Description: desc(toolHint),
-	}, s.handleHintTool)
+	}, withStructuredToolErrors(s.handleHintTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolHelp,
 		Description: desc(toolHelp),
-	}, s.handleHelpTool)
+	}, withStructuredToolErrors(s.handleHelpTool))
 
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolQueueEnqueue,
 		Description: desc(toolQueueEnqueue),
-	}, s.handleQueueEnqueueTool)
+	}, withStructuredToolErrors(s.handleQueueEnqueueTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolQueueWriteStreamBegin,
 		Description: desc(toolQueueWriteStreamBegin),
-	}, s.handleQueueWriteStreamBeginTool)
+	}, withStructuredToolErrors(s.handleQueueWriteStreamBeginTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolQueueWriteStreamAppend,
 		Description: desc(toolQueueWriteStreamAppend),
-	}, s.handleQueueWriteStreamAppendTool)
+	}, withStructuredToolErrors(s.handleQueueWriteStreamAppendTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolQueueWriteStreamCommit,
 		Description: desc(toolQueueWriteStreamCommit),
-	}, s.handleQueueWriteStreamCommitTool)
+	}, withStructuredToolErrors(s.handleQueueWriteStreamCommitTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolQueueWriteStreamAbort,
 		Description: desc(toolQueueWriteStreamAbort),
-	}, s.handleQueueWriteStreamAbortTool)
+	}, withStructuredToolErrors(s.handleQueueWriteStreamAbortTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolQueueDequeue,
 		Description: desc(toolQueueDequeue),
-	}, s.handleQueueDequeueTool)
+	}, withStructuredToolErrors(s.handleQueueDequeueTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolQueueWatch,
 		Description: desc(toolQueueWatch),
-	}, s.handleQueueWatchTool)
+	}, withStructuredToolErrors(s.handleQueueWatchTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolQueueAck,
 		Description: desc(toolQueueAck),
-	}, s.handleQueueAckTool)
+	}, withStructuredToolErrors(s.handleQueueAckTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolQueueNack,
 		Description: desc(toolQueueNack),
-	}, s.handleQueueNackTool)
+	}, withStructuredToolErrors(s.handleQueueNackTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolQueueDefer,
 		Description: desc(toolQueueDefer),
-	}, s.handleQueueDeferTool)
+	}, withStructuredToolErrors(s.handleQueueDeferTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolQueueExtend,
 		Description: desc(toolQueueExtend),
-	}, s.handleQueueExtendTool)
+	}, withStructuredToolErrors(s.handleQueueExtendTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolQueueSubscribe,
 		Description: desc(toolQueueSubscribe),
-	}, s.handleQueueSubscribeTool)
+	}, withStructuredToolErrors(s.handleQueueSubscribeTool))
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:        toolQueueUnsubscribe,
 		Description: desc(toolQueueUnsubscribe),
-	}, s.handleQueueUnsubscribeTool)
+	}, withStructuredToolErrors(s.handleQueueUnsubscribeTool))
 }
 
 type getToolInput struct {

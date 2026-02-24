@@ -54,6 +54,8 @@
 //
 // For writes, small payloads can be sent inline through `lockd.state.update`
 // and `lockd.queue.enqueue`, bounded by `Config.InlineMaxBytes` (default 2MiB).
+// Partial state updates are available with `lockd.state.patch` (JSON merge patch),
+// also bounded by the inline limit.
 // Larger writes should use the write-stream tool families:
 // `lockd.state.write_stream.*`, `lockd.queue.write_stream.*`,
 // and `lockd.attachments.write_stream.*`.

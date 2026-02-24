@@ -1784,7 +1784,7 @@
         }
       },
       {
-        "description": "Purpose: Receive one available message lease from a queue.\nUse when: A worker is ready to process the next queue item.\nRequires: Active MCP session is required for payload streaming. `queue` defaults to \"lockd.agent.bus\". `namespace` defaults to \"mcp\". `owner` defaults to OAuth client id. Optional `stateful`, `visibility_seconds`, `page_size`, `start_after`, `txn_id`, `chunk_bytes`, `max_bytes`, and `progress_token` tune dequeue and payload streaming behavior.\nEffects: Returns `found=false` when no message is available, or message metadata/lease fields plus payload stream summary. Payload bytes are emitted as `lockd.queue.payload.chunk` progress notifications.\nRetry: Safe to retry. Duplicate retries may lease different messages when queue state changes.\nNext: If processed, call `lockd.queue.ack`; if failed call `lockd.queue.nack`; if not for this worker call `lockd.queue.defer`; extend long handlers with `lockd.queue.extend`.",
+        "description": "Purpose: Receive one available message lease from a queue.\nUse when: A worker is ready to process the next queue item.\nRequires: Active MCP session is required for payload streaming. `queue` defaults to \"lockd.agent.bus\". `namespace` defaults to \"mcp\". `owner` defaults to OAuth client id. Optional `stateful`, `visibility_seconds`, `cursor`, `txn_id`, `chunk_bytes`, `max_bytes`, and `progress_token` tune dequeue and payload streaming behavior.\nEffects: Returns `found=false` when no message is available, or message metadata/lease fields plus payload stream summary. Includes `next_cursor` for continuation. Payload bytes are emitted as `lockd.queue.payload.chunk` progress notifications.\nRetry: Safe to retry. Duplicate retries may lease different messages when queue state changes.\nNext: If processed, call `lockd.queue.ack`; if failed call `lockd.queue.nack`; if not for this worker call `lockd.queue.defer`; extend long handlers with `lockd.queue.extend`.",
         "inputSchema": {
           "additionalProperties": false,
           "properties": {
@@ -1795,6 +1795,10 @@
             "chunk_bytes": {
               "description": "Payload stream chunk size per progress event in bytes (default 65536, max 4194304)",
               "type": "integer"
+            },
+            "cursor": {
+              "description": "Optional continuation cursor from previous dequeue response",
+              "type": "string"
             },
             "max_bytes": {
               "description": "Optional maximum payload bytes to stream before truncating",
@@ -1808,20 +1812,12 @@
               "description": "Consumer owner ID (defaults to oauth client id)",
               "type": "string"
             },
-            "page_size": {
-              "description": "Optional dequeue page size hint",
-              "type": "integer"
-            },
             "progress_token": {
               "description": "Optional explicit progress token for payload chunk notifications",
               "type": "string"
             },
             "queue": {
               "description": "Queue name (defaults to lockd.agent.bus)",
-              "type": "string"
-            },
-            "start_after": {
-              "description": "Optional dequeue cursor start-after message id",
               "type": "string"
             },
             "stateful": {
@@ -1852,9 +1848,6 @@
             "correlation_id": {
               "type": "string"
             },
-            "cursor": {
-              "type": "string"
-            },
             "failure_attempts": {
               "type": "integer"
             },
@@ -1880,6 +1873,9 @@
               "type": "string"
             },
             "namespace": {
+              "type": "string"
+            },
+            "next_cursor": {
               "type": "string"
             },
             "not_visible_until_unix": {
@@ -1931,7 +1927,7 @@
         }
       },
       {
-        "description": "Purpose: Publish a message to a lockd queue for agent coordination.\nUse when: You need to signal work/events/context to queue consumers and payload fits inline limits.\nRequires: `queue` defaults to \"lockd.agent.bus\". `namespace` defaults to \"mcp\". Provide payload via exactly one of `payload_text` or `payload_base64`; decoded payload must be \u003c= 2097152 bytes.\nEffects: Appends a queue message and returns delivery metadata (`message_id`, visibility, attempts).\nRetry: Not idempotent by default; retries can enqueue duplicates. Use application-level dedupe keys in payload/attributes.\nNext: For larger payloads use `lockd.queue.write_stream.begin`/`append`/`commit`. Consumers should dequeue then ack/nack/defer.",
+        "description": "Purpose: Publish a message to a lockd queue for agent coordination.\nUse when: You need to signal work/events/context to queue consumers and payload fits inline limits.\nRequires: `queue` defaults to \"lockd.agent.bus\". `namespace` defaults to \"mcp\". Provide payload via exactly one of `payload_text` or `payload_base64`; decoded payload must be \u003c= 2097152 bytes.\nEffects: Appends a queue message and returns delivery metadata (`message_id`, visibility, attempts). Queue ordering is best-effort under retries/requeues; do not assume strict FIFO across all consumers.\nRetry: Not idempotent by default; retries can enqueue duplicates. Use application-level dedupe keys in payload/attributes.\nNext: For larger payloads use `lockd.queue.write_stream.begin`/`append`/`commit`. Consumers should dequeue then ack/nack/defer.",
         "inputSchema": {
           "additionalProperties": false,
           "properties": {
@@ -2637,6 +2633,95 @@
           },
           "required": [
             "version"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Purpose: Apply an RFC 7396 JSON merge patch to current state under lease protection.\nUse when: You need partial updates without sending a full replacement document.\nRequires: `key` and `lease_id` are required. `namespace` defaults to \"mcp\". Provide exactly one of `patch_text` or `patch_base64` and keep patch/result within inline limits; use `state.write_stream` for large documents.\nEffects: Loads current state (lease-bound read), applies merge patch, then writes updated state and returns new version/ETag metadata.\nRetry: Use `if_etag`, `if_version`, and `fencing_token` for safe retries. Patch retries without guards can duplicate logical effects.\nNext: Use `lockd.get`/`lockd.state.stream` to verify result, then release lease.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "fencing_token": {
+              "description": "Optional fencing token override",
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "if_etag": {
+              "description": "Conditional ETag guard",
+              "type": "string"
+            },
+            "if_version": {
+              "description": "Conditional version guard",
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "key": {
+              "description": "State key",
+              "type": "string"
+            },
+            "lease_id": {
+              "description": "Active lease id",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "Namespace (defaults to server default namespace)",
+              "type": "string"
+            },
+            "patch_base64": {
+              "description": "Base64-encoded JSON merge patch document",
+              "type": "string"
+            },
+            "patch_text": {
+              "description": "UTF-8 JSON merge patch document",
+              "type": "string"
+            },
+            "query_hidden": {
+              "description": "Optional query-hidden metadata mutation",
+              "type": [
+                "null",
+                "boolean"
+              ]
+            },
+            "txn_id": {
+              "description": "Optional XA transaction id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "lease_id"
+          ],
+          "type": "object"
+        },
+        "name": "lockd.state.patch",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "bytes": {
+              "type": "integer"
+            },
+            "new_state_etag": {
+              "type": "string"
+            },
+            "new_version": {
+              "type": "integer"
+            },
+            "query_hidden": {
+              "type": [
+                "null",
+                "boolean"
+              ]
+            }
+          },
+          "required": [
+            "new_version",
+            "new_state_etag",
+            "bytes"
           ],
           "type": "object"
         }

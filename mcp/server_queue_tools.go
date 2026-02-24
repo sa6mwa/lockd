@@ -99,8 +99,7 @@ type queueDequeueToolInput struct {
 	BlockSecond       int64  `json:"block_seconds,omitempty" jsonschema:"Long-poll wait; -1 no wait, 0 wait forever, >0 wait seconds"`
 	Stateful          bool   `json:"stateful,omitempty" jsonschema:"Acquire workflow state lease alongside dequeued message"`
 	VisibilitySeconds int64  `json:"visibility_seconds,omitempty" jsonschema:"Optional visibility timeout override in seconds"`
-	PageSize          int    `json:"page_size,omitempty" jsonschema:"Optional dequeue page size hint"`
-	StartAfter        string `json:"start_after,omitempty" jsonschema:"Optional dequeue cursor start-after message id"`
+	Cursor            string `json:"cursor,omitempty" jsonschema:"Optional continuation cursor from previous dequeue response"`
 	TxnID             string `json:"txn_id,omitempty" jsonschema:"Optional transaction id to bind dequeue operations"`
 	ChunkBytes        int64  `json:"chunk_bytes,omitempty" jsonschema:"Payload stream chunk size per progress event in bytes (default 65536, max 4194304)"`
 	MaxBytes          int64  `json:"max_bytes,omitempty" jsonschema:"Optional maximum payload bytes to stream before truncating"`
@@ -120,7 +119,7 @@ type queueDequeueToolOutput struct {
 	FencingToken          int64  `json:"fencing_token,omitempty"`
 	MetaETag              string `json:"meta_etag,omitempty"`
 	TxnID                 string `json:"txn_id,omitempty"`
-	Cursor                string `json:"cursor,omitempty"`
+	NextCursor            string `json:"next_cursor,omitempty"`
 	NotVisibleUntilUnix   int64  `json:"not_visible_until_unix,omitempty"`
 	VisibilitySeconds     int64  `json:"visibility_timeout_seconds,omitempty"`
 	CorrelationID         string `json:"correlation_id,omitempty"`
@@ -160,11 +159,8 @@ func (s *server) handleQueueDequeueTool(ctx context.Context, req *mcpsdk.CallToo
 	if input.VisibilitySeconds > 0 {
 		opts.Visibility = time.Duration(input.VisibilitySeconds) * time.Second
 	}
-	if input.PageSize > 0 {
-		opts.PageSize = input.PageSize
-	}
-	if startAfter := strings.TrimSpace(input.StartAfter); startAfter != "" {
-		opts.StartAfter = startAfter
+	if cursor := strings.TrimSpace(input.Cursor); cursor != "" {
+		opts.StartAfter = cursor
 	}
 	var (
 		msg *lockdclient.QueueMessage
@@ -207,7 +203,7 @@ func (s *server) handleQueueDequeueTool(ctx context.Context, req *mcpsdk.CallToo
 		FencingToken:        msg.FencingToken(),
 		MetaETag:            msg.MetaETag(),
 		TxnID:               msg.TxnID(),
-		Cursor:              msg.Cursor(),
+		NextCursor:          msg.Cursor(),
 		NotVisibleUntilUnix: msg.NotVisibleUntil().Unix(),
 		VisibilitySeconds:   int64(msg.VisibilityTimeout().Seconds()),
 		CorrelationID:       msg.CorrelationID(),

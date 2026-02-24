@@ -702,6 +702,67 @@ func TestInlinePayloadLimitEnforced(t *testing.T) {
 	}
 }
 
+func TestStatePatchToolAppliesJSONMergePatch(t *testing.T) {
+	t.Parallel()
+
+	s, cli := newToolTestServer(t)
+	ctx := context.Background()
+
+	key := fmt.Sprintf("mcp-state-patch-%d", time.Now().UnixNano())
+	lease, err := cli.Acquire(ctx, api.AcquireRequest{
+		Namespace:  "mcp",
+		Key:        key,
+		TTLSeconds: 30,
+		Owner:      "mcp-test",
+		BlockSecs:  api.BlockNoWait,
+	})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if _, err := cli.UpdateBytes(ctx, key, lease.LeaseID, []byte(`{"keep":1,"drop":{"x":1},"nested":{"a":1}}`), lockdclient.UpdateOptions{
+		Namespace: "mcp",
+		TxnID:     lease.TxnID,
+	}); err != nil {
+		t.Fatalf("seed update: %v", err)
+	}
+
+	_, out, err := s.handleStatePatchTool(ctx, nil, statePatchToolInput{
+		Namespace: "mcp",
+		Key:       key,
+		LeaseID:   lease.LeaseID,
+		TxnID:     lease.TxnID,
+		PatchText: `{"drop":null,"nested":{"b":2}}`,
+	})
+	if err != nil {
+		t.Fatalf("state.patch: %v", err)
+	}
+	if out.NewVersion == 0 || out.NewStateETag == "" {
+		t.Fatalf("expected patch output metadata, got version=%d etag=%q", out.NewVersion, out.NewStateETag)
+	}
+
+	if _, err := cli.Release(ctx, api.ReleaseRequest{
+		Namespace: "mcp",
+		Key:       key,
+		LeaseID:   lease.LeaseID,
+		TxnID:     lease.TxnID,
+	}); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	resp, err := cli.Get(ctx, key, lockdclient.WithGetNamespace("mcp"))
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Close()
+	got, err := resp.Bytes()
+	if err != nil {
+		t.Fatalf("get bytes: %v", err)
+	}
+	if string(got) != `{"keep":1,"nested":{"a":1,"b":2}}` {
+		t.Fatalf("unexpected patched state: %s", string(got))
+	}
+}
+
 func newToolTestServer(t *testing.T) (*server, *lockdclient.Client) {
 	t.Helper()
 

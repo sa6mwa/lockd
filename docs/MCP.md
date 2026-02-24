@@ -165,6 +165,7 @@ Lock/state:
 - `lockd.query`
 - `lockd.query.stream`
 - `lockd.state.update`
+- `lockd.state.patch`
 - `lockd.state.write_stream.begin`
 - `lockd.state.write_stream.append`
 - `lockd.state.write_stream.commit`
@@ -228,12 +229,14 @@ TC-only transaction decision tools are intentionally not exposed by MCP. XA rema
 8. extend while long processing is in-flight
 
 `lockd.queue.dequeue` streams payload bytes as progress notifications (`lockd.queue.payload.chunk`) and returns payload stream metadata in the tool result. Payload is not returned inline.
+`lockd.queue.dequeue` also returns `next_cursor`; pass it back as `cursor` on later calls when continuing the same dequeue scan.
 
 ## Contract Notes
 
 - `lockd.get` returns metadata only (`found`, numeric `version`, `etag`, `stream_required`).
 - read payload via `lockd.state.stream` (chunked progress notifications; no full-buffer read).
 - `lockd.state.update` and `lockd.queue.enqueue` are inline-only and enforce `mcp.inline_max_bytes`.
+- `lockd.state.patch` applies RFC 7396 JSON merge patch semantics for partial updates and is also bounded by `mcp.inline_max_bytes`.
 - for larger writes, use `*.write_stream.begin/append/commit` tools.
 - `lockd.get`, `lockd.attachments.list`, and `lockd.attachments.get` default to `public=true`.
 - For those reads: `public=false` requires `lease_id`; `public=true` rejects `lease_id`.

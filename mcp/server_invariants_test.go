@@ -185,6 +185,14 @@ func TestPayloadInputsMutuallyExclusive(t *testing.T) {
 	}); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
 		t.Fatalf("expected state update payload exclusivity error, got %v", err)
 	}
+	if _, _, err := s.handleStatePatchTool(context.Background(), nil, statePatchToolInput{
+		Key:         "k1",
+		LeaseID:     "lease-1",
+		PatchText:   `{}`,
+		PatchBase64: "e30=",
+	}); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("expected state patch payload exclusivity error, got %v", err)
+	}
 	if _, _, err := s.handleQueueEnqueueTool(context.Background(), nil, queueEnqueueToolInput{
 		PayloadText:   "x",
 		PayloadBase64: "eA==",

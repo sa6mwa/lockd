@@ -14,6 +14,7 @@ const (
 	toolQuery                        = "lockd.query"
 	toolQueryStream                  = "lockd.query.stream"
 	toolStateUpdate                  = "lockd.state.update"
+	toolStatePatch                   = "lockd.state.patch"
 	toolStateWriteStreamBegin        = "lockd.state.write_stream.begin"
 	toolStateWriteStreamAppend       = "lockd.state.write_stream.append"
 	toolStateWriteStreamCommit       = "lockd.state.write_stream.commit"
@@ -61,6 +62,7 @@ var mcpToolNames = []string{
 	toolQuery,
 	toolQueryStream,
 	toolStateUpdate,
+	toolStatePatch,
 	toolStateWriteStreamBegin,
 	toolStateWriteStreamAppend,
 	toolStateWriteStreamCommit,
@@ -197,6 +199,14 @@ func buildToolDescriptions(cfg Config) map[string]string {
 			Effects:  "Updates state and returns new version/ETag metadata; can also mutate `query_hidden` metadata.",
 			Retry:    "Use `if_etag`, `if_version`, and `fencing_token` for safe retries. Without guards, retries can apply duplicate writes.",
 			Next:     "For larger payloads use `lockd.state.write_stream.begin`/`append`/`commit`, then release lease to commit or rollback.",
+		}),
+		toolStatePatch: formatToolDescription(toolContract{
+			Purpose:  "Apply an RFC 7396 JSON merge patch to current state under lease protection.",
+			UseWhen:  "You need partial updates without sending a full replacement document.",
+			Requires: fmt.Sprintf("`key` and `lease_id` are required. `namespace` defaults to %q. Provide exactly one of `patch_text` or `patch_base64` and keep patch/result within inline limits; use `state.write_stream` for large documents.", namespace),
+			Effects:  "Loads current state (lease-bound read), applies merge patch, then writes updated state and returns new version/ETag metadata.",
+			Retry:    "Use `if_etag`, `if_version`, and `fencing_token` for safe retries. Patch retries without guards can duplicate logical effects.",
+			Next:     "Use `lockd.get`/`lockd.state.stream` to verify result, then release lease.",
 		}),
 		toolStateWriteStreamBegin: formatToolDescription(toolContract{
 			Purpose:  "Open a session-scoped streaming state writer.",
@@ -386,7 +396,7 @@ func buildToolDescriptions(cfg Config) map[string]string {
 			Purpose:  "Publish a message to a lockd queue for agent coordination.",
 			UseWhen:  "You need to signal work/events/context to queue consumers and payload fits inline limits.",
 			Requires: fmt.Sprintf("`queue` defaults to %q. `namespace` defaults to %q. Provide payload via exactly one of `payload_text` or `payload_base64`; decoded payload must be <= %d bytes.", queue, namespace, inlineMax),
-			Effects:  "Appends a queue message and returns delivery metadata (`message_id`, visibility, attempts).",
+			Effects:  "Appends a queue message and returns delivery metadata (`message_id`, visibility, attempts). Queue ordering is best-effort under retries/requeues; do not assume strict FIFO across all consumers.",
 			Retry:    "Not idempotent by default; retries can enqueue duplicates. Use application-level dedupe keys in payload/attributes.",
 			Next:     "For larger payloads use `lockd.queue.write_stream.begin`/`append`/`commit`. Consumers should dequeue then ack/nack/defer.",
 		}),
@@ -425,8 +435,8 @@ func buildToolDescriptions(cfg Config) map[string]string {
 		toolQueueDequeue: formatToolDescription(toolContract{
 			Purpose:  "Receive one available message lease from a queue.",
 			UseWhen:  "A worker is ready to process the next queue item.",
-			Requires: fmt.Sprintf("Active MCP session is required for payload streaming. `queue` defaults to %q. `namespace` defaults to %q. `owner` defaults to OAuth client id. Optional `stateful`, `visibility_seconds`, `page_size`, `start_after`, `txn_id`, `chunk_bytes`, `max_bytes`, and `progress_token` tune dequeue and payload streaming behavior.", queue, namespace),
-			Effects:  "Returns `found=false` when no message is available, or message metadata/lease fields plus payload stream summary. Payload bytes are emitted as `lockd.queue.payload.chunk` progress notifications.",
+			Requires: fmt.Sprintf("Active MCP session is required for payload streaming. `queue` defaults to %q. `namespace` defaults to %q. `owner` defaults to OAuth client id. Optional `stateful`, `visibility_seconds`, `cursor`, `txn_id`, `chunk_bytes`, `max_bytes`, and `progress_token` tune dequeue and payload streaming behavior.", queue, namespace),
+			Effects:  "Returns `found=false` when no message is available, or message metadata/lease fields plus payload stream summary. Includes `next_cursor` for continuation. Payload bytes are emitted as `lockd.queue.payload.chunk` progress notifications.",
 			Retry:    "Safe to retry. Duplicate retries may lease different messages when queue state changes.",
 			Next:     "If processed, call `lockd.queue.ack`; if failed call `lockd.queue.nack`; if not for this worker call `lockd.queue.defer`; extend long handlers with `lockd.queue.extend`.",
 		}),

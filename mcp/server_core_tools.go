@@ -153,7 +153,7 @@ type stateUpdateToolInput struct {
 	TxnID         string `json:"txn_id,omitempty" jsonschema:"Optional XA transaction id"`
 	FencingToken  *int64 `json:"fencing_token,omitempty" jsonschema:"Optional fencing token override"`
 	IfETag        string `json:"if_etag,omitempty" jsonschema:"Conditional ETag guard"`
-	IfVersion     string `json:"if_version,omitempty" jsonschema:"Conditional version guard"`
+	IfVersion     *int64 `json:"if_version,omitempty" jsonschema:"Conditional version guard"`
 	QueryHidden   *bool  `json:"query_hidden,omitempty" jsonschema:"Optional query-hidden metadata mutation"`
 	PayloadText   string `json:"payload_text,omitempty" jsonschema:"UTF-8 JSON payload text"`
 	PayloadBase64 string `json:"payload_base64,omitempty" jsonschema:"Base64-encoded JSON payload bytes"`
@@ -187,7 +187,7 @@ func (s *server) handleStateUpdateTool(ctx context.Context, _ *mcpsdk.CallToolRe
 		TxnID:        strings.TrimSpace(input.TxnID),
 		FencingToken: input.FencingToken,
 		IfETag:       strings.TrimSpace(input.IfETag),
-		IfVersion:    strings.TrimSpace(input.IfVersion),
+		IfVersion:    input.IfVersion,
 		Metadata: lockdclient.MetadataOptions{
 			QueryHidden: input.QueryHidden,
 			TxnID:       strings.TrimSpace(input.TxnID),
@@ -212,7 +212,7 @@ type stateMetadataToolInput struct {
 	TxnID        string `json:"txn_id,omitempty" jsonschema:"Optional XA transaction id"`
 	FencingToken *int64 `json:"fencing_token,omitempty" jsonschema:"Optional fencing token override"`
 	IfETag       string `json:"if_etag,omitempty" jsonschema:"Conditional ETag guard"`
-	IfVersion    string `json:"if_version,omitempty" jsonschema:"Conditional version guard"`
+	IfVersion    *int64 `json:"if_version,omitempty" jsonschema:"Conditional version guard"`
 	QueryHidden  *bool  `json:"query_hidden" jsonschema:"Set true to hide, false to expose in queries"`
 }
 
@@ -233,7 +233,7 @@ func (s *server) handleStateMetadataTool(ctx context.Context, _ *mcpsdk.CallTool
 		TxnID:        strings.TrimSpace(input.TxnID),
 		FencingToken: input.FencingToken,
 		IfETag:       strings.TrimSpace(input.IfETag),
-		IfVersion:    strings.TrimSpace(input.IfVersion),
+		IfVersion:    input.IfVersion,
 		Metadata: lockdclient.MetadataOptions{
 			QueryHidden: input.QueryHidden,
 			TxnID:       strings.TrimSpace(input.TxnID),
@@ -256,7 +256,7 @@ type stateRemoveToolInput struct {
 	TxnID        string `json:"txn_id,omitempty" jsonschema:"Optional XA transaction id"`
 	FencingToken *int64 `json:"fencing_token,omitempty" jsonschema:"Optional fencing token override"`
 	IfETag       string `json:"if_etag,omitempty" jsonschema:"Conditional ETag guard"`
-	IfVersion    string `json:"if_version,omitempty" jsonschema:"Conditional version guard"`
+	IfVersion    *int64 `json:"if_version,omitempty" jsonschema:"Conditional version guard"`
 }
 
 type stateRemoveToolOutput struct {
@@ -273,7 +273,7 @@ func (s *server) handleStateRemoveTool(ctx context.Context, _ *mcpsdk.CallToolRe
 		TxnID:        strings.TrimSpace(input.TxnID),
 		FencingToken: input.FencingToken,
 		IfETag:       strings.TrimSpace(input.IfETag),
-		IfVersion:    strings.TrimSpace(input.IfVersion),
+		IfVersion:    input.IfVersion,
 	})
 	if err != nil {
 		return nil, stateRemoveToolOutput{}, err

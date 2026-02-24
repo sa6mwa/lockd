@@ -577,6 +577,21 @@ func resolveTxn(txn string) (string, error) {
 	return "", fmt.Errorf("--txn-id is required (xid, 20-char base32) or set %s", envTxnID)
 }
 
+func parseOptionalVersion(raw string) (*int64, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	parsed, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid --if-version %q (must be an int64)", raw)
+	}
+	if parsed < 0 {
+		return nil, fmt.Errorf("invalid --if-version %q (must be >= 0)", raw)
+	}
+	return lockdclient.Int64(parsed), nil
+}
+
 func parseQueueAttributes(pairs []string) (map[string]any, error) {
 	if len(pairs) == 0 {
 		return nil, nil
@@ -1863,6 +1878,10 @@ func newClientUpdateCommand(cfg *clientCLIConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			ifVersionValue, err := parseOptionalVersion(ifVersion)
+			if err != nil {
+				return err
+			}
 			cli.RegisterLeaseToken(lease, token)
 			path := "-"
 			if len(args) == 1 {
@@ -1874,7 +1893,13 @@ func newClientUpdateCommand(cfg *clientCLIConfig) *cobra.Command {
 				return err
 			}
 			ns := resolveNamespaceInput(namespace)
-			opts := lockdclient.UpdateOptions{Namespace: ns, IfVersion: ifVersion, IfETag: ifETag, FencingToken: lockdclient.Int64(token), TxnID: txn}
+			opts := lockdclient.UpdateOptions{
+				Namespace:    ns,
+				IfVersion:    ifVersionValue,
+				IfETag:       ifETag,
+				FencingToken: lockdclient.Int64(token),
+				TxnID:        txn,
+			}
 			ctx, _ := commandContextWithCorrelation(cmd)
 			result, err := cli.UpdateBytes(ctx, key, lease, payload, opts)
 			if err != nil {
@@ -1951,9 +1976,19 @@ func newClientRemoveCommand(cfg *clientCLIConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			ifVersionValue, err := parseOptionalVersion(ifVersion)
+			if err != nil {
+				return err
+			}
 			cli.RegisterLeaseToken(lease, token)
 			ns := resolveNamespaceInput(namespace)
-			opts := lockdclient.RemoveOptions{Namespace: ns, IfVersion: ifVersion, IfETag: ifETag, FencingToken: lockdclient.Int64(token), TxnID: txn}
+			opts := lockdclient.RemoveOptions{
+				Namespace:    ns,
+				IfVersion:    ifVersionValue,
+				IfETag:       ifETag,
+				FencingToken: lockdclient.Int64(token),
+				TxnID:        txn,
+			}
 			ctx, _ := commandContextWithCorrelation(cmd)
 			result, err := cli.Remove(ctx, key, lease, opts)
 			if err != nil {
@@ -2055,10 +2090,16 @@ func newClientSetCommand(cfg *clientCLIConfig) *cobra.Command {
 				}
 			}
 			etag := ""
-			version := ""
+			version := int64(0)
 			if resp != nil {
 				etag = resp.ETag
-				version = resp.Version
+				if strings.TrimSpace(resp.Version) != "" {
+					parsedVersion, parseErr := strconv.ParseInt(resp.Version, 10, 64)
+					if parseErr != nil {
+						return fmt.Errorf("parse fetched version %q: %w", resp.Version, parseErr)
+					}
+					version = parsedVersion
+				}
 			}
 			doc, err := parseJSONObject(stateBytes)
 			if err != nil {
@@ -2076,11 +2117,17 @@ func newClientSetCommand(cfg *clientCLIConfig) *cobra.Command {
 			}
 			opts := lockdclient.UpdateOptions{Namespace: ns, FencingToken: lockdclient.Int64(token), TxnID: txn}
 			if !noCAS {
-				opts.IfVersion = version
+				if version > 0 {
+					opts.IfVersion = lockdclient.Int64(version)
+				}
 				opts.IfETag = etag
 			}
-			if ifVersion != "" {
-				opts.IfVersion = ifVersion
+			ifVersionValue, err := parseOptionalVersion(ifVersion)
+			if err != nil {
+				return err
+			}
+			if ifVersionValue != nil {
+				opts.IfVersion = ifVersionValue
 			}
 			if ifETag != "" {
 				opts.IfETag = ifETag

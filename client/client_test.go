@@ -2445,7 +2445,7 @@ func TestClientUpdateMetadataSendsJSONPayload(t *testing.T) {
 
 	opts := client.UpdateOptions{
 		FencingToken: client.Int64(1),
-		IfVersion:    "3",
+		IfVersion:    client.Int64(3),
 		Metadata:     client.MetadataOptions{QueryHidden: client.Bool(true)},
 	}
 	res, err := cli.UpdateMetadata(context.Background(), "orders", "lease-7", opts)
@@ -3007,7 +3007,7 @@ func TestQueueStateHandleHelperOverrides(t *testing.T) {
 		Namespace:    "override-ns",
 		TxnID:        "override-update-txn",
 		IfETag:       "override-etag",
-		IfVersion:    "42",
+		IfVersion:    client.Int64(42),
 		FencingToken: client.Int64(777),
 	}); err != nil {
 		t.Fatalf("update with options: %v", err)
@@ -3017,7 +3017,7 @@ func TestQueueStateHandleHelperOverrides(t *testing.T) {
 		Namespace:    "override-ns",
 		TxnID:        "override-remove-txn",
 		IfETag:       "override-remove-etag",
-		IfVersion:    "43",
+		IfVersion:    client.Int64(43),
 		FencingToken: client.Int64(778),
 	}); err != nil {
 		t.Fatalf("remove with options: %v", err)

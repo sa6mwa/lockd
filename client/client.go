@@ -1278,7 +1278,7 @@ func (s *QueueStateHandle) Update(ctx context.Context, body io.Reader, opts ...U
 		IfETag: etag,
 	}
 	if version > 0 {
-		options.IfVersion = strconv.FormatInt(version, 10)
+		options.IfVersion = Int64(version)
 	}
 	options.FencingToken = s.syncFencingToken()
 	if len(opts) > 0 {
@@ -1302,8 +1302,8 @@ func (s *QueueStateHandle) UpdateWithOptions(ctx context.Context, body io.Reader
 	if opts.IfETag == "" {
 		opts.IfETag = etag
 	}
-	if opts.IfVersion == "" && version > 0 {
-		opts.IfVersion = strconv.FormatInt(version, 10)
+	if opts.IfVersion == nil && version > 0 {
+		opts.IfVersion = Int64(version)
 	}
 	if opts.FencingToken == nil {
 		opts.FencingToken = s.syncFencingToken()
@@ -1369,7 +1369,7 @@ func (s *QueueStateHandle) UpdateMetadata(ctx context.Context, meta MetadataOpti
 		opts.TxnID = txnID
 	}
 	if version > 0 {
-		opts.IfVersion = strconv.FormatInt(version, 10)
+		opts.IfVersion = Int64(version)
 	}
 	opts.FencingToken = s.syncFencingToken()
 	res, err := cli.UpdateMetadata(ctx, key, leaseID, opts)
@@ -1390,7 +1390,7 @@ func (s *QueueStateHandle) Remove(ctx context.Context) (*api.RemoveResponse, err
 		IfETag: etag,
 	}
 	if version > 0 {
-		opts.IfVersion = strconv.FormatInt(version, 10)
+		opts.IfVersion = Int64(version)
 	}
 	opts.FencingToken = s.syncFencingToken()
 	return s.RemoveWithOptions(ctx, opts)
@@ -1406,8 +1406,8 @@ func (s *QueueStateHandle) RemoveWithOptions(ctx context.Context, opts RemoveOpt
 	if opts.IfETag == "" {
 		opts.IfETag = etag
 	}
-	if opts.IfVersion == "" && version > 0 {
-		opts.IfVersion = strconv.FormatInt(version, 10)
+	if opts.IfVersion == nil && version > 0 {
+		opts.IfVersion = Int64(version)
 	}
 	if opts.FencingToken == nil {
 		opts.FencingToken = s.syncFencingToken()
@@ -2044,7 +2044,7 @@ func (s *LeaseSession) Update(ctx context.Context, body io.Reader, options ...Up
 		IfETag: s.StateETag,
 	}
 	if s.Version > 0 {
-		opts.IfVersion = strconv.FormatInt(s.Version, 10)
+		opts.IfVersion = Int64(s.Version)
 	}
 	opts.FencingToken = s.syncFencingToken()
 	if len(options) > 0 {
@@ -2064,8 +2064,8 @@ func (s *LeaseSession) UpdateWithOptions(ctx context.Context, body io.Reader, op
 	if opts.IfETag == "" {
 		opts.IfETag = s.StateETag
 	}
-	if opts.IfVersion == "" && s.Version > 0 {
-		opts.IfVersion = strconv.FormatInt(s.Version, 10)
+	if opts.IfVersion == nil && s.Version > 0 {
+		opts.IfVersion = Int64(s.Version)
 	}
 	if opts.FencingToken == nil {
 		opts.FencingToken = s.syncFencingToken()
@@ -2103,7 +2103,7 @@ func (s *LeaseSession) Remove(ctx context.Context) (*api.RemoveResponse, error) 
 		IfETag: s.StateETag,
 	}
 	if s.Version > 0 {
-		opts.IfVersion = strconv.FormatInt(s.Version, 10)
+		opts.IfVersion = Int64(s.Version)
 	}
 	opts.FencingToken = s.syncFencingToken()
 	return s.applyRemove(ctx, opts)
@@ -2115,8 +2115,8 @@ func (s *LeaseSession) RemoveWithOptions(ctx context.Context, opts RemoveOptions
 	if opts.IfETag == "" {
 		opts.IfETag = s.StateETag
 	}
-	if opts.IfVersion == "" && s.Version > 0 {
-		opts.IfVersion = strconv.FormatInt(s.Version, 10)
+	if opts.IfVersion == nil && s.Version > 0 {
+		opts.IfVersion = Int64(s.Version)
 	}
 	if opts.FencingToken == nil {
 		opts.FencingToken = s.syncFencingToken()
@@ -2259,7 +2259,7 @@ func (s *LeaseSession) UpdateMetadata(ctx context.Context, meta MetadataOptions)
 		opts.TxnID = s.TxnID
 	}
 	if s.Version > 0 {
-		opts.IfVersion = strconv.FormatInt(s.Version, 10)
+		opts.IfVersion = Int64(s.Version)
 	}
 	opts.FencingToken = s.syncFencingToken()
 	return s.client.updateMetadataWithPreferred(ctx, s.Key, s.LeaseID, opts, s.endpoint)
@@ -2879,7 +2879,7 @@ type UpdateOptions struct {
 	// IfETag sets a conditional ETag guard (maps to If-Match semantics).
 	IfETag string
 	// IfVersion sets a conditional version guard (X-If-Version).
-	IfVersion string
+	IfVersion *int64
 	// FencingToken provides explicit fencing when not already registered on the client.
 	FencingToken *int64
 	// Namespace scopes the mutation. Empty uses the client's default namespace.
@@ -3008,7 +3008,7 @@ type RemoveOptions struct {
 	// IfETag sets a conditional ETag guard (maps to If-Match semantics).
 	IfETag string
 	// IfVersion sets a conditional version guard (X-If-Version).
-	IfVersion string
+	IfVersion *int64
 	// FencingToken provides explicit fencing when not already registered on the client.
 	FencingToken *int64
 	// Namespace scopes the delete. Empty uses the client's default namespace.
@@ -5284,8 +5284,8 @@ func (c *Client) updateWithPreferred(ctx context.Context, key, leaseID string, b
 		if opts.IfETag != "" {
 			req.Header.Set("X-If-State-ETag", opts.IfETag)
 		}
-		if opts.IfVersion != "" {
-			req.Header.Set("X-If-Version", opts.IfVersion)
+		if opts.IfVersion != nil {
+			req.Header.Set("X-If-Version", strconv.FormatInt(*opts.IfVersion, 10))
 		}
 		req.Header.Set(headerFencingToken, strconv.FormatInt(token, 10))
 		opts.Metadata.applyHeaders(req)
@@ -5428,8 +5428,8 @@ func (c *Client) updateMetadataWithPreferred(ctx context.Context, key, leaseID s
 		if opts.TxnID != "" {
 			req.Header.Set(headerTxnID, opts.TxnID)
 		}
-		if opts.IfVersion != "" {
-			req.Header.Set("X-If-Version", opts.IfVersion)
+		if opts.IfVersion != nil {
+			req.Header.Set("X-If-Version", strconv.FormatInt(*opts.IfVersion, 10))
 		}
 		req.Header.Set(headerFencingToken, strconv.FormatInt(token, 10))
 		c.applyCorrelationHeader(ctx, req, "")
@@ -5493,8 +5493,8 @@ func (c *Client) Remove(ctx context.Context, key, leaseID string, opts RemoveOpt
 		if opts.IfETag != "" {
 			req.Header.Set("X-If-State-ETag", opts.IfETag)
 		}
-		if opts.IfVersion != "" {
-			req.Header.Set("X-If-Version", opts.IfVersion)
+		if opts.IfVersion != nil {
+			req.Header.Set("X-If-Version", strconv.FormatInt(*opts.IfVersion, 10))
 		}
 		req.Header.Set(headerFencingToken, strconv.FormatInt(token, 10))
 		c.applyCorrelationHeader(ctx, req, "")

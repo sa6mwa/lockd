@@ -10,13 +10,18 @@ import (
 )
 
 type queryStream struct {
-	body   io.ReadCloser
-	reader *bufio.Reader
-	closed bool
+	body    io.ReadCloser
+	reader  *bufio.Reader
+	closed  bool
+	onClose func()
 }
 
-func newQueryStream(body io.ReadCloser) *queryStream {
-	return &queryStream{body: body, reader: bufio.NewReader(body)}
+func newQueryStream(body io.ReadCloser, onClose ...func()) *queryStream {
+	var closeFn func()
+	if len(onClose) > 0 {
+		closeFn = onClose[0]
+	}
+	return &queryStream{body: body, reader: bufio.NewReader(body), onClose: closeFn}
 }
 
 func (qs *queryStream) Close() error {
@@ -24,6 +29,9 @@ func (qs *queryStream) Close() error {
 		return nil
 	}
 	qs.closed = true
+	if qs.onClose != nil {
+		qs.onClose()
+	}
 	if qs.body != nil {
 		return qs.body.Close()
 	}

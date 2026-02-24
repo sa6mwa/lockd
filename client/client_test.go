@@ -4977,12 +4977,17 @@ func TestClientQueryDocuments(t *testing.T) {
 		if got := r.URL.Query().Get("return"); got != "documents" {
 			t.Fatalf("unexpected return mode %s", got)
 		}
+		w.Header().Set("Trailer", strings.Join([]string{
+			"X-Lockd-Query-Cursor",
+			"X-Lockd-Query-Index-Seq",
+			"X-Lockd-Query-Metadata",
+		}, ", "))
 		w.Header().Set("Content-Type", "application/x-ndjson")
 		w.Header().Set("X-Lockd-Query-Return", "documents")
+		fmt.Fprintln(w, `{"ns":"default","key":"doc-1","ver":7,"doc":{"status":"ready"}}`)
 		w.Header().Set("X-Lockd-Query-Cursor", "next-doc")
 		w.Header().Set("X-Lockd-Query-Index-Seq", "42")
 		w.Header().Set("X-Lockd-Query-Metadata", `{"hint":"scan"}`)
-		fmt.Fprintln(w, `{"ns":"default","key":"doc-1","ver":7,"doc":{"status":"ready"}}`)
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -5006,6 +5011,15 @@ func TestClientQueryDocuments(t *testing.T) {
 	}
 	if err := resp.Close(); err != nil {
 		t.Fatalf("close drained response: %v", err)
+	}
+	if resp.Cursor != "next-doc" {
+		t.Fatalf("expected cursor next-doc after draining, got %s", resp.Cursor)
+	}
+	if resp.IndexSeq != 42 {
+		t.Fatalf("expected index seq 42 after draining, got %d", resp.IndexSeq)
+	}
+	if hint := resp.Metadata["hint"]; hint != "scan" {
+		t.Fatalf("expected metadata hint=scan after draining, got %v", resp.Metadata)
 	}
 	resp2, err := cli.Query(context.Background(),
 		client.WithQueryNamespace("default"),

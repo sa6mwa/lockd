@@ -659,15 +659,24 @@ func TestQueryReturnDocuments(t *testing.T) {
 	if mode := resp.Header.Get(headerQueryReturn); mode != string(api.QueryReturnDocuments) {
 		t.Fatalf("expected return header documents, got %s", mode)
 	}
-	if cursor := resp.Header.Get(headerQueryCursor); cursor != "next-cursor" {
-		t.Fatalf("expected cursor header, got %s", cursor)
+	if cursor := resp.Header.Get(headerQueryCursor); cursor != "" {
+		t.Fatalf("expected no cursor header in documents mode, got %s", cursor)
 	}
-	if seq := resp.Header.Get(headerQueryIndexSeq); seq != "99" {
-		t.Fatalf("expected index seq header, got %s", seq)
+	if seq := resp.Header.Get(headerQueryIndexSeq); seq != "" {
+		t.Fatalf("expected no index seq header in documents mode, got %s", seq)
 	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatalf("read body: %v", err)
+	}
+	if cursor := resp.Trailer.Get(headerQueryCursor); cursor != "next-cursor" {
+		t.Fatalf("expected cursor trailer, got %s", cursor)
+	}
+	if seq := resp.Trailer.Get(headerQueryIndexSeq); seq != "99" {
+		t.Fatalf("expected index seq trailer, got %s", seq)
+	}
+	if metadata := resp.Trailer.Get(headerQueryMetadata); metadata == "" {
+		t.Fatalf("expected metadata trailer")
 	}
 	lines := strings.Split(strings.TrimSpace(string(body)), "\n")
 	if len(lines) != 2 {
@@ -700,6 +709,9 @@ func TestQueryReturnDocuments(t *testing.T) {
 	secondDoc, ok := rows[1]["doc"].(map[string]any)
 	if !ok || secondDoc["status"] != "waiting" {
 		t.Fatalf("unexpected second document: %+v", rows[1])
+	}
+	if adapter.calls != 1 {
+		t.Fatalf("expected a single query execution for documents mode, got %d", adapter.calls)
 	}
 }
 
@@ -1620,6 +1632,7 @@ type stubSearchAdapter struct {
 	result search.Result
 	err    error
 	caps   search.Capabilities
+	calls  int
 }
 
 func (s *stubSearchAdapter) Capabilities(context.Context, string) (search.Capabilities, error) {
@@ -1631,6 +1644,7 @@ func (s *stubSearchAdapter) Capabilities(context.Context, string) (search.Capabi
 }
 
 func (s *stubSearchAdapter) Query(ctx context.Context, req search.Request) (search.Result, error) {
+	s.calls++
 	s.last = req
 	if s.err != nil {
 		return search.Result{}, s.err

@@ -2449,6 +2449,9 @@ type QueryResponse struct {
 	keys    []string
 	keyCopy []string
 	stream  *queryStream
+
+	trailerReader func() (string, uint64, map[string]string)
+	trailerOnce   sync.Once
 }
 
 // Mode reports whether the query streamed keys or documents.
@@ -2571,15 +2574,37 @@ func newKeyQueryResponse(resp api.QueryResponse, mode QueryReturn) *QueryRespons
 	}
 }
 
-func newDocumentQueryResponse(namespace, cursor string, indexSeq uint64, metadata map[string]string, reader io.ReadCloser) *QueryResponse {
-	return &QueryResponse{
+func newDocumentQueryResponse(namespace, cursor string, indexSeq uint64, metadata map[string]string, reader io.ReadCloser, trailerFns ...func() (string, uint64, map[string]string)) *QueryResponse {
+	resp := &QueryResponse{
 		Namespace: namespace,
 		Cursor:    cursor,
 		IndexSeq:  indexSeq,
 		Metadata:  cloneStringMap(metadata),
 		mode:      QueryReturnDocuments,
-		stream:    newQueryStream(reader),
 	}
+	if len(trailerFns) > 0 {
+		resp.trailerReader = trailerFns[0]
+	}
+	resp.stream = newQueryStream(reader, resp.applyTrailers)
+	return resp
+}
+
+func (qr *QueryResponse) applyTrailers() {
+	if qr == nil || qr.trailerReader == nil {
+		return
+	}
+	qr.trailerOnce.Do(func() {
+		cursor, indexSeq, metadata := qr.trailerReader()
+		if cursor != "" {
+			qr.Cursor = cursor
+		}
+		if indexSeq > 0 {
+			qr.IndexSeq = indexSeq
+		}
+		if len(metadata) > 0 {
+			qr.Metadata = mergeMetadata(qr.Metadata, metadata)
+		}
+	})
 }
 
 func cloneStringMap(source map[string]string) map[string]string {
@@ -5054,16 +5079,21 @@ func (c *Client) Query(ctx context.Context, optFns ...QueryOption) (*QueryRespon
 	}
 	contentType := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Type")))
 	mode := detectQueryReturn(resp.Header.Get(headerQueryReturn), contentType)
-	cursorHeader := strings.TrimSpace(resp.Header.Get(headerQueryCursor))
-	indexSeq := parseUintHeader(resp.Header.Get(headerQueryIndexSeq))
-	headerMetadata := parseQueryMetadataHeader(resp.Header.Get(headerQueryMetadata))
 	switch mode {
 	case QueryReturnDocuments:
 		reader := &cancelReadCloser{ReadCloser: resp.Body, cancel: cancel}
-		respObj := newDocumentQueryResponse(ns, cursorHeader, indexSeq, headerMetadata, reader)
-		c.logTraceCtx(ctx, "client.query.success", "namespace", ns, "engine", opts.Engine, "mode", "documents", "endpoint", endpoint, "cursor", cursorHeader)
+		trailerReader := func() (string, uint64, map[string]string) {
+			return strings.TrimSpace(resp.Trailer.Get(headerQueryCursor)),
+				parseUintHeader(resp.Trailer.Get(headerQueryIndexSeq)),
+				parseQueryMetadataHeader(resp.Trailer.Get(headerQueryMetadata))
+		}
+		respObj := newDocumentQueryResponse(ns, "", 0, nil, reader, trailerReader)
+		c.logTraceCtx(ctx, "client.query.success", "namespace", ns, "engine", opts.Engine, "mode", "documents", "endpoint", endpoint)
 		return respObj, nil
 	default:
+		cursorHeader := strings.TrimSpace(resp.Header.Get(headerQueryCursor))
+		indexSeq := parseUintHeader(resp.Header.Get(headerQueryIndexSeq))
+		headerMetadata := parseQueryMetadataHeader(resp.Header.Get(headerQueryMetadata))
 		defer cancel()
 		defer resp.Body.Close()
 		var out api.QueryResponse

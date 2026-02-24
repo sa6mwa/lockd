@@ -1090,17 +1090,14 @@ func (h *Handler) writeQueryKeysResponse(w http.ResponseWriter, resp api.QueryRe
 	return nil
 }
 
-func (h *Handler) writeQueryDocumentsCore(ctx context.Context, w http.ResponseWriter, cmd core.QueryCommand) error {
-	result, err := h.core.QueryDocuments(ctx, cmd, nil)
-	if err != nil {
-		return convertCoreError(err)
+func (h *Handler) writeQueryDocumentsCore(ctx context.Context, w http.ResponseWriter, cmd core.QueryCommand, result *core.QueryResult) error {
+	if result == nil {
+		return httpError{Status: http.StatusInternalServerError, Code: "internal", Detail: "query result required for documents stream"}
 	}
-
-	headers := makeQueryResponseHeaders(result.Cursor, result.IndexSeq, result.Metadata, api.QueryReturnDocuments)
-	for k, v := range headers {
-		w.Header().Set(k, v)
-	}
-	w.Header().Set("Content-Type", contentTypeNDJSON)
+	headers := w.Header()
+	headers.Set("Content-Type", contentTypeNDJSON)
+	headers.Set(headerQueryReturn, string(api.QueryReturnDocuments))
+	declareQueryDocumentTrailers(headers)
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
 	logger := pslog.LoggerFromContext(ctx)
@@ -1117,8 +1114,13 @@ func (h *Handler) writeQueryDocumentsCore(ctx context.Context, w http.ResponseWr
 		rowBuf:     make([]byte, 0, queryStreamRowBufSize),
 		flushEvery: queryStreamFlushEvery,
 	}
-	_, err = h.core.QueryDocuments(ctx, cmd, sink)
+	keys := result.Keys
+	if len(cmd.Keys) > 0 {
+		keys = cmd.Keys
+	}
+	err := h.core.StreamPublishedDocuments(ctx, result.Namespace, keys, result.DocMeta, sink)
 	sink.Flush()
+	applyQueryDocumentTrailers(headers, result.Cursor, result.IndexSeq, result.Metadata)
 	return err
 }
 

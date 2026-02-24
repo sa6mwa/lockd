@@ -426,8 +426,8 @@ use the same endpoint and response envelope (`api.MetadataUpdateResponse`).
 
 `POST /v1/query` still returns `{namespace, keys, cursor}` JSON by default, but
 you can now request document streams by passing `return=documents`. In document
-mode the server replies with `Content-Type: application/x-ndjson`, sets the
-cursor/index metadata via headers, and streams rows shaped like:
+mode the server replies with `Content-Type: application/x-ndjson`, streams rows
+immediately, and emits cursor/index/metadata as HTTP trailers at end-of-stream:
 
 ```
 {"ns":"default","key":"orders/123","ver":42,"doc":{"status":"ready"}}
@@ -439,10 +439,9 @@ The Go SDK exposes `client.WithQueryReturnDocuments()` plus a revamped
 streaming mode each row exposes `row.DocumentReader()` (close it when you’re
 done) or the convenience `row.DocumentInto(...)` / `row.Document()` helpers. If
 you only need the identifiers, call `Keys()` to drain the stream without
-materialising any documents. Response headers mirror the cursor and index
-sequence (`X-Lockd-Query-Cursor`, `X-Lockd-Query-Index-Seq`), and the metadata
-map is available both in headers and on the JSON response for the keys-only
-mode.
+materialising any documents. In `return=documents`, query metadata is trailer-only:
+`X-Lockd-Query-Cursor`, `X-Lockd-Query-Index-Seq`, `X-Lockd-Query-Metadata`.
+For keys-only mode, metadata remains in the JSON body plus response headers.
 
 #### Queue dispatcher tuning
 

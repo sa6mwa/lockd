@@ -1308,7 +1308,7 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request) error {
 
 // handleQuery godoc
 // @Summary      Query keys within a namespace
-// @Description  Executes a selector-based search within a namespace. When return=keys, responds with a JSON envelope containing keys + cursor. When return=documents, streams NDJSON rows (one document per line).
+// @Description  Executes a selector-based search within a namespace. When return=keys, responds with a JSON envelope containing keys + cursor. When return=documents, streams NDJSON rows (one document per line) and emits query cursor/index metadata in response trailers.
 // @Tags         lease
 // @Accept       json
 // @Produce      json
@@ -1475,7 +1475,7 @@ func (h *Handler) handleQuery(w http.ResponseWriter, r *http.Request) error {
 		return h.writeQueryKeysResponse(w, resp, returnMode)
 	}
 
-	return h.writeQueryDocumentsCore(r.Context(), w, cmd)
+	return h.writeQueryDocumentsCore(r.Context(), w, cmd, result)
 }
 
 // handleIndexFlush godoc

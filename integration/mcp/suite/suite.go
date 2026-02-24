@@ -162,15 +162,16 @@ func RunFacadeE2E(t *testing.T, factory ServerFactory) {
 	if !asBool(getOut["found"]) {
 		t.Fatalf("expected lockd.get found=true, got %+v", getOut)
 	}
-	if !asBool(getOut["stream_required"]) {
-		t.Fatalf("expected lockd.get stream_required=true, got %+v", getOut)
+	stateBytes := readAutoPayloadBytes(ctx, t, facade.httpClient, getOut, "payload_mode", "payload_text", "payload_base64", "download_url")
+	if string(stateBytes) != statePayload {
+		t.Fatalf("unexpected lockd.get payload: %s", string(stateBytes))
 	}
 
 	stateStreamOut := mustCallToolObject(ctx, t, cs, "lockd.state.stream", map[string]any{
 		"key": key,
 	})
 	stateDownloadURL := requireStringField(t, stateStreamOut, "download_url")
-	stateBytes := mustTransferDownloadHTTP(ctx, t, facade.httpClient, stateDownloadURL)
+	stateBytes = mustTransferDownloadHTTP(ctx, t, facade.httpClient, stateDownloadURL)
 	if string(stateBytes) != statePayload {
 		t.Fatalf("unexpected state stream payload: %s", string(stateBytes))
 	}
@@ -209,8 +210,7 @@ func RunFacadeE2E(t *testing.T, factory ServerFactory) {
 	if !asBool(dequeueOut["found"]) {
 		t.Fatalf("expected dequeue found=true, got %+v", dequeueOut)
 	}
-	payloadDownloadURL := requireStringField(t, dequeueOut, "payload_download_url")
-	payloadBytes := mustTransferDownloadHTTP(ctx, t, facade.httpClient, payloadDownloadURL)
+	payloadBytes := readAutoPayloadBytes(ctx, t, facade.httpClient, dequeueOut, "payload_mode", "payload_text", "payload_base64", "payload_download_url")
 	if string(payloadBytes) != `{"kind":"mcp-e2e-queue","ok":true}` {
 		t.Fatalf("unexpected dequeue payload: %s", string(payloadBytes))
 	}
@@ -264,12 +264,12 @@ func runFailureModes(ctx context.Context, t testing.TB, cs *mcpsdk.ClientSession
 		t.Fatalf("expected invalid_argument for incomplete ack material, got %+v", errObj)
 	}
 
-	errObj = mustCallToolError(ctx, t, cs, "lockd.state.write_stream.append", map[string]any{
-		"stream_id":    "missing-stream",
-		"chunk_base64": "%%%not-base64%%%",
+	errObj = mustCallToolError(ctx, t, cs, "lockd.get", map[string]any{
+		"key":          "mcp-failure-" + uuidv7.NewString(),
+		"payload_mode": "definitely-not-valid",
 	})
 	if code := asString(errObj["error_code"]); code != "invalid_argument" {
-		t.Fatalf("expected invalid_argument for invalid base64 chunk, got %+v", errObj)
+		t.Fatalf("expected invalid_argument for invalid payload_mode, got %+v", errObj)
 	}
 
 	if _, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{
@@ -1223,6 +1223,34 @@ func requireStringField(t testing.TB, obj map[string]any, field string) string {
 		t.Fatalf("expected non-empty %q in %+v", field, obj)
 	}
 	return v
+}
+
+func readAutoPayloadBytes(ctx context.Context, t testing.TB, transferHTTPClient *http.Client, obj map[string]any, modeField, textField, base64Field, downloadURLField string) []byte {
+	t.Helper()
+	mode := asString(obj[modeField])
+	switch mode {
+	case "inline":
+		if text := asString(obj[textField]); text != "" {
+			return []byte(text)
+		}
+		if raw := asString(obj[base64Field]); raw != "" {
+			decoded, err := base64.StdEncoding.DecodeString(raw)
+			if err != nil {
+				t.Fatalf("decode %s: %v", base64Field, err)
+			}
+			return decoded
+		}
+		if asInt64(obj["payload_bytes"]) == 0 {
+			return []byte{}
+		}
+		t.Fatalf("payload_mode=inline without %s or %s in %+v", textField, base64Field, obj)
+	case "stream":
+		downloadURL := requireStringField(t, obj, downloadURLField)
+		return mustTransferDownloadHTTP(ctx, t, transferHTTPClient, downloadURL)
+	default:
+		t.Fatalf("unsupported %s=%q in %+v", modeField, mode, obj)
+	}
+	return nil
 }
 
 func asObject(v any) map[string]any {

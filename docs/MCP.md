@@ -288,6 +288,10 @@ Use `lockd.query.stream` for query-document payload streaming via one-time NDJSO
 
 Use `lockd.get` + `lockd.state.stream` for point payload reads.
 
+`lockd.query.stream` NDJSON rows are:
+
+- `{"ns":"<namespace>","key":"<key>","ver":<version>,"doc":{...}}`
+
 Engine behavior:
 
 - if `engine` is omitted, behavior is `auto`
@@ -299,6 +303,68 @@ Advanced options exposed:
 - `refresh`: supports `wait_for`
 - `fields`: query field map
 - `cursor` / `limit`
+
+### LQL Primer (for agents)
+
+LQL selectors are JSON Pointer based.
+
+- field paths use RFC 6901 style pointers (`/status`, `/meta/owner`, `/items/0/id`)
+- multiple expressions in one query string are combined with `AND` by default
+- shorthand selector syntax is supported and recommended for simple cases
+
+Shorthand examples:
+
+- `/status="open"` (equality)
+- `/status!="closed"` (not equal)
+- `/progress>=10` (range compare)
+- `/amount<200` (range compare)
+
+Full-form examples:
+
+- `eq{field=/status,value="open"}`
+- `prefix{field=/owner,value="team-"}`
+- `range{field=/progress,gte=10,lt=100}`
+- `in{field=/region,any=us|eu|apac}`
+- `exists{/metadata/etag}`
+- `and.eq{field=/status,value="open"},and.range{field=/amount,gte=100}`
+- `or.eq{field=/state,value="queued"},or.eq{field=/state,value="running"}`
+- `not.eq{field=/archived,value=true}`
+
+Wildcard path behavior:
+
+- `*` any object child value
+- `[]` any array element
+- `**` any immediate child (object or array)
+- `...` recursive descendant (any depth)
+- `/items[]/sku` is sugar for `/items/[]/sku`
+
+Examples:
+
+- `/items[]/sku="ABC-123"`
+- `/items/.../sku="ABC-123"`
+- `eq{field=/...,value="hello"}` (broad descendant value match)
+
+### Placeholder: Upcoming LQL Operators
+
+The new LQL operators below are planned but not landed yet in this branch:
+
+- `contains`
+- `icontains`
+- `iprefix`
+
+Until they land, use current behavior:
+
+- exact descendant matching with `eq{field=/...,value="..."}`
+- prefix matching with `prefix{field=/...,value="..."}`
+
+### Practical Query Pattern
+
+For agent workflows:
+
+1. call `lockd.query` first to fetch candidate keys cheaply
+2. if full documents are needed, call `lockd.query.stream` and consume NDJSON
+3. for single-key reads, call `lockd.get` (and stream only when needed)
+4. continue pagination by passing returned `cursor` back into the next call
 
 ## Go SDK Embedding
 

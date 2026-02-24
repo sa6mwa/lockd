@@ -59,6 +59,8 @@ const (
 	headerAttachmentCreatedAt = "X-Attachment-Created-At"
 	headerAttachmentUpdatedAt = "X-Attachment-Updated-At"
 	headerAttachmentSHA256    = "X-Attachment-SHA256"
+	headerExpectedSHA256      = "X-Expected-SHA256"
+	headerExpectedBytes       = "X-Expected-Bytes"
 )
 const headerCorrelationID = "X-Correlation-Id"
 const headerShutdownImminent = "Shutdown-Imminent"

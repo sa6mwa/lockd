@@ -2471,6 +2471,81 @@ func TestClientUpdateMetadataSendsJSONPayload(t *testing.T) {
 	}
 }
 
+func TestClientUpdateSendsExpectedPayloadHeaders(t *testing.T) {
+	t.Parallel()
+
+	type observed struct {
+		SHA   string
+		Bytes string
+	}
+	var (
+		mu           sync.Mutex
+		observedReqs []observed
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/update" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		mu.Lock()
+		observedReqs = append(observedReqs, observed{
+			SHA:   r.Header.Get("X-Expected-SHA256"),
+			Bytes: r.Header.Get("X-Expected-Bytes"),
+		})
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(api.UpdateResponse{
+			NewVersion:   2,
+			NewStateETag: "etag-2",
+			Bytes:        16,
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	cli, err := client.New(srv.URL,
+		client.WithDisableMTLS(true),
+		client.WithEndpointShuffle(false),
+		client.WithHTTPClient(srv.Client()),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	expectedBytes := int64(16)
+	_, err = cli.Update(context.Background(), "orders", "lease-1", bytes.NewReader([]byte(`{"status":"open"}`)), client.UpdateOptions{
+		FencingToken:   client.Int64(9),
+		ExpectedSHA256: strings.Repeat("a", 64),
+		ExpectedBytes:  &expectedBytes,
+	})
+	if err != nil {
+		t.Fatalf("update call with expected headers: %v", err)
+	}
+	_, err = cli.Update(context.Background(), "orders", "lease-1", bytes.NewReader([]byte(`{"status":"open"}`)), client.UpdateOptions{
+		FencingToken: client.Int64(9),
+	})
+	if err != nil {
+		t.Fatalf("update call without expected headers: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(observedReqs) != 2 {
+		t.Fatalf("expected 2 update requests, got %d", len(observedReqs))
+	}
+	if observedReqs[0].SHA != strings.Repeat("a", 64) {
+		t.Fatalf("expected X-Expected-SHA256 on first request, got %q", observedReqs[0].SHA)
+	}
+	if observedReqs[0].Bytes != "16" {
+		t.Fatalf("expected X-Expected-Bytes on first request, got %q", observedReqs[0].Bytes)
+	}
+	if observedReqs[1].SHA != "" {
+		t.Fatalf("expected empty X-Expected-SHA256 on second request, got %q", observedReqs[1].SHA)
+	}
+	if observedReqs[1].Bytes != "" {
+		t.Fatalf("expected empty X-Expected-Bytes on second request, got %q", observedReqs[1].Bytes)
+	}
+}
+
 func TestClientUpdateMetadataRequiresFields(t *testing.T) {
 	t.Parallel()
 

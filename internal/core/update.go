@@ -3,6 +3,8 @@ package core
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -19,22 +21,40 @@ func normalizeETag(etag string) string {
 	return strings.Trim(strings.TrimSpace(etag), "\"")
 }
 
+func normalizeExpectedSHA256(raw string) (string, error) {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	if value == "" {
+		return "", nil
+	}
+	if len(value) != 64 {
+		return "", fmt.Errorf("expected sha256 must be 64 hex characters")
+	}
+	decoded, err := hex.DecodeString(value)
+	if err != nil {
+		return "", fmt.Errorf("expected sha256 must be valid hex")
+	}
+	return hex.EncodeToString(decoded), nil
+}
+
 // UpdateCommand captures state write parameters.
 type UpdateCommand struct {
-	Namespace      string
-	Key            string
-	LeaseID        string
-	FencingToken   int64
-	TxnID          string
-	IfVersion      int64
-	IfVersionSet   bool
-	IfStateETag    string
-	Body           io.Reader
-	CompactWriter  func(io.Writer, io.Reader, int64) error
-	MaxBytes       int64
-	SpoolThreshold int64
-	KnownMeta      *storage.Meta
-	KnownMetaETag  string
+	Namespace        string
+	Key              string
+	LeaseID          string
+	FencingToken     int64
+	TxnID            string
+	IfVersion        int64
+	IfVersionSet     bool
+	IfStateETag      string
+	ExpectedSHA256   string
+	ExpectedBytes    int64
+	ExpectedBytesSet bool
+	Body             io.Reader
+	CompactWriter    func(io.Writer, io.Reader, int64) error
+	MaxBytes         int64
+	SpoolThreshold   int64
+	KnownMeta        *storage.Meta
+	KnownMetaETag    string
 }
 
 // UpdateResult describes the new state metadata after a successful update.
@@ -73,6 +93,13 @@ func (s *Service) Update(ctx context.Context, cmd UpdateCommand) (*UpdateResult,
 	if strings.TrimSpace(cmd.TxnID) == "" {
 		return nil, Failure{Code: "missing_txn", Detail: "X-Txn-ID required", HTTPStatus: http.StatusBadRequest}
 	}
+	expectedSHA256, err := normalizeExpectedSHA256(cmd.ExpectedSHA256)
+	if err != nil {
+		return nil, Failure{Code: "invalid_expected_sha256", Detail: err.Error(), HTTPStatus: http.StatusBadRequest}
+	}
+	if cmd.ExpectedBytesSet && cmd.ExpectedBytes < 0 {
+		return nil, Failure{Code: "invalid_expected_bytes", Detail: "expected bytes must be >= 0", HTTPStatus: http.StatusBadRequest}
+	}
 
 	storageKey, err := s.namespacedKey(namespace, cmd.Key)
 	if err != nil {
@@ -89,14 +116,33 @@ func (s *Service) Update(ctx context.Context, cmd UpdateCommand) (*UpdateResult,
 	}
 
 	// Compact and spill to disk if needed
+	counting := &countingReader{r: limited, hash: sha256.New()}
 	spool := newPayloadSpool(cmd.SpoolThreshold)
 	defer spool.Close()
-	if err := cmd.CompactWriter(spool, limited, cmd.MaxBytes); err != nil {
+	if err := cmd.CompactWriter(spool, counting, cmd.MaxBytes); err != nil {
 		var fail Failure
 		if errors.As(err, &fail) {
 			return nil, fail
 		}
 		return nil, httpErrorFrom(err)
+	}
+	actualBytes := counting.Count()
+	if cmd.ExpectedBytesSet && actualBytes != cmd.ExpectedBytes {
+		return nil, Failure{
+			Code:       "expected_bytes_mismatch",
+			Detail:     fmt.Sprintf("payload bytes mismatch: expected=%d actual=%d", cmd.ExpectedBytes, actualBytes),
+			HTTPStatus: http.StatusConflict,
+		}
+	}
+	if expectedSHA256 != "" {
+		actual := counting.SumHex()
+		if actual != expectedSHA256 {
+			return nil, Failure{
+				Code:       "expected_sha256_mismatch",
+				Detail:     fmt.Sprintf("payload sha256 mismatch: expected=%s actual=%s", expectedSHA256, actual),
+				HTTPStatus: http.StatusConflict,
+			}
+		}
 	}
 
 	for {

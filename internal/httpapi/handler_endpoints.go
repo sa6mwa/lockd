@@ -1618,6 +1618,8 @@ func (h *Handler) handleIndexFlush(w http.ResponseWriter, r *http.Request) error
 // @Param        X-Fencing-Token    header  string  false  "Optional fencing token proof"
 // @Param        X-If-Version       header  string  false  "Conditionally update when the current version matches"
 // @Param        X-If-State-ETag    header  string  false  "Conditionally update when the state ETag matches"
+// @Param        X-Expected-SHA256  header  string  false  "Optional lowercase hex SHA-256 checksum for the submitted JSON bytes (pre-compaction)"
+// @Param        X-Expected-Bytes   header  string  false  "Optional exact byte length for the submitted JSON bytes (pre-compaction)"
 // @Param        state              body    string  true   "New JSON state payload"
 // @Success      200                {object}  api.UpdateResponse
 // @Failure      400                {object}  api.ErrorResponse
@@ -1666,6 +1668,20 @@ func (h *Handler) handleUpdate(w http.ResponseWriter, r *http.Request) error {
 		}
 	}
 	expectETag := strings.TrimSpace(r.Header.Get("X-If-State-ETag"))
+	expectedSHA256 := strings.TrimSpace(r.Header.Get(headerExpectedSHA256))
+	expectedBytes := int64(0)
+	expectedBytesSet := false
+	if raw := strings.TrimSpace(r.Header.Get(headerExpectedBytes)); raw != "" {
+		parsed, parseErr := strconv.ParseInt(raw, 10, 64)
+		if parseErr != nil {
+			return httpError{Status: http.StatusBadRequest, Code: "invalid_expected_bytes", Detail: parseErr.Error()}
+		}
+		if parsed < 0 {
+			return httpError{Status: http.StatusBadRequest, Code: "invalid_expected_bytes", Detail: "X-Expected-Bytes must be >= 0"}
+		}
+		expectedBytes = parsed
+		expectedBytesSet = true
+	}
 	if _, err := parseMetadataHeaders(r); err != nil {
 		return err
 	} // TODO: pass through when core supports metadata patch
@@ -1676,20 +1692,23 @@ func (h *Handler) handleUpdate(w http.ResponseWriter, r *http.Request) error {
 		knownETag = cachedETag
 	}
 	res, err := h.core.Update(r.Context(), core.UpdateCommand{
-		Namespace:      r.URL.Query().Get("namespace"),
-		Key:            key,
-		LeaseID:        leaseID,
-		TxnID:          txnID,
-		FencingToken:   fencingToken,
-		IfVersion:      expectVersion,
-		IfStateETag:    expectETag,
-		Body:           http.MaxBytesReader(w, r.Body, h.jsonMaxBytes),
-		CompactWriter:  h.compactWriter,
-		MaxBytes:       h.jsonMaxBytes,
-		SpoolThreshold: h.spoolThreshold,
-		KnownMeta:      knownMeta,
-		KnownMetaETag:  knownETag,
-		IfVersionSet:   expectVersionSet,
+		Namespace:        r.URL.Query().Get("namespace"),
+		Key:              key,
+		LeaseID:          leaseID,
+		TxnID:            txnID,
+		FencingToken:     fencingToken,
+		IfVersion:        expectVersion,
+		IfStateETag:      expectETag,
+		ExpectedSHA256:   expectedSHA256,
+		ExpectedBytes:    expectedBytes,
+		ExpectedBytesSet: expectedBytesSet,
+		Body:             http.MaxBytesReader(w, r.Body, h.jsonMaxBytes),
+		CompactWriter:    h.compactWriter,
+		MaxBytes:         h.jsonMaxBytes,
+		SpoolThreshold:   h.spoolThreshold,
+		KnownMeta:        knownMeta,
+		KnownMetaETag:    knownETag,
+		IfVersionSet:     expectVersionSet,
 	})
 	if err != nil {
 		return convertCoreError(err)

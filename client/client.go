@@ -1443,6 +1443,8 @@ const headerQueryMetadata = "X-Lockd-Query-Metadata"
 const headerQueryReturn = "X-Lockd-Query-Return"
 const contentTypeNDJSON = "application/x-ndjson"
 const headerShutdownImminent = "Shutdown-Imminent"
+const headerExpectedSHA256 = "X-Expected-SHA256"
+const headerExpectedBytes = "X-Expected-Bytes"
 const (
 	minQueueAutoExtendInterval = 250 * time.Millisecond
 	maxQueueAutoExtendInterval = 30 * time.Second
@@ -2886,6 +2888,10 @@ type UpdateOptions struct {
 	IfETag string
 	// IfVersion sets a conditional version guard (X-If-Version).
 	IfVersion *int64
+	// ExpectedSHA256 enforces the submitted JSON payload SHA-256 (pre-compaction).
+	ExpectedSHA256 string
+	// ExpectedBytes enforces the submitted JSON payload byte length (pre-compaction).
+	ExpectedBytes *int64
 	// FencingToken provides explicit fencing when not already registered on the client.
 	FencingToken *int64
 	// Namespace scopes the mutation. Empty uses the client's default namespace.
@@ -5298,6 +5304,12 @@ func (c *Client) UpdateStream(ctx context.Context, key, leaseID string, body io.
 		if opts.IfVersion != nil {
 			req.Header.Set("X-If-Version", strconv.FormatInt(*opts.IfVersion, 10))
 		}
+		if checksum := strings.TrimSpace(opts.ExpectedSHA256); checksum != "" {
+			req.Header.Set(headerExpectedSHA256, checksum)
+		}
+		if opts.ExpectedBytes != nil {
+			req.Header.Set(headerExpectedBytes, strconv.FormatInt(*opts.ExpectedBytes, 10))
+		}
 		req.Header.Set(headerFencingToken, strconv.FormatInt(token, 10))
 		opts.Metadata.applyHeaders(req)
 		c.applyCorrelationHeader(ctx, req, "")
@@ -5367,6 +5379,12 @@ func (c *Client) updateWithPreferred(ctx context.Context, key, leaseID string, b
 		}
 		if opts.IfVersion != nil {
 			req.Header.Set("X-If-Version", strconv.FormatInt(*opts.IfVersion, 10))
+		}
+		if checksum := strings.TrimSpace(opts.ExpectedSHA256); checksum != "" {
+			req.Header.Set(headerExpectedSHA256, checksum)
+		}
+		if opts.ExpectedBytes != nil {
+			req.Header.Set(headerExpectedBytes, strconv.FormatInt(*opts.ExpectedBytes, 10))
 		}
 		req.Header.Set(headerFencingToken, strconv.FormatInt(token, 10))
 		opts.Metadata.applyHeaders(req)

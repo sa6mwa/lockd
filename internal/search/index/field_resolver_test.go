@@ -2,6 +2,7 @@ package index
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -261,5 +262,51 @@ func TestIndexAdapterQueryWildcardArraySugar(t *testing.T) {
 	}
 	if !slices.Equal(resp.Keys, []string{"doc-open"}) {
 		t.Fatalf("unexpected wildcard [] keys %v", resp.Keys)
+	}
+}
+
+func TestShouldUseTriePatternPlanner(t *testing.T) {
+	if !shouldUseTriePatternPlanner([]string{"logs", "*", "message"}, 512) {
+		t.Fatal("expected trie planner for moderate wildcard pattern")
+	}
+	if shouldUseTriePatternPlanner([]string{"logs", "...", "message"}, 8_192) {
+		t.Fatal("expected fallback planner for recursive pattern at large field count")
+	}
+	if shouldUseTriePatternPlanner([]string{"a", "*", "*", "*", "*", "*", "*", "z"}, 11_000) {
+		t.Fatal("expected fallback planner for high estimated state count")
+	}
+}
+
+func TestResolveSelectorFieldsFallbackPlannerMatches(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	store := NewStore(mem, nil)
+
+	segment := NewSegment("seg-planner-fallback", time.Unix(1_700_000_140, 0))
+	for i := 0; i < 5_000; i++ {
+		field := fmt.Sprintf("/logs/site/%04d/message", i)
+		segment.Fields[field] = FieldBlock{Postings: map[string][]string{
+			"timeout": {fmt.Sprintf("doc-%04d", i)},
+		}}
+	}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+	manifest := NewManifest()
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{{
+			ID:        segment.ID,
+			CreatedAt: segment.CreatedAt,
+			DocCount:  segment.DocCount(),
+		}},
+	}
+	reader := newSegmentReader(namespaces.Default, manifest, store, nil)
+	fields, err := reader.resolveSelectorFields(ctx, "/logs/.../message")
+	if err != nil {
+		t.Fatalf("resolve selector fields: %v", err)
+	}
+	if len(fields) != 5_000 {
+		t.Fatalf("expected 5000 resolved fields, got %d", len(fields))
 	}
 }

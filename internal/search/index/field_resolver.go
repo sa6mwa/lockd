@@ -35,6 +35,16 @@ func (r *segmentReader) resolveSelectorFields(ctx context.Context, field string)
 	if err != nil {
 		return nil, err
 	}
+	if !shouldUseTriePatternPlanner(pattern, len(fields)) {
+		matches := make([]string, 0, 16)
+		for _, candidate := range fields {
+			if wildcardFieldPathMatch(pattern, r.fieldSegments[candidate]) {
+				matches = append(matches, candidate)
+			}
+		}
+		r.fieldResolutionCached[field] = matches
+		return matches, nil
+	}
 	trieMatches, matchErr := r.matchPatternWithTrie(pattern)
 	if matchErr == nil {
 		r.fieldResolutionCached[field] = trieMatches
@@ -49,6 +59,30 @@ func (r *segmentReader) resolveSelectorFields(ctx context.Context, field string)
 	}
 	r.fieldResolutionCached[field] = matches
 	return matches, nil
+}
+
+func shouldUseTriePatternPlanner(pattern []string, fieldCount int) bool {
+	if fieldCount <= 0 || len(pattern) == 0 {
+		return true
+	}
+	wildcards := 0
+	recursive := 0
+	for _, token := range pattern {
+		switch token {
+		case "*", "[]":
+			wildcards++
+		case "**", "...":
+			recursive++
+		}
+	}
+	if recursive == 0 && wildcards == 0 {
+		return true
+	}
+	if recursive > 0 && fieldCount > 4_096 {
+		return false
+	}
+	estimatedStates := fieldCount * (1 + (wildcards * 2) + (recursive * 8))
+	return estimatedStates <= (maxTriePatternStates / 2)
 }
 
 func (r *segmentReader) allIndexFields(ctx context.Context) ([]string, error) {

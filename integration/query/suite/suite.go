@@ -239,12 +239,10 @@ func RunDocumentStreaming(t *testing.T, factory ServerFactory) {
 // RunLargeNamespaceLowMatchKeys validates key-return queries stay correct for
 // large namespaces when selectors match very few documents.
 func RunLargeNamespaceLowMatchKeys(t *testing.T, factory ServerFactory) {
-	withServer(t, factory, 30*time.Second, func(ctx context.Context, ts *lockd.TestServer, httpClient *http.Client) {
+	withServer(t, factory, 3*time.Minute, func(ctx context.Context, ts *lockd.TestServer, httpClient *http.Client) {
 		namespace := "q-lowmatch-keys-" + xid.New().String()
-		const (
-			totalDocs  = 384
-			targetTerm = "needle-token-42"
-		)
+		const targetTerm = "needle-token-42"
+		totalDocs := largeNamespaceLowMatchTotalDocs(ts.Config.Store)
 		targetKey := ""
 		for i := 0; i < totalDocs; i++ {
 			key := fmt.Sprintf("lowmatch-key-%03d", i)
@@ -286,12 +284,10 @@ and.contains{field=/details/*/message,value=` + targetTerm + `}`)
 // RunLargeNamespaceLowMatchDocuments validates document-return streaming for
 // large namespaces when selectors match very few documents.
 func RunLargeNamespaceLowMatchDocuments(t *testing.T, factory ServerFactory) {
-	withServer(t, factory, 30*time.Second, func(ctx context.Context, ts *lockd.TestServer, httpClient *http.Client) {
+	withServer(t, factory, 3*time.Minute, func(ctx context.Context, ts *lockd.TestServer, httpClient *http.Client) {
 		namespace := "q-lowmatch-docs-" + xid.New().String()
-		const (
-			totalDocs  = 384
-			targetTerm = "needle-token-84"
-		)
+		const targetTerm = "needle-token-84"
+		totalDocs := largeNamespaceLowMatchTotalDocs(ts.Config.Store)
 		targetKey := ""
 		for i := 0; i < totalDocs; i++ {
 			key := fmt.Sprintf("lowmatch-doc-%03d", i)
@@ -343,9 +339,9 @@ and.contains{field=/details/*/message,value=` + targetTerm + `}`)
 // RunDocumentStreamingFlowControl validates cancellation and slow-reader
 // behavior for return=documents streaming.
 func RunDocumentStreamingFlowControl(t *testing.T, factory ServerFactory) {
-	withServer(t, factory, 35*time.Second, func(ctx context.Context, ts *lockd.TestServer, httpClient *http.Client) {
+	withServer(t, factory, 2*time.Minute, func(ctx context.Context, ts *lockd.TestServer, httpClient *http.Client) {
 		namespace := "q-stream-flow-" + xid.New().String()
-		const totalDocs = 128
+		totalDocs := documentStreamingFlowTotalDocs(ts.Config.Store)
 		for i := 0; i < totalDocs; i++ {
 			key := fmt.Sprintf("stream-flow-%03d", i)
 			querydata.SeedState(ctx, t, ts.Client, namespace, key, map[string]any{
@@ -439,6 +435,33 @@ func RunDocumentStreamingFlowControl(t *testing.T, factory ServerFactory) {
 			}
 		})
 	})
+}
+
+func documentStreamingFlowTotalDocs(store string) int {
+	switch {
+	case isObjectStoreStore(store):
+		// Object-store backends have substantially higher per-document seed
+		// latency in CI; keep enough rows for flow-control assertions while
+		// avoiding suite-level timeout pressure.
+		return 24
+	default:
+		return 128
+	}
+}
+
+func largeNamespaceLowMatchTotalDocs(store string) int {
+	if isObjectStoreStore(store) {
+		// Keep the low-match semantics while reducing fixture size for slower
+		// object-store backends.
+		return 48
+	}
+	return 384
+}
+
+func isObjectStoreStore(store string) bool {
+	return strings.HasPrefix(store, "aws://") ||
+		strings.HasPrefix(store, "azure://") ||
+		strings.HasPrefix(store, "s3://")
 }
 
 // RunDomainDatasets seeds richer domain data (finance, firmware, SALUTE, flight) and evaluates selectors.

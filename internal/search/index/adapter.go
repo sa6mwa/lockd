@@ -141,7 +141,7 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 			reader:        reader,
 			containsNgram: manifest.Format >= IndexFormatVersionV4,
 		}
-		matches, err = eval.evaluate(ctx, req.Selector)
+		matches, err = eval.evaluate(ctx, selector)
 	}
 	if err != nil {
 		return search.Result{}, err
@@ -322,7 +322,7 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 			reader:        reader,
 			containsNgram: manifest.Format >= IndexFormatVersionV4,
 		}
-		matches, err = eval.evaluate(ctx, req.Selector)
+		matches, err = eval.evaluate(ctx, selector)
 	}
 	if err != nil {
 		return search.Result{}, err

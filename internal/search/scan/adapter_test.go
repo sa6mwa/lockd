@@ -88,6 +88,42 @@ and.range{field=/amount,gte=120,lt=200}`)
 	}
 }
 
+func TestScanAdapterSelectorNumericMapKeyCompatibility(t *testing.T) {
+	store := memory.New()
+	ctx := context.Background()
+	writeState(t, store, "default", "voucher/1", map[string]any{
+		"voucher": map[string]any{
+			"book": "GENERAL",
+			"lines": map[string]any{
+				"10": map[string]any{"amount": 3500},
+			},
+		},
+	})
+
+	sel, err := lql.ParseSelectorString(`
+and.eq{field=/voucher/book,value=GENERAL},
+and.range{field=/voucher/lines/10/amount,gte=3000}`)
+	if err != nil || sel.IsEmpty() {
+		t.Fatalf("selector parse: %v", err)
+	}
+
+	adapter, err := New(Config{Backend: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	result, err := adapter.Query(ctx, search.Request{
+		Namespace: "default",
+		Selector:  sel,
+		Limit:     5,
+	})
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(result.Keys) != 1 || result.Keys[0] != "voucher/1" {
+		t.Fatalf("unexpected keys %v", result.Keys)
+	}
+}
+
 func TestScanAdapterCursor(t *testing.T) {
 	store := memory.New()
 	ctx := context.Background()
@@ -194,6 +230,56 @@ func TestScanAdapterQueryDocumentsSelectorReadsStateOncePerCandidate(t *testing.
 	if got := backend.reads["orders/2"]; got != 1 {
 		t.Fatalf("expected one read for non-matched candidate, got %d", got)
 	}
+}
+
+func TestScanAdapterQueryDocumentsNumericMapKeyCompatibility(t *testing.T) {
+	store := memory.New()
+	ctx := context.Background()
+	writeState(t, store, "default", "voucher/1", map[string]any{
+		"voucher": map[string]any{
+			"book": "GENERAL",
+			"lines": map[string]any{
+				"10": map[string]any{"amount": 3500},
+			},
+		},
+	})
+	writeState(t, store, "default", "voucher/2", map[string]any{
+		"voucher": map[string]any{
+			"book": "GENERAL",
+			"lines": map[string]any{
+				"10": map[string]any{"amount": 1200},
+			},
+		},
+	})
+
+	sel, err := lql.ParseSelectorString(`
+and.eq{field=/voucher/book,value=GENERAL},
+and.range{field=/voucher/lines/10/amount,gte=3000}`)
+	if err != nil || sel.IsEmpty() {
+		t.Fatalf("selector parse: %v", err)
+	}
+
+	adapter, err := New(Config{Backend: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	sink := &capturingDocumentSink{}
+	result, err := adapter.QueryDocuments(ctx, search.Request{
+		Namespace: "default",
+		Selector:  sel,
+		Limit:     5,
+	}, sink)
+	if err != nil {
+		t.Fatalf("query documents: %v", err)
+	}
+	if len(result.Keys) != 1 || result.Keys[0] != "voucher/1" {
+		t.Fatalf("unexpected keys %v", result.Keys)
+	}
+	if len(sink.rows) != 1 || sink.rows[0].key != "voucher/1" {
+		t.Fatalf("unexpected streamed rows: %+v", sink.rows)
+	}
+	assertQueryMetadataInt(t, result.Metadata, search.MetadataQueryCandidatesSeen, 2)
+	assertQueryMetadataInt(t, result.Metadata, search.MetadataQueryCandidatesMatched, 1)
 }
 
 func TestScanAdapterQueryDocumentsLargeMatchReportsSpill(t *testing.T) {

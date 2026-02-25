@@ -92,12 +92,12 @@ Scope: lockd-side migration and performance program to complete true inline stre
 - [ ] P3.E4 Add benchmarks comparing representations by selectivity bands.
 
 ## Phase 4: Wildcard + Recursive Query Planner Maturity
-- [ ] P4.1 Add planner cost model for wildcard/recursive expansions (avoid pathological traversal).
-- [ ] P4.2 Add selector-to-plan caching keyed by normalized selector AST.
-- [ ] P4.3 Add safeguards for recursive explosion with deterministic fallback path.
-- [ ] P4.4 Add benchmark profile for deep recursive selectors over wide field trees.
-- [ ] P4.5 Add benchmark profile for wide wildcard selectors (`/a/*/*/*`) with low/high selectivity.
-- [ ] P4.6 Add explicit fail-safe behavior tests when plan state cap is exceeded.
+- [x] P4.1 Add planner cost model for wildcard/recursive expansions (avoid pathological traversal).
+- [x] P4.2 Add selector-to-plan caching keyed by normalized selector AST.
+- [x] P4.3 Add safeguards for recursive explosion with deterministic fallback path.
+- [x] P4.4 Add benchmark profile for deep recursive selectors over wide field trees.
+- [x] P4.5 Add benchmark profile for wide wildcard selectors (`/a/*/*/*`) with low/high selectivity.
+- [x] P4.6 Add explicit fail-safe behavior tests when plan state cap is exceeded.
 
 ## Phase 5: Full-text Lucene-like Capability (index-side)
 - [ ] P5.1 Define full-text scope for lockd (filtering only vs optional scoring/ranking).
@@ -161,4 +161,5 @@ Scope: lockd-side migration and performance program to complete true inline stre
 - [x] 2026-02-25: P3.D4 rebuild-format handling landed (pending commit): rebuild now preserves/bootstrap target manifest format after `reset`, cleanup removes segments below target format (e.g. v4 when target is v5), and new core tests cover reset-format preservation and lower-format cleanup.
 - [x] 2026-02-25: P3.D5 integration rebuild coverage landed (pending commit): added `RunIndexRebuildUpgrade` in query suite and wired backend query integration tests (mem/disk/nfs/aws/azure/minio) to validate v4 legacy segment cleanup and v5 rebuild correctness on real backends.
 - [x] 2026-02-25: P3.D6 benchmark report recorded (pending commit): wildcard resolve `15.32 ns/op` (0 alloc), recursive resolve `23.62 ns/op` (0 alloc), wildcard contains `791,083 ns/op`, `186,004 B/op`, `4,106 allocs/op`, adapter wildcard contains `3,091,692 ns/op`, `1,962,550 B/op`, `12,386 allocs/op`.
+- [x] 2026-02-25: Phase 4 baseline confirmed by existing implementation/tests: planner cost heuristics + selector plan cache + recursive fallback safeguards are active; deep-recursive and wide-wildcard benchmarks are present in `adapter_benchmark_test.go`; state-cap fail-safe is pinned in `field_resolver_test.go`.
 - [ ] YYYY-MM-DD: Next slice commit + benchmark delta summary.

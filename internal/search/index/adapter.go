@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1903,7 +1904,7 @@ func sortUniqueDocIDs(in docIDSet) docIDSet {
 	if len(in) == 0 {
 		return nil
 	}
-	sort.Slice(in, func(i, j int) bool { return in[i] < in[j] })
+	slices.Sort(in)
 	w := 1
 	for i := 1; i < len(in); i++ {
 		if in[i] == in[w-1] {

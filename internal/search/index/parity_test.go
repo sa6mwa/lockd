@@ -256,6 +256,45 @@ func TestIndexScanParityWildcardOrderingAndCursor(t *testing.T) {
 	}
 }
 
+func TestIndexScanParityPartialSegmentCoverage(t *testing.T) {
+	docs := buildSyntheticParityDocs(180)
+	keys := make([]string, 0, len(docs))
+	for key := range docs {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for i, key := range keys {
+		doc := docs[key]
+		if i%2 == 0 {
+			delete(doc, "logs")
+		}
+		if i%3 == 0 {
+			delete(doc, "flags")
+		}
+		if i%5 == 0 {
+			delete(doc, "records")
+		}
+	}
+	h := newParityHarnessSegmented(t, docs, 5)
+
+	cases := []api.Selector{
+		{Exists: "/logs/a/message"},
+		{Contains: &api.Term{Field: "/logs/*/message", Value: "timeout"}},
+		{Exists: "/flags/priority"},
+		{
+			And: []api.Selector{
+				{Eq: &api.Term{Field: "/status", Value: "open"}},
+				{Exists: "/logs/a/message"},
+			},
+		},
+	}
+	for i, sel := range cases {
+		t.Run(fmt.Sprintf("partial-%02d", i), func(t *testing.T) {
+			h.assertParity(t, sel)
+		})
+	}
+}
+
 func (h parityHarness) assertParity(t *testing.T, selector api.Selector) {
 	t.Helper()
 	ctx := context.Background()
@@ -349,13 +388,34 @@ func assertSortedUniqueKeys(t *testing.T, keys []string) {
 }
 
 func newParityHarness(t *testing.T, docs map[string]map[string]any) parityHarness {
+	return newParityHarnessSegmented(t, docs, 1)
+}
+
+func newParityHarnessSegmented(t *testing.T, docs map[string]map[string]any, segmentCount int) parityHarness {
 	t.Helper()
+	if segmentCount <= 0 {
+		segmentCount = 1
+	}
 	ctx := context.Background()
 	mem := memory.New()
 	store := NewStore(mem, nil)
-	segment := NewSegment(fmt.Sprintf("seg-parity-%d", time.Now().UnixNano()), time.Unix(1_700_100_000, 0))
+	seed := time.Now().UnixNano()
+	segments := make([]*Segment, 0, segmentCount)
+	for i := 0; i < segmentCount; i++ {
+		segments = append(segments, NewSegment(
+			fmt.Sprintf("seg-parity-%d-%d", seed, i),
+			time.Unix(1_700_100_000+int64(i), 0),
+		))
+	}
 
-	for key, doc := range docs {
+	keys := make([]string, 0, len(docs))
+	for key := range docs {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	for i, key := range keys {
+		doc := docs[key]
 		payload, err := json.Marshal(doc)
 		if err != nil {
 			t.Fatalf("marshal %s: %v", key, err)
@@ -379,6 +439,7 @@ func newParityHarness(t *testing.T, docs map[string]map[string]any) parityHarnes
 		if err != nil {
 			t.Fatalf("index terms %s: %v", key, err)
 		}
+		segment := segments[i%len(segments)]
 		for field, fieldTerms := range terms {
 			block := segment.Fields[field]
 			if block.Postings == nil {
@@ -391,21 +452,30 @@ func newParityHarness(t *testing.T, docs map[string]map[string]any) parityHarnes
 		}
 	}
 
-	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
-		t.Fatalf("write segment: %v", err)
-	}
 	manifest := NewManifest()
 	manifest.Seq = 1
-	manifest.UpdatedAt = segment.CreatedAt
 	manifest.Format = IndexFormatVersionV4
-	manifest.Shards[0] = &Shard{
-		ID: 0,
-		Segments: []SegmentRef{{
+	refs := make([]SegmentRef, 0, len(segments))
+	for _, segment := range segments {
+		if segment.DocCount() == 0 {
+			continue
+		}
+		if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
+			t.Fatalf("write segment %s: %v", segment.ID, err)
+		}
+		refs = append(refs, SegmentRef{
 			ID:        segment.ID,
 			CreatedAt: segment.CreatedAt,
 			DocCount:  segment.DocCount(),
-		}},
+		})
+		if segment.CreatedAt.After(manifest.UpdatedAt) {
+			manifest.UpdatedAt = segment.CreatedAt
+		}
 	}
+	if len(refs) == 0 {
+		t.Fatalf("expected at least one populated segment")
+	}
+	manifest.Shards[0] = &Shard{ID: 0, Segments: refs}
 	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
 		t.Fatalf("save manifest: %v", err)
 	}

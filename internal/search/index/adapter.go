@@ -357,6 +357,27 @@ func (r *segmentReader) keysForPrefix(ctx context.Context, term *api.Term) (keyS
 	return result, err
 }
 
+func (r *segmentReader) keysForContains(ctx context.Context, term *api.Term) (keySet, error) {
+	field := normalizeField(term)
+	if field == "" {
+		return make(keySet), nil
+	}
+	needle := normalizeTermValue(term.Value)
+	if needle == "" {
+		return r.keysForExists(ctx, field)
+	}
+	result := make(keySet)
+	err := r.forEachPosting(ctx, field, func(termValue string, keys []string) error {
+		if strings.Contains(termValue, needle) {
+			for _, key := range keys {
+				result[key] = struct{}{}
+			}
+		}
+		return nil
+	})
+	return result, err
+}
+
 func (r *segmentReader) keysForRange(ctx context.Context, term *api.RangeTerm) (keySet, error) {
 	field := normalizeRangeField(term)
 	if field == "" {
@@ -643,6 +664,27 @@ func (e selectorEvaluator) evaluateBase(ctx context.Context, sel api.Selector) (
 		}
 		intersectWith(set)
 	}
+	if sel.IPrefix != nil {
+		set, err := e.reader.keysForPrefix(ctx, sel.IPrefix)
+		if err != nil {
+			return nil, false, err
+		}
+		intersectWith(set)
+	}
+	if sel.Contains != nil {
+		set, err := e.reader.keysForContains(ctx, sel.Contains)
+		if err != nil {
+			return nil, false, err
+		}
+		intersectWith(set)
+	}
+	if sel.IContains != nil {
+		set, err := e.reader.keysForContains(ctx, sel.IContains)
+		if err != nil {
+			return nil, false, err
+		}
+		intersectWith(set)
+	}
 	if sel.Range != nil {
 		set, err := e.reader.keysForRange(ctx, sel.Range)
 		if err != nil {
@@ -797,25 +839,26 @@ func selectorSupportsLegacyIndexFilter(sel api.Selector) bool {
 		return true
 	}
 	caps := lql.InspectSelectorCapabilities(sel)
-	if caps.Contains || caps.WildcardPath || caps.RecursivePath {
+	if caps.WildcardPath || caps.RecursivePath {
 		return false
 	}
-	payload, err := json.Marshal(sel)
-	if err != nil {
+	families := caps.Families()
+	if len(families) == 0 {
 		return false
 	}
-	if len(payload) == 0 || string(payload) == "{}" {
-		return true
+	supported := map[string]struct{}{
+		"and":      {},
+		"or":       {},
+		"not":      {},
+		"eq":       {},
+		"prefix":   {},
+		"contains": {},
+		"range":    {},
+		"in":       {},
+		"exists":   {},
 	}
-	raw := make(map[string]json.RawMessage)
-	if err := json.Unmarshal(payload, &raw); err != nil {
-		return false
-	}
-	for key := range raw {
-		switch key {
-		case "and", "or", "not", "eq", "prefix", "range", "in", "exists":
-			continue
-		default:
+	for _, family := range families {
+		if _, ok := supported[family]; !ok {
 			return false
 		}
 	}

@@ -257,6 +257,98 @@ func TestIndexAdapterQuery(t *testing.T) {
 	}
 }
 
+func TestIndexAdapterQueryContainsSelectors(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	store := NewStore(mem, nil)
+	segment := NewSegment("seg-contains", time.Unix(1_700_000_030, 0))
+	segment.Fields["/message"] = FieldBlock{Postings: map[string][]string{
+		"timeout while syncing": {"log-1"},
+		"operation complete":    {"log-2"},
+	}}
+	segment.Fields["/service"] = FieldBlock{Postings: map[string][]string{
+		"auth-api":    {"log-1"},
+		"billing-api": {"log-2"},
+	}}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+	manifest := NewManifest()
+	manifest.Seq = 3
+	manifest.UpdatedAt = segment.CreatedAt
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{{
+			ID:        segment.ID,
+			CreatedAt: segment.CreatedAt,
+			DocCount:  segment.DocCount(),
+		}},
+	}
+	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+	for _, key := range []string{"log-1", "log-2"} {
+		meta := &storage.Meta{
+			Version:          1,
+			PublishedVersion: 1,
+			StateETag:        "etag-" + key,
+		}
+		if _, err := mem.StoreMeta(ctx, namespaces.Default, key, meta, ""); err != nil {
+			t.Fatalf("store meta %s: %v", key, err)
+		}
+	}
+
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+
+	containsResp, err := adapter.Query(ctx, search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			Contains: &api.Term{Field: "/message", Value: "timeout"},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	})
+	if err != nil {
+		t.Fatalf("query contains: %v", err)
+	}
+	if !slices.Equal(containsResp.Keys, []string{"log-1"}) {
+		t.Fatalf("unexpected contains keys %v", containsResp.Keys)
+	}
+
+	icontainsResp, err := adapter.Query(ctx, search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			IContains: &api.Term{Field: "/message", Value: "TIMEOUT"},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	})
+	if err != nil {
+		t.Fatalf("query icontains: %v", err)
+	}
+	if !slices.Equal(icontainsResp.Keys, []string{"log-1"}) {
+		t.Fatalf("unexpected icontains keys %v", icontainsResp.Keys)
+	}
+
+	iprefixResp, err := adapter.Query(ctx, search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			IPrefix: &api.Term{Field: "/service", Value: "AUTH"},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	})
+	if err != nil {
+		t.Fatalf("query iprefix: %v", err)
+	}
+	if !slices.Equal(iprefixResp.Keys, []string{"log-1"}) {
+		t.Fatalf("unexpected iprefix keys %v", iprefixResp.Keys)
+	}
+}
+
 func TestIndexAdapterDocMeta(t *testing.T) {
 	ctx := context.Background()
 	mem := memory.New()

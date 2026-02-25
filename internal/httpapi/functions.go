@@ -238,12 +238,33 @@ func normalizeSelectorFields(sel *api.Selector) error {
 		}
 		sel.Eq.Field = normalized
 	}
+	if sel.Contains != nil {
+		normalized, err := jsonpointer.Normalize(sel.Contains.Field)
+		if err != nil {
+			return fmt.Errorf("contains.field: %w", err)
+		}
+		sel.Contains.Field = normalized
+	}
+	if sel.IContains != nil {
+		normalized, err := jsonpointer.Normalize(sel.IContains.Field)
+		if err != nil {
+			return fmt.Errorf("icontains.field: %w", err)
+		}
+		sel.IContains.Field = normalized
+	}
 	if sel.Prefix != nil {
 		normalized, err := jsonpointer.Normalize(sel.Prefix.Field)
 		if err != nil {
 			return fmt.Errorf("prefix.field: %w", err)
 		}
 		sel.Prefix.Field = normalized
+	}
+	if sel.IPrefix != nil {
+		normalized, err := jsonpointer.Normalize(sel.IPrefix.Field)
+		if err != nil {
+			return fmt.Errorf("iprefix.field: %w", err)
+		}
+		sel.IPrefix.Field = normalized
 	}
 	if sel.Range != nil {
 		normalized, err := jsonpointer.Normalize(sel.Range.Field)

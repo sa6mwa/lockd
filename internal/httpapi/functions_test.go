@@ -43,14 +43,17 @@ func TestParseQueryReturnMode(t *testing.T) {
 
 func TestNormalizeSelectorFields(t *testing.T) {
 	sel := api.Selector{
-		Eq:     &api.Term{Field: "/foo"},
-		Exists: "/bar",
-		And:    []api.Selector{{In: &api.InTerm{Field: "/baz"}}},
+		Eq:        &api.Term{Field: "/foo"},
+		Contains:  &api.Term{Field: "/msg"},
+		IContains: &api.Term{Field: "/desc"},
+		IPrefix:   &api.Term{Field: "/service"},
+		Exists:    "/bar",
+		And:       []api.Selector{{In: &api.InTerm{Field: "/baz"}}},
 	}
 	if err := normalizeSelectorFields(&sel); err != nil {
 		t.Fatalf("normalizeSelectorFields error: %v", err)
 	}
-	if sel.Eq.Field != "/foo" || sel.Exists != "/bar" || sel.And[0].In.Field != "/baz" {
+	if sel.Eq.Field != "/foo" || sel.Contains.Field != "/msg" || sel.IContains.Field != "/desc" || sel.IPrefix.Field != "/service" || sel.Exists != "/bar" || sel.And[0].In.Field != "/baz" {
 		t.Fatalf("fields not normalized: %+v", sel)
 	}
 }

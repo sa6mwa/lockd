@@ -44,6 +44,10 @@ func TestAzureQueryDocumentStreaming(t *testing.T) {
 	queriesuite.RunDocumentStreaming(t, startAzureQueryServer)
 }
 
+func TestAzureQueryDocumentStreamingFlowControl(t *testing.T) {
+	queriesuite.RunDocumentStreamingFlowControl(t, startAzureQueryServer)
+}
+
 func TestAzureQueryLargeNamespaceLowMatchKeys(t *testing.T) {
 	queriesuite.RunLargeNamespaceLowMatchKeys(t, startAzureQueryServer)
 }

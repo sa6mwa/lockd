@@ -43,6 +43,10 @@ func TestAWSQueryDocumentStreaming(t *testing.T) {
 	queriesuite.RunDocumentStreaming(t, startAWSQueryServer)
 }
 
+func TestAWSQueryDocumentStreamingFlowControl(t *testing.T) {
+	queriesuite.RunDocumentStreamingFlowControl(t, startAWSQueryServer)
+}
+
 func TestAWSQueryLargeNamespaceLowMatchKeys(t *testing.T) {
 	queriesuite.RunLargeNamespaceLowMatchKeys(t, startAWSQueryServer)
 }

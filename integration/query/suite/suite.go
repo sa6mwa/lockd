@@ -340,6 +340,107 @@ and.contains{field=/details/*/message,value=` + targetTerm + `}`)
 	})
 }
 
+// RunDocumentStreamingFlowControl validates cancellation and slow-reader
+// behavior for return=documents streaming.
+func RunDocumentStreamingFlowControl(t *testing.T, factory ServerFactory) {
+	withServer(t, factory, 35*time.Second, func(ctx context.Context, ts *lockd.TestServer, httpClient *http.Client) {
+		namespace := "q-stream-flow-" + xid.New().String()
+		const totalDocs = 128
+		for i := 0; i < totalDocs; i++ {
+			key := fmt.Sprintf("stream-flow-%03d", i)
+			querydata.SeedState(ctx, t, ts.Client, namespace, key, map[string]any{
+				"status": "open",
+				"index":  i,
+			})
+		}
+		flushNamespaces(ctx, t, ts.Client, namespace)
+
+		sel, err := lql.ParseSelectorString(`eq{field=/status,value=open}`)
+		if err != nil || sel.IsEmpty() {
+			t.Fatalf("parse selector: %v", err)
+		}
+		reqBody, err := json.Marshal(api.QueryRequest{
+			Namespace: namespace,
+			Selector:  sel,
+			Limit:     totalDocs,
+			Return:    api.QueryReturnDocuments,
+		})
+		if err != nil {
+			t.Fatalf("marshal query request: %v", err)
+		}
+		endpoint := fmt.Sprintf("%s/v1/query?return=%s", ts.URL(), api.QueryReturnDocuments)
+
+		t.Run("cancel-mid-stream", func(t *testing.T) {
+			reqCtx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, endpoint, bytes.NewReader(reqBody))
+			if err != nil {
+				t.Fatalf("new request: %v", err)
+			}
+			httpReq.Header.Set("Content-Type", "application/json")
+			resp, err := httpClient.Do(httpReq)
+			if err != nil {
+				t.Fatalf("query request failed: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				data, _ := io.ReadAll(resp.Body)
+				t.Fatalf("expected status 200, got %d: %s", resp.StatusCode, data)
+			}
+			scanner := bufio.NewScanner(resp.Body)
+			count := 0
+			for scanner.Scan() {
+				count++
+				if count >= 10 {
+					cancel()
+					break
+				}
+			}
+			_ = resp.Body.Close()
+			if count < 10 {
+				t.Fatalf("expected at least 10 rows before cancellation, got %d", count)
+			}
+			verify := doQuery(t, httpClient, ts.URL(), api.QueryRequest{
+				Namespace: namespace,
+				Selector:  sel,
+				Limit:     1,
+			})
+			if len(verify.Keys) != 1 {
+				t.Fatalf("expected server to remain responsive after cancellation, got keys=%v", verify.Keys)
+			}
+		})
+
+		t.Run("slow-reader", func(t *testing.T) {
+			httpReq, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(reqBody))
+			if err != nil {
+				t.Fatalf("new request: %v", err)
+			}
+			httpReq.Header.Set("Content-Type", "application/json")
+			resp, err := httpClient.Do(httpReq)
+			if err != nil {
+				t.Fatalf("query request failed: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				data, _ := io.ReadAll(resp.Body)
+				t.Fatalf("expected status 200, got %d: %s", resp.StatusCode, data)
+			}
+			scanner := bufio.NewScanner(resp.Body)
+			count := 0
+			for scanner.Scan() {
+				count++
+				time.Sleep(2 * time.Millisecond)
+			}
+			if err := scanner.Err(); err != nil {
+				t.Fatalf("scan stream: %v", err)
+			}
+			if count != totalDocs {
+				t.Fatalf("expected %d rows from slow reader stream, got %d", totalDocs, count)
+			}
+		})
+	})
+}
+
 // RunDomainDatasets seeds richer domain data (finance, firmware, SALUTE, flight) and evaluates selectors.
 func RunDomainDatasets(t *testing.T, factory ServerFactory, opts ...Option) {
 	cfg := runConfig{datasetProfile: querydata.DatasetFull}

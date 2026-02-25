@@ -43,6 +43,10 @@ func TestMinioQueryDocumentStreaming(t *testing.T) {
 	queriesuite.RunDocumentStreaming(t, startMinioQueryServer)
 }
 
+func TestMinioQueryDocumentStreamingFlowControl(t *testing.T) {
+	queriesuite.RunDocumentStreamingFlowControl(t, startMinioQueryServer)
+}
+
 func TestMinioQueryLargeNamespaceLowMatchKeys(t *testing.T) {
 	queriesuite.RunLargeNamespaceLowMatchKeys(t, startMinioQueryServer)
 }

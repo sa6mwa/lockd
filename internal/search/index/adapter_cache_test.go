@@ -318,6 +318,40 @@ func TestAdapterPreparedReaderCacheLifecycle(t *testing.T) {
 	}
 }
 
+func TestAdapterPreparedReaderCachesWildcardResolution(t *testing.T) {
+	ctx := context.Background()
+	_, adapter := buildSyntheticWildcardBenchIndex(ctx, t, 12, 10)
+	req := search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			IContains: &api.Term{Field: "/logs/*/message", Value: "TIMEOUT"},
+		},
+		Limit:  1_000,
+		Engine: search.EngineIndex,
+	}
+	if _, err := adapter.Query(ctx, req); err != nil {
+		t.Fatalf("query warm wildcard: %v", err)
+	}
+	if _, err := adapter.Query(ctx, req); err != nil {
+		t.Fatalf("query repeat wildcard: %v", err)
+	}
+	manifestRes, err := adapter.store.LoadManifest(ctx, namespaces.Default)
+	if err != nil {
+		t.Fatalf("load manifest: %v", err)
+	}
+	cacheKey := preparedReaderCacheKey(namespaces.Default, manifestRes.Manifest, manifestRes.ETag)
+	template, ok := adapter.readers.get(cacheKey)
+	if !ok || template == nil {
+		t.Fatalf("expected prepared reader cache entry for key %q", cacheKey)
+	}
+	if template.sharedFieldResolution == nil {
+		t.Fatal("expected shared field resolution cache to be present")
+	}
+	if got := template.sharedFieldResolution.len(); got == 0 {
+		t.Fatal("expected shared field resolution cache to contain wildcard entries")
+	}
+}
+
 func compiledTermDocKey(t *testing.T, reader *segmentReader, seg *compiledSegment, field string, term string) string {
 	t.Helper()
 	if seg == nil {

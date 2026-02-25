@@ -21,7 +21,7 @@ func (r *segmentReader) resolveSelectorFields(ctx context.Context, field string)
 	if !selectorFieldMayNeedExpansion(field) {
 		return []string{field}, nil
 	}
-	if cached, ok := r.fieldResolutionCached[field]; ok {
+	if cached, ok := r.cachedFieldResolution(field); ok {
 		return cached, nil
 	}
 	pattern, hasWildcard, err := selectorFieldPatternSegments(field)
@@ -42,12 +42,12 @@ func (r *segmentReader) resolveSelectorFields(ctx context.Context, field string)
 				matches = append(matches, candidate)
 			}
 		}
-		r.fieldResolutionCached[field] = matches
+		r.rememberFieldResolution(field, matches)
 		return matches, nil
 	}
 	trieMatches, matchErr := r.matchPatternWithTrie(pattern)
 	if matchErr == nil {
-		r.fieldResolutionCached[field] = trieMatches
+		r.rememberFieldResolution(field, trieMatches)
 		return trieMatches, nil
 	}
 	// Fallback preserves correctness under pathological recursive expansion.
@@ -57,8 +57,36 @@ func (r *segmentReader) resolveSelectorFields(ctx context.Context, field string)
 			matches = append(matches, candidate)
 		}
 	}
-	r.fieldResolutionCached[field] = matches
+	r.rememberFieldResolution(field, matches)
 	return matches, nil
+}
+
+func (r *segmentReader) cachedFieldResolution(field string) ([]string, bool) {
+	if r == nil || field == "" {
+		return nil, false
+	}
+	if cached, ok := r.fieldResolutionCached[field]; ok {
+		return cached, true
+	}
+	if r.sharedFieldResolution == nil {
+		return nil, false
+	}
+	cached, ok := r.sharedFieldResolution.get(field)
+	if !ok {
+		return nil, false
+	}
+	r.fieldResolutionCached[field] = cached
+	return cached, true
+}
+
+func (r *segmentReader) rememberFieldResolution(field string, matches []string) {
+	if r == nil || field == "" {
+		return
+	}
+	r.fieldResolutionCached[field] = matches
+	if r.sharedFieldResolution != nil {
+		r.sharedFieldResolution.put(field, matches)
+	}
 }
 
 func shouldUseTriePatternPlanner(pattern []string, fieldCount int) bool {

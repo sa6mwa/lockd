@@ -650,6 +650,7 @@ type segmentReader struct {
 	fieldListReady        bool
 	fieldSegments         map[string][]string
 	fieldResolutionCached map[string][]string
+	sharedFieldResolution *fieldResolutionCache
 	fieldTrie             *fieldPathTrie
 	immutable             bool
 }
@@ -666,6 +667,7 @@ func newSegmentReader(namespace string, manifest *Manifest, store *Store, logger
 		fieldIDs:              make(map[string]uint32),
 		fieldSegments:         make(map[string][]string),
 		fieldResolutionCached: make(map[string][]string),
+		sharedFieldResolution: newFieldResolutionCache(),
 	}
 }
 
@@ -1247,6 +1249,7 @@ func (r *segmentReader) cloneForQuery(manifest *Manifest) *segmentReader {
 		fieldListReady:        r.fieldListReady,
 		fieldSegments:         r.fieldSegments,
 		fieldResolutionCached: make(map[string][]string, 16),
+		sharedFieldResolution: r.sharedFieldResolution,
 		fieldTrie:             r.fieldTrie,
 		immutable:             true,
 	}

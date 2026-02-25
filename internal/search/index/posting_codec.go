@@ -158,3 +158,57 @@ func (p adaptivePosting) decodeInto(dst docIDSet) docIDSet {
 		return dst[:0]
 	}
 }
+
+func (p adaptivePosting) appendIntersectInto(dst, filter docIDSet) docIDSet {
+	if len(filter) == 0 {
+		return dst
+	}
+	switch p.encoding {
+	case postingEncodingBitset:
+		j := 0
+		for wordIdx, word := range p.dense {
+			base := uint32(wordIdx * 64)
+			for word != 0 {
+				tz := bits.TrailingZeros64(word)
+				docID := base + uint32(tz)
+				for j < len(filter) && filter[j] < docID {
+					j++
+				}
+				if j >= len(filter) {
+					return dst
+				}
+				if filter[j] == docID {
+					dst = append(dst, docID)
+					j++
+				}
+				word &= word - 1
+			}
+		}
+		return dst
+	case postingEncodingDeltaVarint:
+		payload := p.sparse
+		var docID uint32
+		j := 0
+		for len(payload) > 0 && j < len(filter) {
+			delta, n := binary.Uvarint(payload)
+			if n <= 0 {
+				break
+			}
+			docID += uint32(delta)
+			for j < len(filter) && filter[j] < docID {
+				j++
+			}
+			if j >= len(filter) {
+				break
+			}
+			if filter[j] == docID {
+				dst = append(dst, docID)
+				j++
+			}
+			payload = payload[n:]
+		}
+		return dst
+	default:
+		return dst
+	}
+}

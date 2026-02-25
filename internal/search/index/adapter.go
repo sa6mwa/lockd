@@ -992,12 +992,24 @@ func (r *segmentReader) docIDsForContainsField(
 	}
 	out := borrowDocIDScratch()
 	defer releaseDocIDScratch(out)
-	if err := r.forEachPostingDocIDsByFieldID(ctx, fieldID, func(termValue string, docIDs []uint32) error {
-		if strings.Contains(termValue, needle) {
-			if len(candidateFilter) > 0 {
-				*out = appendIntersectDocIDs(*out, docIDs, candidateFilter)
-				return nil
+	decoded := borrowDocIDScratch()
+	defer releaseDocIDScratch(decoded)
+	if err := r.forEachCompiledSegment(ctx, func(seg *compiledSegment) error {
+		block, ok := seg.fieldsByID[fieldID]
+		if !ok {
+			return nil
+		}
+		for termID, termValue := range block.terms {
+			if !strings.Contains(termValue, needle) {
+				continue
 			}
+			posting := block.postingsByID[termID]
+			if len(candidateFilter) > 0 {
+				*out = posting.appendIntersectInto(*out, candidateFilter)
+				continue
+			}
+			docIDs := posting.decodeInto((*decoded)[:0])
+			*decoded = docIDs
 			*out = append(*out, docIDs...)
 		}
 		return nil

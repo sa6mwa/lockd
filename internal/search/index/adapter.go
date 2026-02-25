@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -22,6 +23,13 @@ import (
 )
 
 const indexCursorPrefix = "indexv1:"
+
+var docIDScratchPool = sync.Pool{
+	New: func() any {
+		buf := make(docIDSet, 0, 256)
+		return &buf
+	},
+}
 
 // AdapterConfig configures the index query adapter.
 type AdapterConfig struct {
@@ -567,7 +575,8 @@ func newSegmentReader(namespace string, manifest *Manifest, store *Store, logger
 }
 
 func (r *segmentReader) allDocIDs(ctx context.Context) (docIDSet, error) {
-	out := make(docIDSet, 0)
+	out := borrowDocIDScratch()
+	defer releaseDocIDScratch(out)
 	err := r.forEachCompiledSegment(ctx, func(seg *compiledSegment) error {
 		for _, fieldID := range seg.fieldIDs {
 			block, ok := seg.fieldsByID[fieldID]
@@ -575,7 +584,7 @@ func (r *segmentReader) allDocIDs(ctx context.Context) (docIDSet, error) {
 				continue
 			}
 			for _, docIDs := range block.postingsByID {
-				out = append(out, docIDs...)
+				*out = append(*out, docIDs...)
 			}
 		}
 		return nil
@@ -583,7 +592,7 @@ func (r *segmentReader) allDocIDs(ctx context.Context) (docIDSet, error) {
 	if err != nil {
 		return nil, err
 	}
-	return sortUniqueDocIDs(out), nil
+	return sortUniqueDocIDs(append(docIDSet(nil), (*out)...)), nil
 }
 
 func (r *segmentReader) resolveSelectorFieldIDs(ctx context.Context, field string) ([]uint32, error) {
@@ -625,20 +634,20 @@ func (r *segmentReader) docIDsForTermID(ctx context.Context, fieldID uint32, ter
 	if strings.TrimSpace(term) == "" {
 		return nil, nil
 	}
-	out := make(docIDSet, 0)
+	var out docIDSet
 	err := r.forEachCompiledSegment(ctx, func(seg *compiledSegment) error {
 		block, ok := seg.fieldsByID[fieldID]
 		if !ok {
 			return nil
 		}
 		docIDs := block.docIDsForTerm(term)
-		out = append(out, docIDs...)
+		out = unionDocIDs(out, docIDs)
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return sortUniqueDocIDs(out), nil
+	return out, nil
 }
 
 func (r *segmentReader) docIDsForPrefix(ctx context.Context, term *api.Term) (docIDSet, error) {
@@ -650,18 +659,19 @@ func (r *segmentReader) docIDsForPrefix(ctx context.Context, term *api.Term) (do
 		return nil, nil
 	}
 	prefix := normalizeTermValue(term.Value)
-	out := make(docIDSet, 0)
+	out := borrowDocIDScratch()
+	defer releaseDocIDScratch(out)
 	for _, fieldID := range fieldIDs {
 		if err := r.forEachPostingDocIDsByFieldID(ctx, fieldID, func(termValue string, docIDs []uint32) error {
 			if strings.HasPrefix(termValue, prefix) {
-				out = append(out, docIDs...)
+				*out = append(*out, docIDs...)
 			}
 			return nil
 		}); err != nil {
 			return nil, err
 		}
 	}
-	return sortUniqueDocIDs(out), nil
+	return sortUniqueDocIDs(append(docIDSet(nil), (*out)...)), nil
 }
 
 func (r *segmentReader) docIDsForContains(ctx context.Context, term *api.Term, useTrigramIndex bool) (docIDSet, error) {
@@ -721,20 +731,21 @@ func (r *segmentReader) docIDsForContainsField(ctx context.Context, field string
 			}
 		}
 	}
-	out := make(docIDSet, 0)
+	out := borrowDocIDScratch()
+	defer releaseDocIDScratch(out)
 	if err := r.forEachPostingDocIDsByFieldID(ctx, fieldID, func(termValue string, docIDs []uint32) error {
 		if strings.Contains(termValue, needle) {
-			filtered := docIDs
 			if len(candidateFilter) > 0 {
-				filtered = intersectDocIDs(filtered, candidateFilter)
+				*out = appendIntersectDocIDs(*out, docIDs, candidateFilter)
+				return nil
 			}
-			out = append(out, filtered...)
+			*out = append(*out, docIDs...)
 		}
 		return nil
 	}); err != nil {
 		return nil, err
 	}
-	return sortUniqueDocIDs(out), nil
+	return sortUniqueDocIDs(append(docIDSet(nil), (*out)...)), nil
 }
 
 func (r *segmentReader) docIDsForRange(ctx context.Context, term *api.RangeTerm) (docIDSet, error) {
@@ -745,7 +756,8 @@ func (r *segmentReader) docIDsForRange(ctx context.Context, term *api.RangeTerm)
 	if len(fieldIDs) == 0 {
 		return nil, nil
 	}
-	out := make(docIDSet, 0)
+	out := borrowDocIDScratch()
+	defer releaseDocIDScratch(out)
 	for _, fieldID := range fieldIDs {
 		if err := r.forEachPostingDocIDsByFieldID(ctx, fieldID, func(termValue string, docIDs []uint32) error {
 			num, err := strconv.ParseFloat(termValue, 64)
@@ -755,13 +767,13 @@ func (r *segmentReader) docIDsForRange(ctx context.Context, term *api.RangeTerm)
 			if !rangeMatches(term, num) {
 				return nil
 			}
-			out = append(out, docIDs...)
+			*out = append(*out, docIDs...)
 			return nil
 		}); err != nil {
 			return nil, err
 		}
 	}
-	return sortUniqueDocIDs(out), nil
+	return sortUniqueDocIDs(append(docIDSet(nil), (*out)...)), nil
 }
 
 func (r *segmentReader) docIDsForExists(ctx context.Context, field string) (docIDSet, error) {
@@ -772,16 +784,17 @@ func (r *segmentReader) docIDsForExists(ctx context.Context, field string) (docI
 	if len(fieldIDs) == 0 {
 		return nil, nil
 	}
-	out := make(docIDSet, 0)
+	out := borrowDocIDScratch()
+	defer releaseDocIDScratch(out)
 	for _, fieldID := range fieldIDs {
 		if err := r.forEachPostingDocIDsByFieldID(ctx, fieldID, func(_ string, docIDs []uint32) error {
-			out = append(out, docIDs...)
+			*out = append(*out, docIDs...)
 			return nil
 		}); err != nil {
 			return nil, err
 		}
 	}
-	return sortUniqueDocIDs(out), nil
+	return sortUniqueDocIDs(append(docIDSet(nil), (*out)...)), nil
 }
 
 func (r *segmentReader) docIDsForIn(ctx context.Context, term *api.InTerm) (docIDSet, error) {
@@ -1312,6 +1325,24 @@ func (a *Adapter) visibleFromLedger(ctx context.Context, namespace, key string, 
 
 type docIDSet []uint32
 
+func borrowDocIDScratch() *docIDSet {
+	buf := docIDScratchPool.Get().(*docIDSet)
+	*buf = (*buf)[:0]
+	return buf
+}
+
+func releaseDocIDScratch(buf *docIDSet) {
+	if buf == nil {
+		return
+	}
+	if cap(*buf) > 1<<20 {
+		*buf = make(docIDSet, 0, 256)
+	} else {
+		*buf = (*buf)[:0]
+	}
+	docIDScratchPool.Put(buf)
+}
+
 func cloneDocIDs(in docIDSet) docIDSet {
 	if len(in) == 0 {
 		return nil
@@ -1425,6 +1456,29 @@ func subtractDocIDs(a, b docIDSet) docIDSet {
 		j++
 	}
 	return out
+}
+
+func appendIntersectDocIDs(dst docIDSet, a, b docIDSet) docIDSet {
+	if len(a) == 0 || len(b) == 0 {
+		return dst
+	}
+	i, j := 0, 0
+	for i < len(a) && j < len(b) {
+		av := a[i]
+		bv := b[j]
+		if av == bv {
+			dst = append(dst, av)
+			i++
+			j++
+			continue
+		}
+		if av < bv {
+			i++
+			continue
+		}
+		j++
+	}
+	return dst
 }
 
 func (r *segmentReader) sortedKeysForDocIDs(ids docIDSet) []string {

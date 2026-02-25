@@ -110,6 +110,118 @@ func BenchmarkAdapterQueryWildcardContains(b *testing.B) {
 	}
 }
 
+func BenchmarkAdapterQueryRecursiveDeepLowSelectivity(b *testing.B) {
+	ctx := context.Background()
+	_, adapter := buildSyntheticHierarchyBenchIndex(ctx, b, 4, 7, 2, 20)
+	req := search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			IContains: &api.Term{Field: "/tree/.../message", Value: "TIMEOUT"},
+		},
+		Limit:  20_000,
+		Engine: search.EngineIndex,
+	}
+	warmResp, warmErr := adapter.Query(ctx, req)
+	if warmErr != nil {
+		b.Fatalf("adapter warm recursive low query: %v", warmErr)
+	}
+	benchResultSize = len(warmResp.Keys)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		resp, err := adapter.Query(ctx, req)
+		if err != nil {
+			b.Fatalf("adapter recursive low query: %v", err)
+		}
+		benchResultSize = len(resp.Keys)
+	}
+}
+
+func BenchmarkAdapterQueryRecursiveDeepHighSelectivity(b *testing.B) {
+	ctx := context.Background()
+	_, adapter := buildSyntheticHierarchyBenchIndex(ctx, b, 4, 7, 2, 2)
+	req := search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			IContains: &api.Term{Field: "/tree/.../message", Value: "TIMEOUT"},
+		},
+		Limit:  20_000,
+		Engine: search.EngineIndex,
+	}
+	warmResp, warmErr := adapter.Query(ctx, req)
+	if warmErr != nil {
+		b.Fatalf("adapter warm recursive high query: %v", warmErr)
+	}
+	benchResultSize = len(warmResp.Keys)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		resp, err := adapter.Query(ctx, req)
+		if err != nil {
+			b.Fatalf("adapter recursive high query: %v", err)
+		}
+		benchResultSize = len(resp.Keys)
+	}
+}
+
+func BenchmarkAdapterQueryWildcardWideLowSelectivity(b *testing.B) {
+	ctx := context.Background()
+	_, adapter := buildSyntheticHierarchyBenchIndex(ctx, b, 3, 12, 2, 24)
+	req := search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			IContains: &api.Term{Field: "/tree/*/*/*/message", Value: "TIMEOUT"},
+		},
+		Limit:  20_000,
+		Engine: search.EngineIndex,
+	}
+	warmResp, warmErr := adapter.Query(ctx, req)
+	if warmErr != nil {
+		b.Fatalf("adapter warm wildcard low query: %v", warmErr)
+	}
+	benchResultSize = len(warmResp.Keys)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		resp, err := adapter.Query(ctx, req)
+		if err != nil {
+			b.Fatalf("adapter wildcard low query: %v", err)
+		}
+		benchResultSize = len(resp.Keys)
+	}
+}
+
+func BenchmarkAdapterQueryWildcardWideHighSelectivity(b *testing.B) {
+	ctx := context.Background()
+	_, adapter := buildSyntheticHierarchyBenchIndex(ctx, b, 3, 12, 2, 2)
+	req := search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			IContains: &api.Term{Field: "/tree/*/*/*/message", Value: "TIMEOUT"},
+		},
+		Limit:  20_000,
+		Engine: search.EngineIndex,
+	}
+	warmResp, warmErr := adapter.Query(ctx, req)
+	if warmErr != nil {
+		b.Fatalf("adapter warm wildcard high query: %v", warmErr)
+	}
+	benchResultSize = len(warmResp.Keys)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		resp, err := adapter.Query(ctx, req)
+		if err != nil {
+			b.Fatalf("adapter wildcard high query: %v", err)
+		}
+		benchResultSize = len(resp.Keys)
+	}
+}
+
 func buildSyntheticWildcardBenchIndex(
 	ctx context.Context,
 	b testing.TB,
@@ -174,6 +286,120 @@ func buildSyntheticWildcardBenchIndex(
 	}
 	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
 		b.Fatalf("save manifest: %v", err)
+	}
+
+	reader := newSegmentReader(namespaces.Default, manifest, store, nil)
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		b.Fatalf("new adapter: %v", err)
+	}
+	return reader, adapter
+}
+
+func buildSyntheticHierarchyBenchIndex(
+	ctx context.Context,
+	b testing.TB,
+	depth int,
+	branch int,
+	docsPerLeaf int,
+	timeoutModulo int,
+) (*segmentReader, *Adapter) {
+	b.Helper()
+	if depth <= 0 {
+		depth = 3
+	}
+	if branch <= 0 {
+		branch = 8
+	}
+	if docsPerLeaf <= 0 {
+		docsPerLeaf = 2
+	}
+	if timeoutModulo <= 0 {
+		timeoutModulo = 2
+	}
+
+	mem := memory.New()
+	store := NewStore(mem, nil)
+	segment := NewSegment("bench-hierarchy-seg", time.Unix(1_700_000_230, 0))
+
+	var path []int
+	var addLeaf func(level int)
+	docSeq := 0
+	addLeaf = func(level int) {
+		if level == depth {
+			field := "/tree"
+			for _, part := range path {
+				field += fmt.Sprintf("/n%02d", part)
+			}
+			field += "/message"
+
+			timeoutTerm := "timeout while syncing"
+			okTerm := "operation complete"
+			timeoutKeys := make([]string, 0, docsPerLeaf)
+			okKeys := make([]string, 0, docsPerLeaf)
+			for j := 0; j < docsPerLeaf; j++ {
+				key := fmt.Sprintf("hdoc-%06d", docSeq)
+				docSeq++
+				if docSeq%timeoutModulo == 0 {
+					timeoutKeys = append(timeoutKeys, key)
+				} else {
+					okKeys = append(okKeys, key)
+				}
+				meta := &storage.Meta{
+					Version:          1,
+					PublishedVersion: 1,
+					StateETag:        "etag-" + key,
+				}
+				if _, err := mem.StoreMeta(ctx, namespaces.Default, key, meta, ""); err != nil {
+					b.Fatalf("store meta %s: %v", key, err)
+				}
+			}
+			postings := make(map[string][]string, 2)
+			if len(timeoutKeys) > 0 {
+				postings[timeoutTerm] = timeoutKeys
+			}
+			if len(okKeys) > 0 {
+				postings[okTerm] = okKeys
+			}
+			block := FieldBlock{Postings: postings}
+			segment.Fields[field] = block
+
+			gramField := containsGramField(field)
+			gramPostings := make(map[string][]string)
+			for _, gram := range normalizedTrigrams("timeout") {
+				gramPostings[gram] = append([]string(nil), timeoutKeys...)
+			}
+			if len(timeoutKeys) == 0 {
+				return
+			}
+			segment.Fields[gramField] = FieldBlock{Postings: gramPostings}
+			return
+		}
+		for i := 0; i < branch; i++ {
+			path = append(path, i)
+			addLeaf(level + 1)
+			path = path[:len(path)-1]
+		}
+	}
+	addLeaf(0)
+
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
+		b.Fatalf("write hierarchy segment: %v", err)
+	}
+	manifest := NewManifest()
+	manifest.Seq = 1
+	manifest.UpdatedAt = segment.CreatedAt
+	manifest.Format = IndexFormatVersionV4
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{{
+			ID:        segment.ID,
+			CreatedAt: segment.CreatedAt,
+			DocCount:  segment.DocCount(),
+		}},
+	}
+	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
+		b.Fatalf("save hierarchy manifest: %v", err)
 	}
 
 	reader := newSegmentReader(namespaces.Default, manifest, store, nil)

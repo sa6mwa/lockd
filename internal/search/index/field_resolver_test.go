@@ -310,3 +310,28 @@ func TestResolveSelectorFieldsFallbackPlannerMatches(t *testing.T) {
 		t.Fatalf("expected 5000 resolved fields, got %d", len(fields))
 	}
 }
+
+func TestMatchPatternWithTrieStateCap(t *testing.T) {
+	const nodes = 30_000
+	fields := make([]string, 0, nodes)
+	segments := make(map[string][]string, nodes)
+	for i := 0; i < nodes; i++ {
+		field := fmt.Sprintf("/cap/%05d", i)
+		parts, err := indexFieldSegments(field)
+		if err != nil {
+			t.Fatalf("indexFieldSegments(%q): %v", field, err)
+		}
+		fields = append(fields, field)
+		segments[field] = parts
+	}
+	reader := &segmentReader{
+		fieldTrie: buildFieldPathTrie(fields, segments),
+	}
+	_, err := reader.matchPatternWithTrie([]string{"...", "...", "...", "...", "...", "...", "...", "...", "..."})
+	if err == nil {
+		t.Fatal("expected state-cap error for pathological recursive pattern")
+	}
+	if err != errFieldPatternStateLimit {
+		t.Fatalf("expected errFieldPatternStateLimit, got %v", err)
+	}
+}

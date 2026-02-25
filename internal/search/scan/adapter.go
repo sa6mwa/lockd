@@ -326,7 +326,7 @@ func (a *Adapter) matchAndStreamDocument(
 		SpoolMemoryBytes:  1,
 		MaxCandidateBytes: a.maxDocumentBytes,
 		MaxMatches:        1,
-		CapturePolicy:     lql.QueryCaptureAllCandidates,
+		CapturePolicy:     lql.QueryCaptureMatchesOnlyBestEffort,
 		OnValue: func(v lql.QueryStreamValue) error {
 			if !v.Matched {
 				return nil

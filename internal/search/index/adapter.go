@@ -542,6 +542,8 @@ type segmentReader struct {
 	compiled              map[string]*compiledSegment
 	keyIDs                map[string]uint32
 	keys                  []string
+	fieldIDs              map[string]uint32
+	fields                []string
 	fieldList             []string
 	fieldListReady        bool
 	fieldSegments         map[string][]string
@@ -558,6 +560,7 @@ func newSegmentReader(namespace string, manifest *Manifest, store *Store, logger
 		cache:                 make(map[string]*Segment),
 		compiled:              make(map[string]*compiledSegment),
 		keyIDs:                make(map[string]uint32),
+		fieldIDs:              make(map[string]uint32),
 		fieldSegments:         make(map[string][]string),
 		fieldResolutionCached: make(map[string][]string),
 	}
@@ -566,8 +569,12 @@ func newSegmentReader(namespace string, manifest *Manifest, store *Store, logger
 func (r *segmentReader) allDocIDs(ctx context.Context) (docIDSet, error) {
 	out := make(docIDSet, 0)
 	err := r.forEachCompiledSegment(ctx, func(seg *compiledSegment) error {
-		for _, block := range seg.fields {
-			for _, docIDs := range block.postings {
+		for _, fieldID := range seg.fieldIDs {
+			block, ok := seg.fieldsByID[fieldID]
+			if !ok {
+				continue
+			}
+			for _, docIDs := range block.postingsByID {
 				out = append(out, docIDs...)
 			}
 		}
@@ -579,18 +586,33 @@ func (r *segmentReader) allDocIDs(ctx context.Context) (docIDSet, error) {
 	return sortUniqueDocIDs(out), nil
 }
 
-func (r *segmentReader) docIDsForEq(ctx context.Context, term *api.Term) (docIDSet, error) {
-	fields, err := r.resolveSelectorFields(ctx, normalizeField(term))
+func (r *segmentReader) resolveSelectorFieldIDs(ctx context.Context, field string) ([]uint32, error) {
+	resolved, err := r.resolveSelectorFields(ctx, field)
 	if err != nil {
 		return nil, err
 	}
-	if len(fields) == 0 {
+	if len(resolved) == 0 {
+		return nil, nil
+	}
+	ids := make([]uint32, 0, len(resolved))
+	for _, name := range resolved {
+		ids = append(ids, r.internField(name))
+	}
+	return ids, nil
+}
+
+func (r *segmentReader) docIDsForEq(ctx context.Context, term *api.Term) (docIDSet, error) {
+	fieldIDs, err := r.resolveSelectorFieldIDs(ctx, normalizeField(term))
+	if err != nil {
+		return nil, err
+	}
+	if len(fieldIDs) == 0 {
 		return nil, nil
 	}
 	normalizedTerm := normalizeTermValue(term.Value)
 	out := make(docIDSet, 0)
-	for _, field := range fields {
-		set, err := r.docIDsForTerm(ctx, field, normalizedTerm)
+	for _, fieldID := range fieldIDs {
+		set, err := r.docIDsForTermID(ctx, fieldID, normalizedTerm)
 		if err != nil {
 			return nil, err
 		}
@@ -599,18 +621,17 @@ func (r *segmentReader) docIDsForEq(ctx context.Context, term *api.Term) (docIDS
 	return out, nil
 }
 
-func (r *segmentReader) docIDsForTerm(ctx context.Context, field, term string) (docIDSet, error) {
-	field = strings.TrimSpace(field)
-	if field == "" {
+func (r *segmentReader) docIDsForTermID(ctx context.Context, fieldID uint32, term string) (docIDSet, error) {
+	if strings.TrimSpace(term) == "" {
 		return nil, nil
 	}
 	out := make(docIDSet, 0)
 	err := r.forEachCompiledSegment(ctx, func(seg *compiledSegment) error {
-		block, ok := seg.fields[field]
+		block, ok := seg.fieldsByID[fieldID]
 		if !ok {
 			return nil
 		}
-		docIDs := block.postings[term]
+		docIDs := block.docIDsForTerm(term)
 		out = append(out, docIDs...)
 		return nil
 	})
@@ -621,17 +642,17 @@ func (r *segmentReader) docIDsForTerm(ctx context.Context, field, term string) (
 }
 
 func (r *segmentReader) docIDsForPrefix(ctx context.Context, term *api.Term) (docIDSet, error) {
-	fields, err := r.resolveSelectorFields(ctx, normalizeField(term))
+	fieldIDs, err := r.resolveSelectorFieldIDs(ctx, normalizeField(term))
 	if err != nil {
 		return nil, err
 	}
-	if len(fields) == 0 {
+	if len(fieldIDs) == 0 {
 		return nil, nil
 	}
 	prefix := normalizeTermValue(term.Value)
 	out := make(docIDSet, 0)
-	for _, field := range fields {
-		if err := r.forEachPostingDocIDs(ctx, field, func(termValue string, docIDs []uint32) error {
+	for _, fieldID := range fieldIDs {
+		if err := r.forEachPostingDocIDsByFieldID(ctx, fieldID, func(termValue string, docIDs []uint32) error {
 			if strings.HasPrefix(termValue, prefix) {
 				out = append(out, docIDs...)
 			}
@@ -657,7 +678,7 @@ func (r *segmentReader) docIDsForContains(ctx context.Context, term *api.Term, u
 	}
 	out := make(docIDSet, 0)
 	for _, field := range fields {
-		set, err := r.docIDsForContainsField(ctx, field, needle, useTrigramIndex)
+		set, err := r.docIDsForContainsField(ctx, field, r.internField(field), needle, useTrigramIndex)
 		if err != nil {
 			return nil, err
 		}
@@ -666,7 +687,7 @@ func (r *segmentReader) docIDsForContains(ctx context.Context, term *api.Term, u
 	return out, nil
 }
 
-func (r *segmentReader) docIDsForContainsField(ctx context.Context, field, needle string, useTrigramIndex bool) (docIDSet, error) {
+func (r *segmentReader) docIDsForContainsField(ctx context.Context, field string, fieldID uint32, needle string, useTrigramIndex bool) (docIDSet, error) {
 	var candidateFilter docIDSet
 	if useTrigramIndex {
 		grams := normalizedTrigrams(needle)
@@ -674,8 +695,9 @@ func (r *segmentReader) docIDsForContainsField(ctx context.Context, field, needl
 			initialized := false
 			sawGramPosting := false
 			candidate := make(docIDSet, 0)
+			gramFieldID := r.internField(containsGramField(field))
 			for _, gram := range grams {
-				gramSet, err := r.docIDsForTerm(ctx, containsGramField(field), gram)
+				gramSet, err := r.docIDsForTermID(ctx, gramFieldID, gram)
 				if err != nil {
 					return nil, err
 				}
@@ -700,7 +722,7 @@ func (r *segmentReader) docIDsForContainsField(ctx context.Context, field, needl
 		}
 	}
 	out := make(docIDSet, 0)
-	if err := r.forEachPostingDocIDs(ctx, field, func(termValue string, docIDs []uint32) error {
+	if err := r.forEachPostingDocIDsByFieldID(ctx, fieldID, func(termValue string, docIDs []uint32) error {
 		if strings.Contains(termValue, needle) {
 			filtered := docIDs
 			if len(candidateFilter) > 0 {
@@ -716,16 +738,16 @@ func (r *segmentReader) docIDsForContainsField(ctx context.Context, field, needl
 }
 
 func (r *segmentReader) docIDsForRange(ctx context.Context, term *api.RangeTerm) (docIDSet, error) {
-	fields, err := r.resolveSelectorFields(ctx, normalizeRangeField(term))
+	fieldIDs, err := r.resolveSelectorFieldIDs(ctx, normalizeRangeField(term))
 	if err != nil {
 		return nil, err
 	}
-	if len(fields) == 0 {
+	if len(fieldIDs) == 0 {
 		return nil, nil
 	}
 	out := make(docIDSet, 0)
-	for _, field := range fields {
-		if err := r.forEachPostingDocIDs(ctx, field, func(termValue string, docIDs []uint32) error {
+	for _, fieldID := range fieldIDs {
+		if err := r.forEachPostingDocIDsByFieldID(ctx, fieldID, func(termValue string, docIDs []uint32) error {
 			num, err := strconv.ParseFloat(termValue, 64)
 			if err != nil || math.IsNaN(num) {
 				return nil
@@ -743,16 +765,16 @@ func (r *segmentReader) docIDsForRange(ctx context.Context, term *api.RangeTerm)
 }
 
 func (r *segmentReader) docIDsForExists(ctx context.Context, field string) (docIDSet, error) {
-	fields, err := r.resolveSelectorFields(ctx, strings.TrimSpace(field))
+	fieldIDs, err := r.resolveSelectorFieldIDs(ctx, strings.TrimSpace(field))
 	if err != nil {
 		return nil, err
 	}
-	if len(fields) == 0 {
+	if len(fieldIDs) == 0 {
 		return nil, nil
 	}
 	out := make(docIDSet, 0)
-	for _, field := range fields {
-		if err := r.forEachPostingDocIDs(ctx, field, func(_ string, docIDs []uint32) error {
+	for _, fieldID := range fieldIDs {
+		if err := r.forEachPostingDocIDsByFieldID(ctx, fieldID, func(_ string, docIDs []uint32) error {
 			out = append(out, docIDs...)
 			return nil
 		}); err != nil {
@@ -763,17 +785,17 @@ func (r *segmentReader) docIDsForExists(ctx context.Context, field string) (docI
 }
 
 func (r *segmentReader) docIDsForIn(ctx context.Context, term *api.InTerm) (docIDSet, error) {
-	fields, err := r.resolveSelectorFields(ctx, strings.TrimSpace(term.Field))
+	fieldIDs, err := r.resolveSelectorFieldIDs(ctx, strings.TrimSpace(term.Field))
 	if err != nil {
 		return nil, err
 	}
-	if len(fields) == 0 || len(term.Any) == 0 {
+	if len(fieldIDs) == 0 || len(term.Any) == 0 {
 		return nil, nil
 	}
 	unionSet := make(docIDSet, 0)
-	for _, field := range fields {
+	for _, fieldID := range fieldIDs {
 		for _, candidate := range term.Any {
-			eqSet, err := r.docIDsForTerm(ctx, field, normalizeTermValue(candidate))
+			eqSet, err := r.docIDsForTermID(ctx, fieldID, normalizeTermValue(candidate))
 			if err != nil {
 				return nil, err
 			}
@@ -837,14 +859,15 @@ func (r *segmentReader) forEachCompiledSegment(ctx context.Context, fn func(*com
 	return nil
 }
 
-func (r *segmentReader) forEachPostingDocIDs(ctx context.Context, field string, fn func(term string, docIDs []uint32) error) error {
+func (r *segmentReader) forEachPostingDocIDsByFieldID(ctx context.Context, fieldID uint32, fn func(term string, docIDs []uint32) error) error {
 	return r.forEachCompiledSegment(ctx, func(seg *compiledSegment) error {
-		block, ok := seg.fields[field]
+		block, ok := seg.fieldsByID[fieldID]
 		if !ok {
 			return nil
 		}
-		for term, docIDs := range block.postings {
-			if err := fn(term, docIDs); err != nil {
+		for termID, termValue := range block.terms {
+			docIDs := block.postingsByID[termID]
+			if err := fn(termValue, docIDs); err != nil {
 				return err
 			}
 		}
@@ -879,24 +902,39 @@ func (r *segmentReader) loadCompiledSegment(ctx context.Context, id string) (*co
 
 func (r *segmentReader) compileSegment(seg *Segment) *compiledSegment {
 	if seg == nil {
-		return &compiledSegment{fields: make(map[string]compiledField)}
+		return &compiledSegment{fieldsByID: make(map[uint32]compiledField)}
 	}
 	out := &compiledSegment{
-		fields: make(map[string]compiledField, len(seg.Fields)),
+		fieldsByID: make(map[uint32]compiledField, len(seg.Fields)),
+		fieldIDs:   make([]uint32, 0, len(seg.Fields)),
 	}
 	for field, block := range seg.Fields {
+		fieldID := r.internField(field)
 		compiledBlock := compiledField{
-			postings: make(map[string][]uint32, len(block.Postings)),
+			termIDs:      make(map[string]uint32, len(block.Postings)),
+			terms:        make([]string, 0, len(block.Postings)),
+			postingsByID: make([]docIDSet, 0, len(block.Postings)),
 		}
-		for term, keys := range block.Postings {
+		terms := make([]string, 0, len(block.Postings))
+		for term := range block.Postings {
+			terms = append(terms, term)
+		}
+		sort.Strings(terms)
+		for _, term := range terms {
+			keys := block.Postings[term]
 			docIDs := make([]uint32, 0, len(keys))
 			for _, key := range keys {
 				docIDs = append(docIDs, r.internKey(key))
 			}
-			compiledBlock.postings[term] = sortUniqueDocIDs(docIDs)
+			termID := uint32(len(compiledBlock.terms))
+			compiledBlock.termIDs[term] = termID
+			compiledBlock.terms = append(compiledBlock.terms, term)
+			compiledBlock.postingsByID = append(compiledBlock.postingsByID, sortUniqueDocIDs(docIDs))
 		}
-		out.fields[field] = compiledBlock
+		out.fieldIDs = append(out.fieldIDs, fieldID)
+		out.fieldsByID[fieldID] = compiledBlock
 	}
+	sort.Slice(out.fieldIDs, func(i, j int) bool { return out.fieldIDs[i] < out.fieldIDs[j] })
 	return out
 }
 
@@ -910,6 +948,16 @@ func (r *segmentReader) internKey(key string) uint32 {
 	return id
 }
 
+func (r *segmentReader) internField(field string) uint32 {
+	if id, ok := r.fieldIDs[field]; ok {
+		return id
+	}
+	id := uint32(len(r.fields))
+	r.fields = append(r.fields, field)
+	r.fieldIDs[field] = id
+	return id
+}
+
 func (r *segmentReader) keyByDocID(id uint32) string {
 	if int(id) >= len(r.keys) {
 		return ""
@@ -918,11 +966,25 @@ func (r *segmentReader) keyByDocID(id uint32) string {
 }
 
 type compiledSegment struct {
-	fields map[string]compiledField
+	fieldIDs   []uint32
+	fieldsByID map[uint32]compiledField
 }
 
 type compiledField struct {
-	postings map[string][]uint32
+	termIDs      map[string]uint32
+	terms        []string
+	postingsByID []docIDSet
+}
+
+func (f compiledField) docIDsForTerm(term string) docIDSet {
+	termID, ok := f.termIDs[term]
+	if !ok {
+		return nil
+	}
+	if int(termID) >= len(f.postingsByID) {
+		return nil
+	}
+	return f.postingsByID[termID]
 }
 
 func (r *segmentReader) docMetaMap(ctx context.Context) (map[string]DocumentMetadata, error) {

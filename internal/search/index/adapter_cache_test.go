@@ -163,17 +163,70 @@ func TestStoreSegmentCacheEvictionReload(t *testing.T) {
 	}
 }
 
+func TestCompiledSegmentDictionaries(t *testing.T) {
+	ctx := context.Background()
+	const (
+		namespace = namespaces.Default
+		segmentID = "seg-dicts"
+	)
+	store := NewStore(memory.New(), nil)
+	seed := NewSegment(segmentID, time.Unix(1_700_000_050, 0))
+	seed.Fields["/status"] = FieldBlock{Postings: map[string][]string{
+		"open":   {"doc-a"},
+		"closed": {"doc-b"},
+	}}
+	if _, _, err := store.WriteSegment(ctx, namespace, seed); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+	manifest := NewManifest()
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{{
+			ID:        segmentID,
+			CreatedAt: seed.CreatedAt,
+			DocCount:  seed.DocCount(),
+		}},
+	}
+	reader := newSegmentReader(namespace, manifest, store, nil)
+	compiled, err := reader.loadCompiledSegment(ctx, segmentID)
+	if err != nil {
+		t.Fatalf("load compiled segment: %v", err)
+	}
+
+	fieldID, ok := reader.fieldIDs["/status"]
+	if !ok {
+		t.Fatal("missing field id for /status")
+	}
+	block, ok := compiled.fieldsByID[fieldID]
+	if !ok {
+		t.Fatal("missing compiled field block for /status")
+	}
+	if len(block.termIDs) != 2 || len(block.terms) != 2 || len(block.postingsByID) != 2 {
+		t.Fatalf("unexpected dictionary sizes: termIDs=%d terms=%d postings=%d",
+			len(block.termIDs), len(block.terms), len(block.postingsByID))
+	}
+	openKey := compiledTermDocKey(t, reader, compiled, "/status", "open")
+	closedKey := compiledTermDocKey(t, reader, compiled, "/status", "closed")
+	if openKey != "doc-a" || closedKey != "doc-b" {
+		t.Fatalf("unexpected dictionary doc mapping open=%q closed=%q", openKey, closedKey)
+	}
+}
+
 func compiledTermDocKey(t *testing.T, reader *segmentReader, seg *compiledSegment, field string, term string) string {
 	t.Helper()
 	if seg == nil {
 		t.Fatal("compiled segment is nil")
 	}
-	block, ok := seg.fields[field]
+	fieldID, ok := reader.fieldIDs[field]
+	if !ok {
+		t.Fatalf("missing field id for %q", field)
+	}
+	block, ok := seg.fieldsByID[fieldID]
 	if !ok {
 		t.Fatalf("missing compiled field %q", field)
 	}
-	docIDs, ok := block.postings[term]
-	if !ok {
+	docIDs := block.docIDsForTerm(term)
+	if len(docIDs) == 0 {
 		t.Fatalf("missing compiled term %q for field %q", term, field)
 	}
 	if len(docIDs) != 1 {

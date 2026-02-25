@@ -77,6 +77,7 @@ func (r *segmentReader) allIndexFields(ctx context.Context) ([]string, error) {
 		if err != nil {
 			continue
 		}
+		r.internField(field)
 		r.fieldSegments[field] = segments
 	}
 	r.fieldList = fields
@@ -193,8 +194,8 @@ type fieldPathTrie struct {
 }
 
 type fieldPathTrieNode struct {
-	id       int
-	children map[string]*fieldPathTrieNode
+	id        int
+	children  map[string]*fieldPathTrieNode
 	terminals []string
 }
 

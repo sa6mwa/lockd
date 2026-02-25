@@ -1,7 +1,10 @@
 package index
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"io"
 	"slices"
 	"testing"
 	"time"
@@ -349,6 +352,66 @@ func TestIndexAdapterQueryContainsSelectors(t *testing.T) {
 	}
 }
 
+func TestIndexAdapterQueryDocumentsStreamsMatches(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	store := NewStore(mem, nil)
+	segment := NewSegment("seg-docs", time.Unix(1_700_000_050, 0))
+	segment.Fields["/status"] = FieldBlock{Postings: map[string][]string{
+		"open":   {"orders-open-1"},
+		"closed": {"orders-closed-1"},
+	}}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+	manifest := NewManifest()
+	manifest.Seq = 4
+	manifest.UpdatedAt = segment.CreatedAt
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{{
+			ID:        segment.ID,
+			CreatedAt: segment.CreatedAt,
+			DocCount:  segment.DocCount(),
+		}},
+	}
+	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+	writeIndexedState(t, mem, namespaces.Default, "orders-open-1", map[string]any{"status": "open"})
+	writeIndexedState(t, mem, namespaces.Default, "orders-closed-1", map[string]any{"status": "closed"})
+
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	sink := &capturingIndexDocumentSink{}
+	result, err := adapter.QueryDocuments(ctx, search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			Eq: &api.Term{Field: "/status", Value: "open"},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	}, sink)
+	if err != nil {
+		t.Fatalf("query documents: %v", err)
+	}
+	if !slices.Equal(result.Keys, []string{"orders-open-1"}) {
+		t.Fatalf("unexpected streamed keys %v", result.Keys)
+	}
+	if len(sink.rows) != 1 || sink.rows[0].key != "orders-open-1" {
+		t.Fatalf("unexpected streamed rows %+v", sink.rows)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(sink.rows[0].doc, &doc); err != nil {
+		t.Fatalf("decode streamed doc: %v", err)
+	}
+	if doc["status"] != "open" {
+		t.Fatalf("unexpected document payload %+v", doc)
+	}
+}
+
 func TestIndexAdapterDocMeta(t *testing.T) {
 	ctx := context.Background()
 	mem := memory.New()
@@ -577,4 +640,51 @@ func TestIndexAdapterRespectsVisibilityLedger(t *testing.T) {
 
 func floatPtr(val float64) *float64 {
 	return &val
+}
+
+type indexDocumentRow struct {
+	namespace string
+	key       string
+	version   int64
+	doc       []byte
+}
+
+type capturingIndexDocumentSink struct {
+	rows []indexDocumentRow
+}
+
+func (s *capturingIndexDocumentSink) OnDocument(_ context.Context, namespace, key string, version int64, reader io.Reader) error {
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return err
+	}
+	s.rows = append(s.rows, indexDocumentRow{
+		namespace: namespace,
+		key:       key,
+		version:   version,
+		doc:       append([]byte(nil), data...),
+	})
+	return nil
+}
+
+func writeIndexedState(t *testing.T, store storage.Backend, namespace, key string, doc map[string]any) {
+	t.Helper()
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	stateRes, err := store.WriteState(context.Background(), namespace, key, bytes.NewReader(payload), storage.PutStateOptions{})
+	if err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+	meta := &storage.Meta{
+		Version:             1,
+		PublishedVersion:    1,
+		StateETag:           stateRes.NewETag,
+		StatePlaintextBytes: stateRes.BytesWritten,
+		StateDescriptor:     append([]byte(nil), stateRes.Descriptor...),
+	}
+	if _, err := store.StoreMeta(context.Background(), namespace, key, meta, ""); err != nil {
+		t.Fatalf("store meta: %v", err)
+	}
 }

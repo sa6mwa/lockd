@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -246,6 +248,158 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 	return result, nil
 }
 
+// QueryDocuments evaluates the selector via the index and streams matching
+// documents directly to sink.
+func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink search.DocumentSink) (search.Result, error) {
+	if a == nil || a.store == nil {
+		return search.Result{}, fmt.Errorf("index adapter unavailable")
+	}
+	if req.Namespace == "" {
+		return search.Result{}, fmt.Errorf("index adapter: namespace required")
+	}
+	if sink == nil {
+		return search.Result{}, fmt.Errorf("index adapter: document sink required")
+	}
+	manifestRes, err := a.store.LoadManifest(ctx, req.Namespace)
+	if err != nil {
+		return search.Result{}, fmt.Errorf("load manifest: %w", err)
+	}
+	manifest := manifestRes.Manifest
+	if manifest == nil {
+		manifest = NewManifest()
+	}
+	reader := newSegmentReader(req.Namespace, manifest, a.store, a.logger)
+	visibility, err := a.visibilityMap(ctx, req.Namespace)
+	if err != nil {
+		return search.Result{}, err
+	}
+	var (
+		matches         keySet
+		postFilterPlan  lql.QueryStreamPlan
+		requirePostEval bool
+	)
+	selector := cloneSelector(req.Selector)
+	useLegacyFilter := selectorSupportsLegacyIndexFilter(req.Selector)
+	if !selector.IsEmpty() {
+		if normalizeErr := normalizeSelectorFieldsForLQL(&selector); normalizeErr != nil {
+			return search.Result{}, fmt.Errorf("normalize selector: %w", normalizeErr)
+		}
+	}
+	if selector.IsEmpty() || !useLegacyFilter {
+		matches, err = reader.allKeys(ctx)
+	} else {
+		eval := selectorEvaluator{reader: reader}
+		matches, err = eval.evaluate(ctx, req.Selector)
+	}
+	if !selector.IsEmpty() {
+		compiled, compileErr := lql.NewQueryStreamPlan(selector)
+		if compileErr != nil {
+			return search.Result{}, fmt.Errorf("compile selector: %w", compileErr)
+		}
+		postFilterPlan = compiled
+		requirePostEval = true
+	}
+	if err != nil {
+		return search.Result{}, err
+	}
+	sortedKeys := matches.sorted()
+	startIdx, err := startIndexFromCursor(req.Cursor, sortedKeys)
+	if err != nil {
+		return search.Result{}, fmt.Errorf("%w: %v", search.ErrInvalidCursor, err)
+	}
+	if startIdx >= len(sortedKeys) {
+		return search.Result{IndexSeq: manifest.Seq, Format: manifest.Format}, nil
+	}
+	limit := req.Limit
+	if limit <= 0 {
+		limit = len(sortedKeys) - startIdx
+	}
+	if limit > len(sortedKeys)-startIdx {
+		limit = len(sortedKeys) - startIdx
+	}
+	if limit <= 0 {
+		return search.Result{IndexSeq: manifest.Seq, Format: manifest.Format}, nil
+	}
+	streamed := make([]string, 0, min(limit, len(sortedKeys)-startIdx))
+	nextIndex := len(sortedKeys)
+	var lastReturned string
+	for i := startIdx; i < len(sortedKeys); i++ {
+		if len(streamed) >= limit {
+			nextIndex = i
+			break
+		}
+		if err := ctx.Err(); err != nil {
+			return search.Result{}, err
+		}
+		key := sortedKeys[i]
+		visibleKey, ok, err := a.visibleFromLedger(ctx, req.Namespace, key, visibility)
+		if err != nil {
+			return search.Result{}, err
+		}
+		if ok && !visibleKey {
+			continue
+		}
+		metaRes, metaErr := a.store.backend.LoadMeta(ctx, req.Namespace, key)
+		if metaErr != nil {
+			if errors.Is(metaErr, storage.ErrNotFound) || storage.IsTransient(metaErr) {
+				continue
+			}
+			return search.Result{}, fmt.Errorf("load meta %s: %w", key, metaErr)
+		}
+		meta := metaRes.Meta
+		if meta == nil || meta.PublishedVersion == 0 || meta.QueryExcluded() {
+			continue
+		}
+		version := meta.PublishedVersion
+		if version == 0 {
+			version = meta.Version
+		}
+		if !requirePostEval {
+			if err := a.streamDocument(ctx, req.Namespace, key, version, meta, sink); err != nil {
+				if errors.Is(err, storage.ErrNotFound) || storage.IsTransient(err) {
+					continue
+				}
+				return search.Result{}, fmt.Errorf("stream document %s: %w", key, err)
+			}
+			streamed = append(streamed, key)
+			lastReturned = key
+			nextIndex = i + 1
+			continue
+		}
+		if meta.StateETag == "" {
+			continue
+		}
+		matched, err := a.matchAndStreamDocument(ctx, req.Namespace, key, version, meta, postFilterPlan, sink)
+		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) || storage.IsTransient(err) {
+				continue
+			}
+			return search.Result{}, fmt.Errorf("evaluate+stream selector %s: %w", key, err)
+		}
+		if !matched {
+			continue
+		}
+		streamed = append(streamed, key)
+		lastReturned = key
+		nextIndex = i + 1
+	}
+	result := search.Result{
+		Keys:     streamed,
+		IndexSeq: manifest.Seq,
+		Format:   manifest.Format,
+	}
+	if manifest.UpdatedAt.Unix() > 0 {
+		if result.Metadata == nil {
+			result.Metadata = make(map[string]string)
+		}
+		result.Metadata["index_updated_at"] = manifest.UpdatedAt.UTC().Format(time.RFC3339)
+	}
+	if len(streamed) == limit && nextIndex < len(sortedKeys) && lastReturned != "" {
+		result.Cursor = encodeCursor(lastReturned)
+	}
+	return result, nil
+}
+
 func (a *Adapter) matchesSelector(ctx context.Context, namespace, key string, meta *storage.Meta, plan lql.QueryStreamPlan) (bool, error) {
 	stateCtx := ctx
 	if meta != nil && len(meta.StateDescriptor) > 0 {
@@ -283,6 +437,90 @@ func (a *Adapter) matchesSelector(ctx context.Context, namespace, key string, me
 		return false, err
 	}
 	return matched, nil
+}
+
+func (a *Adapter) streamDocument(ctx context.Context, namespace, key string, version int64, meta *storage.Meta, sink search.DocumentSink) error {
+	stateCtx := ctx
+	if meta != nil && len(meta.StateDescriptor) > 0 {
+		stateCtx = storage.ContextWithStateDescriptor(stateCtx, meta.StateDescriptor)
+	}
+	if meta != nil && meta.StatePlaintextBytes > 0 {
+		stateCtx = storage.ContextWithStatePlaintextSize(stateCtx, meta.StatePlaintextBytes)
+	}
+	stateRes, err := a.store.backend.ReadState(stateCtx, namespace, key)
+	if err != nil {
+		return err
+	}
+	if stateRes.Reader == nil {
+		return nil
+	}
+	defer stateRes.Reader.Close()
+	return sink.OnDocument(ctx, namespace, key, version, stateRes.Reader)
+}
+
+func (a *Adapter) matchAndStreamDocument(
+	ctx context.Context,
+	namespace string,
+	key string,
+	version int64,
+	meta *storage.Meta,
+	plan lql.QueryStreamPlan,
+	sink search.DocumentSink,
+) (bool, error) {
+	stateCtx := ctx
+	if meta != nil && len(meta.StateDescriptor) > 0 {
+		stateCtx = storage.ContextWithStateDescriptor(stateCtx, meta.StateDescriptor)
+	}
+	if meta != nil && meta.StatePlaintextBytes > 0 {
+		stateCtx = storage.ContextWithStatePlaintextSize(stateCtx, meta.StatePlaintextBytes)
+	}
+	stateRes, err := a.store.backend.ReadState(stateCtx, namespace, key)
+	if err != nil {
+		return false, err
+	}
+	if stateRes.Reader == nil {
+		return false, nil
+	}
+	defer stateRes.Reader.Close()
+
+	spool, err := os.CreateTemp("", "lockd-index-query-doc-*.json")
+	if err != nil {
+		return false, fmt.Errorf("index: create document spool: %w", err)
+	}
+	spoolPath := spool.Name()
+	defer func() {
+		_ = spool.Close()
+		_ = os.Remove(spoolPath)
+	}()
+
+	tee := io.TeeReader(stateRes.Reader, spool)
+	matched := false
+	_, err = lql.QueryStreamWithResult(lql.QueryStreamRequest{
+		Ctx:               stateCtx,
+		Reader:            tee,
+		Plan:              plan,
+		Mode:              lql.QueryDecisionOnly,
+		MaxCandidateBytes: 100 * 1024 * 1024,
+		OnDecision: func(d lql.QueryStreamDecision) error {
+			if d.Matched {
+				matched = true
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		return false, err
+	}
+	if !matched {
+		return false, nil
+	}
+	if _, err := spool.Seek(0, io.SeekStart); err != nil {
+		return false, fmt.Errorf("index: rewind document spool: %w", err)
+	}
+	if err := sink.OnDocument(ctx, namespace, key, version, spool); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 type segmentReader struct {

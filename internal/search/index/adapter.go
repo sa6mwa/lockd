@@ -743,13 +743,29 @@ func (r *segmentReader) docIDsForTermID(ctx context.Context, fieldID uint32, ter
 	if strings.TrimSpace(term) == "" {
 		return nil, nil
 	}
-	decoded := borrowDocIDScratch()
-	defer releaseDocIDScratch(decoded)
 	out := borrowDocIDScratch()
 	defer releaseDocIDScratch(out)
-	var first docIDSet
-	multiSegment := false
-	err := r.forEachCompiledSegment(ctx, func(seg *compiledSegment) error {
+	if err := r.fillDocIDsForTermID(ctx, fieldID, term, out); err != nil {
+		return nil, err
+	}
+	if len(*out) == 0 {
+		return nil, nil
+	}
+	return append(docIDSet(nil), (*out)...), nil
+}
+
+func (r *segmentReader) fillDocIDsForTermID(ctx context.Context, fieldID uint32, term string, out *docIDSet) error {
+	if out == nil {
+		return nil
+	}
+	*out = (*out)[:0]
+	if strings.TrimSpace(term) == "" {
+		return nil
+	}
+	decoded := borrowDocIDScratch()
+	defer releaseDocIDScratch(decoded)
+	segmentsWithDocs := 0
+	if err := r.forEachCompiledSegment(ctx, func(seg *compiledSegment) error {
 		block, ok := seg.fieldsByID[fieldID]
 		if !ok {
 			return nil
@@ -759,27 +775,16 @@ func (r *segmentReader) docIDsForTermID(ctx context.Context, fieldID uint32, ter
 		if len(docIDs) == 0 {
 			return nil
 		}
-		if first == nil {
-			first = append(docIDSet(nil), docIDs...)
-			return nil
-		}
-		if !multiSegment {
-			*out = append((*out)[:0], first...)
-			multiSegment = true
-		}
+		segmentsWithDocs++
 		*out = append(*out, docIDs...)
 		return nil
-	})
-	if err != nil {
-		return nil, err
+	}); err != nil {
+		return err
 	}
-	if first == nil {
-		return nil, nil
+	if segmentsWithDocs > 1 {
+		*out = sortUniqueDocIDs(*out)
 	}
-	if !multiSegment {
-		return first, nil
-	}
-	return sortUniqueDocIDs(append(docIDSet(nil), (*out)...)), nil
+	return nil
 }
 
 func (r *segmentReader) docIDsForPrefix(ctx context.Context, term *api.Term) (docIDSet, error) {
@@ -926,12 +931,13 @@ func (r *segmentReader) tokenPrefilterForField(ctx context.Context, field string
 	}
 	acc := borrowDocIDAccumulator()
 	defer releaseDocIDAccumulator(acc)
+	termSet := borrowDocIDScratch()
+	defer releaseDocIDScratch(termSet)
 	for _, token := range tokens {
-		set, err := r.docIDsForTermID(ctx, tokenFieldID, token)
-		if err != nil {
+		if err := r.fillDocIDsForTermID(ctx, tokenFieldID, token, termSet); err != nil {
 			return nil, false, err
 		}
-		acc.intersect(set)
+		acc.intersect(*termSet)
 		if acc.initialized && len(acc.current) == 0 {
 			break
 		}
@@ -957,6 +963,8 @@ func (r *segmentReader) docIDsForContainsField(
 			sawGramPosting := false
 			acc := borrowDocIDAccumulator()
 			defer releaseDocIDAccumulator(acc)
+			gramSet := borrowDocIDScratch()
+			defer releaseDocIDScratch(gramSet)
 			gramFieldID, ok := r.fieldID(containsGramField(field))
 			if !ok {
 				gramFieldID = 0
@@ -965,14 +973,13 @@ func (r *segmentReader) docIDsForContainsField(
 				if gramFieldID == 0 {
 					break
 				}
-				gramSet, err := r.docIDsForTermID(ctx, gramFieldID, gram)
-				if err != nil {
+				if err := r.fillDocIDsForTermID(ctx, gramFieldID, gram, gramSet); err != nil {
 					return nil, err
 				}
-				if len(gramSet) > 0 {
+				if len(*gramSet) > 0 {
 					sawGramPosting = true
 				}
-				acc.intersect(gramSet)
+				acc.intersect(*gramSet)
 				if acc.initialized && len(acc.current) == 0 {
 					break
 				}

@@ -29,6 +29,8 @@ ETCD_PROPS := workloads/etcd.properties
 LOCKD_ATTACH_PROPS := workloads/lockd.attach.properties
 LOCKD_TXN_PROPS := workloads/lockd.txn.properties
 LOCKD_QUERYSYNC_PROPS := workloads/lockd.querysync.properties
+LOCKD_QUERY_INDEX_PROPS := workloads/lockd.query.index.properties
+LOCKD_QUERY_SCAN_PROPS := workloads/lockd.query.scan.properties
 
 LOCKD_EXTRA_PROPS ?=
 
@@ -40,6 +42,7 @@ ETCD_ARGS := -P $(ETCD_PROPS) -p etcd.endpoints=$(ETCD_ENDPOINTS)
 
 .PHONY: help build clean \
 	lockd-load lockd-run lockd-load-attach lockd-run-attach lockd-load-txn lockd-run-txn \
+	lockd-load-query lockd-run-query-index lockd-run-query-scan lockd-run-query-pair lockd-compare-query \
 	etcd-load etcd-run compare preflight-lockd preflight-etcd
 
 help:
@@ -51,6 +54,11 @@ help:
 	@echo "  make lockd-run-attach          # run lockd with attachment overlay"
 	@echo "  make lockd-load-txn            # load lockd with explicit txn overlay"
 	@echo "  make lockd-run-txn             # run lockd with explicit txn overlay"
+	@echo "  make lockd-load-query          # load lockd with scan-heavy query workload (workloade)"
+	@echo "  make lockd-run-query-index     # run query workload using lockd.query.engine=index"
+	@echo "  make lockd-run-query-scan      # run query workload using lockd.query.engine=scan"
+	@echo "  make lockd-run-query-pair      # run index + scan query workloads then compare"
+	@echo "  make lockd-compare-query       # compare latest query index vs scan runs from PERF_LOG"
 	@echo "  make etcd-load                 # load etcd with standard workload"
 	@echo "  make etcd-run                  # run etcd with standard workload"
 	@echo "  make compare                   # lockd load/run + etcd load/run"
@@ -140,6 +148,22 @@ lockd-load-txn: lockd-load
 
 lockd-run-txn: LOCKD_EXTRA_PROPS := $(LOCKD_TXN_PROPS)
 lockd-run-txn: lockd-run
+
+lockd-load-query: WORKLOAD := workloade
+lockd-load-query: lockd-load
+
+lockd-run-query-index: WORKLOAD := workloade
+lockd-run-query-index: LOCKD_EXTRA_PROPS := $(LOCKD_QUERY_INDEX_PROPS) $(LOCKD_QUERYSYNC_PROPS)
+lockd-run-query-index: lockd-run
+
+lockd-run-query-scan: WORKLOAD := workloade
+lockd-run-query-scan: LOCKD_EXTRA_PROPS := $(LOCKD_QUERY_SCAN_PROPS)
+lockd-run-query-scan: lockd-run
+
+lockd-compare-query:
+	@bash scripts/compare_query_perf.sh --perf-log "$(PERF_LOG)" --benchmarks BENCHMARKS.md
+
+lockd-run-query-pair: lockd-run-query-index lockd-run-query-scan lockd-compare-query
 
 etcd-load: build preflight-etcd
 	@$(RUNNER) load etcd $(COMMON_ARGS) $(ETCD_ARGS) --perf-log=$(PERF_LOG)

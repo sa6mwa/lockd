@@ -33,11 +33,14 @@ make lockd-load
 make lockd-run
 make etcd-load
 make etcd-run
+make lockd-load-query
+make lockd-run-query-pair
 ```
 
 Each `make *-load` / `make *-run` appends a summary to `performance.log` with the final YCSB stats.
 Disable logging by setting `PERF_LOG=` (empty) or run the binary with `--perf-log=`.
 For baseline runs, we also store a snapshot under `docs/performance/` so results are tracked alongside other perf notes.
+Each log entry now includes `query_engine` and `query_return` metadata for lockd runs so index-vs-scan comparisons can be parsed deterministically.
 
 Benchmark methodology, caveats, and results live in [BENCHMARKS.md](BENCHMARKS.md).
 
@@ -45,6 +48,15 @@ Override the workload mix or scale as needed:
 
 ```bash
 make lockd-run WORKLOAD=workloadb RECORDCOUNT=50000 OPERATIONCOUNT=500000 THREADS=16
+```
+
+For scan-heavy query comparisons (index engine vs scan engine), use:
+
+```bash
+make lockd-load-query
+make lockd-run-query-index
+make lockd-run-query-scan
+make lockd-compare-query
 ```
 
 > **Note**: The standard `go-ycsb` binary can also exercise the lockd driver; just `go build` it from this module so the `_ "github.com/sa6mwa/lockd/ycsb/db/lockd"` import is included.

@@ -413,8 +413,10 @@ func perfMetadata(dbName, phase string) string {
 	walFsyncInterval := perfWalFsyncInterval(dbName, globalProps)
 	walCommitMaxOps := perfWalCommitMaxOps(dbName, globalProps)
 	walCommitSingleWait := perfWalCommitSingleWait(dbName, globalProps)
+	queryEngine := perfQueryEngine(dbName, globalProps)
+	queryReturn := perfQueryReturn(dbName, globalProps)
 	return fmt.Sprintf(
-		"backend=%s phase=%s workload=%s recordcount=%s operationcount=%s threads=%s target=%s endpoints=%s wal_fsync_interval=%s wal_commit_max_ops=%s wal_commit_single_wait=%s",
+		"backend=%s phase=%s workload=%s recordcount=%s operationcount=%s threads=%s target=%s endpoints=%s wal_fsync_interval=%s wal_commit_max_ops=%s wal_commit_single_wait=%s query_engine=%s query_return=%s",
 		dbName,
 		phase,
 		workload,
@@ -426,6 +428,8 @@ func perfMetadata(dbName, phase string) string {
 		walFsyncInterval,
 		walCommitMaxOps,
 		walCommitSingleWait,
+		queryEngine,
+		queryReturn,
 	)
 }
 
@@ -477,4 +481,18 @@ func perfWalCommitSingleWait(dbName string, props *properties.Properties) string
 		}
 	}
 	return strings.TrimSpace(os.Getenv("LOCKD_WAL_COMMIT_SINGLE_WAIT"))
+}
+
+func perfQueryEngine(dbName string, props *properties.Properties) string {
+	if !strings.EqualFold(dbName, "lockd") || props == nil {
+		return ""
+	}
+	return strings.TrimSpace(strings.ToLower(props.GetString("lockd.query.engine", "")))
+}
+
+func perfQueryReturn(dbName string, props *properties.Properties) string {
+	if !strings.EqualFold(dbName, "lockd") || props == nil {
+		return ""
+	}
+	return strings.TrimSpace(strings.ToLower(props.GetString("lockd.query.return", "")))
 }

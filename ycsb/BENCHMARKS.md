@@ -66,6 +66,12 @@ Query sync overlay (index visibility):
 - `LOCKD_EXTRA_PROPS="workloads/lockd.querysync.properties"` on any lockd target
   to require index refresh before returning writes/queries.
 
+Query engine A/B workflow (scan-heavy workload):
+- `make lockd-load-query`
+- `make lockd-run-query-index`
+- `make lockd-run-query-scan`
+- `make lockd-compare-query` (parses `performance.log` and reports latest index vs scan SCAN ops/s)
+
 Etcd comparison (no attachments/explicit XA):
 - `make etcd-load`
 - `make etcd-run`

@@ -23,6 +23,7 @@ Options:
 Environment:
   BENCHTIME          Value passed to -benchtime (default: 1x to avoid repeated
                      reruns; set e.g. BENCHTIME=1s to restore Go's default).
+  QUERY_BENCH_*      Passed through to benchmark/query/run.sh for the query suite.
 USAGE
 }
 
@@ -65,13 +66,15 @@ done
 
 declare -a SUITES
 declare -A SUITE_DIR SUITE_TAGS SUITE_ENVFILE
+declare -A SUITE_CMD
 
 add_suite() {
-  local name=$1 dir=$2 tags=$3 env_file=$4
+  local name=$1 dir=$2 tags=$3 env_file=$4 cmd=${5:-}
   SUITES+=("$name")
   SUITE_DIR["$name"]=$dir
   SUITE_TAGS["$name"]=$tags
   SUITE_ENVFILE["$name"]=$env_file
+  SUITE_CMD["$name"]=$cmd
 }
 
 add_suite disk benchmark/disk "bench disk" ".env.disk"
@@ -79,6 +82,7 @@ add_suite minio benchmark/minio "bench minio" ".env.minio"
 add_suite mem benchmark/mem/lq "bench mem lq" ""
 add_suite aws benchmark/aws "bench aws" ".env.aws"
 add_suite azure benchmark/azure "bench azure" ".env.azure"
+add_suite query "" "" "" "./benchmark/query/run.sh"
 
 MEM_BENCH_SCENARIOS=(
   "single_server_prefetch1_100p_100c"
@@ -141,7 +145,8 @@ echo
 for suite in "${SUITES_TO_RUN[@]}"; do
   dir=${SUITE_DIR[$suite]:-}
   tags=${SUITE_TAGS[$suite]:-}
-  if [[ -z $dir ]]; then
+  suite_cmd=${SUITE_CMD[$suite]:-}
+  if [[ -z $dir && -z $suite_cmd ]]; then
     echo "Unknown suite: $suite" >&2
     EXIT_CODE=1
     continue
@@ -153,6 +158,20 @@ for suite in "${SUITES_TO_RUN[@]}"; do
     continue
   fi
   log_file="$LOG_DIR/${suite//\//-}.log"
+  if [[ -n $suite_cmd ]]; then
+    echo "==> Running benchmark suite: $suite"
+    echo "Command: $suite_cmd"
+    if bash -c "$suite_cmd" 2>&1 | tee "$log_file"; then
+      STATUS[$suite]=0
+    else
+      STATUS[$suite]=1
+      EXIT_CODE=1
+    fi
+    SUITE_LOGS["$suite"]+="$log_file "
+    echo "Log: $log_file"
+    echo
+    continue
+  fi
   echo "==> Running benchmark suite: $suite"
   if [[ $suite == "mem" && $isolate_mem -eq 1 ]]; then
     suite_failed=0

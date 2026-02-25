@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1040,6 +1042,66 @@ func TestIndexAdapterQueryDocumentsStreamsMatches(t *testing.T) {
 	}
 }
 
+func TestIndexAdapterQueryDocumentsUsesSegmentDocMetaWithoutLoadMeta(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	tracking := &loadMetaTrackingBackend{
+		Backend:      mem,
+		failLoadMeta: true,
+	}
+	store := NewStore(tracking, nil)
+	segment := NewSegment("seg-docmeta-fastpath", time.Unix(1_700_000_055, 0))
+	segment.Fields["/status"] = FieldBlock{Postings: map[string][]string{
+		"open": {"orders-open-1"},
+	}}
+	segment.DocMeta["orders-open-1"] = DocumentMetadata{
+		StateETag:           "etag-segment-open-1",
+		StatePlaintextBytes: 128,
+		PublishedVersion:    1,
+	}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+	manifest := NewManifest()
+	manifest.Seq = 5
+	manifest.UpdatedAt = segment.CreatedAt
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{{
+			ID:        segment.ID,
+			CreatedAt: segment.CreatedAt,
+			DocCount:  segment.DocCount(),
+		}},
+	}
+	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+	writeIndexedState(t, tracking, namespaces.Default, "orders-open-1", map[string]any{"status": "open"})
+
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	sink := &capturingIndexDocumentSink{}
+	result, err := adapter.QueryDocuments(ctx, search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			Eq: &api.Term{Field: "/status", Value: "open"},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	}, sink)
+	if err != nil {
+		t.Fatalf("query documents: %v", err)
+	}
+	if !slices.Equal(result.Keys, []string{"orders-open-1"}) {
+		t.Fatalf("unexpected streamed keys %v", result.Keys)
+	}
+	if got := tracking.LoadMetaCalls(); got != 0 {
+		t.Fatalf("expected zero load meta calls during query documents, got %d", got)
+	}
+}
+
 func TestIndexAdapterDocMeta(t *testing.T) {
 	ctx := context.Background()
 	mem := memory.New()
@@ -1315,4 +1377,22 @@ func writeIndexedState(t *testing.T, store storage.Backend, namespace, key strin
 	if _, err := store.StoreMeta(context.Background(), namespace, key, meta, ""); err != nil {
 		t.Fatalf("store meta: %v", err)
 	}
+}
+
+type loadMetaTrackingBackend struct {
+	storage.Backend
+	failLoadMeta  bool
+	loadMetaCalls atomic.Int64
+}
+
+func (b *loadMetaTrackingBackend) LoadMeta(ctx context.Context, namespace, key string) (storage.LoadMetaResult, error) {
+	b.loadMetaCalls.Add(1)
+	if b.failLoadMeta {
+		return storage.LoadMetaResult{}, errors.New("load meta disabled in test")
+	}
+	return b.Backend.LoadMeta(ctx, namespace, key)
+}
+
+func (b *loadMetaTrackingBackend) LoadMetaCalls() int64 {
+	return b.loadMetaCalls.Load()
 }

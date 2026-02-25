@@ -88,6 +88,51 @@ and.range{field=/amount,gte=120,lt=200}`)
 	}
 }
 
+func TestScanAdapterCachesCompiledSelectorPlans(t *testing.T) {
+	store := memory.New()
+	ctx := context.Background()
+	writeState(t, store, "default", "orders/1", map[string]any{
+		"status": "open",
+		"amount": 150.5,
+	})
+
+	sel, err := lql.ParseSelectorString(`and.eq{field=/status,value=open}`)
+	if err != nil || sel.IsEmpty() {
+		t.Fatalf("selector parse: %v", err)
+	}
+
+	adapter, err := New(Config{Backend: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		_, err := adapter.Query(ctx, search.Request{
+			Namespace: "default",
+			Selector:  sel,
+			Limit:     5,
+		})
+		if err != nil {
+			t.Fatalf("query run %d: %v", i, err)
+		}
+	}
+	if got := adapter.plans.len(); got != 1 {
+		t.Fatalf("expected one cached selector plan, got %d", got)
+	}
+
+	sink := &capturingDocumentSink{}
+	_, err = adapter.QueryDocuments(ctx, search.Request{
+		Namespace: "default",
+		Selector:  sel,
+		Limit:     5,
+	}, sink)
+	if err != nil {
+		t.Fatalf("query documents: %v", err)
+	}
+	if got := adapter.plans.len(); got != 1 {
+		t.Fatalf("expected cached selector plan reuse for query documents, got %d", got)
+	}
+}
+
 func TestScanAdapterSelectorNumericMapKeyCompatibility(t *testing.T) {
 	store := memory.New()
 	ctx := context.Background()

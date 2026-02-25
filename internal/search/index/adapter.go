@@ -354,6 +354,21 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 	if limit <= 0 {
 		return search.Result{IndexSeq: manifest.Seq, Format: manifest.Format}, nil
 	}
+	canUseDocMeta := manifest.Format >= IndexFormatVersionV3
+	var docMeta map[string]DocumentMetadata
+	docMetaReady := false
+	getDocMeta := func() (map[string]DocumentMetadata, error) {
+		if docMetaReady {
+			return docMeta, nil
+		}
+		docMetaReady = true
+		metaMap, err := reader.docMetaMap(ctx)
+		if err != nil {
+			return nil, err
+		}
+		docMeta = metaMap
+		return docMeta, nil
+	}
 	streamed := make([]string, 0, min(limit, len(sortedKeys)-startIdx))
 	var streamStats search.StreamStats
 	nextIndex := len(sortedKeys)
@@ -374,23 +389,47 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 		if ok && !visibleKey {
 			continue
 		}
-		metaRes, metaErr := a.store.backend.LoadMeta(ctx, req.Namespace, key)
-		if metaErr != nil {
-			if errors.Is(metaErr, storage.ErrNotFound) || storage.IsTransient(metaErr) {
+		stateMeta := storage.Meta{}
+		metaLoaded := false
+		if canUseDocMeta {
+			metaMap, err := getDocMeta()
+			if err != nil {
+				return search.Result{}, err
+			}
+			if meta, ok := metaMap[key]; ok {
+				if meta.PublishedVersion == 0 || meta.QueryExcluded {
+					continue
+				}
+				stateMeta.PublishedVersion = meta.PublishedVersion
+				stateMeta.StateETag = meta.StateETag
+				stateMeta.StatePlaintextBytes = meta.StatePlaintextBytes
+				stateMeta.StateDescriptor = meta.StateDescriptor
+				metaLoaded = true
+			}
+		}
+		if !metaLoaded {
+			metaRes, metaErr := a.store.backend.LoadMeta(ctx, req.Namespace, key)
+			if metaErr != nil {
+				if errors.Is(metaErr, storage.ErrNotFound) || storage.IsTransient(metaErr) {
+					continue
+				}
+				return search.Result{}, fmt.Errorf("load meta %s: %w", key, metaErr)
+			}
+			meta := metaRes.Meta
+			if meta == nil || meta.PublishedVersion == 0 || meta.QueryExcluded() {
 				continue
 			}
-			return search.Result{}, fmt.Errorf("load meta %s: %w", key, metaErr)
+			stateMeta.PublishedVersion = meta.PublishedVersion
+			stateMeta.StateETag = meta.StateETag
+			stateMeta.StatePlaintextBytes = meta.StatePlaintextBytes
+			stateMeta.StateDescriptor = meta.StateDescriptor
 		}
-		meta := metaRes.Meta
-		if meta == nil || meta.PublishedVersion == 0 || meta.QueryExcluded() {
+		version := stateMeta.PublishedVersion
+		if version == 0 {
 			continue
 		}
-		version := meta.PublishedVersion
-		if version == 0 {
-			version = meta.Version
-		}
 		if !execPlan.requirePostEval {
-			if err := a.streamDocument(ctx, req.Namespace, key, version, meta, sink); err != nil {
+			if err := a.streamDocument(ctx, req.Namespace, key, version, &stateMeta, sink); err != nil {
 				if errors.Is(err, storage.ErrNotFound) || storage.IsTransient(err) {
 					continue
 				}
@@ -402,10 +441,10 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 			nextIndex = i + 1
 			continue
 		}
-		if meta.StateETag == "" {
+		if stateMeta.StateETag == "" {
 			continue
 		}
-		matched, queryResult, err := a.matchAndStreamDocument(ctx, req.Namespace, key, version, meta, execPlan.postFilterPlan, sink)
+		matched, queryResult, err := a.matchAndStreamDocument(ctx, req.Namespace, key, version, &stateMeta, execPlan.postFilterPlan, sink)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) || storage.IsTransient(err) {
 				continue

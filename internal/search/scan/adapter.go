@@ -34,6 +34,7 @@ type Adapter struct {
 	backend          storage.Backend
 	logger           pslog.Logger
 	maxDocumentBytes int64
+	plans            *queryPlanCache
 }
 
 // New returns a scan adapter wired according to cfg.
@@ -49,6 +50,7 @@ func New(cfg Config) (*Adapter, error) {
 		backend:          cfg.Backend,
 		logger:           cfg.Logger,
 		maxDocumentBytes: maxBytes,
+		plans:            newQueryPlanCache(defaultQueryPlanCacheLimit),
 	}, nil
 }
 
@@ -82,7 +84,7 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 	compatNumericSelector := !matchAll && selectorNeedsNumericSegmentCompat(req.Selector)
 	var plan lql.QueryStreamPlan
 	if !matchAll && !compatNumericSelector {
-		compiled, compileErr := lql.NewQueryStreamPlan(req.Selector)
+		compiled, compileErr := a.compiledPlan(req.Selector)
 		if compileErr != nil {
 			return search.Result{}, fmt.Errorf("scan: compile selector: %w", compileErr)
 		}
@@ -188,7 +190,7 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 	compatNumericSelector := !matchAll && selectorNeedsNumericSegmentCompat(req.Selector)
 	var plan lql.QueryStreamPlan
 	if !matchAll && !compatNumericSelector {
-		compiled, compileErr := lql.NewQueryStreamPlan(req.Selector)
+		compiled, compileErr := a.compiledPlan(req.Selector)
 		if compileErr != nil {
 			return search.Result{}, fmt.Errorf("scan: compile selector: %w", compileErr)
 		}
@@ -584,4 +586,25 @@ func isDigits(segment string) bool {
 	// Keep semantics aligned with stream path compilation (non-negative int tokens).
 	_, err := strconv.Atoi(segment)
 	return err == nil
+}
+
+func (a *Adapter) compiledPlan(sel lql.Selector) (lql.QueryStreamPlan, error) {
+	payload, err := json.Marshal(sel)
+	if err != nil {
+		return lql.QueryStreamPlan{}, err
+	}
+	cacheKey := string(payload)
+	if a != nil && a.plans != nil {
+		if plan, ok := a.plans.get(cacheKey); ok {
+			return plan, nil
+		}
+	}
+	plan, err := lql.NewQueryStreamPlan(sel)
+	if err != nil {
+		return lql.QueryStreamPlan{}, err
+	}
+	if a != nil && a.plans != nil {
+		a.plans.put(cacheKey, plan)
+	}
+	return plan, nil
 }

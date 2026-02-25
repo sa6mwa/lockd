@@ -23,6 +23,7 @@ import (
 	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/internal/core"
 	"pkt.systems/lockd/internal/correlation"
+	"pkt.systems/lockd/internal/jsonutil"
 	"pkt.systems/lockd/internal/queue"
 	"pkt.systems/lockd/internal/search"
 	scanadapter "pkt.systems/lockd/internal/search/scan"
@@ -1495,6 +1496,137 @@ func TestConvertMutateStreamErrorMapping(t *testing.T) {
 	}
 }
 
+func TestMutateBackpressureSlowWriterCompletes(t *testing.T) {
+	store := memory.New()
+	handler := New(Config{
+		Store:        store,
+		Logger:       pslog.NoopLogger(),
+		Clock:        newStubClock(time.Unix(1_700_000_000, 0)),
+		JSONMaxBytes: 8 << 20,
+		DefaultTTL:   15 * time.Second,
+		MaxTTL:       1 * time.Minute,
+		AcquireBlock: 10 * time.Second,
+		CompactWriter: func(w io.Writer, r io.Reader, maxBytes int64) error {
+			slow := &slowReader{reader: r, delay: 150 * time.Microsecond}
+			return jsonutil.CompactWriter(w, slow, maxBytes)
+		},
+	})
+	mux := http.NewServeMux()
+	handler.Register(mux)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	const key = "stream-mutate-backpressure"
+	seedPublishedState(t, store, key, buildLargeStateDocument(300))
+
+	var acquire api.AcquireResponse
+	if status := doJSON(t, server, http.MethodPost, "/v1/acquire", nil, api.AcquireRequest{
+		Key: key, Owner: "worker-backpressure", TTLSeconds: 10,
+	}, &acquire); status != http.StatusOK {
+		t.Fatalf("acquire: expected 200, got %d", status)
+	}
+
+	payload, err := json.Marshal(api.MutateRequest{Mutations: []string{`/status="ready"`}})
+	if err != nil {
+		t.Fatalf("marshal mutate payload: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/v1/mutate?key="+key, bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("new mutate request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Lease-ID", acquire.LeaseID)
+	req.Header.Set("X-Txn-ID", acquire.TxnID)
+	req.Header.Set("X-Fencing-Token", strconv.FormatInt(acquire.FencingToken, 10))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("mutate request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, data)
+	}
+	if got := parseIntHeader(t, resp.Header, headerMutateCandidatesSeen); got != 1 {
+		t.Fatalf("expected %s=1, got %d", headerMutateCandidatesSeen, got)
+	}
+	if got := parseIntHeader(t, resp.Header, headerMutateCandidatesWritten); got != 1 {
+		t.Fatalf("expected %s=1, got %d", headerMutateCandidatesWritten, got)
+	}
+}
+
+func TestMutateBackpressureCancellation(t *testing.T) {
+	store := memory.New()
+	handler := New(Config{
+		Store:        store,
+		Logger:       pslog.NoopLogger(),
+		Clock:        newStubClock(time.Unix(1_700_000_000, 0)),
+		JSONMaxBytes: 8 << 20,
+		DefaultTTL:   15 * time.Second,
+		MaxTTL:       1 * time.Minute,
+		AcquireBlock: 10 * time.Second,
+		CompactWriter: func(w io.Writer, r io.Reader, maxBytes int64) error {
+			slow := &slowReader{reader: r, delay: 300 * time.Microsecond}
+			return jsonutil.CompactWriter(w, slow, maxBytes)
+		},
+	})
+	mux := http.NewServeMux()
+	handler.Register(mux)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	const key = "stream-mutate-cancel"
+	seedPublishedState(t, store, key, buildLargeStateDocument(1500))
+
+	var acquire api.AcquireResponse
+	if status := doJSON(t, server, http.MethodPost, "/v1/acquire", nil, api.AcquireRequest{
+		Key: key, Owner: "worker-cancel", TTLSeconds: 10,
+	}, &acquire); status != http.StatusOK {
+		t.Fatalf("acquire: expected 200, got %d", status)
+	}
+
+	payload, err := json.Marshal(api.MutateRequest{Mutations: []string{`/status="ready"`}})
+	if err != nil {
+		t.Fatalf("marshal mutate payload: %v", err)
+	}
+	reqCtx, cancel := context.WithTimeout(context.Background(), 15*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, server.URL+"/v1/mutate?key="+key, bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("new mutate request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Lease-ID", acquire.LeaseID)
+	req.Header.Set("X-Txn-ID", acquire.TxnID)
+	req.Header.Set("X-Fencing-Token", strconv.FormatInt(acquire.FencingToken, 10))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err == nil {
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusRequestTimeout {
+			data, _ := io.ReadAll(resp.Body)
+			t.Fatalf("expected 408 timeout on cancel, got %d: %s", resp.StatusCode, data)
+		}
+		var errResp api.ErrorResponse
+		if decodeErr := json.NewDecoder(resp.Body).Decode(&errResp); decodeErr != nil {
+			t.Fatalf("decode cancel response: %v", decodeErr)
+		}
+		if errResp.ErrorCode != "context_canceled" {
+			t.Fatalf("expected context_canceled, got %s", errResp.ErrorCode)
+		}
+	} else if !errors.Is(err, context.DeadlineExceeded) && !strings.Contains(err.Error(), "context deadline exceeded") {
+		t.Fatalf("expected deadline exceeded from canceled request, got %v", err)
+	}
+
+	// Server should remain responsive after cancellation.
+	var probe api.AcquireResponse
+	if status := doJSON(t, server, http.MethodPost, "/v1/acquire", nil, api.AcquireRequest{
+		Key: "stream-mutate-cancel-probe", Owner: "worker-probe", TTLSeconds: 5,
+	}, &probe); status != http.StatusOK {
+		t.Fatalf("probe acquire expected 200, got %d", status)
+	}
+}
+
 func TestMutateValidation(t *testing.T) {
 	server := newTestHTTPServer(t)
 
@@ -1866,6 +1998,56 @@ func parseIntHeader(t *testing.T, headers http.Header, key string) int64 {
 		t.Fatalf("parse header %s=%q: %v", key, raw, err)
 	}
 	return parsed
+}
+
+func seedPublishedState(t *testing.T, store storage.Backend, key string, doc map[string]any) {
+	t.Helper()
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal state: %v", err)
+	}
+	res, err := store.WriteState(context.Background(), namespaces.Default, key, bytes.NewReader(payload), storage.PutStateOptions{})
+	if err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+	meta := &storage.Meta{
+		Version:             1,
+		PublishedVersion:    1,
+		StateETag:           res.NewETag,
+		UpdatedAtUnix:       time.Now().Unix(),
+		StatePlaintextBytes: res.BytesWritten,
+		StateDescriptor:     append([]byte(nil), res.Descriptor...),
+	}
+	if _, err := store.StoreMeta(context.Background(), namespaces.Default, key, meta, ""); err != nil {
+		t.Fatalf("store meta: %v", err)
+	}
+}
+
+func buildLargeStateDocument(items int) map[string]any {
+	rows := make([]map[string]any, 0, items)
+	for i := 0; i < items; i++ {
+		rows = append(rows, map[string]any{
+			"id":      i,
+			"message": fmt.Sprintf("row-%04d", i),
+			"ok":      i%2 == 0,
+		})
+	}
+	return map[string]any{
+		"status": "pending",
+		"rows":   rows,
+	}
+}
+
+type slowReader struct {
+	reader io.Reader
+	delay  time.Duration
+}
+
+func (s *slowReader) Read(p []byte) (int, error) {
+	if s.delay > 0 {
+		time.Sleep(s.delay)
+	}
+	return s.reader.Read(p)
 }
 
 func newQueryTestServer(t *testing.T, adapter search.Adapter) *httptest.Server {

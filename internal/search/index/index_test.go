@@ -260,6 +260,179 @@ func TestIndexAdapterQuery(t *testing.T) {
 	}
 }
 
+func TestIndexAdapterQueryStableOrderingAndCursorAcrossOr(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	store := NewStore(mem, nil)
+	segment := NewSegment("seg-order-or", time.Unix(1_700_000_021, 0))
+	segment.Fields["/group"] = FieldBlock{Postings: map[string][]string{
+		"alpha": {"zeta", "alpha"},
+		"beta":  {"mu", "beta"},
+	}}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+	manifest := NewManifest()
+	manifest.Seq = 3
+	manifest.UpdatedAt = segment.CreatedAt
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{{
+			ID:        segment.ID,
+			CreatedAt: segment.CreatedAt,
+			DocCount:  segment.DocCount(),
+		}},
+	}
+	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+	for _, key := range []string{"alpha", "beta", "mu", "zeta"} {
+		meta := &storage.Meta{
+			Version:          1,
+			PublishedVersion: 1,
+			StateETag:        "etag-" + key,
+		}
+		if _, err := mem.StoreMeta(ctx, namespaces.Default, key, meta, ""); err != nil {
+			t.Fatalf("store meta %s: %v", key, err)
+		}
+	}
+
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	req := search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			Or: []api.Selector{
+				{Eq: &api.Term{Field: "/group", Value: "alpha"}},
+				{Eq: &api.Term{Field: "/group", Value: "beta"}},
+			},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	}
+	full, err := adapter.Query(ctx, req)
+	if err != nil {
+		t.Fatalf("full query: %v", err)
+	}
+	want := []string{"alpha", "beta", "mu", "zeta"}
+	if !slices.Equal(full.Keys, want) {
+		t.Fatalf("unexpected full keys %v", full.Keys)
+	}
+
+	page1, err := adapter.Query(ctx, search.Request{
+		Namespace: req.Namespace,
+		Selector:  req.Selector,
+		Limit:     2,
+		Engine:    req.Engine,
+	})
+	if err != nil {
+		t.Fatalf("page1 query: %v", err)
+	}
+	if !slices.Equal(page1.Keys, want[:2]) || page1.Cursor == "" {
+		t.Fatalf("unexpected page1 %+v", page1)
+	}
+	page2, err := adapter.Query(ctx, search.Request{
+		Namespace: req.Namespace,
+		Selector:  req.Selector,
+		Limit:     2,
+		Cursor:    page1.Cursor,
+		Engine:    req.Engine,
+	})
+	if err != nil {
+		t.Fatalf("page2 query: %v", err)
+	}
+	if !slices.Equal(page2.Keys, want[2:]) || page2.Cursor != "" {
+		t.Fatalf("unexpected page2 %+v", page2)
+	}
+}
+
+func TestIndexAdapterQueryStableOrderingAndCursorWithNot(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	store := NewStore(mem, nil)
+	segment := NewSegment("seg-order-not", time.Unix(1_700_000_022, 0))
+	segment.Fields["/status"] = FieldBlock{Postings: map[string][]string{
+		"open":   {"k3", "k1"},
+		"closed": {"k2"},
+	}}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+	manifest := NewManifest()
+	manifest.Seq = 4
+	manifest.UpdatedAt = segment.CreatedAt
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{{
+			ID:        segment.ID,
+			CreatedAt: segment.CreatedAt,
+			DocCount:  segment.DocCount(),
+		}},
+	}
+	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+	for _, key := range []string{"k1", "k2", "k3"} {
+		meta := &storage.Meta{
+			Version:          1,
+			PublishedVersion: 1,
+			StateETag:        "etag-" + key,
+		}
+		if _, err := mem.StoreMeta(ctx, namespaces.Default, key, meta, ""); err != nil {
+			t.Fatalf("store meta %s: %v", key, err)
+		}
+	}
+
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	req := search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			Not: &api.Selector{Eq: &api.Term{Field: "/status", Value: "closed"}},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	}
+	full, err := adapter.Query(ctx, req)
+	if err != nil {
+		t.Fatalf("full query: %v", err)
+	}
+	want := []string{"k1", "k3"}
+	if !slices.Equal(full.Keys, want) {
+		t.Fatalf("unexpected full keys %v", full.Keys)
+	}
+
+	page1, err := adapter.Query(ctx, search.Request{
+		Namespace: req.Namespace,
+		Selector:  req.Selector,
+		Limit:     1,
+		Engine:    req.Engine,
+	})
+	if err != nil {
+		t.Fatalf("page1 query: %v", err)
+	}
+	if !slices.Equal(page1.Keys, want[:1]) || page1.Cursor == "" {
+		t.Fatalf("unexpected page1 %+v", page1)
+	}
+	page2, err := adapter.Query(ctx, search.Request{
+		Namespace: req.Namespace,
+		Selector:  req.Selector,
+		Limit:     1,
+		Cursor:    page1.Cursor,
+		Engine:    req.Engine,
+	})
+	if err != nil {
+		t.Fatalf("page2 query: %v", err)
+	}
+	if !slices.Equal(page2.Keys, want[1:]) || page2.Cursor != "" {
+		t.Fatalf("unexpected page2 %+v", page2)
+	}
+}
+
 func TestIndexAdapterQueryContainsSelectors(t *testing.T) {
 	ctx := context.Background()
 	mem := memory.New()

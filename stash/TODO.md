@@ -78,9 +78,9 @@ Scope: lockd-side migration and performance program to complete true inline stre
 - [x] P3.C4 Benchmark delta report for C slice.
 
 ### P3.D Index format v5 (persistent lucene-like structure)
-- [ ] P3.D1 Write v5 format design doc (manifest + segment schema + migration behavior).
-- [ ] P3.D2 Persist field dictionary + term dictionary + docID postings in segment format.
-- [ ] P3.D3 Implement reader/writer compatibility for v4 and v5.
+- [x] P3.D1 Write v5 format design doc (manifest + segment schema + migration behavior).
+- [x] P3.D2 Persist field dictionary + term dictionary + docID postings in segment format.
+- [x] P3.D3 Implement reader/writer compatibility for v4 and v5.
 - [ ] P3.D4 Add rebuild path and mixed-format handling tests.
 - [ ] P3.D5 Add integration tests on upgrade/rebuild scenarios.
 - [ ] P3.D6 Benchmark delta report for D slice.
@@ -157,4 +157,5 @@ Scope: lockd-side migration and performance program to complete true inline stre
 - [x] 2026-02-25: Scan/LQL numeric-map-key parity + object-store integration hardening landed (`9bef106`): scan adapter now preserves selector semantics for numeric JSON pointer segments by compatibility matching path; query integration suite now scales flow-control/low-match fixtures on object stores (`aws://`, `azure://`, `s3://`) to avoid false timeout failures while preserving behavioral assertions.
 - [x] 2026-02-25: Full integration contract sweep passed (`./run-integration-suites.sh all`, elapsed `52:46`): mem/disk/nfs/aws/azure/minio/mixed all green.
 - [x] 2026-02-25: P3.C3-P3.C4 pooling slice landed (pending commit): added pooled `docIDAccumulator` work buffers for repeated union/intersect/subtract loops in selector evaluation and postings aggregation. Bench: wildcard resolve `15.83 ns/op` (0 alloc), recursive resolve `24.92 ns/op` (0 alloc), wildcard contains `854,746 ns/op`, `186,210 B/op`, `4,106 allocs/op`, adapter wildcard contains `2,747,160 ns/op`, `1,963,217 B/op`, `12,386 allocs/op`.
+- [x] 2026-02-25: P3.D1-P3.D3 v5 segment format wiring landed (pending commit): added v5 protobuf schema (`doc_table`, `field_dict`, `term_dict`, `doc_ids` postings), implemented v5 encode/decode in `Segment.ToProto/FromProto`, fixed manifest cache format cloning, added writer manifest-format inheritance, and added mixed v4/v5 query compatibility tests.
 - [ ] YYYY-MM-DD: Next slice commit + benchmark delta summary.

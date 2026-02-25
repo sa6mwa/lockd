@@ -165,6 +165,16 @@ func (w *Writer) persistSegment(ctx context.Context, segment *Segment) (int64, e
 	if w.store == nil {
 		return 0, storage.ErrNotImplemented
 	}
+	manifestRes, err := w.store.LoadManifest(ctx, w.cfg.Namespace)
+	if err != nil {
+		return 0, err
+	}
+	targetFormat := uint32(IndexFormatVersionV4)
+	if manifest := manifestRes.Manifest; manifest != nil && manifest.Format >= IndexFormatVersionV4 {
+		targetFormat = manifest.Format
+	}
+	segment.Format = targetFormat
+
 	_, segmentBytes, err := w.store.WriteSegment(ctx, w.cfg.Namespace, segment)
 	if err != nil {
 		return 0, err
@@ -178,10 +188,11 @@ func (w *Writer) persistSegment(ctx context.Context, segment *Segment) (int64, e
 		manifest := manifestRes.Manifest
 		etag := manifestRes.ETag
 		if manifest != nil && manifest.Format == 0 {
-			manifest.Format = IndexFormatVersionV4
+			manifest.Format = targetFormat
 		}
 		if manifest == nil || len(manifest.Shards) == 0 {
 			manifest = NewManifest()
+			manifest.Format = targetFormat
 		}
 		shard := manifest.Shards[0]
 		if shard == nil {

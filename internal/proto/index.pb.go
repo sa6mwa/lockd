@@ -208,6 +208,7 @@ type IndexSegment struct {
 	Fields        []*FieldBlock          `protobuf:"bytes,3,rep,name=fields,proto3" json:"fields,omitempty"`
 	DocMeta       []*DocumentMeta        `protobuf:"bytes,4,rep,name=doc_meta,json=docMeta,proto3" json:"doc_meta,omitempty"`
 	FormatVersion uint32                 `protobuf:"varint,5,opt,name=format_version,json=formatVersion,proto3" json:"format_version,omitempty"`
+	V5            *IndexSegmentV5        `protobuf:"bytes,6,opt,name=v5,proto3" json:"v5,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -277,6 +278,185 @@ func (x *IndexSegment) GetFormatVersion() uint32 {
 	return 0
 }
 
+func (x *IndexSegment) GetV5() *IndexSegmentV5 {
+	if x != nil {
+		return x.V5
+	}
+	return nil
+}
+
+type IndexSegmentV5 struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	DocTable      []string               `protobuf:"bytes,1,rep,name=doc_table,json=docTable,proto3" json:"doc_table,omitempty"`
+	FieldDict     []string               `protobuf:"bytes,2,rep,name=field_dict,json=fieldDict,proto3" json:"field_dict,omitempty"`
+	Fields        []*FieldBlockV5        `protobuf:"bytes,3,rep,name=fields,proto3" json:"fields,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *IndexSegmentV5) Reset() {
+	*x = IndexSegmentV5{}
+	mi := &file_index_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IndexSegmentV5) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IndexSegmentV5) ProtoMessage() {}
+
+func (x *IndexSegmentV5) ProtoReflect() protoreflect.Message {
+	mi := &file_index_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IndexSegmentV5.ProtoReflect.Descriptor instead.
+func (*IndexSegmentV5) Descriptor() ([]byte, []int) {
+	return file_index_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *IndexSegmentV5) GetDocTable() []string {
+	if x != nil {
+		return x.DocTable
+	}
+	return nil
+}
+
+func (x *IndexSegmentV5) GetFieldDict() []string {
+	if x != nil {
+		return x.FieldDict
+	}
+	return nil
+}
+
+func (x *IndexSegmentV5) GetFields() []*FieldBlockV5 {
+	if x != nil {
+		return x.Fields
+	}
+	return nil
+}
+
+type FieldBlockV5 struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	FieldId       uint32                 `protobuf:"varint,1,opt,name=field_id,json=fieldId,proto3" json:"field_id,omitempty"`
+	TermDict      []string               `protobuf:"bytes,2,rep,name=term_dict,json=termDict,proto3" json:"term_dict,omitempty"`
+	Postings      []*PostingDocIDs       `protobuf:"bytes,3,rep,name=postings,proto3" json:"postings,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FieldBlockV5) Reset() {
+	*x = FieldBlockV5{}
+	mi := &file_index_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FieldBlockV5) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FieldBlockV5) ProtoMessage() {}
+
+func (x *FieldBlockV5) ProtoReflect() protoreflect.Message {
+	mi := &file_index_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FieldBlockV5.ProtoReflect.Descriptor instead.
+func (*FieldBlockV5) Descriptor() ([]byte, []int) {
+	return file_index_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *FieldBlockV5) GetFieldId() uint32 {
+	if x != nil {
+		return x.FieldId
+	}
+	return 0
+}
+
+func (x *FieldBlockV5) GetTermDict() []string {
+	if x != nil {
+		return x.TermDict
+	}
+	return nil
+}
+
+func (x *FieldBlockV5) GetPostings() []*PostingDocIDs {
+	if x != nil {
+		return x.Postings
+	}
+	return nil
+}
+
+type PostingDocIDs struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TermId        uint32                 `protobuf:"varint,1,opt,name=term_id,json=termId,proto3" json:"term_id,omitempty"`
+	DocIds        []uint32               `protobuf:"varint,2,rep,packed,name=doc_ids,json=docIds,proto3" json:"doc_ids,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PostingDocIDs) Reset() {
+	*x = PostingDocIDs{}
+	mi := &file_index_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PostingDocIDs) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PostingDocIDs) ProtoMessage() {}
+
+func (x *PostingDocIDs) ProtoReflect() protoreflect.Message {
+	mi := &file_index_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PostingDocIDs.ProtoReflect.Descriptor instead.
+func (*PostingDocIDs) Descriptor() ([]byte, []int) {
+	return file_index_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *PostingDocIDs) GetTermId() uint32 {
+	if x != nil {
+		return x.TermId
+	}
+	return 0
+}
+
+func (x *PostingDocIDs) GetDocIds() []uint32 {
+	if x != nil {
+		return x.DocIds
+	}
+	return nil
+}
+
 type FieldBlock struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
@@ -287,7 +467,7 @@ type FieldBlock struct {
 
 func (x *FieldBlock) Reset() {
 	*x = FieldBlock{}
-	mi := &file_index_proto_msgTypes[4]
+	mi := &file_index_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -299,7 +479,7 @@ func (x *FieldBlock) String() string {
 func (*FieldBlock) ProtoMessage() {}
 
 func (x *FieldBlock) ProtoReflect() protoreflect.Message {
-	mi := &file_index_proto_msgTypes[4]
+	mi := &file_index_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -312,7 +492,7 @@ func (x *FieldBlock) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FieldBlock.ProtoReflect.Descriptor instead.
 func (*FieldBlock) Descriptor() ([]byte, []int) {
-	return file_index_proto_rawDescGZIP(), []int{4}
+	return file_index_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *FieldBlock) GetName() string {
@@ -339,7 +519,7 @@ type TermPosting struct {
 
 func (x *TermPosting) Reset() {
 	*x = TermPosting{}
-	mi := &file_index_proto_msgTypes[5]
+	mi := &file_index_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -351,7 +531,7 @@ func (x *TermPosting) String() string {
 func (*TermPosting) ProtoMessage() {}
 
 func (x *TermPosting) ProtoReflect() protoreflect.Message {
-	mi := &file_index_proto_msgTypes[5]
+	mi := &file_index_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -364,7 +544,7 @@ func (x *TermPosting) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TermPosting.ProtoReflect.Descriptor instead.
 func (*TermPosting) Descriptor() ([]byte, []int) {
-	return file_index_proto_rawDescGZIP(), []int{5}
+	return file_index_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *TermPosting) GetTerm() string {
@@ -395,7 +575,7 @@ type DocumentMeta struct {
 
 func (x *DocumentMeta) Reset() {
 	*x = DocumentMeta{}
-	mi := &file_index_proto_msgTypes[6]
+	mi := &file_index_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -407,7 +587,7 @@ func (x *DocumentMeta) String() string {
 func (*DocumentMeta) ProtoMessage() {}
 
 func (x *DocumentMeta) ProtoReflect() protoreflect.Message {
-	mi := &file_index_proto_msgTypes[6]
+	mi := &file_index_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -420,7 +600,7 @@ func (x *DocumentMeta) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DocumentMeta.ProtoReflect.Descriptor instead.
 func (*DocumentMeta) Descriptor() ([]byte, []int) {
-	return file_index_proto_rawDescGZIP(), []int{6}
+	return file_index_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *DocumentMeta) GetKey() string {
@@ -483,14 +663,27 @@ const file_index_proto_rawDesc = "" +
 	"\n" +
 	"segment_id\x18\x01 \x01(\tR\tsegmentId\x12&\n" +
 	"\x0fcreated_at_unix\x18\x02 \x01(\x03R\rcreatedAtUnix\x12\x1b\n" +
-	"\tdoc_count\x18\x03 \x01(\x04R\bdocCount\"\xe9\x01\n" +
+	"\tdoc_count\x18\x03 \x01(\x04R\bdocCount\"\x99\x02\n" +
 	"\fIndexSegment\x12\x1d\n" +
 	"\n" +
 	"segment_id\x18\x01 \x01(\tR\tsegmentId\x12&\n" +
 	"\x0fcreated_at_unix\x18\x02 \x01(\x03R\rcreatedAtUnix\x122\n" +
 	"\x06fields\x18\x03 \x03(\v2\x1a.lockd.internal.FieldBlockR\x06fields\x127\n" +
 	"\bdoc_meta\x18\x04 \x03(\v2\x1c.lockd.internal.DocumentMetaR\adocMeta\x12%\n" +
-	"\x0eformat_version\x18\x05 \x01(\rR\rformatVersion\"Y\n" +
+	"\x0eformat_version\x18\x05 \x01(\rR\rformatVersion\x12.\n" +
+	"\x02v5\x18\x06 \x01(\v2\x1e.lockd.internal.IndexSegmentV5R\x02v5\"\x82\x01\n" +
+	"\x0eIndexSegmentV5\x12\x1b\n" +
+	"\tdoc_table\x18\x01 \x03(\tR\bdocTable\x12\x1d\n" +
+	"\n" +
+	"field_dict\x18\x02 \x03(\tR\tfieldDict\x124\n" +
+	"\x06fields\x18\x03 \x03(\v2\x1c.lockd.internal.FieldBlockV5R\x06fields\"\x81\x01\n" +
+	"\fFieldBlockV5\x12\x19\n" +
+	"\bfield_id\x18\x01 \x01(\rR\afieldId\x12\x1b\n" +
+	"\tterm_dict\x18\x02 \x03(\tR\btermDict\x129\n" +
+	"\bpostings\x18\x03 \x03(\v2\x1d.lockd.internal.PostingDocIDsR\bpostings\"A\n" +
+	"\rPostingDocIDs\x12\x17\n" +
+	"\aterm_id\x18\x01 \x01(\rR\x06termId\x12\x17\n" +
+	"\adoc_ids\x18\x02 \x03(\rR\x06docIds\"Y\n" +
 	"\n" +
 	"FieldBlock\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x127\n" +
@@ -519,27 +712,33 @@ func file_index_proto_rawDescGZIP() []byte {
 	return file_index_proto_rawDescData
 }
 
-var file_index_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
+var file_index_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_index_proto_goTypes = []any{
 	(*IndexManifest)(nil),   // 0: lockd.internal.IndexManifest
 	(*IndexShard)(nil),      // 1: lockd.internal.IndexShard
 	(*IndexSegmentRef)(nil), // 2: lockd.internal.IndexSegmentRef
 	(*IndexSegment)(nil),    // 3: lockd.internal.IndexSegment
-	(*FieldBlock)(nil),      // 4: lockd.internal.FieldBlock
-	(*TermPosting)(nil),     // 5: lockd.internal.TermPosting
-	(*DocumentMeta)(nil),    // 6: lockd.internal.DocumentMeta
+	(*IndexSegmentV5)(nil),  // 4: lockd.internal.IndexSegmentV5
+	(*FieldBlockV5)(nil),    // 5: lockd.internal.FieldBlockV5
+	(*PostingDocIDs)(nil),   // 6: lockd.internal.PostingDocIDs
+	(*FieldBlock)(nil),      // 7: lockd.internal.FieldBlock
+	(*TermPosting)(nil),     // 8: lockd.internal.TermPosting
+	(*DocumentMeta)(nil),    // 9: lockd.internal.DocumentMeta
 }
 var file_index_proto_depIdxs = []int32{
 	1, // 0: lockd.internal.IndexManifest.shards:type_name -> lockd.internal.IndexShard
 	2, // 1: lockd.internal.IndexShard.segments:type_name -> lockd.internal.IndexSegmentRef
-	4, // 2: lockd.internal.IndexSegment.fields:type_name -> lockd.internal.FieldBlock
-	6, // 3: lockd.internal.IndexSegment.doc_meta:type_name -> lockd.internal.DocumentMeta
-	5, // 4: lockd.internal.FieldBlock.postings:type_name -> lockd.internal.TermPosting
-	5, // [5:5] is the sub-list for method output_type
-	5, // [5:5] is the sub-list for method input_type
-	5, // [5:5] is the sub-list for extension type_name
-	5, // [5:5] is the sub-list for extension extendee
-	0, // [0:5] is the sub-list for field type_name
+	7, // 2: lockd.internal.IndexSegment.fields:type_name -> lockd.internal.FieldBlock
+	9, // 3: lockd.internal.IndexSegment.doc_meta:type_name -> lockd.internal.DocumentMeta
+	4, // 4: lockd.internal.IndexSegment.v5:type_name -> lockd.internal.IndexSegmentV5
+	5, // 5: lockd.internal.IndexSegmentV5.fields:type_name -> lockd.internal.FieldBlockV5
+	6, // 6: lockd.internal.FieldBlockV5.postings:type_name -> lockd.internal.PostingDocIDs
+	8, // 7: lockd.internal.FieldBlock.postings:type_name -> lockd.internal.TermPosting
+	8, // [8:8] is the sub-list for method output_type
+	8, // [8:8] is the sub-list for method input_type
+	8, // [8:8] is the sub-list for extension type_name
+	8, // [8:8] is the sub-list for extension extendee
+	0, // [0:8] is the sub-list for field type_name
 }
 
 func init() { file_index_proto_init() }
@@ -553,7 +752,7 @@ func file_index_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_index_proto_rawDesc), len(file_index_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   7,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

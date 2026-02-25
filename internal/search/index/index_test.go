@@ -47,6 +47,45 @@ func TestSegmentRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSegmentRoundTripV5(t *testing.T) {
+	seg := NewSegment("seg-v5", time.Unix(1_700_000_011, 0))
+	seg.Format = IndexFormatVersionV5
+	seg.Fields["/status"] = FieldBlock{Postings: map[string][]string{
+		"open":   {"doc-2", "doc-1", "doc-1"},
+		"closed": {"doc-3"},
+	}}
+	seg.Fields["/kind"] = FieldBlock{Postings: map[string][]string{
+		"order": {"doc-1", "doc-2", "doc-3"},
+	}}
+	seg.DocMeta["doc-1"] = DocumentMetadata{
+		StateETag:           "etag-doc-1",
+		StatePlaintextBytes: 12,
+		PublishedVersion:    7,
+	}
+	msg := seg.ToProto()
+	if msg.GetV5() == nil {
+		t.Fatalf("expected v5 payload in proto segment")
+	}
+	if len(msg.GetFields()) != 0 {
+		t.Fatalf("expected legacy fields to be omitted for v5 payload")
+	}
+	loaded := SegmentFromProto(msg)
+	if loaded.Format != IndexFormatVersionV5 {
+		t.Fatalf("unexpected loaded format %d", loaded.Format)
+	}
+	status := loaded.Fields["/status"].Postings
+	if !slices.Equal(status["open"], []string{"doc-1", "doc-2"}) {
+		t.Fatalf("unexpected /status open postings %v", status["open"])
+	}
+	if !slices.Equal(status["closed"], []string{"doc-3"}) {
+		t.Fatalf("unexpected /status closed postings %v", status["closed"])
+	}
+	kind := loaded.Fields["/kind"].Postings
+	if !slices.Equal(kind["order"], []string{"doc-1", "doc-2", "doc-3"}) {
+		t.Fatalf("unexpected /kind order postings %v", kind["order"])
+	}
+}
+
 func TestStoreManifestLifecycle(t *testing.T) {
 	store := memory.New()
 	idxStore := NewStore(store, nil)
@@ -257,6 +296,75 @@ func TestIndexAdapterQuery(t *testing.T) {
 	}
 	if len(page2.Keys) != 1 || page2.Keys[0] != "orders-open-3" || page2.Cursor != "" {
 		t.Fatalf("unexpected page2 %+v", page2)
+	}
+}
+
+func TestIndexAdapterQueryMixedSegmentFormats(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	store := NewStore(mem, nil)
+
+	segV4 := NewSegment("seg-v4", time.Unix(1_700_000_021, 0))
+	segV4.Format = IndexFormatVersionV4
+	segV4.Fields["/status"] = FieldBlock{Postings: map[string][]string{
+		"open": {"doc-v4"},
+	}}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segV4); err != nil {
+		t.Fatalf("write v4 segment: %v", err)
+	}
+
+	segV5 := NewSegment("seg-v5", time.Unix(1_700_000_022, 0))
+	segV5.Format = IndexFormatVersionV5
+	segV5.Fields["/status"] = FieldBlock{Postings: map[string][]string{
+		"open": {"doc-v5"},
+	}}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segV5); err != nil {
+		t.Fatalf("write v5 segment: %v", err)
+	}
+
+	manifest := NewManifest()
+	manifest.Format = IndexFormatVersionV5
+	manifest.Seq = 10
+	manifest.UpdatedAt = segV5.CreatedAt
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{
+			{ID: segV5.ID, CreatedAt: segV5.CreatedAt, DocCount: segV5.DocCount()},
+			{ID: segV4.ID, CreatedAt: segV4.CreatedAt, DocCount: segV4.DocCount()},
+		},
+	}
+	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+
+	for _, key := range []string{"doc-v4", "doc-v5"} {
+		meta := &storage.Meta{
+			Version:          1,
+			PublishedVersion: 1,
+			StateETag:        "etag-" + key,
+		}
+		if _, err := mem.StoreMeta(ctx, namespaces.Default, key, meta, ""); err != nil {
+			t.Fatalf("store meta %s: %v", key, err)
+		}
+	}
+
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	resp, err := adapter.Query(ctx, search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			Eq: &api.Term{Field: "/status", Value: "open"},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	})
+	if err != nil {
+		t.Fatalf("query mixed formats: %v", err)
+	}
+	if !slices.Equal(resp.Keys, []string{"doc-v4", "doc-v5"}) {
+		t.Fatalf("unexpected mixed format keys %v", resp.Keys)
 	}
 }
 

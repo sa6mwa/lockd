@@ -28,6 +28,24 @@ message IndexSegment {
   repeated FieldBlock fields = 3;
   repeated DocumentMeta doc_meta = 4;
   uint32 format_version = 5;
+  IndexSegmentV5 v5 = 6;
+}
+
+message IndexSegmentV5 {
+  repeated string doc_table = 1;
+  repeated string field_dict = 2;
+  repeated FieldBlockV5 fields = 3;
+}
+
+message FieldBlockV5 {
+  uint32 field_id = 1;
+  repeated string term_dict = 2;
+  repeated PostingDocIDs postings = 3;
+}
+
+message PostingDocIDs {
+  uint32 term_id = 1;
+  repeated uint32 doc_ids = 2;
 }
 
 message FieldBlock {

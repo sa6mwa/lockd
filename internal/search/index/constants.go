@@ -19,4 +19,6 @@ const (
 	IndexFormatVersionV3 = 3
 	// IndexFormatVersionV4 adds trigram text postings for contains selectors.
 	IndexFormatVersionV4 = 4
+	// IndexFormatVersionV5 stores field/term dictionaries and docID postings.
+	IndexFormatVersionV5 = 5
 )

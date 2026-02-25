@@ -40,6 +40,56 @@ func TestWriterFlushByCount(t *testing.T) {
 	}
 }
 
+func TestWriterFlushUsesManifestFormat(t *testing.T) {
+	ctx := context.Background()
+	memStore := memory.New()
+	idxStore := NewStore(memStore, nil)
+
+	manifest := NewManifest()
+	manifest.Format = IndexFormatVersionV5
+	manifest.Seq = 1
+	manifest.UpdatedAt = time.Unix(1_700_000_100, 0).UTC()
+	manifest.Shards[0] = &Shard{ID: 0}
+	if _, err := idxStore.SaveManifest(ctx, "default", manifest, ""); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+
+	writer := NewWriter(WriterConfig{
+		Namespace:     "default",
+		Store:         idxStore,
+		FlushDocs:     1,
+		FlushInterval: time.Minute,
+		Logger:        pslog.NewStructured(context.Background(), io.Discard),
+	})
+	defer writer.Close(context.Background())
+
+	if err := writer.Insert(Document{
+		Key:    "doc-v5",
+		Fields: map[string][]string{"/status": {"open"}},
+	}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	manifestRes, err := idxStore.LoadManifest(ctx, "default")
+	if err != nil {
+		t.Fatalf("load manifest: %v", err)
+	}
+	if manifestRes.Manifest.Format != IndexFormatVersionV5 {
+		t.Fatalf("expected manifest format v5, got %d", manifestRes.Manifest.Format)
+	}
+	shard := manifestRes.Manifest.Shards[0]
+	if shard == nil || len(shard.Segments) == 0 {
+		t.Fatalf("expected flushed segment in manifest")
+	}
+	loaded, err := idxStore.LoadSegment(ctx, "default", shard.Segments[0].ID)
+	if err != nil {
+		t.Fatalf("load segment: %v", err)
+	}
+	if loaded.Format != IndexFormatVersionV5 {
+		t.Fatalf("expected written segment format v5, got %d", loaded.Format)
+	}
+}
+
 func TestWriterWaitForReadableReturnsAfterFlush(t *testing.T) {
 	clk := clock.NewManual(time.Now().UTC())
 	memStore := memory.New()

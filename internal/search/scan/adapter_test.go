@@ -193,6 +193,44 @@ func TestScanAdapterQueryDocumentsSelectorReadsStateOncePerCandidate(t *testing.
 	}
 }
 
+func TestScanAdapterQueryDocumentsLargeMatchReportsSpill(t *testing.T) {
+	store := memory.New()
+	ctx := context.Background()
+	writeState(t, store, "default", "orders/large", map[string]any{
+		"message": strings.Repeat("timeout payload ", 20_000),
+	})
+
+	adapter, err := New(Config{Backend: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	sel, err := lql.ParseSelectorString(`contains{field=/message,value=timeout}`)
+	if err != nil || sel.IsEmpty() {
+		t.Fatalf("selector parse: %v", err)
+	}
+	sink := &capturingDocumentSink{}
+	result, err := adapter.QueryDocuments(ctx, search.Request{
+		Namespace: "default",
+		Selector:  sel,
+		Limit:     10,
+	}, sink)
+	if err != nil {
+		t.Fatalf("query documents: %v", err)
+	}
+	if len(result.Keys) != 1 || result.Keys[0] != "orders/large" {
+		t.Fatalf("unexpected result keys: %+v", result.Keys)
+	}
+	if len(sink.rows) != 1 {
+		t.Fatalf("expected one streamed row, got %d", len(sink.rows))
+	}
+	if spills := queryMetadataInt(t, result.Metadata, search.MetadataQuerySpillCount); spills < 1 {
+		t.Fatalf("expected spill count >= 1, got %d", spills)
+	}
+	if spilledBytes := queryMetadataInt(t, result.Metadata, search.MetadataQuerySpillBytes); spilledBytes <= 0 {
+		t.Fatalf("expected spill bytes > 0, got %d", spilledBytes)
+	}
+}
+
 func TestScanAdapterInvalidCursor(t *testing.T) {
 	store := memory.New()
 	ctx := context.Background()
@@ -427,6 +465,14 @@ func writeMetaOnly(t *testing.T, store storage.Backend, namespace, key string) {
 
 func assertQueryMetadataInt(t *testing.T, metadata map[string]string, key string, want int64) {
 	t.Helper()
+	got := queryMetadataInt(t, metadata, key)
+	if got != want {
+		t.Fatalf("unexpected metadata %q: got=%d want=%d", key, got, want)
+	}
+}
+
+func queryMetadataInt(t *testing.T, metadata map[string]string, key string) int64 {
+	t.Helper()
 	raw := strings.TrimSpace(metadata[key])
 	if raw == "" {
 		t.Fatalf("missing metadata key %q", key)
@@ -435,7 +481,5 @@ func assertQueryMetadataInt(t *testing.T, metadata map[string]string, key string
 	if err != nil {
 		t.Fatalf("parse metadata %q=%q: %v", key, raw, err)
 	}
-	if got != want {
-		t.Fatalf("unexpected metadata %q: got=%d want=%d", key, got, want)
-	}
+	return got
 }

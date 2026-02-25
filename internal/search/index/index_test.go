@@ -191,6 +191,31 @@ func TestIndexAdapterQuery(t *testing.T) {
 		"4200": {"device-gw-42"},
 		"3300": {"device-gw-7"},
 	}}
+	segment.DocMeta["orders-open-1"] = DocumentMetadata{
+		StateETag:        "etag-orders-open-1",
+		PublishedVersion: 1,
+	}
+	segment.DocMeta["orders-open-2"] = DocumentMetadata{
+		StateETag:        "etag-orders-open-2",
+		PublishedVersion: 1,
+		QueryExcluded:    true,
+	}
+	segment.DocMeta["orders-open-3"] = DocumentMetadata{
+		StateETag:        "etag-orders-open-3",
+		PublishedVersion: 1,
+	}
+	segment.DocMeta["orders-closed"] = DocumentMetadata{
+		StateETag:        "etag-orders-closed",
+		PublishedVersion: 1,
+	}
+	segment.DocMeta["device-gw-42"] = DocumentMetadata{
+		StateETag:        "etag-device-gw-42",
+		PublishedVersion: 1,
+	}
+	segment.DocMeta["device-gw-7"] = DocumentMetadata{
+		StateETag:        "etag-device-gw-7",
+		PublishedVersion: 0,
+	}
 	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
 		t.Fatalf("write segment: %v", err)
 	}
@@ -1099,6 +1124,65 @@ func TestIndexAdapterQueryDocumentsUsesSegmentDocMetaWithoutLoadMeta(t *testing.
 	}
 	if got := tracking.LoadMetaCalls(); got != 0 {
 		t.Fatalf("expected zero load meta calls during query documents, got %d", got)
+	}
+}
+
+func TestIndexAdapterQueryUsesSegmentDocMetaWithoutLoadMeta(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	tracking := &loadMetaTrackingBackend{
+		Backend:      mem,
+		failLoadMeta: true,
+	}
+	store := NewStore(tracking, nil)
+	segment := NewSegment("seg-query-docmeta-fastpath", time.Unix(1_700_000_056, 0))
+	segment.Fields["/status"] = FieldBlock{Postings: map[string][]string{
+		"open": {"orders-open-1"},
+	}}
+	segment.DocMeta["orders-open-1"] = DocumentMetadata{
+		StateETag:           "etag-segment-open-1",
+		StatePlaintextBytes: 128,
+		PublishedVersion:    1,
+	}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+	manifest := NewManifest()
+	manifest.Seq = 5
+	manifest.UpdatedAt = segment.CreatedAt
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{{
+			ID:        segment.ID,
+			CreatedAt: segment.CreatedAt,
+			DocCount:  segment.DocCount(),
+		}},
+	}
+	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+	writeIndexedState(t, tracking, namespaces.Default, "orders-open-1", map[string]any{"status": "open"})
+
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	result, err := adapter.Query(ctx, search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			Eq: &api.Term{Field: "/status", Value: "open"},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	})
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if !slices.Equal(result.Keys, []string{"orders-open-1"}) {
+		t.Fatalf("unexpected keys %v", result.Keys)
+	}
+	if got := tracking.LoadMetaCalls(); got != 0 {
+		t.Fatalf("expected zero load meta calls during query, got %d", got)
 	}
 }
 

@@ -86,10 +86,10 @@ Scope: lockd-side migration and performance program to complete true inline stre
 - [x] P3.D6 Benchmark delta report for D slice.
 
 ### P3.E Compressed postings (optional but likely needed)
-- [ ] P3.E1 Evaluate roaring/bitset strategy for dense postings.
-- [ ] P3.E2 Evaluate delta+varint for sparse postings.
-- [ ] P3.E3 Add adaptive representation policy (sparse vs dense).
-- [ ] P3.E4 Add benchmarks comparing representations by selectivity bands.
+- [x] P3.E1 Evaluate roaring/bitset strategy for dense postings.
+- [x] P3.E2 Evaluate delta+varint for sparse postings.
+- [x] P3.E3 Add adaptive representation policy (sparse vs dense).
+- [x] P3.E4 Add benchmarks comparing representations by selectivity bands.
 
 ## Phase 4: Wildcard + Recursive Query Planner Maturity
 - [x] P4.1 Add planner cost model for wildcard/recursive expansions (avoid pathological traversal).
@@ -164,4 +164,5 @@ Scope: lockd-side migration and performance program to complete true inline stre
 - [x] 2026-02-25: Phase 4 baseline confirmed by existing implementation/tests: planner cost heuristics + selector plan cache + recursive fallback safeguards are active; deep-recursive and wide-wildcard benchmarks are present in `adapter_benchmark_test.go`; state-cap fail-safe is pinned in `field_resolver_test.go`.
 - [x] 2026-02-25: Phase 7 benchmark program baseline landed (pending commit): froze small/medium/large wildcard+recursive+fulltext profiles in `adapter_benchmark_test.go`, recorded reproducible command set and current-head hot benchmark table in `docs/performance/2026-02-25-search-index-phase7-baseline/summary.md`, and defined diminishing-returns/maintenance-mode policy.
 - [x] 2026-02-25: Phase 8 docs + DX cleanup landed (pending commit): rewrote `docs/subsystems/search-and-index.md` for current query/mutate streaming architecture, added selector support matrix and wildcard/recursive complexity notes, linked benchmark acceptance gates, and updated README/MCP docs for `mutate` plus current LQL operator coverage.
+- [x] 2026-02-25: Phase 3.E adaptive postings landed (pending commit): compiled segment postings now use adaptive in-memory encoding (`delta+varint` for sparse, bitset for dense) with decode-on-iteration; added strategy round-trip tests plus selectivity-band decode/union benchmarks (`BenchmarkAdaptivePostingDecodeSelectivity`, `BenchmarkAdaptivePostingUnionSelectivity`).
 - [ ] YYYY-MM-DD: Next slice commit + benchmark delta summary.

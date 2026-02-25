@@ -599,13 +599,17 @@ func newSegmentReader(namespace string, manifest *Manifest, store *Store, logger
 func (r *segmentReader) allDocIDs(ctx context.Context) (docIDSet, error) {
 	out := borrowDocIDScratch()
 	defer releaseDocIDScratch(out)
+	decoded := borrowDocIDScratch()
+	defer releaseDocIDScratch(decoded)
 	err := r.forEachCompiledSegment(ctx, func(seg *compiledSegment) error {
 		for _, fieldID := range seg.fieldIDs {
 			block, ok := seg.fieldsByID[fieldID]
 			if !ok {
 				continue
 			}
-			for _, docIDs := range block.postingsByID {
+			for _, posting := range block.postingsByID {
+				docIDs := posting.decodeInto((*decoded)[:0])
+				*decoded = docIDs
 				*out = append(*out, docIDs...)
 			}
 		}
@@ -659,12 +663,15 @@ func (r *segmentReader) docIDsForTermID(ctx context.Context, fieldID uint32, ter
 	}
 	acc := borrowDocIDAccumulator()
 	defer releaseDocIDAccumulator(acc)
+	decoded := borrowDocIDScratch()
+	defer releaseDocIDScratch(decoded)
 	err := r.forEachCompiledSegment(ctx, func(seg *compiledSegment) error {
 		block, ok := seg.fieldsByID[fieldID]
 		if !ok {
 			return nil
 		}
-		docIDs := block.docIDsForTerm(term)
+		docIDs := block.docIDsForTermInto(term, (*decoded)[:0])
+		*decoded = docIDs
 		acc.union(docIDs)
 		return nil
 	})
@@ -895,13 +902,16 @@ func (r *segmentReader) forEachCompiledSegment(ctx context.Context, fn func(*com
 }
 
 func (r *segmentReader) forEachPostingDocIDsByFieldID(ctx context.Context, fieldID uint32, fn func(term string, docIDs []uint32) error) error {
+	decoded := borrowDocIDScratch()
+	defer releaseDocIDScratch(decoded)
 	return r.forEachCompiledSegment(ctx, func(seg *compiledSegment) error {
 		block, ok := seg.fieldsByID[fieldID]
 		if !ok {
 			return nil
 		}
 		for termID, termValue := range block.terms {
-			docIDs := block.postingsByID[termID]
+			docIDs := block.postingsByID[termID].decodeInto((*decoded)[:0])
+			*decoded = docIDs
 			if err := fn(termValue, docIDs); err != nil {
 				return err
 			}
@@ -948,7 +958,7 @@ func (r *segmentReader) compileSegment(seg *Segment) *compiledSegment {
 		compiledBlock := compiledField{
 			termIDs:      make(map[string]uint32, len(block.Postings)),
 			terms:        make([]string, 0, len(block.Postings)),
-			postingsByID: make([]docIDSet, 0, len(block.Postings)),
+			postingsByID: make([]adaptivePosting, 0, len(block.Postings)),
 		}
 		terms := make([]string, 0, len(block.Postings))
 		for term := range block.Postings {
@@ -964,7 +974,7 @@ func (r *segmentReader) compileSegment(seg *Segment) *compiledSegment {
 			termID := uint32(len(compiledBlock.terms))
 			compiledBlock.termIDs[term] = termID
 			compiledBlock.terms = append(compiledBlock.terms, term)
-			compiledBlock.postingsByID = append(compiledBlock.postingsByID, sortUniqueDocIDs(docIDs))
+			compiledBlock.postingsByID = append(compiledBlock.postingsByID, newAdaptivePosting(docIDs))
 		}
 		out.fieldIDs = append(out.fieldIDs, fieldID)
 		out.fieldsByID[fieldID] = compiledBlock
@@ -1008,18 +1018,18 @@ type compiledSegment struct {
 type compiledField struct {
 	termIDs      map[string]uint32
 	terms        []string
-	postingsByID []docIDSet
+	postingsByID []adaptivePosting
 }
 
-func (f compiledField) docIDsForTerm(term string) docIDSet {
+func (f compiledField) docIDsForTermInto(term string, dst docIDSet) docIDSet {
 	termID, ok := f.termIDs[term]
 	if !ok {
-		return nil
+		return dst[:0]
 	}
 	if int(termID) >= len(f.postingsByID) {
-		return nil
+		return dst[:0]
 	}
-	return f.postingsByID[termID]
+	return f.postingsByID[termID].decodeInto(dst)
 }
 
 func (r *segmentReader) docMetaMap(ctx context.Context) (map[string]DocumentMetadata, error) {

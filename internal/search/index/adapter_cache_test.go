@@ -225,7 +225,7 @@ func compiledTermDocKey(t *testing.T, reader *segmentReader, seg *compiledSegmen
 	if !ok {
 		t.Fatalf("missing compiled field %q", field)
 	}
-	docIDs := block.docIDsForTerm(term)
+	docIDs := block.docIDsForTermInto(term, nil)
 	if len(docIDs) == 0 {
 		t.Fatalf("missing compiled term %q for field %q", term, field)
 	}

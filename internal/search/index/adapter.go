@@ -743,10 +743,11 @@ func (r *segmentReader) docIDsForTermID(ctx context.Context, fieldID uint32, ter
 	if strings.TrimSpace(term) == "" {
 		return nil, nil
 	}
-	acc := borrowDocIDAccumulator()
-	defer releaseDocIDAccumulator(acc)
 	decoded := borrowDocIDScratch()
 	defer releaseDocIDScratch(decoded)
+	out := borrowDocIDScratch()
+	defer releaseDocIDScratch(out)
+	hadResults := false
 	err := r.forEachCompiledSegment(ctx, func(seg *compiledSegment) error {
 		block, ok := seg.fieldsByID[fieldID]
 		if !ok {
@@ -754,13 +755,20 @@ func (r *segmentReader) docIDsForTermID(ctx context.Context, fieldID uint32, ter
 		}
 		docIDs := block.docIDsForTermInto(term, (*decoded)[:0])
 		*decoded = docIDs
-		acc.union(docIDs)
+		if len(docIDs) == 0 {
+			return nil
+		}
+		hadResults = true
+		*out = append(*out, docIDs...)
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return acc.result(), nil
+	if !hadResults {
+		return nil, nil
+	}
+	return sortUniqueDocIDs(append(docIDSet(nil), (*out)...)), nil
 }
 
 func (r *segmentReader) docIDsForPrefix(ctx context.Context, term *api.Term) (docIDSet, error) {
@@ -799,6 +807,10 @@ func (r *segmentReader) docIDsForContains(ctx context.Context, term *api.Term, u
 	if needle == "" {
 		return r.docIDsForExists(ctx, normalizeField(term))
 	}
+	var grams []string
+	if useTrigramIndex {
+		grams = normalizedTrigrams(needle)
+	}
 	out := borrowDocIDScratch()
 	defer releaseDocIDScratch(out)
 	for _, field := range fields {
@@ -806,7 +818,7 @@ func (r *segmentReader) docIDsForContains(ctx context.Context, term *api.Term, u
 		if !ok {
 			continue
 		}
-		set, err := r.docIDsForContainsField(ctx, field, fieldID, needle, useTrigramIndex, nil)
+		set, err := r.docIDsForContainsField(ctx, field, fieldID, needle, useTrigramIndex, grams, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -828,9 +840,14 @@ func (r *segmentReader) docIDsForIContains(ctx context.Context, term *api.Term, 
 	if needle == "" {
 		return r.docIDsForExists(ctx, normalizedField)
 	}
+	tokens := simpleTextAnalyzer{}.Tokens(needle)
 	useAllText := strings.TrimSpace(normalizedField) == "/..."
+	var grams []string
+	if useTrigramIndex {
+		grams = normalizedTrigrams(needle)
+	}
 	if len(fields) == 0 {
-		prefilter, hasTokenIndex, err := r.tokenPrefilterForField(ctx, normalizedField, needle, useAllText)
+		prefilter, hasTokenIndex, err := r.tokenPrefilterForField(ctx, normalizedField, tokens, useAllText)
 		if err != nil {
 			return nil, err
 		}
@@ -842,7 +859,7 @@ func (r *segmentReader) docIDsForIContains(ctx context.Context, term *api.Term, 
 	out := borrowDocIDScratch()
 	defer releaseDocIDScratch(out)
 	for _, field := range fields {
-		prefilter, hasTokenIndex, err := r.tokenPrefilterForField(ctx, field, needle, useAllText)
+		prefilter, hasTokenIndex, err := r.tokenPrefilterForField(ctx, field, tokens, useAllText)
 		if err != nil {
 			return nil, err
 		}
@@ -865,7 +882,7 @@ func (r *segmentReader) docIDsForIContains(ctx context.Context, term *api.Term, 
 		if !ok {
 			continue
 		}
-		set, err := r.docIDsForContainsField(ctx, field, fieldID, needle, useTrigramIndex, prefilter)
+		set, err := r.docIDsForContainsField(ctx, field, fieldID, needle, useTrigramIndex, grams, prefilter)
 		if err != nil {
 			return nil, err
 		}
@@ -877,8 +894,7 @@ func (r *segmentReader) docIDsForIContains(ctx context.Context, term *api.Term, 
 	return sortUniqueDocIDs(append(docIDSet(nil), (*out)...)), nil
 }
 
-func (r *segmentReader) tokenPrefilterForField(ctx context.Context, field, needle string, useAllText bool) (docIDSet, bool, error) {
-	tokens := simpleTextAnalyzer{}.Tokens(needle)
+func (r *segmentReader) tokenPrefilterForField(ctx context.Context, field string, tokens []string, useAllText bool) (docIDSet, bool, error) {
 	if len(tokens) == 0 {
 		return nil, false, nil
 	}
@@ -921,11 +937,11 @@ func (r *segmentReader) docIDsForContainsField(
 	fieldID uint32,
 	needle string,
 	useTrigramIndex bool,
+	grams []string,
 	prefilter docIDSet,
 ) (docIDSet, error) {
 	candidateFilter := prefilter
 	if useTrigramIndex {
-		grams := normalizedTrigrams(needle)
 		if len(grams) > 0 {
 			sawGramPosting := false
 			acc := borrowDocIDAccumulator()

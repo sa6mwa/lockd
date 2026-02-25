@@ -747,7 +747,8 @@ func (r *segmentReader) docIDsForTermID(ctx context.Context, fieldID uint32, ter
 	defer releaseDocIDScratch(decoded)
 	out := borrowDocIDScratch()
 	defer releaseDocIDScratch(out)
-	hadResults := false
+	var first docIDSet
+	multiSegment := false
 	err := r.forEachCompiledSegment(ctx, func(seg *compiledSegment) error {
 		block, ok := seg.fieldsByID[fieldID]
 		if !ok {
@@ -758,15 +759,25 @@ func (r *segmentReader) docIDsForTermID(ctx context.Context, fieldID uint32, ter
 		if len(docIDs) == 0 {
 			return nil
 		}
-		hadResults = true
+		if first == nil {
+			first = append(docIDSet(nil), docIDs...)
+			return nil
+		}
+		if !multiSegment {
+			*out = append((*out)[:0], first...)
+			multiSegment = true
+		}
 		*out = append(*out, docIDs...)
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	if !hadResults {
+	if first == nil {
 		return nil, nil
+	}
+	if !multiSegment {
+		return first, nil
 	}
 	return sortUniqueDocIDs(append(docIDSet(nil), (*out)...)), nil
 }

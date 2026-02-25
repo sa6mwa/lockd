@@ -1013,6 +1013,7 @@ func (r *segmentReader) docIDsForContainsField(
 	defer releaseDocIDScratch(out)
 	decoded := borrowDocIDScratch()
 	defer releaseDocIDScratch(decoded)
+	contributingPostings := 0
 	if single, ok, err := r.singleCompiledSegment(ctx); err != nil {
 		return nil, err
 	} else if ok {
@@ -1025,13 +1026,23 @@ func (r *segmentReader) docIDsForContainsField(
 				continue
 			}
 			posting := block.postingsByID[termID]
+			before := len(*out)
 			if len(candidateFilter) > 0 {
 				*out = posting.appendIntersectInto(*out, candidateFilter)
-				continue
+			} else {
+				docIDs := posting.decodeInto((*decoded)[:0])
+				*decoded = docIDs
+				*out = append(*out, docIDs...)
 			}
-			docIDs := posting.decodeInto((*decoded)[:0])
-			*decoded = docIDs
-			*out = append(*out, docIDs...)
+			if len(*out) > before {
+				contributingPostings++
+			}
+		}
+		if len(*out) == 0 {
+			return nil, nil
+		}
+		if contributingPostings <= 1 {
+			return append(docIDSet(nil), (*out)...), nil
 		}
 		return sortUniqueDocIDs(append(docIDSet(nil), (*out)...)), nil
 	}
@@ -1045,17 +1056,27 @@ func (r *segmentReader) docIDsForContainsField(
 				continue
 			}
 			posting := block.postingsByID[termID]
+			before := len(*out)
 			if len(candidateFilter) > 0 {
 				*out = posting.appendIntersectInto(*out, candidateFilter)
-				continue
+			} else {
+				docIDs := posting.decodeInto((*decoded)[:0])
+				*decoded = docIDs
+				*out = append(*out, docIDs...)
 			}
-			docIDs := posting.decodeInto((*decoded)[:0])
-			*decoded = docIDs
-			*out = append(*out, docIDs...)
+			if len(*out) > before {
+				contributingPostings++
+			}
 		}
 		return nil
 	}); err != nil {
 		return nil, err
+	}
+	if len(*out) == 0 {
+		return nil, nil
+	}
+	if contributingPostings <= 1 {
+		return append(docIDSet(nil), (*out)...), nil
 	}
 	return sortUniqueDocIDs(append(docIDSet(nil), (*out)...)), nil
 }

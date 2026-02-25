@@ -1730,9 +1730,12 @@ func (h *Handler) handleMutate(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	pipeReader, pipeWriter := io.Pipe()
-	mutateErrCh := make(chan error, 1)
+	type mutateStreamRun struct {
+		result lql.MutateStreamResult
+		err    error
+	}
+	mutateResultCh := make(chan mutateStreamRun, 1)
 	go func() {
-		defer close(mutateErrCh)
 		defer source.Close()
 		req := lql.MutateStreamRequest{
 			Ctx:               r.Context(),
@@ -1742,13 +1745,14 @@ func (h *Handler) handleMutate(w http.ResponseWriter, r *http.Request) error {
 			Plan:              plan,
 			MaxCandidateBytes: h.jsonMaxBytes,
 		}
-		if mutateErr := lql.MutateStream(req); mutateErr != nil {
+		runResult, mutateErr := lql.MutateStreamWithResult(req)
+		if mutateErr != nil {
 			_ = pipeWriter.CloseWithError(mutateErr)
-			mutateErrCh <- mutateErr
+			mutateResultCh <- mutateStreamRun{err: mutateErr}
 			return
 		}
 		_ = pipeWriter.Close()
-		mutateErrCh <- nil
+		mutateResultCh <- mutateStreamRun{result: runResult}
 	}()
 
 	res, err := h.core.Update(r.Context(), core.UpdateCommand{
@@ -1769,27 +1773,44 @@ func (h *Handler) handleMutate(w http.ResponseWriter, r *http.Request) error {
 	})
 	if err != nil {
 		_ = pipeReader.Close()
-		if mutateErr := <-mutateErrCh; mutateErr != nil {
-			return convertMutateStreamError(mutateErr)
+		if run := <-mutateResultCh; run.err != nil {
+			return convertMutateStreamError(run.err)
 		}
 		return convertCoreError(err)
 	}
-	if mutateErr := <-mutateErrCh; mutateErr != nil {
-		return convertMutateStreamError(mutateErr)
+	run := <-mutateResultCh
+	if run.err != nil {
+		return convertMutateStreamError(run.err)
 	}
 	if res.Meta != nil && res.Meta.Lease != nil {
 		h.cacheLease(leaseID, storageKey, *res.Meta, res.MetaETag)
+	}
+	headers := map[string]string{
+		"X-Key-Version": strconv.FormatInt(res.NewVersion, 10),
+		"ETag":          res.NewStateETag,
+	}
+	for key, value := range mutateStreamSummaryHeaders(run.result) {
+		headers[key] = value
 	}
 	h.writeJSON(w, http.StatusOK, api.UpdateResponse{
 		NewVersion:   res.NewVersion,
 		NewStateETag: res.NewStateETag,
 		Bytes:        res.Bytes,
 		Metadata:     metadataAttributesFromMeta(res.Meta),
-	}, map[string]string{
-		"X-Key-Version": strconv.FormatInt(res.NewVersion, 10),
-		"ETag":          res.NewStateETag,
-	})
+	}, headers)
 	return nil
+}
+
+func mutateStreamSummaryHeaders(result lql.MutateStreamResult) map[string]string {
+	return map[string]string{
+		headerMutateCandidatesSeen:    strconv.FormatInt(result.CandidatesSeen, 10),
+		headerMutateCandidatesWritten: strconv.FormatInt(result.CandidatesWritten, 10),
+		headerMutateBytesRead:         strconv.FormatInt(result.BytesRead, 10),
+		headerMutateBytesWritten:      strconv.FormatInt(result.BytesWritten, 10),
+		headerMutateBytesCaptured:     strconv.FormatInt(result.BytesCaptured, 10),
+		headerMutateSpillCount:        strconv.FormatInt(result.SpillCount, 10),
+		headerMutateSpillBytes:        strconv.FormatInt(result.SpillBytes, 10),
+	}
 }
 
 func convertMutateStreamError(err error) error {

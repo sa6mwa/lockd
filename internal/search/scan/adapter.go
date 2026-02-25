@@ -189,6 +189,7 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 		limit = len(keys)
 	}
 	matches := make([]string, 0, limit)
+	var streamStats search.StreamStats
 	var lastMatch string
 	more := false
 	for i := startIdx; i < len(keys); i++ {
@@ -247,19 +248,28 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 			}
 			docReader.Close()
 			matches = append(matches, key)
+			streamStats.AddCandidate(true)
 			lastMatch = key
 			continue
 		}
-		matched, err := a.matchAndStreamDocument(ctx, req.Namespace, key, version, stateRes.Reader, plan, sink)
+		matched, queryResult, err := a.matchAndStreamDocument(ctx, req.Namespace, key, version, stateRes.Reader, plan, sink)
 		if err != nil {
 			return search.Result{}, err
 		}
+		streamStats.Add(
+			queryResult.CandidatesSeen,
+			queryResult.CandidatesMatched,
+			queryResult.BytesCaptured,
+			queryResult.SpillCount,
+			queryResult.SpillBytes,
+		)
 		if matched {
 			matches = append(matches, key)
 			lastMatch = key
 		}
 	}
 	result := search.Result{Keys: matches}
+	result.Metadata = streamStats.ApplyMetadata(result.Metadata)
 	if len(matches) == limit && more && lastMatch != "" {
 		result.Cursor = encodeCursor(lastMatch)
 	}
@@ -310,14 +320,14 @@ func (a *Adapter) matchAndStreamDocument(
 	reader io.ReadCloser,
 	plan lql.QueryStreamPlan,
 	sink search.DocumentSink,
-) (bool, error) {
+) (bool, lql.QueryStreamResult, error) {
 	if reader == nil {
-		return false, nil
+		return false, lql.QueryStreamResult{}, nil
 	}
 	defer reader.Close()
 
 	matched := false
-	_, err := lql.QueryStreamWithResult(lql.QueryStreamRequest{
+	result, err := lql.QueryStreamWithResult(lql.QueryStreamRequest{
 		Ctx:               ctx,
 		Reader:            reader,
 		Plan:              plan,
@@ -344,12 +354,12 @@ func (a *Adapter) matchAndStreamDocument(
 		},
 	})
 	if err != nil {
-		return false, fmt.Errorf("scan: evaluate state %s: %w", key, err)
+		return false, lql.QueryStreamResult{}, fmt.Errorf("scan: evaluate state %s: %w", key, err)
 	}
 	if !matched {
-		return false, nil
+		return false, result, nil
 	}
-	return true, nil
+	return true, result, nil
 }
 
 func startIndexFromCursor(cursor string, keys []string) (int, error) {

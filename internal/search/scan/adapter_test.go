@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -135,6 +136,8 @@ func TestScanAdapterQueryDocumentsMatchAll(t *testing.T) {
 	if len(result.Keys) != 2 {
 		t.Fatalf("expected 2 keys, got %d", len(result.Keys))
 	}
+	assertQueryMetadataInt(t, result.Metadata, search.MetadataQueryCandidatesSeen, 2)
+	assertQueryMetadataInt(t, result.Metadata, search.MetadataQueryCandidatesMatched, 2)
 	if len(sink.rows) != 2 {
 		t.Fatalf("expected 2 streamed docs, got %d", len(sink.rows))
 	}
@@ -177,6 +180,8 @@ func TestScanAdapterQueryDocumentsSelectorReadsStateOncePerCandidate(t *testing.
 	if len(result.Keys) != 1 || result.Keys[0] != "orders/1" {
 		t.Fatalf("unexpected result keys: %+v", result.Keys)
 	}
+	assertQueryMetadataInt(t, result.Metadata, search.MetadataQueryCandidatesSeen, 2)
+	assertQueryMetadataInt(t, result.Metadata, search.MetadataQueryCandidatesMatched, 1)
 	if len(sink.rows) != 1 || sink.rows[0].key != "orders/1" {
 		t.Fatalf("unexpected streamed rows: %+v", sink.rows)
 	}
@@ -417,5 +422,20 @@ func writeMetaOnly(t *testing.T, store storage.Backend, namespace, key string) {
 	}
 	if _, err := store.StoreMeta(context.Background(), namespace, key, meta, ""); err != nil {
 		t.Fatalf("store meta: %v", err)
+	}
+}
+
+func assertQueryMetadataInt(t *testing.T, metadata map[string]string, key string, want int64) {
+	t.Helper()
+	raw := strings.TrimSpace(metadata[key])
+	if raw == "" {
+		t.Fatalf("missing metadata key %q", key)
+	}
+	got, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		t.Fatalf("parse metadata %q=%q: %v", key, raw, err)
+	}
+	if got != want {
+		t.Fatalf("unexpected metadata %q: got=%d want=%d", key, got, want)
 	}
 }

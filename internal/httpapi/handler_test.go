@@ -24,6 +24,7 @@ import (
 	"pkt.systems/lockd/internal/correlation"
 	"pkt.systems/lockd/internal/queue"
 	"pkt.systems/lockd/internal/search"
+	scanadapter "pkt.systems/lockd/internal/search/scan"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/memory"
 	"pkt.systems/lockd/namespaces"
@@ -715,6 +716,96 @@ func TestQueryReturnDocuments(t *testing.T) {
 	}
 }
 
+func TestQueryReturnDocumentsIncludesStreamCounters(t *testing.T) {
+	store := memory.New()
+	scanAdapter, err := scanadapter.New(scanadapter.Config{Backend: store, MaxDocumentBytes: 1 << 20})
+	if err != nil {
+		t.Fatalf("new scan adapter: %v", err)
+	}
+	defaultCfg := scanNamespaceConfig()
+	configStore := namespaces.NewConfigStore(store, nil, nil, defaultCfg)
+	handler := New(Config{
+		Store:                  store,
+		Logger:                 pslog.NoopLogger(),
+		Clock:                  newStubClock(time.Unix(1_700_000_000, 0)),
+		SearchAdapter:          scanAdapter,
+		NamespaceConfigs:       configStore,
+		DefaultNamespaceConfig: defaultCfg,
+		JSONMaxBytes:           1 << 20,
+		DefaultTTL:             15 * time.Second,
+		MaxTTL:                 1 * time.Minute,
+		AcquireBlock:           10 * time.Second,
+	})
+	mux := http.NewServeMux()
+	handler.Register(mux)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	seedPublished := func(key, status string) {
+		var acquire api.AcquireResponse
+		if statusCode := doJSON(t, server, http.MethodPost, "/v1/acquire", nil, api.AcquireRequest{
+			Key: key, Owner: "stream-counters", TTLSeconds: 10,
+		}, &acquire); statusCode != http.StatusOK {
+			t.Fatalf("acquire %s: expected 200, got %d", key, statusCode)
+		}
+		headers := map[string]string{
+			"X-Lease-ID":      acquire.LeaseID,
+			"X-Txn-ID":        acquire.TxnID,
+			"X-Fencing-Token": strconv.FormatInt(acquire.FencingToken, 10),
+		}
+		if statusCode := doJSON(t, server, http.MethodPost, "/v1/update?key="+key, headers, map[string]any{
+			"status": status,
+		}, nil); statusCode != http.StatusOK {
+			t.Fatalf("update %s: expected 200, got %d", key, statusCode)
+		}
+		var release api.ReleaseResponse
+		if statusCode := doJSON(t, server, http.MethodPost, "/v1/release", headers, api.ReleaseRequest{
+			Key: key, LeaseID: acquire.LeaseID, TxnID: acquire.TxnID,
+		}, &release); statusCode != http.StatusOK || !release.Released {
+			t.Fatalf("release %s failed: status=%d released=%v", key, statusCode, release.Released)
+		}
+	}
+	seedPublished("stream-counter-open", "open")
+	seedPublished("stream-counter-closed", "closed")
+
+	body, err := json.Marshal(api.QueryRequest{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			Eq: &api.Term{Field: "/status", Value: "open"},
+		},
+		Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("marshal query request: %v", err)
+	}
+	resp, err := http.Post(server.URL+"/v1/query?namespace=default&return=documents", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("query request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, data)
+	}
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		t.Fatalf("drain body: %v", err)
+	}
+	trailerMetadata := strings.TrimSpace(resp.Trailer.Get(headerQueryMetadata))
+	if trailerMetadata == "" {
+		t.Fatalf("expected %s trailer", headerQueryMetadata)
+	}
+	var metadata map[string]string
+	if err := json.Unmarshal([]byte(trailerMetadata), &metadata); err != nil {
+		t.Fatalf("decode metadata trailer: %v", err)
+	}
+	if got := metadata[search.MetadataQueryCandidatesSeen]; got != "2" {
+		t.Fatalf("expected %s=2, got %q", search.MetadataQueryCandidatesSeen, got)
+	}
+	if got := metadata[search.MetadataQueryCandidatesMatched]; got != "1" {
+		t.Fatalf("expected %s=1, got %q", search.MetadataQueryCandidatesMatched, got)
+	}
+}
+
 func TestGetPublicWithoutLease(t *testing.T) {
 	store := memory.New()
 	clk := newStubClock(time.Unix(1_700_000_000, 0))
@@ -1252,6 +1343,69 @@ func TestMutateAppliesLQLExpressions(t *testing.T) {
 	}
 }
 
+func TestMutateIncludesStreamSummaryHeaders(t *testing.T) {
+	server := newTestHTTPServer(t)
+
+	req := api.AcquireRequest{Key: "stream-mutate-summary", Owner: "worker-a", TTLSeconds: 5}
+	var acquire api.AcquireResponse
+	if status := doJSON(t, server, http.MethodPost, "/v1/acquire", nil, req, &acquire); status != http.StatusOK {
+		t.Fatalf("acquire: expected 200, got %d", status)
+	}
+
+	payload, err := json.Marshal(api.MutateRequest{
+		Mutations: []string{`/status="ready"`, `/count=1`},
+	})
+	if err != nil {
+		t.Fatalf("marshal mutate payload: %v", err)
+	}
+	httpReq, err := http.NewRequest(http.MethodPost, server.URL+"/v1/mutate?key=stream-mutate-summary", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("new mutate request: %v", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-Lease-ID", acquire.LeaseID)
+	httpReq.Header.Set("X-Txn-ID", acquire.TxnID)
+	httpReq.Header.Set("X-Fencing-Token", strconv.FormatInt(acquire.FencingToken, 10))
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		t.Fatalf("mutate request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(resp.Body)
+		t.Fatalf("mutate: expected 200, got %d: %s", resp.StatusCode, data)
+	}
+	var mutateResp api.UpdateResponse
+	if err := json.NewDecoder(resp.Body).Decode(&mutateResp); err != nil {
+		t.Fatalf("decode mutate response: %v", err)
+	}
+	if mutateResp.NewVersion == 0 || mutateResp.NewStateETag == "" {
+		t.Fatalf("unexpected mutate response: %+v", mutateResp)
+	}
+
+	if got := parseIntHeader(t, resp.Header, headerMutateCandidatesSeen); got != 1 {
+		t.Fatalf("expected %s=1, got %d", headerMutateCandidatesSeen, got)
+	}
+	if got := parseIntHeader(t, resp.Header, headerMutateCandidatesWritten); got != 1 {
+		t.Fatalf("expected %s=1, got %d", headerMutateCandidatesWritten, got)
+	}
+	if got := parseIntHeader(t, resp.Header, headerMutateBytesRead); got <= 0 {
+		t.Fatalf("expected %s > 0, got %d", headerMutateBytesRead, got)
+	}
+	if got := parseIntHeader(t, resp.Header, headerMutateBytesWritten); got <= 0 {
+		t.Fatalf("expected %s > 0, got %d", headerMutateBytesWritten, got)
+	}
+	if got := parseIntHeader(t, resp.Header, headerMutateBytesCaptured); got != 0 {
+		t.Fatalf("expected %s=0, got %d", headerMutateBytesCaptured, got)
+	}
+	if got := parseIntHeader(t, resp.Header, headerMutateSpillCount); got != 0 {
+		t.Fatalf("expected %s=0, got %d", headerMutateSpillCount, got)
+	}
+	if got := parseIntHeader(t, resp.Header, headerMutateSpillBytes); got != 0 {
+		t.Fatalf("expected %s=0, got %d", headerMutateSpillBytes, got)
+	}
+}
+
 func TestMutateValidation(t *testing.T) {
 	server := newTestHTTPServer(t)
 
@@ -1610,6 +1764,19 @@ func doJSON(t *testing.T, server *httptest.Server, method, path string, headers 
 		}
 	}
 	return resp.StatusCode
+}
+
+func parseIntHeader(t *testing.T, headers http.Header, key string) int64 {
+	t.Helper()
+	raw := strings.TrimSpace(headers.Get(key))
+	if raw == "" {
+		t.Fatalf("missing response header %q", key)
+	}
+	parsed, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		t.Fatalf("parse header %s=%q: %v", key, raw, err)
+	}
+	return parsed
 }
 
 func newQueryTestServer(t *testing.T, adapter search.Adapter) *httptest.Server {

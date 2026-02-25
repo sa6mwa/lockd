@@ -325,6 +325,7 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 		return search.Result{IndexSeq: manifest.Seq, Format: manifest.Format}, nil
 	}
 	streamed := make([]string, 0, min(limit, len(sortedKeys)-startIdx))
+	var streamStats search.StreamStats
 	nextIndex := len(sortedKeys)
 	var lastReturned string
 	for i := startIdx; i < len(sortedKeys); i++ {
@@ -366,6 +367,7 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 				return search.Result{}, fmt.Errorf("stream document %s: %w", key, err)
 			}
 			streamed = append(streamed, key)
+			streamStats.AddCandidate(true)
 			lastReturned = key
 			nextIndex = i + 1
 			continue
@@ -373,13 +375,20 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 		if meta.StateETag == "" {
 			continue
 		}
-		matched, err := a.matchAndStreamDocument(ctx, req.Namespace, key, version, meta, postFilterPlan, sink)
+		matched, queryResult, err := a.matchAndStreamDocument(ctx, req.Namespace, key, version, meta, postFilterPlan, sink)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) || storage.IsTransient(err) {
 				continue
 			}
 			return search.Result{}, fmt.Errorf("evaluate+stream selector %s: %w", key, err)
 		}
+		streamStats.Add(
+			queryResult.CandidatesSeen,
+			queryResult.CandidatesMatched,
+			queryResult.BytesCaptured,
+			queryResult.SpillCount,
+			queryResult.SpillBytes,
+		)
 		if !matched {
 			continue
 		}
@@ -398,6 +407,7 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 		}
 		result.Metadata["index_updated_at"] = manifest.UpdatedAt.UTC().Format(time.RFC3339)
 	}
+	result.Metadata = streamStats.ApplyMetadata(result.Metadata)
 	if len(streamed) == limit && nextIndex < len(sortedKeys) && lastReturned != "" {
 		result.Cursor = encodeCursor(lastReturned)
 	}
@@ -470,7 +480,7 @@ func (a *Adapter) matchAndStreamDocument(
 	meta *storage.Meta,
 	plan lql.QueryStreamPlan,
 	sink search.DocumentSink,
-) (bool, error) {
+) (bool, lql.QueryStreamResult, error) {
 	stateCtx := ctx
 	if meta != nil && len(meta.StateDescriptor) > 0 {
 		stateCtx = storage.ContextWithStateDescriptor(stateCtx, meta.StateDescriptor)
@@ -480,15 +490,15 @@ func (a *Adapter) matchAndStreamDocument(
 	}
 	stateRes, err := a.store.backend.ReadState(stateCtx, namespace, key)
 	if err != nil {
-		return false, err
+		return false, lql.QueryStreamResult{}, err
 	}
 	if stateRes.Reader == nil {
-		return false, nil
+		return false, lql.QueryStreamResult{}, nil
 	}
 	defer stateRes.Reader.Close()
 
 	matched := false
-	_, err = lql.QueryStreamWithResult(lql.QueryStreamRequest{
+	result, err := lql.QueryStreamWithResult(lql.QueryStreamRequest{
 		Ctx:               stateCtx,
 		Reader:            stateRes.Reader,
 		Plan:              plan,
@@ -515,12 +525,12 @@ func (a *Adapter) matchAndStreamDocument(
 		},
 	})
 	if err != nil {
-		return false, err
+		return false, lql.QueryStreamResult{}, err
 	}
 	if !matched {
-		return false, nil
+		return false, result, nil
 	}
-	return true, nil
+	return true, result, nil
 }
 
 type segmentReader struct {

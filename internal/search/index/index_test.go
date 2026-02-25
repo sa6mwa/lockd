@@ -595,6 +595,12 @@ func TestIndexAdapterQueryDocumentsStreamsMatches(t *testing.T) {
 	if !slices.Equal(result.Keys, []string{"orders-open-1"}) {
 		t.Fatalf("unexpected streamed keys %v", result.Keys)
 	}
+	if got := result.Metadata[search.MetadataQueryCandidatesSeen]; got != "1" {
+		t.Fatalf("expected %s=1, got %q", search.MetadataQueryCandidatesSeen, got)
+	}
+	if got := result.Metadata[search.MetadataQueryCandidatesMatched]; got != "1" {
+		t.Fatalf("expected %s=1, got %q", search.MetadataQueryCandidatesMatched, got)
+	}
 	if len(sink.rows) != 1 || sink.rows[0].key != "orders-open-1" {
 		t.Fatalf("unexpected streamed rows %+v", sink.rows)
 	}

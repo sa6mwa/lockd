@@ -1321,7 +1321,6 @@ func (r *segmentReader) compileSegment(seg *Segment) *compiledSegment {
 	for field, block := range seg.Fields {
 		fieldID := r.internField(field)
 		compiledBlock := compiledField{
-			termIDs:      make(map[string]uint32, len(block.Postings)),
 			terms:        make([]string, 0, len(block.Postings)),
 			postingsByID: make([]adaptivePosting, 0, len(block.Postings)),
 		}
@@ -1330,6 +1329,9 @@ func (r *segmentReader) compileSegment(seg *Segment) *compiledSegment {
 			terms = append(terms, term)
 		}
 		sort.Strings(terms)
+		if len(terms) > 8 {
+			compiledBlock.termIDs = make(map[string]uint32, len(terms))
+		}
 		for _, term := range terms {
 			keys := block.Postings[term]
 			docIDs := make([]uint32, 0, len(keys))
@@ -1337,7 +1339,9 @@ func (r *segmentReader) compileSegment(seg *Segment) *compiledSegment {
 				docIDs = append(docIDs, r.internKey(key))
 			}
 			termID := uint32(len(compiledBlock.terms))
-			compiledBlock.termIDs[term] = termID
+			if compiledBlock.termIDs != nil {
+				compiledBlock.termIDs[term] = termID
+			}
 			compiledBlock.terms = append(compiledBlock.terms, term)
 			compiledBlock.postingsByID = append(compiledBlock.postingsByID, newAdaptivePosting(docIDs))
 		}
@@ -1445,6 +1449,18 @@ type compiledField struct {
 }
 
 func (f compiledField) docIDsForTermInto(term string, dst docIDSet) docIDSet {
+	if len(f.terms) <= 8 || len(f.termIDs) == 0 {
+		for termID, candidate := range f.terms {
+			if candidate != term {
+				continue
+			}
+			if termID >= len(f.postingsByID) {
+				return dst[:0]
+			}
+			return f.postingsByID[termID].decodeInto(dst)
+		}
+		return dst[:0]
+	}
 	termID, ok := f.termIDs[term]
 	if !ok {
 		return dst[:0]

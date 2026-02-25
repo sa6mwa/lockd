@@ -203,9 +203,12 @@ func TestCompiledSegmentDictionaries(t *testing.T) {
 	if !ok {
 		t.Fatal("missing compiled field block for /status")
 	}
-	if len(block.termIDs) != 2 || len(block.terms) != 2 || len(block.postingsByID) != 2 {
+	if len(block.terms) != 2 || len(block.postingsByID) != 2 {
 		t.Fatalf("unexpected dictionary sizes: termIDs=%d terms=%d postings=%d",
 			len(block.termIDs), len(block.terms), len(block.postingsByID))
+	}
+	if len(block.termIDs) > 0 && len(block.termIDs) != 2 {
+		t.Fatalf("unexpected term id map size: %d", len(block.termIDs))
 	}
 	openKey := compiledTermDocKey(t, reader, compiled, "/status", "open")
 	closedKey := compiledTermDocKey(t, reader, compiled, "/status", "closed")

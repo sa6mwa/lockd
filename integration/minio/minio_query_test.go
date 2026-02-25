@@ -43,6 +43,14 @@ func TestMinioQueryDocumentStreaming(t *testing.T) {
 	queriesuite.RunDocumentStreaming(t, startMinioQueryServer)
 }
 
+func TestMinioQueryLargeNamespaceLowMatchKeys(t *testing.T) {
+	queriesuite.RunLargeNamespaceLowMatchKeys(t, startMinioQueryServer)
+}
+
+func TestMinioQueryLargeNamespaceLowMatchDocuments(t *testing.T) {
+	queriesuite.RunLargeNamespaceLowMatchDocuments(t, startMinioQueryServer)
+}
+
 func TestMinioQueryDomainDatasets(t *testing.T) {
 	queriesuite.RunDomainDatasets(t, startMinioQueryServer)
 }

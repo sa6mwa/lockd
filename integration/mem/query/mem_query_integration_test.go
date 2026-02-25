@@ -45,6 +45,14 @@ func TestMemQueryDocumentStreaming(t *testing.T) {
 	queriesuite.RunDocumentStreaming(t, startMemQueryServer)
 }
 
+func TestMemQueryLargeNamespaceLowMatchKeys(t *testing.T) {
+	queriesuite.RunLargeNamespaceLowMatchKeys(t, startMemQueryServer)
+}
+
+func TestMemQueryLargeNamespaceLowMatchDocuments(t *testing.T) {
+	queriesuite.RunLargeNamespaceLowMatchDocuments(t, startMemQueryServer)
+}
+
 func TestMemQueryDomainDatasets(t *testing.T) {
 	queriesuite.RunDomainDatasets(t, startMemQueryServer)
 }

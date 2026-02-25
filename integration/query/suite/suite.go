@@ -236,6 +236,110 @@ func RunDocumentStreaming(t *testing.T, factory ServerFactory) {
 	})
 }
 
+// RunLargeNamespaceLowMatchKeys validates key-return queries stay correct for
+// large namespaces when selectors match very few documents.
+func RunLargeNamespaceLowMatchKeys(t *testing.T, factory ServerFactory) {
+	withServer(t, factory, 30*time.Second, func(ctx context.Context, ts *lockd.TestServer, httpClient *http.Client) {
+		namespace := "q-lowmatch-keys-" + xid.New().String()
+		const (
+			totalDocs  = 384
+			targetTerm = "needle-token-42"
+		)
+		targetKey := ""
+		for i := 0; i < totalDocs; i++ {
+			key := fmt.Sprintf("lowmatch-key-%03d", i)
+			msgA := fmt.Sprintf("normal telemetry %03d", i)
+			if i == totalDocs-7 {
+				msgA = "contains needle-token-42 for exact low match"
+				targetKey = key
+			}
+			querydata.SeedState(ctx, t, ts.Client, namespace, key, map[string]any{
+				"kind": "work",
+				"details": map[string]any{
+					"a": map[string]any{"message": msgA},
+					"b": map[string]any{"message": fmt.Sprintf("background %03d", i)},
+				},
+			})
+		}
+		flushNamespaces(ctx, t, ts.Client, namespace)
+
+		sel, err := lql.ParseSelectorString(`
+and.eq{field=/kind,value=work},
+and.contains{field=/details/*/message,value=` + targetTerm + `}`)
+		if err != nil || sel.IsEmpty() {
+			t.Fatalf("parse low-match selector: %v", err)
+		}
+		resp := doQuery(t, httpClient, ts.URL(), api.QueryRequest{
+			Namespace: namespace,
+			Selector:  sel,
+			Limit:     16,
+		})
+		if len(resp.Keys) != 1 || resp.Keys[0] != targetKey {
+			t.Fatalf("expected single key %q, got %+v", targetKey, resp.Keys)
+		}
+		if resp.Cursor != "" {
+			t.Fatalf("expected empty cursor for low-match single result, got %q", resp.Cursor)
+		}
+	})
+}
+
+// RunLargeNamespaceLowMatchDocuments validates document-return streaming for
+// large namespaces when selectors match very few documents.
+func RunLargeNamespaceLowMatchDocuments(t *testing.T, factory ServerFactory) {
+	withServer(t, factory, 30*time.Second, func(ctx context.Context, ts *lockd.TestServer, httpClient *http.Client) {
+		namespace := "q-lowmatch-docs-" + xid.New().String()
+		const (
+			totalDocs  = 384
+			targetTerm = "needle-token-84"
+		)
+		targetKey := ""
+		for i := 0; i < totalDocs; i++ {
+			key := fmt.Sprintf("lowmatch-doc-%03d", i)
+			msgA := fmt.Sprintf("normal payload %03d", i)
+			if i == totalDocs-11 {
+				msgA = "contains needle-token-84 for document streaming"
+				targetKey = key
+			}
+			querydata.SeedState(ctx, t, ts.Client, namespace, key, map[string]any{
+				"kind": "work",
+				"details": map[string]any{
+					"a": map[string]any{"message": msgA},
+					"b": map[string]any{"message": fmt.Sprintf("secondary %03d", i)},
+				},
+			})
+		}
+		flushNamespaces(ctx, t, ts.Client, namespace)
+
+		sel, err := lql.ParseSelectorString(`
+and.eq{field=/kind,value=work},
+and.contains{field=/details/*/message,value=` + targetTerm + `}`)
+		if err != nil || sel.IsEmpty() {
+			t.Fatalf("parse low-match document selector: %v", err)
+		}
+		rows := doQueryDocuments(t, httpClient, ts.URL(), api.QueryRequest{
+			Namespace: namespace,
+			Selector:  sel,
+			Limit:     16,
+		})
+		if len(rows) != 1 {
+			t.Fatalf("expected one streamed document, got %d", len(rows))
+		}
+		if rows[0].Namespace != namespace {
+			t.Fatalf("expected namespace %q, got %q", namespace, rows[0].Namespace)
+		}
+		if rows[0].Key != targetKey {
+			t.Fatalf("expected key %q, got %q", targetKey, rows[0].Key)
+		}
+		var doc map[string]any
+		if err := json.Unmarshal(rows[0].Doc, &doc); err != nil {
+			t.Fatalf("decode streamed doc: %v", err)
+		}
+		if kind, _ := doc["kind"].(string); kind != "work" {
+			t.Fatalf("unexpected streamed doc payload: %+v", doc)
+		}
+	})
+}
+
 // RunDomainDatasets seeds richer domain data (finance, firmware, SALUTE, flight) and evaluates selectors.
 func RunDomainDatasets(t *testing.T, factory ServerFactory, opts ...Option) {
 	cfg := runConfig{datasetProfile: querydata.DatasetFull}

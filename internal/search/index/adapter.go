@@ -41,6 +41,7 @@ type AdapterConfig struct {
 type Adapter struct {
 	store  *Store
 	logger pslog.Logger
+	plans  *selectorPlanCache
 
 	docMetaHits    atomic.Uint64
 	docMetaMisses  atomic.Uint64
@@ -56,6 +57,7 @@ func NewAdapter(cfg AdapterConfig) (*Adapter, error) {
 	return &Adapter{
 		store:  cfg.Store,
 		logger: cfg.Logger,
+		plans:  newSelectorPlanCache(defaultSelectorPlanCacheLimit),
 	}, nil
 }
 
@@ -65,6 +67,43 @@ func (a *Adapter) Capabilities(context.Context, string) (search.Capabilities, er
 		return search.Capabilities{}, nil
 	}
 	return search.Capabilities{Index: true}, nil
+}
+
+func (a *Adapter) prepareSelectorExecutionPlan(sel api.Selector) (selectorExecutionPlan, error) {
+	if sel.IsEmpty() {
+		return selectorExecutionPlan{selector: api.Selector{}, useLegacyFilter: true}, nil
+	}
+	normalized := cloneSelector(sel)
+	if normalizeErr := normalizeSelectorFieldsForLQL(&normalized); normalizeErr != nil {
+		return selectorExecutionPlan{}, fmt.Errorf("normalize selector: %w", normalizeErr)
+	}
+	keyPayload, err := json.Marshal(normalized)
+	if err != nil {
+		return selectorExecutionPlan{}, fmt.Errorf("marshal selector cache key: %w", err)
+	}
+	cacheKey := string(keyPayload)
+	if a != nil && a.plans != nil {
+		if cached, ok := a.plans.get(cacheKey); ok {
+			return cached, nil
+		}
+	}
+	useLegacy := selectorSupportsLegacyIndexFilter(sel)
+	out := selectorExecutionPlan{
+		selector:        normalized,
+		useLegacyFilter: useLegacy,
+	}
+	if !useLegacy {
+		compiled, compileErr := lql.NewQueryStreamPlan(normalized)
+		if compileErr != nil {
+			return selectorExecutionPlan{}, fmt.Errorf("compile selector: %w", compileErr)
+		}
+		out.requirePostEval = true
+		out.postFilterPlan = compiled
+	}
+	if a != nil && a.plans != nil {
+		a.plans.put(cacheKey, out)
+	}
+	return out, nil
 }
 
 // Query evaluates the selector via the index and returns matching keys.
@@ -88,18 +127,13 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 	if err != nil {
 		return search.Result{}, err
 	}
-	var (
-		matches         docIDSet
-		postFilterPlan  lql.QueryStreamPlan
-		requirePostEval bool
-	)
-	selector := cloneSelector(req.Selector)
-	useLegacyFilter := selectorSupportsLegacyIndexFilter(req.Selector)
-	if !selector.IsEmpty() {
-		if normalizeErr := normalizeSelectorFieldsForLQL(&selector); normalizeErr != nil {
-			return search.Result{}, fmt.Errorf("normalize selector: %w", normalizeErr)
-		}
+	var matches docIDSet
+	execPlan, err := a.prepareSelectorExecutionPlan(req.Selector)
+	if err != nil {
+		return search.Result{}, err
 	}
+	selector := execPlan.selector
+	useLegacyFilter := execPlan.useLegacyFilter
 	if selector.IsEmpty() || !useLegacyFilter {
 		matches, err = reader.allDocIDs(ctx)
 	} else {
@@ -108,14 +142,6 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 			containsNgram: manifest.Format >= IndexFormatVersionV4,
 		}
 		matches, err = eval.evaluate(ctx, req.Selector)
-	}
-	if !selector.IsEmpty() && !useLegacyFilter {
-		compiled, compileErr := lql.NewQueryStreamPlan(selector)
-		if compileErr != nil {
-			return search.Result{}, fmt.Errorf("compile selector: %w", compileErr)
-		}
-		postFilterPlan = compiled
-		requirePostEval = true
 	}
 	if err != nil {
 		return search.Result{}, err
@@ -209,7 +235,7 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 				}
 			}
 		}
-		if requirePostEval {
+		if execPlan.requirePostEval {
 			metaRes, metaErr := a.store.backend.LoadMeta(ctx, req.Namespace, key)
 			if metaErr != nil {
 				if errors.Is(metaErr, storage.ErrNotFound) {
@@ -221,7 +247,7 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 			if meta == nil || meta.StateETag == "" {
 				continue
 			}
-			matched, matchErr := a.matchesSelector(ctx, req.Namespace, key, meta, postFilterPlan)
+			matched, matchErr := a.matchesSelector(ctx, req.Namespace, key, meta, execPlan.postFilterPlan)
 			if matchErr != nil {
 				return search.Result{}, fmt.Errorf("evaluate selector %s: %w", key, matchErr)
 			}
@@ -282,18 +308,13 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 	if err != nil {
 		return search.Result{}, err
 	}
-	var (
-		matches         docIDSet
-		postFilterPlan  lql.QueryStreamPlan
-		requirePostEval bool
-	)
-	selector := cloneSelector(req.Selector)
-	useLegacyFilter := selectorSupportsLegacyIndexFilter(req.Selector)
-	if !selector.IsEmpty() {
-		if normalizeErr := normalizeSelectorFieldsForLQL(&selector); normalizeErr != nil {
-			return search.Result{}, fmt.Errorf("normalize selector: %w", normalizeErr)
-		}
+	var matches docIDSet
+	execPlan, err := a.prepareSelectorExecutionPlan(req.Selector)
+	if err != nil {
+		return search.Result{}, err
 	}
+	selector := execPlan.selector
+	useLegacyFilter := execPlan.useLegacyFilter
 	if selector.IsEmpty() || !useLegacyFilter {
 		matches, err = reader.allDocIDs(ctx)
 	} else {
@@ -302,14 +323,6 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 			containsNgram: manifest.Format >= IndexFormatVersionV4,
 		}
 		matches, err = eval.evaluate(ctx, req.Selector)
-	}
-	if !selector.IsEmpty() && !useLegacyFilter {
-		compiled, compileErr := lql.NewQueryStreamPlan(selector)
-		if compileErr != nil {
-			return search.Result{}, fmt.Errorf("compile selector: %w", compileErr)
-		}
-		postFilterPlan = compiled
-		requirePostEval = true
 	}
 	if err != nil {
 		return search.Result{}, err
@@ -367,7 +380,7 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 		if version == 0 {
 			version = meta.Version
 		}
-		if !requirePostEval {
+		if !execPlan.requirePostEval {
 			if err := a.streamDocument(ctx, req.Namespace, key, version, meta, sink); err != nil {
 				if errors.Is(err, storage.ErrNotFound) || storage.IsTransient(err) {
 					continue
@@ -383,7 +396,7 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 		if meta.StateETag == "" {
 			continue
 		}
-		matched, queryResult, err := a.matchAndStreamDocument(ctx, req.Namespace, key, version, meta, postFilterPlan, sink)
+		matched, queryResult, err := a.matchAndStreamDocument(ctx, req.Namespace, key, version, meta, execPlan.postFilterPlan, sink)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) || storage.IsTransient(err) {
 				continue

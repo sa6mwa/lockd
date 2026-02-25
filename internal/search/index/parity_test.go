@@ -187,6 +187,75 @@ func TestIndexScanParityMalformedAndEscapedPointers(t *testing.T) {
 	}
 }
 
+func TestIndexScanParityRecursiveNumericSegments(t *testing.T) {
+	docs := buildSyntheticParityDocs(60)
+	docs["doc-num-0"] = map[string]any{
+		"events": map[string]any{
+			"0": map[string]any{
+				"message": "timeout stage zero",
+				"code":    "E42",
+			},
+		},
+	}
+	docs["doc-num-10"] = map[string]any{
+		"events": map[string]any{
+			"10": map[string]any{
+				"message": "timeout stage ten",
+				"code":    "E42",
+			},
+		},
+	}
+	docs["doc-num-nested"] = map[string]any{
+		"events": map[string]any{
+			"group": map[string]any{
+				"1": map[string]any{
+					"message": "timeout nested one",
+					"code":    "E43",
+				},
+			},
+		},
+	}
+	h := newParityHarness(t, docs)
+
+	cases := []api.Selector{
+		{IContains: &api.Term{Field: "/events/.../message", Value: "TIMEOUT"}},
+		{Contains: &api.Term{Field: "/events/*/message", Value: "timeout"}},
+		{Eq: &api.Term{Field: "/events/.../code", Value: "E42"}},
+	}
+	for i, sel := range cases {
+		t.Run(fmt.Sprintf("numeric-%02d", i), func(t *testing.T) {
+			h.assertParity(t, sel)
+		})
+	}
+}
+
+func TestIndexScanParityWildcardOrderingAndCursor(t *testing.T) {
+	h := newParityHarness(t, buildSyntheticParityDocs(260))
+	cases := []api.Selector{
+		{Contains: &api.Term{Field: "/logs/*/message", Value: "timeout"}},
+		{IContains: &api.Term{Field: "/logs/.../message", Value: "TIMEOUT"}},
+	}
+	for i, sel := range cases {
+		t.Run(fmt.Sprintf("ordering-%02d", i), func(t *testing.T) {
+			indexKeysA, indexCursorsA := h.collectPaged(t, sel, 9, search.EngineIndex)
+			indexKeysB, indexCursorsB := h.collectPaged(t, sel, 9, search.EngineIndex)
+			scanKeys, _ := h.collectPaged(t, sel, 9, search.EngineScan)
+
+			assertSortedUniqueKeys(t, indexKeysA)
+			assertSortedUniqueKeys(t, scanKeys)
+			if !slices.Equal(indexKeysA, indexKeysB) {
+				t.Fatalf("index ordering not deterministic across runs\nrunA=%v\nrunB=%v", indexKeysA, indexKeysB)
+			}
+			if !slices.Equal(indexCursorsA, indexCursorsB) {
+				t.Fatalf("index cursors not deterministic across runs\nrunA=%v\nrunB=%v", indexCursorsA, indexCursorsB)
+			}
+			if !slices.Equal(indexKeysA, scanKeys) {
+				t.Fatalf("index/scan wildcard order mismatch\nindex=%v\nscan=%v", indexKeysA, scanKeys)
+			}
+		})
+	}
+}
+
 func (h parityHarness) assertParity(t *testing.T, selector api.Selector) {
 	t.Helper()
 	ctx := context.Background()
@@ -214,6 +283,68 @@ func (h parityHarness) assertParity(t *testing.T, selector api.Selector) {
 	sort.Strings(want)
 	if !slices.Equal(got, want) {
 		t.Fatalf("selector parity mismatch\nindex=%v\nscan=%v", got, want)
+	}
+}
+
+func (h parityHarness) collectPaged(t *testing.T, selector api.Selector, limit int, engine search.EngineHint) ([]string, []string) {
+	t.Helper()
+	ctx := context.Background()
+	cursor := ""
+	keys := make([]string, 0, 128)
+	cursors := make([]string, 0, 16)
+	seen := make(map[string]struct{})
+	for i := 0; i < 512; i++ {
+		req := search.Request{
+			Namespace: namespaces.Default,
+			Selector:  selector,
+			Limit:     limit,
+			Cursor:    cursor,
+			Engine:    engine,
+		}
+		var (
+			res search.Result
+			err error
+		)
+		switch engine {
+		case search.EngineIndex:
+			res, err = h.index.Query(ctx, req)
+		case search.EngineScan:
+			res, err = h.scan.Query(ctx, req)
+		default:
+			t.Fatalf("unsupported engine %q", engine)
+		}
+		if err != nil {
+			t.Fatalf("paged query failed for %q: %v", engine, err)
+		}
+		if len(res.Keys) == 0 && res.Cursor != "" {
+			t.Fatalf("cursor %q returned without keys for %q", res.Cursor, engine)
+		}
+		for _, key := range res.Keys {
+			if _, ok := seen[key]; ok {
+				t.Fatalf("duplicate key %q in paged results for %q", key, engine)
+			}
+			seen[key] = struct{}{}
+			keys = append(keys, key)
+		}
+		if res.Cursor == "" {
+			return keys, cursors
+		}
+		cursors = append(cursors, res.Cursor)
+		cursor = res.Cursor
+	}
+	t.Fatalf("paged query exceeded max page count for %q", engine)
+	return nil, nil
+}
+
+func assertSortedUniqueKeys(t *testing.T, keys []string) {
+	t.Helper()
+	if !slices.IsSorted(keys) {
+		t.Fatalf("keys are not sorted: %v", keys)
+	}
+	for i := 1; i < len(keys); i++ {
+		if keys[i-1] == keys[i] {
+			t.Fatalf("duplicate adjacent key %q in sorted keys", keys[i])
+		}
 	}
 }
 

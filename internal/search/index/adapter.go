@@ -48,9 +48,10 @@ type AdapterConfig struct {
 
 // Adapter executes queries against immutable index segments.
 type Adapter struct {
-	store  *Store
-	logger pslog.Logger
-	plans  *selectorPlanCache
+	store   *Store
+	logger  pslog.Logger
+	plans   *selectorPlanCache
+	readers *preparedReaderCache
 
 	docMetaHits    atomic.Uint64
 	docMetaMisses  atomic.Uint64
@@ -64,9 +65,10 @@ func NewAdapter(cfg AdapterConfig) (*Adapter, error) {
 		return nil, fmt.Errorf("index adapter: store required")
 	}
 	return &Adapter{
-		store:  cfg.Store,
-		logger: cfg.Logger,
-		plans:  newSelectorPlanCache(defaultSelectorPlanCacheLimit),
+		store:   cfg.Store,
+		logger:  cfg.Logger,
+		plans:   newSelectorPlanCache(defaultSelectorPlanCacheLimit),
+		readers: newPreparedReaderCache(defaultPreparedReaderCacheLimit),
 	}, nil
 }
 
@@ -115,6 +117,31 @@ func (a *Adapter) prepareSelectorExecutionPlan(sel api.Selector) (selectorExecut
 	return out, nil
 }
 
+func (a *Adapter) queryReader(ctx context.Context, namespace string, manifest *Manifest, manifestETag string) (*segmentReader, error) {
+	if manifest == nil {
+		manifest = NewManifest()
+	}
+	if a == nil || a.store == nil || a.readers == nil {
+		var store *Store
+		var logger pslog.Logger
+		if a != nil {
+			store = a.store
+			logger = a.logger
+		}
+		return newSegmentReader(namespace, manifest, store, logger), nil
+	}
+	key := preparedReaderCacheKey(namespace, manifest, manifestETag)
+	if template, ok := a.readers.get(key); ok && template != nil {
+		return template.cloneForQuery(manifest), nil
+	}
+	template := newSegmentReader(namespace, manifest, a.store, a.logger)
+	if err := template.prime(ctx); err != nil {
+		return nil, err
+	}
+	a.readers.put(key, template)
+	return template.cloneForQuery(manifest), nil
+}
+
 // Query evaluates the selector via the index and returns matching keys.
 func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result, error) {
 	if a == nil || a.store == nil {
@@ -131,7 +158,10 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 	if manifest == nil {
 		manifest = NewManifest()
 	}
-	reader := newSegmentReader(req.Namespace, manifest, a.store, a.logger)
+	reader, err := a.queryReader(ctx, req.Namespace, manifest, manifestRes.ETag)
+	if err != nil {
+		return search.Result{}, err
+	}
 	visibility, err := a.visibilityMap(ctx, req.Namespace)
 	if err != nil {
 		return search.Result{}, err
@@ -312,7 +342,10 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 	if manifest == nil {
 		manifest = NewManifest()
 	}
-	reader := newSegmentReader(req.Namespace, manifest, a.store, a.logger)
+	reader, err := a.queryReader(ctx, req.Namespace, manifest, manifestRes.ETag)
+	if err != nil {
+		return search.Result{}, err
+	}
 	visibility, err := a.visibilityMap(ctx, req.Namespace)
 	if err != nil {
 		return search.Result{}, err
@@ -618,6 +651,7 @@ type segmentReader struct {
 	fieldSegments         map[string][]string
 	fieldResolutionCached map[string][]string
 	fieldTrie             *fieldPathTrie
+	immutable             bool
 }
 
 func newSegmentReader(namespace string, manifest *Manifest, store *Store, logger pslog.Logger) *segmentReader {
@@ -670,7 +704,14 @@ func (r *segmentReader) resolveSelectorFieldIDs(ctx context.Context, field strin
 	}
 	ids := make([]uint32, 0, len(resolved))
 	for _, name := range resolved {
-		ids = append(ids, r.internField(name))
+		id, ok := r.fieldID(name)
+		if !ok {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return nil, nil
 	}
 	return ids, nil
 }
@@ -759,7 +800,11 @@ func (r *segmentReader) docIDsForContains(ctx context.Context, term *api.Term, u
 	acc := borrowDocIDAccumulator()
 	defer releaseDocIDAccumulator(acc)
 	for _, field := range fields {
-		set, err := r.docIDsForContainsField(ctx, field, r.internField(field), needle, useTrigramIndex, nil)
+		fieldID, ok := r.fieldID(field)
+		if !ok {
+			continue
+		}
+		set, err := r.docIDsForContainsField(ctx, field, fieldID, needle, useTrigramIndex, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -809,7 +854,11 @@ func (r *segmentReader) docIDsForIContains(ctx context.Context, term *api.Term, 
 				continue
 			}
 		}
-		set, err := r.docIDsForContainsField(ctx, field, r.internField(field), needle, useTrigramIndex, prefilter)
+		fieldID, ok := r.fieldID(field)
+		if !ok {
+			continue
+		}
+		set, err := r.docIDsForContainsField(ctx, field, fieldID, needle, useTrigramIndex, prefilter)
 		if err != nil {
 			return nil, err
 		}
@@ -834,7 +883,10 @@ func (r *segmentReader) tokenPrefilterForField(ctx context.Context, field, needl
 	if len(tokenExists) == 0 {
 		return nil, false, nil
 	}
-	tokenFieldID := r.internField(tokenField)
+	tokenFieldID, ok := r.fieldID(tokenField)
+	if !ok {
+		return nil, false, nil
+	}
 	acc := borrowDocIDAccumulator()
 	defer releaseDocIDAccumulator(acc)
 	for _, token := range tokens {
@@ -868,8 +920,14 @@ func (r *segmentReader) docIDsForContainsField(
 			sawGramPosting := false
 			acc := borrowDocIDAccumulator()
 			defer releaseDocIDAccumulator(acc)
-			gramFieldID := r.internField(containsGramField(field))
+			gramFieldID, ok := r.fieldID(containsGramField(field))
+			if !ok {
+				gramFieldID = 0
+			}
 			for _, gram := range grams {
+				if gramFieldID == 0 {
+					break
+				}
 				gramSet, err := r.docIDsForTermID(ctx, gramFieldID, gram)
 				if err != nil {
 					return nil, err
@@ -1060,6 +1118,9 @@ func (r *segmentReader) loadSegment(ctx context.Context, id string) (*Segment, e
 	if seg, ok := r.cache[id]; ok {
 		return seg, nil
 	}
+	if r.immutable {
+		return nil, fmt.Errorf("index reader immutable cache miss for segment %s", id)
+	}
 	segment, err := r.store.LoadSegment(ctx, r.namespace, id)
 	if err != nil {
 		return nil, err
@@ -1071,6 +1132,9 @@ func (r *segmentReader) loadSegment(ctx context.Context, id string) (*Segment, e
 func (r *segmentReader) loadCompiledSegment(ctx context.Context, id string) (*compiledSegment, error) {
 	if seg, ok := r.compiled[id]; ok {
 		return seg, nil
+	}
+	if r.immutable {
+		return nil, fmt.Errorf("index reader immutable cache miss for compiled segment %s", id)
 	}
 	raw, err := r.loadSegment(ctx, id)
 	if err != nil {
@@ -1144,6 +1208,61 @@ func (r *segmentReader) keyByDocID(id uint32) string {
 		return ""
 	}
 	return r.keys[id]
+}
+
+func (r *segmentReader) prime(ctx context.Context) error {
+	if r == nil {
+		return nil
+	}
+	if err := r.forEachCompiledSegment(ctx, func(*compiledSegment) error {
+		return nil
+	}); err != nil {
+		return err
+	}
+	if _, err := r.allIndexFields(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *segmentReader) cloneForQuery(manifest *Manifest) *segmentReader {
+	if r == nil {
+		return nil
+	}
+	if manifest == nil {
+		manifest = r.manifest
+	}
+	return &segmentReader{
+		namespace:             r.namespace,
+		manifest:              manifest,
+		store:                 r.store,
+		logger:                r.logger,
+		cache:                 r.cache,
+		compiled:              r.compiled,
+		keyIDs:                r.keyIDs,
+		keys:                  r.keys,
+		fieldIDs:              r.fieldIDs,
+		fields:                r.fields,
+		fieldList:             r.fieldList,
+		fieldListReady:        r.fieldListReady,
+		fieldSegments:         r.fieldSegments,
+		fieldResolutionCached: make(map[string][]string, 16),
+		fieldTrie:             r.fieldTrie,
+		immutable:             true,
+	}
+}
+
+func (r *segmentReader) fieldID(field string) (uint32, bool) {
+	if r == nil {
+		return 0, false
+	}
+	if id, ok := r.fieldIDs[field]; ok {
+		return id, true
+	}
+	if r.immutable {
+		return 0, false
+	}
+	return r.internField(field), true
 }
 
 type compiledSegment struct {

@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"pkt.systems/lockd/api"
+	"pkt.systems/lockd/internal/search"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/memory"
 	"pkt.systems/lockd/namespaces"
@@ -209,6 +211,110 @@ func TestCompiledSegmentDictionaries(t *testing.T) {
 	closedKey := compiledTermDocKey(t, reader, compiled, "/status", "closed")
 	if openKey != "doc-a" || closedKey != "doc-b" {
 		t.Fatalf("unexpected dictionary doc mapping open=%q closed=%q", openKey, closedKey)
+	}
+}
+
+func TestAdapterPreparedReaderCacheLifecycle(t *testing.T) {
+	ctx := context.Background()
+	store := NewStore(memory.New(), nil)
+	const namespace = namespaces.Default
+
+	seg1 := NewSegment("seg-reader-cache-1", time.Unix(1_700_000_111, 0))
+	seg1.Fields["/status"] = FieldBlock{Postings: map[string][]string{
+		"open": {"doc-open-1"},
+	}}
+	if _, _, err := store.WriteSegment(ctx, namespace, seg1); err != nil {
+		t.Fatalf("write segment1: %v", err)
+	}
+	manifest1 := NewManifest()
+	manifest1.Seq = 1
+	manifest1.UpdatedAt = seg1.CreatedAt
+	manifest1.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{{
+			ID:        seg1.ID,
+			CreatedAt: seg1.CreatedAt,
+			DocCount:  seg1.DocCount(),
+		}},
+	}
+	if _, err := store.SaveManifest(ctx, namespace, manifest1, ""); err != nil {
+		t.Fatalf("save manifest1: %v", err)
+	}
+	writeIndexedState(t, store.backend, namespace, "doc-open-1", map[string]any{"status": "open"})
+
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	openReq := search.Request{
+		Namespace: namespace,
+		Selector: api.Selector{
+			Eq: &api.Term{Field: "/status", Value: "open"},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	}
+	resp1, err := adapter.Query(ctx, openReq)
+	if err != nil {
+		t.Fatalf("query open first: %v", err)
+	}
+	if len(resp1.Keys) != 1 || resp1.Keys[0] != "doc-open-1" {
+		t.Fatalf("unexpected first query keys %v", resp1.Keys)
+	}
+	if got := adapter.readers.len(); got != 1 {
+		t.Fatalf("expected one prepared reader cache entry after first query, got %d", got)
+	}
+	resp2, err := adapter.Query(ctx, openReq)
+	if err != nil {
+		t.Fatalf("query open second: %v", err)
+	}
+	if len(resp2.Keys) != 1 || resp2.Keys[0] != "doc-open-1" {
+		t.Fatalf("unexpected second query keys %v", resp2.Keys)
+	}
+	if got := adapter.readers.len(); got != 1 {
+		t.Fatalf("expected prepared reader cache reuse, got %d entries", got)
+	}
+
+	seg2 := NewSegment("seg-reader-cache-2", time.Unix(1_700_000_222, 0))
+	seg2.Fields["/status"] = FieldBlock{Postings: map[string][]string{
+		"closed": {"doc-closed-1"},
+	}}
+	if _, _, err := store.WriteSegment(ctx, namespace, seg2); err != nil {
+		t.Fatalf("write segment2: %v", err)
+	}
+	manifest2 := NewManifest()
+	manifest2.Seq = 2
+	manifest2.UpdatedAt = seg2.CreatedAt
+	manifest2.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{{
+			ID:        seg2.ID,
+			CreatedAt: seg2.CreatedAt,
+			DocCount:  seg2.DocCount(),
+		}},
+	}
+	if _, err := store.SaveManifest(ctx, namespace, manifest2, ""); err != nil {
+		t.Fatalf("save manifest2: %v", err)
+	}
+	writeIndexedState(t, store.backend, namespace, "doc-closed-1", map[string]any{"status": "closed"})
+
+	closedReq := search.Request{
+		Namespace: namespace,
+		Selector: api.Selector{
+			Eq: &api.Term{Field: "/status", Value: "closed"},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	}
+	resp3, err := adapter.Query(ctx, closedReq)
+	if err != nil {
+		t.Fatalf("query closed after manifest update: %v", err)
+	}
+	if len(resp3.Keys) != 1 || resp3.Keys[0] != "doc-closed-1" {
+		t.Fatalf("unexpected third query keys %v", resp3.Keys)
+	}
+	if got := adapter.readers.len(); got != 2 {
+		t.Fatalf("expected second prepared reader cache entry after manifest change, got %d", got)
 	}
 }
 

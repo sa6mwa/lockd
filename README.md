@@ -1152,11 +1152,11 @@ lockd client get --key orders -o - \
   | lockd client update --key orders
 lockd client remove --key orders
 
-# Atomic JSON mutations (mutate using an existing lease)
-lockd client set --key orders /progress/step=fetch /progress/count++ time:/progress/updated=NOW
+# Atomic JSON mutations (streaming server-side mutate under the active lease)
+lockd client mutate --key orders /progress/step=fetch /progress/count++ time:/progress/updated=NOW
 
 # Rich mutations with brace/quoted syntax (LQL)
-lockd client set --key ledger \
+lockd client mutate --key ledger \
   '/data{/hello key="mars traveler",/count++}' \
   /meta/previous=world \
   time:/meta/processed=NOW
@@ -1245,14 +1245,16 @@ tools without buffering in memory.
 
 The CLI auto-discovers `client*.pem` bundles under `$HOME/.lockd/` (or use
 `--bundle`) and performs the same host-agnostic mTLS verification as the SDK.
-`set` and `edit` consume the shared LQL mutation DSL. Paths now use JSON Pointer
+`mutate`, `set`, and `edit` consume the shared LQL mutation DSL. `mutate` is
+the streaming server-side path (`/v1/mutate`), while `set` remains available for
+local read-modify-write flows. Paths now use JSON Pointer
 syntax ([RFC 6901](https://datatracker.ietf.org/doc/html/rfc6901))
 (`/progress/counter++`), so literal dots, spaces, or Unicode in
 keys are handled transparently (only `/` and `~` are escaped as `~1`/`~0`). The
 mutator also supports brace blocks that fan out to nested fields
 (`/data{/hello key="mars traveler",/count++}`), increments (`=+3`/`--`),
 removals (`rm:`/`delete:`), and `time:` prefixes for RFC3339 timestamps.
-Commas and newlines can be mixed freely, e.g. `lockd client set --key ledger
+Commas and newlines can be mixed freely, e.g. `lockd client mutate --key ledger
 'meta{/owner="alice",/previous="world"}'`.
 
 Timeout knobs mirror the Go client: `--timeout` (HTTP dial+request),

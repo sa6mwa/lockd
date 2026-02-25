@@ -125,11 +125,11 @@ Scope: lockd-side migration and performance program to complete true inline stre
 - [ ] P7.6 Once stop condition reached, switch to maintenance/perf-regression guard mode.
 
 ## Phase 8: Documentation + DX cleanup
-- [ ] P8.1 Update `docs/subsystems/search-and-index.md` with current architecture.
-- [ ] P8.2 Document selector support matrix (index-native vs post-filter fallback).
-- [ ] P8.3 Document wildcard/recursive semantics and complexity notes.
-- [ ] P8.4 Document benchmark workflow and expected acceptance gates.
-- [ ] P8.5 Update CLI/SDK query docs where behavior changed (trailers, streaming details).
+- [x] P8.1 Update `docs/subsystems/search-and-index.md` with current architecture.
+- [x] P8.2 Document selector support matrix (index-native vs post-filter fallback).
+- [x] P8.3 Document wildcard/recursive semantics and complexity notes.
+- [x] P8.4 Document benchmark workflow and expected acceptance gates.
+- [x] P8.5 Update CLI/SDK query docs where behavior changed (trailers, streaming details).
 
 ## Immediate Next Iteration Queue (pick in order)
 - [x] N1 Execute P3.A1-P3.A3 in one focused slice (compiled segment cache + docID postings in memory).
@@ -163,4 +163,5 @@ Scope: lockd-side migration and performance program to complete true inline stre
 - [x] 2026-02-25: P3.D6 benchmark report recorded (pending commit): wildcard resolve `15.32 ns/op` (0 alloc), recursive resolve `23.62 ns/op` (0 alloc), wildcard contains `791,083 ns/op`, `186,004 B/op`, `4,106 allocs/op`, adapter wildcard contains `3,091,692 ns/op`, `1,962,550 B/op`, `12,386 allocs/op`.
 - [x] 2026-02-25: Phase 4 baseline confirmed by existing implementation/tests: planner cost heuristics + selector plan cache + recursive fallback safeguards are active; deep-recursive and wide-wildcard benchmarks are present in `adapter_benchmark_test.go`; state-cap fail-safe is pinned in `field_resolver_test.go`.
 - [x] 2026-02-25: Phase 7 benchmark program baseline landed (pending commit): froze small/medium/large wildcard+recursive+fulltext profiles in `adapter_benchmark_test.go`, recorded reproducible command set and current-head hot benchmark table in `docs/performance/2026-02-25-search-index-phase7-baseline/summary.md`, and defined diminishing-returns/maintenance-mode policy.
+- [x] 2026-02-25: Phase 8 docs + DX cleanup landed (pending commit): rewrote `docs/subsystems/search-and-index.md` for current query/mutate streaming architecture, added selector support matrix and wildcard/recursive complexity notes, linked benchmark acceptance gates, and updated README/MCP docs for `mutate` plus current LQL operator coverage.
 - [ ] YYYY-MM-DD: Next slice commit + benchmark delta summary.

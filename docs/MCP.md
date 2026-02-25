@@ -344,18 +344,11 @@ Examples:
 - `/items/.../sku="ABC-123"`
 - `eq{field=/...,value="hello"}` (broad descendant value match)
 
-### Placeholder: Upcoming LQL Operators
+Additional operators available in current lockd builds:
 
-The new LQL operators below are planned but not landed yet in this branch:
-
-- `contains`
-- `icontains`
-- `iprefix`
-
-Until they land, use current behavior:
-
-- exact descendant matching with `eq{field=/...,value="..."}`
-- prefix matching with `prefix{field=/...,value="..."}`
+- `contains{field=/message,value=timeout}`
+- `icontains{field=/message,value=TIMEOUT}`
+- `iprefix{field=/owner,value=TEAM-}`
 
 ### Practical Query Pattern
 

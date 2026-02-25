@@ -1,41 +1,99 @@
 # Search + Index Subsystem
 
-## 1) Purpose
+## Purpose
 
-This subsystem provides key/document query over namespaced state using either full scan or segment-based indexing, with configurable engine selection and streaming document return modes.
+The search subsystem serves namespaced selector queries and streaming document scans with two execution engines:
+- `index` for postings-based lookup
+- `scan` for full storage traversal
 
-## 2) Architecture and implementation details
+It also owns server-side streaming mutation (`/v1/mutate`) so selector/mutator logic stays close to storage I/O without buffering whole documents in memory.
 
-- API enters through `internal/core/query.go` and becomes `search.Request`.
-- Query routing:
-  - `internal/search/dispatcher.go` selects index vs scan adapter using engine hint and capability checks.
-  - namespace config (`namespaces.Config`) influences automatic engine selection.
-- Scan engine:
-  - `internal/search/scan/adapter.go` enumerates metadata keys and loads JSON state documents on demand.
-  - selector evaluation is done in-memory via `scan/evaluator.go`.
-- Index engine:
-  - `internal/search/index/manager.go` owns per-namespace writers and visibility writers.
-  - writes produce/flush manifests + segments; reads can include index sequence metadata.
-- Core integration:
-  - `internal/core/query.go` supports `return=keys|documents`.
-  - document streaming uses bounded parallel prefetch (`QueryDocPrefetch`) while preserving output order.
-  - index rebuild can be scheduled on read when format mismatch is detected.
-- Operational controls:
-  - explicit `/v1/index/flush` endpoint supports synchronous and asynchronous flush modes.
-  - warmup/readability hooks reduce stale reads after writes.
+## Query and Mutate Flows
 
-## 3) Implemented non-style improvements (bugs, security, reliability)
+### Query (`/v1/query`)
 
-- Scan adapter error handling now surfaces real read failures:
-  - non-`ErrNotFound` failures from `LoadMeta`/state reads are returned as query errors.
-  - this removes false-negative query behavior where backend failures were previously logged-and-skipped.
-- Index flush endpoint hardening is now in place:
-  - request body size is bounded with `http.MaxBytesReader`.
-  - async flushes are deduped per namespace and capped globally to prevent unbounded goroutine growth.
-- Targeted regression coverage was added for query/index control-plane behavior:
-  - `internal/search/scan/adapter_test.go` validates error surfacing.
-  - `internal/httpapi/handler_index_test.go` validates async dedupe and in-flight cap behavior.
+- `return=keys`:
+  - response body: JSON envelope (`namespace`, `keys`, `cursor`, metadata)
+  - response headers: `X-Lockd-Query-*`
+- `return=documents`:
+  - response body: NDJSON rows (`{"ns","key","ver","doc":...}`)
+  - query metadata/cursor/index sequence are emitted in trailers:
+    - `X-Lockd-Query-Cursor`
+    - `X-Lockd-Query-Index-Seq`
+    - `X-Lockd-Query-Metadata`
 
-## Feature-aligned improvements
+`X-Lockd-Query-Metadata` includes stream counters (`query_candidates_seen`, `query_candidates_matched`, `query_bytes_captured`, `query_spill_count`, `query_spill_bytes`).
 
-- Add query result metadata fields for `engine_used`, `index_age`, and `partial` to make consistency and fallback behavior explicit to clients.
+### Mutate (`/v1/mutate`)
+
+- server loads lease-visible JSON for the key
+- applies LQL mutate plan in streaming mode (`MutateSingleObjectOnly`)
+- streams mutated JSON directly into update path (`core.Update`) via pipe
+- returns normal update response + mutate stream headers:
+  - `X-Lockd-Mutate-Candidates-Seen`
+  - `X-Lockd-Mutate-Candidates-Written`
+  - `X-Lockd-Mutate-Bytes-Read`
+  - `X-Lockd-Mutate-Bytes-Written`
+  - `X-Lockd-Mutate-Bytes-Captured`
+  - `X-Lockd-Mutate-Spill-Count`
+  - `X-Lockd-Mutate-Spill-Bytes`
+
+## Engine Selection and Fallback
+
+- `internal/search/dispatcher.go` routes by requested engine hint (`auto|index|scan`)
+- `auto` tries index first, then scan on capability/streaming fallback boundaries
+- index adapter supports full document streaming (`QueryDocuments`), so query-doc paths remain single-pass and do not re-query per match
+
+## Selector Support Matrix
+
+Current index-native selector families:
+
+| Family | Index-native |
+| --- | --- |
+| `eq` | yes |
+| `prefix` | yes |
+| `iprefix` | yes |
+| `contains` | yes |
+| `icontains` | yes |
+| `range` | yes |
+| `in` | yes |
+| `exists` | yes |
+| `and` / `or` / `not` compositions | yes (recursive evaluation) |
+
+Path expansion support in index engine:
+- wildcard object/array child: `*`, `[]`
+- immediate mixed child: `**`
+- recursive descendant: `...`
+
+If a selector family is not index-native, the index adapter falls back to:
+- index candidate enumeration (`allDocIDs`)
+- per-key LQL post-filter evaluation
+
+This preserves correctness while keeping index-native families fast.
+
+## Wildcard/Recursive Semantics and Complexity
+
+- wildcard and recursive selectors are resolved against indexed field dictionaries
+- planner heuristics bound expansion state; large recursive trees can trigger deterministic fallback traversal
+- cursor/key ordering is still lexicographic and pagination-stable under wildcard/recursive selectors
+- `contains`/`icontains` use trigram postings for candidate narrowing and term verification for correctness
+
+## Index Format and Rebuild
+
+- v5 segments persist doc tables + field/term dictionaries + docID postings
+- reader remains compatible with v4 and v5 segments
+- rebuild/reset preserves target format and removes lower-format legacy segments when required
+
+See `docs/subsystems/index-format-v5.md` for schema and migration notes.
+
+## Benchmark Workflow and Acceptance Gates
+
+Phase-7 benchmark contract:
+- frozen datasets: `small|medium|large` across wildcard/recursive/fulltext-like selectors
+- reproducible command and baseline table:
+  - `docs/performance/2026-02-25-search-index-phase7-baseline/summary.md`
+
+Per perf slice requirements:
+- run frozen benchmark set with `-benchmem`
+- include before/after table in commit notes
+- stop structural perf rewrites after two consecutive slices with median `<5%` gains in both `ns/op` and `allocs/op`; then move to regression-guard mode

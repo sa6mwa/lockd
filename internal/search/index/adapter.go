@@ -533,6 +533,7 @@ type segmentReader struct {
 	fieldListReady        bool
 	fieldSegments         map[string][]string
 	fieldResolutionCached map[string][]string
+	fieldTrie             *fieldPathTrie
 }
 
 func newSegmentReader(namespace string, manifest *Manifest, store *Store, logger pslog.Logger) *segmentReader {
@@ -588,18 +589,24 @@ func (r *segmentReader) keysForTerm(ctx context.Context, field, term string) (ke
 		return make(keySet), nil
 	}
 	result := make(keySet)
-	err := r.forEachSegment(ctx, func(seg *Segment) error {
+	if err := r.collectKeysForTerm(ctx, field, term, result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (r *segmentReader) collectKeysForTerm(ctx context.Context, field, term string, out keySet) error {
+	return r.forEachSegment(ctx, func(seg *Segment) error {
 		block, ok := seg.Fields[field]
 		if !ok {
 			return nil
 		}
 		keys := block.Postings[term]
 		for _, key := range keys {
-			result[key] = struct{}{}
+			out[key] = struct{}{}
 		}
 		return nil
 	})
-	return result, err
 }
 
 func (r *segmentReader) keysForPrefix(ctx context.Context, term *api.Term) (keySet, error) {
@@ -640,8 +647,12 @@ func (r *segmentReader) keysForContains(ctx context.Context, term *api.Term, use
 		return r.keysForExists(ctx, normalizeField(term))
 	}
 	out := make(keySet)
+	ws := containsWorkspace{
+		candidate: make(keySet),
+		gram:      make(keySet),
+	}
 	for _, field := range fields {
-		set, err := r.keysForContainsField(ctx, field, needle, useTrigramIndex)
+		set, err := r.keysForContainsField(ctx, field, needle, useTrigramIndex, &ws)
 		if err != nil {
 			return nil, err
 		}
@@ -650,25 +661,51 @@ func (r *segmentReader) keysForContains(ctx context.Context, term *api.Term, use
 	return out, nil
 }
 
-func (r *segmentReader) keysForContainsField(ctx context.Context, field, needle string, useTrigramIndex bool) (keySet, error) {
+type containsWorkspace struct {
+	candidate keySet
+	gram      keySet
+}
+
+func (r *segmentReader) keysForContainsField(ctx context.Context, field, needle string, useTrigramIndex bool, ws *containsWorkspace) (keySet, error) {
+	if ws == nil {
+		ws = &containsWorkspace{
+			candidate: make(keySet),
+			gram:      make(keySet),
+		}
+	}
 	var candidateFilter keySet
 	if useTrigramIndex {
 		grams := normalizedTrigrams(needle)
 		if len(grams) > 0 {
-			var out keySet
-			for i, gram := range grams {
-				gramSet, err := r.keysForTerm(ctx, containsGramField(field), gram)
-				if err != nil {
+			clear(ws.candidate)
+			initialized := false
+			sawGramPosting := false
+			for _, gram := range grams {
+				clear(ws.gram)
+				if err := r.collectKeysForTerm(ctx, containsGramField(field), gram, ws.gram); err != nil {
 					return nil, err
 				}
-				if i == 0 {
-					out = gramSet
-					continue
+				if len(ws.gram) > 0 {
+					sawGramPosting = true
 				}
-				out = intersect(out, gramSet)
+				if !initialized {
+					mergeKeySet(ws.candidate, ws.gram)
+					initialized = true
+				} else {
+					for key := range ws.candidate {
+						if _, ok := ws.gram[key]; !ok {
+							delete(ws.candidate, key)
+						}
+					}
+				}
+				if len(ws.candidate) == 0 {
+					break
+				}
 			}
-			if len(out) > 0 {
-				candidateFilter = out
+			if len(ws.candidate) > 0 {
+				candidateFilter = ws.candidate
+			} else if initialized && sawGramPosting {
+				return make(keySet), nil
 			}
 		}
 	}
@@ -1235,9 +1272,6 @@ func selectorSupportsLegacyIndexFilter(sel api.Selector) bool {
 		return true
 	}
 	caps := lql.InspectSelectorCapabilities(sel)
-	if caps.RecursivePath {
-		return false
-	}
 	families := caps.Families()
 	if len(families) == 0 {
 		return false

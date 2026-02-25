@@ -43,6 +43,29 @@ func BenchmarkSegmentReaderResolveWildcardFields(b *testing.B) {
 	}
 }
 
+func BenchmarkSegmentReaderResolveRecursiveFields(b *testing.B) {
+	ctx := context.Background()
+	reader, _ := buildSyntheticWildcardBenchIndex(ctx, b, 256, 32)
+
+	warm, err := reader.resolveSelectorFields(ctx, "/logs/.../message")
+	if err != nil {
+		b.Fatalf("resolve selector fields: %v", err)
+	}
+	if len(warm) == 0 {
+		b.Fatalf("expected resolved fields")
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		fields, err := reader.resolveSelectorFields(ctx, "/logs/.../message")
+		if err != nil {
+			b.Fatalf("resolve selector fields: %v", err)
+		}
+		benchResolvedFields = fields
+	}
+}
+
 func BenchmarkSegmentReaderWildcardContains(b *testing.B) {
 	ctx := context.Background()
 	reader, _ := buildSyntheticWildcardBenchIndex(ctx, b, 256, 32)

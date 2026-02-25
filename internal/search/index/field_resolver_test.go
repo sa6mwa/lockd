@@ -21,11 +21,11 @@ func TestSelectorSupportsLegacyIndexFilterAllowsWildcard(t *testing.T) {
 	}
 }
 
-func TestSelectorSupportsLegacyIndexFilterRejectsRecursive(t *testing.T) {
-	if selectorSupportsLegacyIndexFilter(api.Selector{
+func TestSelectorSupportsLegacyIndexFilterAllowsRecursive(t *testing.T) {
+	if !selectorSupportsLegacyIndexFilter(api.Selector{
 		Contains: &api.Term{Field: "/logs/**/message", Value: "timeout"},
 	}) {
-		t.Fatalf("expected recursive selector to be scan/postfilter-only")
+		t.Fatalf("expected recursive selector to be index-supported")
 	}
 }
 
@@ -89,6 +89,126 @@ func TestIndexAdapterQueryWildcardContains(t *testing.T) {
 	}
 }
 
+func TestIndexAdapterQueryRecursiveSingleStep(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	store := NewStore(mem, nil)
+
+	segment := NewSegment("seg-recursive-single-step", time.Unix(1_700_000_122, 0))
+	segment.Fields["/logs/message"] = FieldBlock{Postings: map[string][]string{
+		"timeout direct": {"doc-zero"},
+	}}
+	segment.Fields["/logs/a/message"] = FieldBlock{Postings: map[string][]string{
+		"timeout one-level": {"doc-one"},
+	}}
+	segment.Fields["/logs/a/nested/message"] = FieldBlock{Postings: map[string][]string{
+		"timeout deep": {"doc-deep"},
+	}}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+	manifest := NewManifest()
+	manifest.Seq = 11
+	manifest.UpdatedAt = segment.CreatedAt
+	manifest.Format = IndexFormatVersionV4
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{{
+			ID:        segment.ID,
+			CreatedAt: segment.CreatedAt,
+			DocCount:  segment.DocCount(),
+		}},
+	}
+	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+	for _, key := range []string{"doc-zero", "doc-one", "doc-deep"} {
+		meta := &storage.Meta{Version: 1, PublishedVersion: 1, StateETag: "etag-" + key}
+		if _, err := mem.StoreMeta(ctx, namespaces.Default, key, meta, ""); err != nil {
+			t.Fatalf("store meta %s: %v", key, err)
+		}
+	}
+
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	resp, err := adapter.Query(ctx, search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			Contains: &api.Term{Field: "/logs/**/message", Value: "timeout"},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	})
+	if err != nil {
+		t.Fatalf("query recursive **: %v", err)
+	}
+	if !slices.Equal(resp.Keys, []string{"doc-one", "doc-zero"}) {
+		t.Fatalf("unexpected recursive ** keys %v", resp.Keys)
+	}
+}
+
+func TestIndexAdapterQueryRecursiveDescendant(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	store := NewStore(mem, nil)
+
+	segment := NewSegment("seg-recursive-descendant", time.Unix(1_700_000_123, 0))
+	segment.Fields["/logs/message"] = FieldBlock{Postings: map[string][]string{
+		"timeout direct": {"doc-zero"},
+	}}
+	segment.Fields["/logs/a/message"] = FieldBlock{Postings: map[string][]string{
+		"timeout one-level": {"doc-one"},
+	}}
+	segment.Fields["/logs/a/nested/message"] = FieldBlock{Postings: map[string][]string{
+		"timeout deep": {"doc-deep"},
+	}}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+	manifest := NewManifest()
+	manifest.Seq = 12
+	manifest.UpdatedAt = segment.CreatedAt
+	manifest.Format = IndexFormatVersionV4
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{{
+			ID:        segment.ID,
+			CreatedAt: segment.CreatedAt,
+			DocCount:  segment.DocCount(),
+		}},
+	}
+	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+	for _, key := range []string{"doc-zero", "doc-one", "doc-deep"} {
+		meta := &storage.Meta{Version: 1, PublishedVersion: 1, StateETag: "etag-" + key}
+		if _, err := mem.StoreMeta(ctx, namespaces.Default, key, meta, ""); err != nil {
+			t.Fatalf("store meta %s: %v", key, err)
+		}
+	}
+
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	resp, err := adapter.Query(ctx, search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			Contains: &api.Term{Field: "/logs/.../message", Value: "timeout"},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	})
+	if err != nil {
+		t.Fatalf("query recursive ...: %v", err)
+	}
+	if !slices.Equal(resp.Keys, []string{"doc-deep", "doc-one", "doc-zero"}) {
+		t.Fatalf("unexpected recursive ... keys %v", resp.Keys)
+	}
+}
+
 func TestIndexAdapterQueryWildcardArraySugar(t *testing.T) {
 	ctx := context.Background()
 	mem := memory.New()
@@ -143,4 +263,3 @@ func TestIndexAdapterQueryWildcardArraySugar(t *testing.T) {
 		t.Fatalf("unexpected wildcard [] keys %v", resp.Keys)
 	}
 }
-

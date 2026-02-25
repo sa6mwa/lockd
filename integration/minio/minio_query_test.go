@@ -47,6 +47,10 @@ func TestMinioQueryDocumentStreamingFlowControl(t *testing.T) {
 	queriesuite.RunDocumentStreamingFlowControl(t, startMinioQueryServer)
 }
 
+func TestMinioQueryIndexRebuildUpgrade(t *testing.T) {
+	queriesuite.RunIndexRebuildUpgrade(t, startMinioQueryServer)
+}
+
 func TestMinioQueryLargeNamespaceLowMatchKeys(t *testing.T) {
 	queriesuite.RunLargeNamespaceLowMatchKeys(t, startMinioQueryServer)
 }

@@ -52,6 +52,10 @@ func TestDiskQueryDocumentStreamingFlowControl(t *testing.T) {
 	queriesuite.RunDocumentStreamingFlowControl(t, startDiskQueryServer)
 }
 
+func TestDiskQueryIndexRebuildUpgrade(t *testing.T) {
+	queriesuite.RunIndexRebuildUpgrade(t, startDiskQueryServer)
+}
+
 func TestDiskQueryLargeNamespaceLowMatchKeys(t *testing.T) {
 	queriesuite.RunLargeNamespaceLowMatchKeys(t, startDiskQueryServer)
 }

@@ -21,6 +21,7 @@ import (
 	lockdclient "pkt.systems/lockd/client"
 	querydata "pkt.systems/lockd/integration/query/querydata"
 	"pkt.systems/lockd/internal/core"
+	indexer "pkt.systems/lockd/internal/search/index"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/namespaces"
 	"pkt.systems/lql"
@@ -233,6 +234,110 @@ func RunDocumentStreaming(t *testing.T, factory ServerFactory) {
 		if doc["region"] != "emea" {
 			t.Fatalf("unexpected document: %+v", doc)
 		}
+	})
+}
+
+// RunIndexRebuildUpgrade validates rebuild/cleanup behavior when a namespace
+// upgrades from legacy v4 segments to v5 while preserving query correctness.
+func RunIndexRebuildUpgrade(t *testing.T, factory ServerFactory) {
+	withServer(t, factory, 2*time.Minute, func(ctx context.Context, ts *lockd.TestServer, httpClient *http.Client) {
+		namespace := "q-rebuild-" + xid.New().String()
+		keyA := "rebuild-doc-a"
+		keyB := "rebuild-doc-b"
+		querydata.SeedState(ctx, t, ts.Client, namespace, keyA, map[string]any{"status": "open", "kind": "ticket"})
+		querydata.SeedState(ctx, t, ts.Client, namespace, keyB, map[string]any{"status": "open", "kind": "ticket"})
+		flushNamespaces(ctx, t, ts.Client, namespace)
+
+		crypto := rebuildCryptoFromServerConfig(t, ts.Config)
+		idxStore := indexer.NewStore(ts.Backend(), crypto)
+		idxManager := indexer.NewManager(idxStore, indexer.WriterOptions{
+			FlushDocs:     1000,
+			FlushInterval: time.Minute,
+		})
+		defer idxManager.Close(context.Background())
+
+		legacy := indexer.NewSegment("legacy-v4-"+xid.New().String(), time.Now().UTC().Add(-time.Minute))
+		legacy.Format = indexer.IndexFormatVersionV4
+		legacy.Fields["/status"] = indexer.FieldBlock{Postings: map[string][]string{
+			"open": {keyA},
+		}}
+		if _, _, err := idxStore.WriteSegment(ctx, namespace, legacy); err != nil {
+			t.Fatalf("write legacy segment: %v", err)
+		}
+		manifest := indexer.NewManifest()
+		manifest.Format = indexer.IndexFormatVersionV5
+		manifest.Seq = 3
+		manifest.UpdatedAt = legacy.CreatedAt
+		manifest.Shards[0] = &indexer.Shard{
+			ID: 0,
+			Segments: []indexer.SegmentRef{
+				{ID: legacy.ID, CreatedAt: legacy.CreatedAt, DocCount: legacy.DocCount()},
+			},
+		}
+		if _, err := idxStore.SaveManifest(ctx, namespace, manifest, ""); err != nil {
+			t.Fatalf("save seed manifest: %v", err)
+		}
+
+		defaultCfg := namespaces.DefaultConfig()
+		if provider, ok := ts.Backend().(namespaces.ConfigProvider); ok && provider != nil {
+			defaultCfg = provider.DefaultNamespaceConfig()
+		}
+		svc := core.New(core.Config{
+			Store:                  ts.Backend(),
+			Crypto:                 crypto,
+			IndexManager:           idxManager,
+			DefaultNamespace:       ts.Config.DefaultNamespace,
+			DefaultNamespaceConfig: defaultCfg,
+		})
+		res, err := svc.RebuildIndex(ctx, namespace, core.IndexRebuildOptions{
+			Mode:         "wait",
+			Cleanup:      true,
+			CleanupDelay: 0,
+		})
+		if err != nil {
+			t.Fatalf("rebuild index: %v", err)
+		}
+		if !res.Rebuilt {
+			t.Fatalf("expected rebuilt=true, got %+v", res)
+		}
+
+		manifestRes, err := idxStore.LoadManifest(ctx, namespace)
+		if err != nil {
+			t.Fatalf("load manifest: %v", err)
+		}
+		if manifestRes.Manifest == nil || manifestRes.Manifest.Format != indexer.IndexFormatVersionV5 {
+			t.Fatalf("expected manifest format v5, got %+v", manifestRes.Manifest)
+		}
+		shard := manifestRes.Manifest.Shards[0]
+		if shard == nil || len(shard.Segments) == 0 {
+			t.Fatalf("expected rebuilt segments")
+		}
+		for _, ref := range shard.Segments {
+			if ref.ID == legacy.ID {
+				t.Fatalf("legacy v4 segment should be removed from manifest")
+			}
+			seg, err := idxStore.LoadSegment(ctx, namespace, ref.ID)
+			if err != nil {
+				t.Fatalf("load segment %s: %v", ref.ID, err)
+			}
+			if seg.Format != indexer.IndexFormatVersionV5 {
+				t.Fatalf("expected segment format v5, got %d", seg.Format)
+			}
+		}
+		if _, err := idxStore.LoadSegment(ctx, namespace, legacy.ID); !errors.Is(err, storage.ErrNotFound) {
+			t.Fatalf("expected legacy segment object deleted, got err=%v", err)
+		}
+
+		sel, err := lql.ParseSelectorString(`eq{field=/status,value=open}`)
+		if err != nil || sel.IsEmpty() {
+			t.Fatalf("parse selector: %v", err)
+		}
+		resp := doQuery(t, httpClient, ts.URL(), api.QueryRequest{
+			Namespace: namespace,
+			Selector:  sel,
+			Limit:     10,
+		})
+		querydata.ExpectKeySet(t, resp.Keys, []string{keyA, keyB})
 	})
 }
 
@@ -1649,4 +1754,23 @@ func waitForTxnRecordsDecided(ctx context.Context, backend storage.Backend) erro
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+func rebuildCryptoFromServerConfig(t testing.TB, cfg lockd.Config) *storage.Crypto {
+	t.Helper()
+	if !cfg.StorageEncryptionEnabled() {
+		return nil
+	}
+	crypto, err := storage.NewCrypto(storage.CryptoConfig{
+		Enabled:            true,
+		RootKey:            cfg.MetadataRootKey,
+		MetadataDescriptor: cfg.MetadataDescriptor,
+		MetadataContext:    []byte(cfg.MetadataContext),
+		Snappy:             cfg.StorageEncryptionSnappy,
+		DisableBufferPool:  cfg.DisableKryptoPool,
+	})
+	if err != nil {
+		t.Fatalf("build rebuild crypto: %v", err)
+	}
+	return crypto
 }

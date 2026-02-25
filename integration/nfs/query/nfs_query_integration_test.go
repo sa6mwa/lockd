@@ -52,6 +52,10 @@ func TestNFSQueryDocumentStreamingFlowControl(t *testing.T) {
 	queriesuite.RunDocumentStreamingFlowControl(t, startNFSQueryServer)
 }
 
+func TestNFSQueryIndexRebuildUpgrade(t *testing.T) {
+	queriesuite.RunIndexRebuildUpgrade(t, startNFSQueryServer)
+}
+
 func TestNFSQueryLargeNamespaceLowMatchKeys(t *testing.T) {
 	queriesuite.RunLargeNamespaceLowMatchKeys(t, startNFSQueryServer)
 }

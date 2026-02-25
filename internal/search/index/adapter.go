@@ -81,7 +81,7 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 		return search.Result{}, err
 	}
 	var (
-		matches         keySet
+		matches         docIDSet
 		postFilterPlan  lql.QueryStreamPlan
 		requirePostEval bool
 	)
@@ -93,7 +93,7 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 		}
 	}
 	if selector.IsEmpty() || !useLegacyFilter {
-		matches, err = reader.allKeys(ctx)
+		matches, err = reader.allDocIDs(ctx)
 	} else {
 		eval := selectorEvaluator{
 			reader:        reader,
@@ -112,7 +112,7 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 	if err != nil {
 		return search.Result{}, err
 	}
-	sortedKeys := matches.sorted()
+	sortedKeys := reader.sortedKeysForDocIDs(matches)
 	startIdx, err := startIndexFromCursor(req.Cursor, sortedKeys)
 	if err != nil {
 		return search.Result{}, fmt.Errorf("%w: %v", search.ErrInvalidCursor, err)
@@ -275,7 +275,7 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 		return search.Result{}, err
 	}
 	var (
-		matches         keySet
+		matches         docIDSet
 		postFilterPlan  lql.QueryStreamPlan
 		requirePostEval bool
 	)
@@ -287,7 +287,7 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 		}
 	}
 	if selector.IsEmpty() || !useLegacyFilter {
-		matches, err = reader.allKeys(ctx)
+		matches, err = reader.allDocIDs(ctx)
 	} else {
 		eval := selectorEvaluator{
 			reader:        reader,
@@ -306,7 +306,7 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 	if err != nil {
 		return search.Result{}, err
 	}
-	sortedKeys := matches.sorted()
+	sortedKeys := reader.sortedKeysForDocIDs(matches)
 	startIdx, err := startIndexFromCursor(req.Cursor, sortedKeys)
 	if err != nil {
 		return search.Result{}, fmt.Errorf("%w: %v", search.ErrInvalidCursor, err)
@@ -563,213 +563,167 @@ func newSegmentReader(namespace string, manifest *Manifest, store *Store, logger
 	}
 }
 
-func (r *segmentReader) allKeys(ctx context.Context) (keySet, error) {
-	result := make(keySet)
+func (r *segmentReader) allDocIDs(ctx context.Context) (docIDSet, error) {
+	out := make(docIDSet, 0)
 	err := r.forEachCompiledSegment(ctx, func(seg *compiledSegment) error {
 		for _, block := range seg.fields {
 			for _, docIDs := range block.postings {
-				r.addDocIDsToKeySet(result, docIDs)
+				out = append(out, docIDs...)
 			}
 		}
 		return nil
 	})
-	return result, err
+	if err != nil {
+		return nil, err
+	}
+	return sortUniqueDocIDs(out), nil
 }
 
-func (r *segmentReader) keysForEq(ctx context.Context, term *api.Term) (keySet, error) {
+func (r *segmentReader) docIDsForEq(ctx context.Context, term *api.Term) (docIDSet, error) {
 	fields, err := r.resolveSelectorFields(ctx, normalizeField(term))
 	if err != nil {
 		return nil, err
 	}
 	if len(fields) == 0 {
-		return make(keySet), nil
+		return nil, nil
 	}
 	normalizedTerm := normalizeTermValue(term.Value)
-	out := make(keySet)
+	out := make(docIDSet, 0)
 	for _, field := range fields {
-		set, err := r.keysForTerm(ctx, field, normalizedTerm)
+		set, err := r.docIDsForTerm(ctx, field, normalizedTerm)
 		if err != nil {
 			return nil, err
 		}
-		mergeKeySet(out, set)
+		out = unionDocIDs(out, set)
 	}
 	return out, nil
 }
 
-func (r *segmentReader) keysForTerm(ctx context.Context, field, term string) (keySet, error) {
+func (r *segmentReader) docIDsForTerm(ctx context.Context, field, term string) (docIDSet, error) {
 	field = strings.TrimSpace(field)
 	if field == "" {
-		return make(keySet), nil
+		return nil, nil
 	}
-	result := make(keySet)
-	if err := r.collectKeysForTerm(ctx, field, term, result); err != nil {
+	out := make(docIDSet, 0)
+	err := r.forEachCompiledSegment(ctx, func(seg *compiledSegment) error {
+		block, ok := seg.fields[field]
+		if !ok {
+			return nil
+		}
+		docIDs := block.postings[term]
+		out = append(out, docIDs...)
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
-	return result, nil
+	return sortUniqueDocIDs(out), nil
 }
 
-func (r *segmentReader) collectKeysForTerm(ctx context.Context, field, term string, out keySet) error {
-	return r.forEachCompiledSegment(ctx, func(seg *compiledSegment) error {
-		block, ok := seg.fields[field]
-		if !ok {
-			return nil
-		}
-		docIDs := block.postings[term]
-		for _, docID := range docIDs {
-			key := r.keyByDocID(docID)
-			if key == "" {
-				continue
-			}
-			out[key] = struct{}{}
-		}
-		return nil
-	})
-}
-
-func (r *segmentReader) collectDocIDsForTerm(ctx context.Context, field, term string, out map[uint32]struct{}) error {
-	return r.forEachCompiledSegment(ctx, func(seg *compiledSegment) error {
-		block, ok := seg.fields[field]
-		if !ok {
-			return nil
-		}
-		docIDs := block.postings[term]
-		for _, docID := range docIDs {
-			out[docID] = struct{}{}
-		}
-		return nil
-	})
-}
-
-func (r *segmentReader) keysForPrefix(ctx context.Context, term *api.Term) (keySet, error) {
+func (r *segmentReader) docIDsForPrefix(ctx context.Context, term *api.Term) (docIDSet, error) {
 	fields, err := r.resolveSelectorFields(ctx, normalizeField(term))
 	if err != nil {
 		return nil, err
 	}
 	if len(fields) == 0 {
-		return make(keySet), nil
+		return nil, nil
 	}
 	prefix := normalizeTermValue(term.Value)
-	result := make(keySet)
+	out := make(docIDSet, 0)
 	for _, field := range fields {
 		if err := r.forEachPostingDocIDs(ctx, field, func(termValue string, docIDs []uint32) error {
 			if strings.HasPrefix(termValue, prefix) {
-				r.addDocIDsToKeySet(result, docIDs)
+				out = append(out, docIDs...)
 			}
 			return nil
 		}); err != nil {
 			return nil, err
 		}
 	}
-	return result, nil
+	return sortUniqueDocIDs(out), nil
 }
 
-func (r *segmentReader) keysForContains(ctx context.Context, term *api.Term, useTrigramIndex bool) (keySet, error) {
+func (r *segmentReader) docIDsForContains(ctx context.Context, term *api.Term, useTrigramIndex bool) (docIDSet, error) {
 	fields, err := r.resolveSelectorFields(ctx, normalizeField(term))
 	if err != nil {
 		return nil, err
 	}
 	if len(fields) == 0 {
-		return make(keySet), nil
+		return nil, nil
 	}
 	needle := normalizeTermValue(term.Value)
 	if needle == "" {
-		return r.keysForExists(ctx, normalizeField(term))
+		return r.docIDsForExists(ctx, normalizeField(term))
 	}
-	out := make(keySet)
-	ws := containsWorkspace{
-		candidate: make(map[uint32]struct{}),
-		gram:      make(map[uint32]struct{}),
-	}
+	out := make(docIDSet, 0)
 	for _, field := range fields {
-		set, err := r.keysForContainsField(ctx, field, needle, useTrigramIndex, &ws)
+		set, err := r.docIDsForContainsField(ctx, field, needle, useTrigramIndex)
 		if err != nil {
 			return nil, err
 		}
-		mergeKeySet(out, set)
+		out = unionDocIDs(out, set)
 	}
 	return out, nil
 }
 
-type containsWorkspace struct {
-	candidate map[uint32]struct{}
-	gram      map[uint32]struct{}
-}
-
-func (r *segmentReader) keysForContainsField(ctx context.Context, field, needle string, useTrigramIndex bool, ws *containsWorkspace) (keySet, error) {
-	if ws == nil {
-		ws = &containsWorkspace{
-			candidate: make(map[uint32]struct{}),
-			gram:      make(map[uint32]struct{}),
-		}
-	}
-	var candidateFilter map[uint32]struct{}
+func (r *segmentReader) docIDsForContainsField(ctx context.Context, field, needle string, useTrigramIndex bool) (docIDSet, error) {
+	var candidateFilter docIDSet
 	if useTrigramIndex {
 		grams := normalizedTrigrams(needle)
 		if len(grams) > 0 {
-			clear(ws.candidate)
 			initialized := false
 			sawGramPosting := false
+			candidate := make(docIDSet, 0)
 			for _, gram := range grams {
-				clear(ws.gram)
-				if err := r.collectDocIDsForTerm(ctx, containsGramField(field), gram, ws.gram); err != nil {
+				gramSet, err := r.docIDsForTerm(ctx, containsGramField(field), gram)
+				if err != nil {
 					return nil, err
 				}
-				if len(ws.gram) > 0 {
+				if len(gramSet) > 0 {
 					sawGramPosting = true
 				}
 				if !initialized {
-					mergeDocIDSet(ws.candidate, ws.gram)
+					candidate = cloneDocIDs(gramSet)
 					initialized = true
 				} else {
-					for docID := range ws.candidate {
-						if _, ok := ws.gram[docID]; !ok {
-							delete(ws.candidate, docID)
-						}
-					}
+					candidate = intersectDocIDs(candidate, gramSet)
 				}
-				if len(ws.candidate) == 0 {
+				if len(candidate) == 0 {
 					break
 				}
 			}
-			if len(ws.candidate) > 0 {
-				candidateFilter = ws.candidate
+			if len(candidate) > 0 {
+				candidateFilter = candidate
 			} else if initialized && sawGramPosting {
-				return make(keySet), nil
+				return nil, nil
 			}
 		}
 	}
-	result := make(keySet)
+	out := make(docIDSet, 0)
 	if err := r.forEachPostingDocIDs(ctx, field, func(termValue string, docIDs []uint32) error {
 		if strings.Contains(termValue, needle) {
-			for _, docID := range docIDs {
-				if len(candidateFilter) > 0 {
-					if _, ok := candidateFilter[docID]; !ok {
-						continue
-					}
-				}
-				key := r.keyByDocID(docID)
-				if key == "" {
-					continue
-				}
-				result[key] = struct{}{}
+			filtered := docIDs
+			if len(candidateFilter) > 0 {
+				filtered = intersectDocIDs(filtered, candidateFilter)
 			}
+			out = append(out, filtered...)
 		}
 		return nil
 	}); err != nil {
 		return nil, err
 	}
-	return result, nil
+	return sortUniqueDocIDs(out), nil
 }
 
-func (r *segmentReader) keysForRange(ctx context.Context, term *api.RangeTerm) (keySet, error) {
+func (r *segmentReader) docIDsForRange(ctx context.Context, term *api.RangeTerm) (docIDSet, error) {
 	fields, err := r.resolveSelectorFields(ctx, normalizeRangeField(term))
 	if err != nil {
 		return nil, err
 	}
 	if len(fields) == 0 {
-		return make(keySet), nil
+		return nil, nil
 	}
-	result := make(keySet)
+	out := make(docIDSet, 0)
 	for _, field := range fields {
 		if err := r.forEachPostingDocIDs(ctx, field, func(termValue string, docIDs []uint32) error {
 			num, err := strconv.ParseFloat(termValue, 64)
@@ -779,51 +733,51 @@ func (r *segmentReader) keysForRange(ctx context.Context, term *api.RangeTerm) (
 			if !rangeMatches(term, num) {
 				return nil
 			}
-			r.addDocIDsToKeySet(result, docIDs)
+			out = append(out, docIDs...)
 			return nil
 		}); err != nil {
 			return nil, err
 		}
 	}
-	return result, nil
+	return sortUniqueDocIDs(out), nil
 }
 
-func (r *segmentReader) keysForExists(ctx context.Context, field string) (keySet, error) {
+func (r *segmentReader) docIDsForExists(ctx context.Context, field string) (docIDSet, error) {
 	fields, err := r.resolveSelectorFields(ctx, strings.TrimSpace(field))
 	if err != nil {
 		return nil, err
 	}
 	if len(fields) == 0 {
-		return make(keySet), nil
+		return nil, nil
 	}
-	result := make(keySet)
+	out := make(docIDSet, 0)
 	for _, field := range fields {
 		if err := r.forEachPostingDocIDs(ctx, field, func(_ string, docIDs []uint32) error {
-			r.addDocIDsToKeySet(result, docIDs)
+			out = append(out, docIDs...)
 			return nil
 		}); err != nil {
 			return nil, err
 		}
 	}
-	return result, nil
+	return sortUniqueDocIDs(out), nil
 }
 
-func (r *segmentReader) keysForIn(ctx context.Context, term *api.InTerm) (keySet, error) {
+func (r *segmentReader) docIDsForIn(ctx context.Context, term *api.InTerm) (docIDSet, error) {
 	fields, err := r.resolveSelectorFields(ctx, strings.TrimSpace(term.Field))
 	if err != nil {
 		return nil, err
 	}
 	if len(fields) == 0 || len(term.Any) == 0 {
-		return make(keySet), nil
+		return nil, nil
 	}
-	unionSet := make(keySet)
+	unionSet := make(docIDSet, 0)
 	for _, field := range fields {
 		for _, candidate := range term.Any {
-			eqSet, err := r.keysForTerm(ctx, field, normalizeTermValue(candidate))
+			eqSet, err := r.docIDsForTerm(ctx, field, normalizeTermValue(candidate))
 			if err != nil {
 				return nil, err
 			}
-			mergeKeySet(unionSet, eqSet)
+			unionSet = unionDocIDs(unionSet, eqSet)
 		}
 	}
 	return unionSet, nil
@@ -939,7 +893,7 @@ func (r *segmentReader) compileSegment(seg *Segment) *compiledSegment {
 			for _, key := range keys {
 				docIDs = append(docIDs, r.internKey(key))
 			}
-			compiledBlock.postings[term] = docIDs
+			compiledBlock.postings[term] = sortUniqueDocIDs(docIDs)
 		}
 		out.fields[field] = compiledBlock
 	}
@@ -961,16 +915,6 @@ func (r *segmentReader) keyByDocID(id uint32) string {
 		return ""
 	}
 	return r.keys[id]
-}
-
-func (r *segmentReader) addDocIDsToKeySet(out keySet, docIDs []uint32) {
-	for _, id := range docIDs {
-		key := r.keyByDocID(id)
-		if key == "" {
-			continue
-		}
-		out[key] = struct{}{}
-	}
 }
 
 type compiledSegment struct {
@@ -1014,87 +958,87 @@ type selectorEvaluator struct {
 
 type selectorClauseResolver struct {
 	family  string
-	resolve func(ctx context.Context, e selectorEvaluator, sel api.Selector) (keySet, bool, error)
+	resolve func(ctx context.Context, e selectorEvaluator, sel api.Selector) (docIDSet, bool, error)
 }
 
 var selectorClauseResolvers = []selectorClauseResolver{
 	{
 		family: "eq",
-		resolve: func(ctx context.Context, e selectorEvaluator, sel api.Selector) (keySet, bool, error) {
+		resolve: func(ctx context.Context, e selectorEvaluator, sel api.Selector) (docIDSet, bool, error) {
 			if sel.Eq == nil {
 				return nil, false, nil
 			}
-			set, err := e.reader.keysForEq(ctx, sel.Eq)
+			set, err := e.reader.docIDsForEq(ctx, sel.Eq)
 			return set, true, err
 		},
 	},
 	{
 		family: "prefix",
-		resolve: func(ctx context.Context, e selectorEvaluator, sel api.Selector) (keySet, bool, error) {
+		resolve: func(ctx context.Context, e selectorEvaluator, sel api.Selector) (docIDSet, bool, error) {
 			if sel.Prefix == nil {
 				return nil, false, nil
 			}
-			set, err := e.reader.keysForPrefix(ctx, sel.Prefix)
+			set, err := e.reader.docIDsForPrefix(ctx, sel.Prefix)
 			return set, true, err
 		},
 	},
 	{
-		family: "prefix",
-		resolve: func(ctx context.Context, e selectorEvaluator, sel api.Selector) (keySet, bool, error) {
+		family: "iprefix",
+		resolve: func(ctx context.Context, e selectorEvaluator, sel api.Selector) (docIDSet, bool, error) {
 			if sel.IPrefix == nil {
 				return nil, false, nil
 			}
-			set, err := e.reader.keysForPrefix(ctx, sel.IPrefix)
+			set, err := e.reader.docIDsForPrefix(ctx, sel.IPrefix)
 			return set, true, err
 		},
 	},
 	{
 		family: "contains",
-		resolve: func(ctx context.Context, e selectorEvaluator, sel api.Selector) (keySet, bool, error) {
+		resolve: func(ctx context.Context, e selectorEvaluator, sel api.Selector) (docIDSet, bool, error) {
 			if sel.Contains == nil {
 				return nil, false, nil
 			}
-			set, err := e.reader.keysForContains(ctx, sel.Contains, e.containsNgram)
+			set, err := e.reader.docIDsForContains(ctx, sel.Contains, e.containsNgram)
 			return set, true, err
 		},
 	},
 	{
-		family: "contains",
-		resolve: func(ctx context.Context, e selectorEvaluator, sel api.Selector) (keySet, bool, error) {
+		family: "icontains",
+		resolve: func(ctx context.Context, e selectorEvaluator, sel api.Selector) (docIDSet, bool, error) {
 			if sel.IContains == nil {
 				return nil, false, nil
 			}
-			set, err := e.reader.keysForContains(ctx, sel.IContains, e.containsNgram)
+			set, err := e.reader.docIDsForContains(ctx, sel.IContains, e.containsNgram)
 			return set, true, err
 		},
 	},
 	{
 		family: "range",
-		resolve: func(ctx context.Context, e selectorEvaluator, sel api.Selector) (keySet, bool, error) {
+		resolve: func(ctx context.Context, e selectorEvaluator, sel api.Selector) (docIDSet, bool, error) {
 			if sel.Range == nil {
 				return nil, false, nil
 			}
-			set, err := e.reader.keysForRange(ctx, sel.Range)
+			set, err := e.reader.docIDsForRange(ctx, sel.Range)
 			return set, true, err
 		},
 	},
 	{
 		family: "in",
-		resolve: func(ctx context.Context, e selectorEvaluator, sel api.Selector) (keySet, bool, error) {
+		resolve: func(ctx context.Context, e selectorEvaluator, sel api.Selector) (docIDSet, bool, error) {
 			if sel.In == nil {
 				return nil, false, nil
 			}
-			set, err := e.reader.keysForIn(ctx, sel.In)
+			set, err := e.reader.docIDsForIn(ctx, sel.In)
 			return set, true, err
 		},
 	},
 	{
 		family: "exists",
-		resolve: func(ctx context.Context, e selectorEvaluator, sel api.Selector) (keySet, bool, error) {
+		resolve: func(ctx context.Context, e selectorEvaluator, sel api.Selector) (docIDSet, bool, error) {
 			if sel.Exists == "" {
 				return nil, false, nil
 			}
-			set, err := e.reader.keysForExists(ctx, sel.Exists)
+			set, err := e.reader.docIDsForExists(ctx, sel.Exists)
 			return set, true, err
 		},
 	},
@@ -1209,43 +1153,43 @@ func (a *Adapter) recordDocMetaStats(found, missing, invalid int) {
 	)
 }
 
-func (e selectorEvaluator) evaluate(ctx context.Context, sel api.Selector) (keySet, error) {
+func (e selectorEvaluator) evaluate(ctx context.Context, sel api.Selector) (docIDSet, error) {
 	baseSet, initialized, err := e.evaluateBase(ctx, sel)
 	if err != nil {
 		return nil, err
 	}
 	if len(sel.Or) == 0 {
 		if !initialized {
-			return e.reader.allKeys(ctx)
+			return e.reader.allDocIDs(ctx)
 		}
 		return baseSet, nil
 	}
-	unionSet := make(keySet)
+	unionSet := make(docIDSet, 0)
 	for _, branch := range sel.Or {
 		branchSet, err := e.evaluate(ctx, branch)
 		if err != nil {
 			return nil, err
 		}
-		unionSet = union(unionSet, branchSet)
+		unionSet = unionDocIDs(unionSet, branchSet)
 	}
 	if !initialized {
 		return unionSet, nil
 	}
-	return intersect(baseSet, unionSet), nil
+	return intersectDocIDs(baseSet, unionSet), nil
 }
 
-func (e selectorEvaluator) evaluateBase(ctx context.Context, sel api.Selector) (keySet, bool, error) {
+func (e selectorEvaluator) evaluateBase(ctx context.Context, sel api.Selector) (docIDSet, bool, error) {
 	var (
-		result      keySet
+		result      docIDSet
 		initialized bool
 	)
-	intersectWith := func(set keySet) {
+	intersectWith := func(set docIDSet) {
 		if !initialized {
-			result = set.clone()
+			result = cloneDocIDs(set)
 			initialized = true
 			return
 		}
-		result = intersect(result, set)
+		result = intersectDocIDs(result, set)
 	}
 	for _, resolver := range selectorClauseResolvers {
 		set, present, err := resolver.resolve(ctx, e, sel)
@@ -1271,14 +1215,14 @@ func (e selectorEvaluator) evaluateBase(ctx context.Context, sel api.Selector) (
 		}
 		if len(notSet) > 0 {
 			if !initialized {
-				all, err := e.reader.allKeys(ctx)
+				all, err := e.reader.allDocIDs(ctx)
 				if err != nil {
 					return nil, false, err
 				}
-				result = subtract(all, notSet)
+				result = subtractDocIDs(all, notSet)
 				initialized = true
 			} else {
-				result = subtract(result, notSet)
+				result = subtractDocIDs(result, notSet)
 			}
 		}
 	}
@@ -1304,103 +1248,144 @@ func (a *Adapter) visibleFromLedger(ctx context.Context, namespace, key string, 
 	return visible, ok, nil
 }
 
-type keySet map[string]struct{}
+type docIDSet []uint32
 
-func (s keySet) clone() keySet {
-	if len(s) == 0 {
-		return make(keySet)
+func cloneDocIDs(in docIDSet) docIDSet {
+	if len(in) == 0 {
+		return nil
 	}
-	out := make(keySet, len(s))
-	for key := range s {
-		out[key] = struct{}{}
+	out := make(docIDSet, len(in))
+	copy(out, in)
+	return out
+}
+
+func sortUniqueDocIDs(in docIDSet) docIDSet {
+	if len(in) == 0 {
+		return nil
+	}
+	sort.Slice(in, func(i, j int) bool { return in[i] < in[j] })
+	w := 1
+	for i := 1; i < len(in); i++ {
+		if in[i] == in[w-1] {
+			continue
+		}
+		in[w] = in[i]
+		w++
+	}
+	return in[:w]
+}
+
+func unionDocIDs(a, b docIDSet) docIDSet {
+	if len(a) == 0 {
+		return cloneDocIDs(b)
+	}
+	if len(b) == 0 {
+		return cloneDocIDs(a)
+	}
+	out := make(docIDSet, 0, len(a)+len(b))
+	i, j := 0, 0
+	for i < len(a) && j < len(b) {
+		av := a[i]
+		bv := b[j]
+		if av == bv {
+			out = append(out, av)
+			i++
+			j++
+			continue
+		}
+		if av < bv {
+			out = append(out, av)
+			i++
+			continue
+		}
+		out = append(out, bv)
+		j++
+	}
+	if i < len(a) {
+		out = append(out, a[i:]...)
+	}
+	if j < len(b) {
+		out = append(out, b[j:]...)
 	}
 	return out
 }
 
-func (s keySet) sorted() []string {
-	if len(s) == 0 {
+func intersectDocIDs(a, b docIDSet) docIDSet {
+	if len(a) == 0 || len(b) == 0 {
 		return nil
 	}
-	keys := make([]string, 0, len(s))
-	for key := range s {
+	out := make(docIDSet, 0, min(len(a), len(b)))
+	i, j := 0, 0
+	for i < len(a) && j < len(b) {
+		av := a[i]
+		bv := b[j]
+		if av == bv {
+			out = append(out, av)
+			i++
+			j++
+			continue
+		}
+		if av < bv {
+			i++
+			continue
+		}
+		j++
+	}
+	return out
+}
+
+func subtractDocIDs(a, b docIDSet) docIDSet {
+	if len(a) == 0 {
+		return nil
+	}
+	if len(b) == 0 {
+		return cloneDocIDs(a)
+	}
+	out := make(docIDSet, 0, len(a))
+	i, j := 0, 0
+	for i < len(a) {
+		if j >= len(b) {
+			out = append(out, a[i:]...)
+			break
+		}
+		av := a[i]
+		bv := b[j]
+		if av == bv {
+			i++
+			j++
+			continue
+		}
+		if av < bv {
+			out = append(out, av)
+			i++
+			continue
+		}
+		j++
+	}
+	return out
+}
+
+func (r *segmentReader) sortedKeysForDocIDs(ids docIDSet) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(ids))
+	var prev uint32
+	first := true
+	for _, id := range ids {
+		if !first && id == prev {
+			continue
+		}
+		first = false
+		prev = id
+		key := r.keyByDocID(id)
+		if key == "" {
+			continue
+		}
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
 	return keys
-}
-
-func mergeKeySet(dst keySet, src keySet) {
-	if len(dst) == 0 && len(src) == 0 {
-		return
-	}
-	for key := range src {
-		dst[key] = struct{}{}
-	}
-}
-
-func mergeDocIDSet(dst map[uint32]struct{}, src map[uint32]struct{}) {
-	if len(dst) == 0 && len(src) == 0 {
-		return
-	}
-	for id := range src {
-		dst[id] = struct{}{}
-	}
-}
-
-func union(a, b keySet) keySet {
-	if len(a) == 0 && len(b) == 0 {
-		return make(keySet)
-	}
-	if len(a) == 0 {
-		return b.clone()
-	}
-	if len(b) == 0 {
-		return a.clone()
-	}
-	out := make(keySet, len(a)+len(b))
-	for key := range a {
-		out[key] = struct{}{}
-	}
-	for key := range b {
-		out[key] = struct{}{}
-	}
-	return out
-}
-
-func intersect(a, b keySet) keySet {
-	if len(a) == 0 || len(b) == 0 {
-		return make(keySet)
-	}
-	var smaller, larger keySet
-	if len(a) <= len(b) {
-		smaller, larger = a, b
-	} else {
-		smaller, larger = b, a
-	}
-	out := make(keySet)
-	for key := range smaller {
-		if _, ok := larger[key]; ok {
-			out[key] = struct{}{}
-		}
-	}
-	return out
-}
-
-func subtract(a, b keySet) keySet {
-	if len(a) == 0 {
-		return make(keySet)
-	}
-	if len(b) == 0 {
-		return a.clone()
-	}
-	out := make(keySet, len(a))
-	for key := range a {
-		if _, hidden := b[key]; hidden {
-			continue
-		}
-		out[key] = struct{}{}
-	}
-	return out
 }
 
 func selectorSupportsLegacyIndexFilter(sel api.Selector) bool {

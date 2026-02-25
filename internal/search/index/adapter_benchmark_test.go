@@ -15,7 +15,7 @@ import (
 
 var (
 	benchResolvedFields []string
-	benchKeySetSize     int
+	benchDocIDSetSize   int
 	benchResultSize     int
 )
 
@@ -74,11 +74,11 @@ func BenchmarkSegmentReaderWildcardContains(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		set, err := reader.keysForContains(ctx, term, true)
+		set, err := reader.docIDsForContains(ctx, term, true)
 		if err != nil {
-			b.Fatalf("keysForContains: %v", err)
+			b.Fatalf("docIDsForContains: %v", err)
 		}
-		benchKeySetSize = len(set)
+		benchDocIDSetSize = len(set)
 	}
 }
 

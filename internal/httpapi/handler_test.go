@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -28,6 +29,7 @@ import (
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/memory"
 	"pkt.systems/lockd/namespaces"
+	"pkt.systems/lql"
 )
 
 func scanNamespaceConfig() namespaces.Config {
@@ -1403,6 +1405,93 @@ func TestMutateIncludesStreamSummaryHeaders(t *testing.T) {
 	}
 	if got := parseIntHeader(t, resp.Header, headerMutateSpillBytes); got != 0 {
 		t.Fatalf("expected %s=0, got %d", headerMutateSpillBytes, got)
+	}
+}
+
+func TestMutateRejectsNonObjectState(t *testing.T) {
+	server := newTestHTTPServer(t)
+
+	req := api.AcquireRequest{Key: "stream-mutate-array", Owner: "worker-a", TTLSeconds: 5}
+	var acquire api.AcquireResponse
+	if status := doJSON(t, server, http.MethodPost, "/v1/acquire", nil, req, &acquire); status != http.StatusOK {
+		t.Fatalf("acquire: expected 200, got %d", status)
+	}
+
+	headers := map[string]string{
+		"X-Lease-ID":      acquire.LeaseID,
+		"X-Txn-ID":        acquire.TxnID,
+		"X-Fencing-Token": strconv.FormatInt(acquire.FencingToken, 10),
+	}
+	if status := doJSON(t, server, http.MethodPost, "/v1/update?key=stream-mutate-array", headers, []any{
+		map[string]any{"status": "initial"},
+	}, nil); status != http.StatusOK {
+		t.Fatalf("update array state: expected 200, got %d", status)
+	}
+
+	var errResp api.ErrorResponse
+	status := doJSON(t, server, http.MethodPost, "/v1/mutate?key=stream-mutate-array", headers, api.MutateRequest{
+		Mutations: []string{`/status="ready"`},
+	}, &errResp)
+	if status != http.StatusBadRequest {
+		t.Fatalf("expected mutate 400 for non-object root, got %d", status)
+	}
+	if errResp.ErrorCode != "invalid_body" {
+		t.Fatalf("expected invalid_body, got %s", errResp.ErrorCode)
+	}
+}
+
+func TestConvertMutateStreamErrorMapping(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantCode   string
+	}{
+		{
+			name:       "invalid selector",
+			err:        &lql.StreamError{Code: lql.StreamErrorInvalidSelector, Detail: "bad expression"},
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "invalid_mutations",
+		},
+		{
+			name:       "document too large",
+			err:        &lql.StreamError{Code: lql.StreamErrorDocumentTooLarge, Detail: "limit exceeded"},
+			wantStatus: http.StatusRequestEntityTooLarge,
+			wantCode:   "document_too_large",
+		},
+		{
+			name:       "context canceled",
+			err:        &lql.StreamError{Code: lql.StreamErrorContextCanceled, Detail: "canceled"},
+			wantStatus: http.StatusRequestTimeout,
+			wantCode:   "context_canceled",
+		},
+		{
+			name:       "internal",
+			err:        &lql.StreamError{Code: lql.StreamErrorInternal, Detail: "panic"},
+			wantStatus: http.StatusInternalServerError,
+			wantCode:   "internal",
+		},
+		{
+			name:       "generic",
+			err:        errors.New("bad stream"),
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "invalid_body",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := convertMutateStreamError(tc.err)
+			httpErr, ok := err.(httpError)
+			if !ok {
+				t.Fatalf("expected httpError, got %T", err)
+			}
+			if httpErr.Status != tc.wantStatus {
+				t.Fatalf("status mismatch: got=%d want=%d", httpErr.Status, tc.wantStatus)
+			}
+			if httpErr.Code != tc.wantCode {
+				t.Fatalf("code mismatch: got=%q want=%q", httpErr.Code, tc.wantCode)
+			}
+		})
 	}
 }
 

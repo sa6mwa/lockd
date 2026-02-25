@@ -84,6 +84,7 @@ func newClientCommand(cfg *clientCLIConfig) *cobra.Command {
 		newClientAttachmentsCommand(cfg),
 		newClientUpdateCommand(cfg),
 		newClientRemoveCommand(cfg),
+		newClientMutateCommand(cfg),
 		newClientSetCommand(cfg),
 		newClientEditCommand(cfg),
 		newClientQueryCommand(cfg),
@@ -2160,6 +2161,113 @@ func newClientSetCommand(cfg *clientCLIConfig) *cobra.Command {
 	cmd.Flags().StringVar(&txnID, "txn-id", "", "transaction id (xid, 20-char base32; default from "+envTxnID+")")
 	cmd.Flags().StringVar(&output, "output", string(outputJSON), "output format (text|json)")
 	cmd.Flags().StringVarP(&namespace, "namespace", "n", "", "namespace for the key (defaults to server configuration)")
+	return cmd
+}
+
+func newClientMutateCommand(cfg *clientCLIConfig) *cobra.Command {
+	var leaseID string
+	var ifVersion string
+	var ifETag string
+	var fencing string
+	var output string
+	var keyFlag string
+	var namespace string
+	var txnID string
+	cmd := &cobra.Command{
+		Use:   "mutate mutation [mutation...]",
+		Short: "Apply server-side LQL mutations for an active lease",
+		Example: `  # Increment a counter and stamp the current time
+  lockd client mutate --key orders /progress/counter++ time:/progress/updated=NOW
+
+  # Mutate multiple fields with brace shorthand + quoted keys
+  lockd client mutate --key ledger '/data{/hello key="mars traveler",/count++}' /meta/previous=world`,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Args:          cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			key, err := resolveKeyInput(keyFlag, keyRequireExisting)
+			if err != nil {
+				return err
+			}
+			if _, err := parseMutations(args, time.Now()); err != nil {
+				return err
+			}
+			mutationExprs := make([]string, 0, len(args))
+			for _, raw := range args {
+				expr := strings.TrimSpace(raw)
+				if expr != "" {
+					mutationExprs = append(mutationExprs, expr)
+				}
+			}
+			if len(mutationExprs) == 0 {
+				return fmt.Errorf("at least one mutation expression is required")
+			}
+			lease, err := resolveLease(leaseID)
+			if err != nil {
+				return err
+			}
+			if err := cfg.load(); err != nil {
+				return err
+			}
+			defer cfg.cleanup()
+			cli, err := cfg.client()
+			if err != nil {
+				return err
+			}
+			token, err := resolveFencing(fencing)
+			if err != nil {
+				return err
+			}
+			txn, err := resolveTxn(txnID)
+			if err != nil {
+				return err
+			}
+			cli.RegisterLeaseToken(lease, token)
+			ns := resolveNamespaceInput(namespace)
+			ifVersionValue, err := parseOptionalVersion(ifVersion)
+			if err != nil {
+				return err
+			}
+			ctx, _ := commandContextWithCorrelation(cmd)
+			result, err := cli.Mutate(ctx, lockdclient.MutateRequest{
+				Key:       key,
+				LeaseID:   lease,
+				Mutations: mutationExprs,
+				Options: lockdclient.UpdateOptions{
+					Namespace:    ns,
+					IfVersion:    ifVersionValue,
+					IfETag:       ifETag,
+					FencingToken: lockdclient.Int64(token),
+					TxnID:        txn,
+				},
+			})
+			if err != nil {
+				return err
+			}
+			summary := map[string]any{
+				"version": result.NewVersion,
+				"bytes":   result.BytesWritten,
+			}
+			if result.NewStateETag != "" {
+				summary["etag"] = result.NewStateETag
+			}
+			switch outputMode(strings.ToLower(output)) {
+			case outputJSON:
+				return writeJSON(cmd.OutOrStdout(), summary)
+			default:
+				fmt.Fprintf(cmd.OutOrStdout(), "version: %d\nbytes: %d\netag: %s\n", result.NewVersion, result.BytesWritten, result.NewStateETag)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&keyFlag, "key", "k", "", "key to update (falls back to "+envKey+")")
+	cmd.Flags().StringVar(&leaseID, "lease", "", "active lease identifier (xid, 20-char base32)")
+	cmd.Flags().StringVar(&ifVersion, "if-version", "", "conditional version guard")
+	cmd.Flags().StringVar(&ifETag, "if-etag", "", "conditional ETag guard")
+	cmd.Flags().StringVar(&txnID, "txn-id", "", "transaction id (xid, 20-char base32; default from "+envTxnID+")")
+	cmd.Flags().StringVar(&output, "output", string(outputJSON), "output format (text|json)")
+	cmd.Flags().StringVarP(&namespace, "namespace", "n", "", "namespace for the key (defaults to server configuration)")
+	cmd.Flags().StringVar(&fencing, "fencing-token", "", "fencing token (default from "+envFencingToken+")")
 	return cmd
 }
 

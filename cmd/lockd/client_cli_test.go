@@ -128,6 +128,17 @@ func TestCLIClientStateLifecycle(t *testing.T) {
 		"client",
 		"--server", serverURL,
 		"--disable-mtls",
+		"mutate",
+		"--key", key,
+		"--namespace", namespaces.Default,
+		"/status/counter++",
+		`/status/phase="published"`,
+	)
+
+	runCLICommand(t,
+		"client",
+		"--server", serverURL,
+		"--disable-mtls",
 		"release",
 		"--key", key,
 		"--namespace", namespaces.Default,
@@ -151,11 +162,11 @@ func TestCLIClientStateLifecycle(t *testing.T) {
 		t.Fatalf("load final state: %v", err)
 	}
 	srvStatus := serverState["status"].(map[string]any)
-	if srvStatus["phase"] != "staged" {
-		t.Fatalf("expected phase staged, got %#v", srvStatus["phase"])
+	if srvStatus["phase"] != "published" {
+		t.Fatalf("expected phase published, got %#v", srvStatus["phase"])
 	}
-	if count := srvStatus["counter"].(float64); count != 3 {
-		t.Fatalf("expected counter 3, got %v", count)
+	if count := srvStatus["counter"].(float64); count != 4 {
+		t.Fatalf("expected counter 4, got %v", count)
 	}
 	if _, ok := srvStatus["updated"]; !ok {
 		t.Fatalf("expected updated timestamp in %+v", srvStatus)

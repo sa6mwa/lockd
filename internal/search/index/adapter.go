@@ -1927,29 +1927,6 @@ func subtractDocIDsInto(dst, a, b docIDSet) docIDSet {
 	return dst
 }
 
-func appendIntersectDocIDs(dst docIDSet, a, b docIDSet) docIDSet {
-	if len(a) == 0 || len(b) == 0 {
-		return dst
-	}
-	i, j := 0, 0
-	for i < len(a) && j < len(b) {
-		av := a[i]
-		bv := b[j]
-		if av == bv {
-			dst = append(dst, av)
-			i++
-			j++
-			continue
-		}
-		if av < bv {
-			i++
-			continue
-		}
-		j++
-	}
-	return dst
-}
-
 func (r *segmentReader) sortedKeysForDocIDs(ids docIDSet) []string {
 	if len(ids) == 0 {
 		return nil

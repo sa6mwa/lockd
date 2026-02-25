@@ -178,7 +178,7 @@ func (w *Writer) persistSegment(ctx context.Context, segment *Segment) (int64, e
 		manifest := manifestRes.Manifest
 		etag := manifestRes.ETag
 		if manifest != nil && manifest.Format == 0 {
-			manifest.Format = IndexFormatVersionV3
+			manifest.Format = IndexFormatVersionV4
 		}
 		if manifest == nil || len(manifest.Shards) == 0 {
 			manifest = NewManifest()

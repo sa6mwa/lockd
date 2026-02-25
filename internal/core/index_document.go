@@ -5,7 +5,6 @@ import (
 	"io"
 	"sort"
 	"strconv"
-	"strings"
 
 	"pkt.systems/lockd/internal/jsonpointer"
 	indexer "pkt.systems/lockd/internal/search/index"
@@ -62,7 +61,7 @@ func recursiveIndex(path string, value any, doc *indexer.Document) {
 			recursiveIndex(path, elem, doc)
 		}
 	case string:
-		doc.AddTerm(path, strings.ToLower(v))
+		doc.AddString(path, v)
 	case json.Number:
 		doc.AddTerm(path, v.String())
 	case bool:

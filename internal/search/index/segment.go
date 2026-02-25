@@ -29,7 +29,7 @@ func NewSegment(id string, created time.Time) *Segment {
 		CreatedAt: created,
 		Fields:    make(map[string]FieldBlock),
 		DocMeta:   make(map[string]DocumentMetadata),
-		Format:    IndexFormatVersionV3,
+		Format:    IndexFormatVersionV4,
 	}
 }
 

@@ -1,5 +1,7 @@
 package index
 
+import "strings"
+
 // Document captures normalized postings for a single key.
 type Document struct {
 	Key    string
@@ -28,4 +30,13 @@ func (d *Document) AddTerm(field, term string) {
 		d.Fields = make(map[string][]string)
 	}
 	d.Fields[field] = append(d.Fields[field], term)
+}
+
+// AddString indexes a string value for exact/prefix clauses and contains-like
+// selectors via trigram postings.
+func (d *Document) AddString(field, value string) {
+	d.AddTerm(field, strings.ToLower(value))
+	for _, gram := range normalizedTrigrams(value) {
+		d.AddTerm(containsGramField(field), gram)
+	}
 }

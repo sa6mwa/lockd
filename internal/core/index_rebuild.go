@@ -102,7 +102,7 @@ func (s *Service) maybeScheduleIndexRebuild(ctx context.Context, namespace strin
 	if s == nil || s.indexManager == nil {
 		return false, nil
 	}
-	if format >= indexer.IndexFormatVersionV3 {
+	if format >= indexer.IndexFormatVersionV4 {
 		return false, nil
 	}
 	opts := IndexRebuildOptions{
@@ -430,7 +430,7 @@ func (s *Service) cleanupLegacySegments(ctx context.Context, namespace string, d
 		if manifest == nil || len(manifest.Shards) == 0 {
 			return nil
 		}
-		manifest.Format = indexer.IndexFormatVersionV3
+		manifest.Format = indexer.IndexFormatVersionV4
 		changed := false
 		for _, shard := range manifest.Shards {
 			if shard == nil || len(shard.Segments) == 0 {
@@ -501,7 +501,7 @@ func (s *Service) collectLegacySegmentIDs(ctx context.Context, namespace string)
 				}
 				return nil, err
 			}
-			if segment != nil && segment.Format < indexer.IndexFormatVersionV3 {
+			if segment != nil && segment.Format < indexer.IndexFormatVersionV4 {
 				legacy[ref.ID] = struct{}{}
 			}
 		}

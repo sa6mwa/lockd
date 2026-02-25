@@ -95,7 +95,10 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 	if selector.IsEmpty() || !useLegacyFilter {
 		matches, err = reader.allKeys(ctx)
 	} else {
-		eval := selectorEvaluator{reader: reader}
+		eval := selectorEvaluator{
+			reader:        reader,
+			containsNgram: manifest.Format >= IndexFormatVersionV4,
+		}
 		matches, err = eval.evaluate(ctx, req.Selector)
 	}
 	if !selector.IsEmpty() {
@@ -286,7 +289,10 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 	if selector.IsEmpty() || !useLegacyFilter {
 		matches, err = reader.allKeys(ctx)
 	} else {
-		eval := selectorEvaluator{reader: reader}
+		eval := selectorEvaluator{
+			reader:        reader,
+			containsNgram: manifest.Format >= IndexFormatVersionV4,
+		}
 		matches, err = eval.evaluate(ctx, req.Selector)
 	}
 	if !selector.IsEmpty() {
@@ -555,14 +561,21 @@ func (r *segmentReader) keysForEq(ctx context.Context, term *api.Term) (keySet, 
 	if field == "" {
 		return make(keySet), nil
 	}
-	value := normalizeTermValue(term.Value)
+	return r.keysForTerm(ctx, field, normalizeTermValue(term.Value))
+}
+
+func (r *segmentReader) keysForTerm(ctx context.Context, field, term string) (keySet, error) {
+	field = strings.TrimSpace(field)
+	if field == "" {
+		return make(keySet), nil
+	}
 	result := make(keySet)
 	err := r.forEachSegment(ctx, func(seg *Segment) error {
 		block, ok := seg.Fields[field]
 		if !ok {
 			return nil
 		}
-		keys := block.Postings[value]
+		keys := block.Postings[term]
 		for _, key := range keys {
 			result[key] = struct{}{}
 		}
@@ -589,7 +602,7 @@ func (r *segmentReader) keysForPrefix(ctx context.Context, term *api.Term) (keyS
 	return result, err
 }
 
-func (r *segmentReader) keysForContains(ctx context.Context, term *api.Term) (keySet, error) {
+func (r *segmentReader) keysForContains(ctx context.Context, term *api.Term, useTrigramIndex bool) (keySet, error) {
 	field := normalizeField(term)
 	if field == "" {
 		return make(keySet), nil
@@ -597,6 +610,26 @@ func (r *segmentReader) keysForContains(ctx context.Context, term *api.Term) (ke
 	needle := normalizeTermValue(term.Value)
 	if needle == "" {
 		return r.keysForExists(ctx, field)
+	}
+	if useTrigramIndex {
+		grams := normalizedTrigrams(needle)
+		if len(grams) > 0 {
+			var out keySet
+			for i, gram := range grams {
+				gramSet, err := r.keysForTerm(ctx, containsGramField(field), gram)
+				if err != nil {
+					return nil, err
+				}
+				if i == 0 {
+					out = gramSet
+					continue
+				}
+				out = intersect(out, gramSet)
+			}
+			if out != nil && len(out) > 0 {
+				return out, nil
+			}
+		}
 	}
 	result := make(keySet)
 	err := r.forEachPosting(ctx, field, func(termValue string, keys []string) error {
@@ -744,8 +777,109 @@ func (r *segmentReader) docMetaMap(ctx context.Context) (map[string]DocumentMeta
 }
 
 type selectorEvaluator struct {
-	reader *segmentReader
+	reader        *segmentReader
+	containsNgram bool
 }
+
+type selectorClauseResolver struct {
+	family  string
+	resolve func(ctx context.Context, e selectorEvaluator, sel api.Selector) (keySet, bool, error)
+}
+
+var selectorClauseResolvers = []selectorClauseResolver{
+	{
+		family: "eq",
+		resolve: func(ctx context.Context, e selectorEvaluator, sel api.Selector) (keySet, bool, error) {
+			if sel.Eq == nil {
+				return nil, false, nil
+			}
+			set, err := e.reader.keysForEq(ctx, sel.Eq)
+			return set, true, err
+		},
+	},
+	{
+		family: "prefix",
+		resolve: func(ctx context.Context, e selectorEvaluator, sel api.Selector) (keySet, bool, error) {
+			if sel.Prefix == nil {
+				return nil, false, nil
+			}
+			set, err := e.reader.keysForPrefix(ctx, sel.Prefix)
+			return set, true, err
+		},
+	},
+	{
+		family: "prefix",
+		resolve: func(ctx context.Context, e selectorEvaluator, sel api.Selector) (keySet, bool, error) {
+			if sel.IPrefix == nil {
+				return nil, false, nil
+			}
+			set, err := e.reader.keysForPrefix(ctx, sel.IPrefix)
+			return set, true, err
+		},
+	},
+	{
+		family: "contains",
+		resolve: func(ctx context.Context, e selectorEvaluator, sel api.Selector) (keySet, bool, error) {
+			if sel.Contains == nil {
+				return nil, false, nil
+			}
+			set, err := e.reader.keysForContains(ctx, sel.Contains, e.containsNgram)
+			return set, true, err
+		},
+	},
+	{
+		family: "contains",
+		resolve: func(ctx context.Context, e selectorEvaluator, sel api.Selector) (keySet, bool, error) {
+			if sel.IContains == nil {
+				return nil, false, nil
+			}
+			set, err := e.reader.keysForContains(ctx, sel.IContains, e.containsNgram)
+			return set, true, err
+		},
+	},
+	{
+		family: "range",
+		resolve: func(ctx context.Context, e selectorEvaluator, sel api.Selector) (keySet, bool, error) {
+			if sel.Range == nil {
+				return nil, false, nil
+			}
+			set, err := e.reader.keysForRange(ctx, sel.Range)
+			return set, true, err
+		},
+	},
+	{
+		family: "in",
+		resolve: func(ctx context.Context, e selectorEvaluator, sel api.Selector) (keySet, bool, error) {
+			if sel.In == nil {
+				return nil, false, nil
+			}
+			set, err := e.reader.keysForIn(ctx, sel.In)
+			return set, true, err
+		},
+	},
+	{
+		family: "exists",
+		resolve: func(ctx context.Context, e selectorEvaluator, sel api.Selector) (keySet, bool, error) {
+			if sel.Exists == "" {
+				return nil, false, nil
+			}
+			set, err := e.reader.keysForExists(ctx, sel.Exists)
+			return set, true, err
+		},
+	},
+}
+
+var selectorSupportedFamilies = func() map[string]struct{} {
+	out := map[string]struct{}{
+		"and": {},
+		"or":  {},
+		"not": {},
+	}
+	for _, resolver := range selectorClauseResolvers {
+		out[resolver.family] = struct{}{}
+	}
+	return out
+}()
 
 var errDocMetaComplete = errors.New("doc meta complete")
 
@@ -882,59 +1016,13 @@ func (e selectorEvaluator) evaluateBase(ctx context.Context, sel api.Selector) (
 		}
 		result = intersect(result, set)
 	}
-	if sel.Eq != nil {
-		set, err := e.reader.keysForEq(ctx, sel.Eq)
+	for _, resolver := range selectorClauseResolvers {
+		set, present, err := resolver.resolve(ctx, e, sel)
 		if err != nil {
 			return nil, false, err
 		}
-		intersectWith(set)
-	}
-	if sel.Prefix != nil {
-		set, err := e.reader.keysForPrefix(ctx, sel.Prefix)
-		if err != nil {
-			return nil, false, err
-		}
-		intersectWith(set)
-	}
-	if sel.IPrefix != nil {
-		set, err := e.reader.keysForPrefix(ctx, sel.IPrefix)
-		if err != nil {
-			return nil, false, err
-		}
-		intersectWith(set)
-	}
-	if sel.Contains != nil {
-		set, err := e.reader.keysForContains(ctx, sel.Contains)
-		if err != nil {
-			return nil, false, err
-		}
-		intersectWith(set)
-	}
-	if sel.IContains != nil {
-		set, err := e.reader.keysForContains(ctx, sel.IContains)
-		if err != nil {
-			return nil, false, err
-		}
-		intersectWith(set)
-	}
-	if sel.Range != nil {
-		set, err := e.reader.keysForRange(ctx, sel.Range)
-		if err != nil {
-			return nil, false, err
-		}
-		intersectWith(set)
-	}
-	if sel.In != nil {
-		set, err := e.reader.keysForIn(ctx, sel.In)
-		if err != nil {
-			return nil, false, err
-		}
-		intersectWith(set)
-	}
-	if sel.Exists != "" {
-		set, err := e.reader.keysForExists(ctx, sel.Exists)
-		if err != nil {
-			return nil, false, err
+		if !present {
+			continue
 		}
 		intersectWith(set)
 	}
@@ -1078,19 +1166,8 @@ func selectorSupportsLegacyIndexFilter(sel api.Selector) bool {
 	if len(families) == 0 {
 		return false
 	}
-	supported := map[string]struct{}{
-		"and":      {},
-		"or":       {},
-		"not":      {},
-		"eq":       {},
-		"prefix":   {},
-		"contains": {},
-		"range":    {},
-		"in":       {},
-		"exists":   {},
-	}
 	for _, family := range families {
-		if _, ok := supported[family]; !ok {
+		if _, ok := selectorSupportedFamilies[family]; !ok {
 			return false
 		}
 	}

@@ -17,4 +17,6 @@ const (
 	IndexFormatVersionV2 = 2
 	// IndexFormatVersionV3 includes query-excluded hints in document metadata.
 	IndexFormatVersionV3 = 3
+	// IndexFormatVersionV4 adds trigram text postings for contains selectors.
+	IndexFormatVersionV4 = 4
 )

@@ -164,7 +164,7 @@ func (s *Store) SaveManifest(ctx context.Context, namespace string, manifest *Ma
 		return "", fmt.Errorf("index store unavailable")
 	}
 	if manifest != nil && manifest.Format == 0 {
-		manifest.Format = IndexFormatVersionV3
+		manifest.Format = IndexFormatVersionV4
 	}
 	if err := manifest.Validate(); err != nil {
 		return "", err

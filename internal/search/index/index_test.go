@@ -352,6 +352,62 @@ func TestIndexAdapterQueryContainsSelectors(t *testing.T) {
 	}
 }
 
+func TestIndexAdapterQueryContainsUsesTrigramPostings(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	store := NewStore(mem, nil)
+	segment := NewSegment("seg-contains-grams", time.Unix(1_700_000_031, 0))
+	gramField := containsGramField("/message")
+	segment.Fields[gramField] = FieldBlock{Postings: map[string][]string{
+		"tim": {"log-1"},
+		"ime": {"log-1"},
+	}}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+	manifest := NewManifest()
+	manifest.Seq = 3
+	manifest.UpdatedAt = segment.CreatedAt
+	manifest.Format = IndexFormatVersionV4
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{{
+			ID:        segment.ID,
+			CreatedAt: segment.CreatedAt,
+			DocCount:  segment.DocCount(),
+		}},
+	}
+	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+	meta := &storage.Meta{
+		Version:          1,
+		PublishedVersion: 1,
+		StateETag:        "etag-log-1",
+	}
+	if _, err := mem.StoreMeta(ctx, namespaces.Default, "log-1", meta, ""); err != nil {
+		t.Fatalf("store meta: %v", err)
+	}
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	resp, err := adapter.Query(ctx, search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			Contains: &api.Term{Field: "/message", Value: "time"},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	})
+	if err != nil {
+		t.Fatalf("query contains: %v", err)
+	}
+	if !slices.Equal(resp.Keys, []string{"log-1"}) {
+		t.Fatalf("unexpected contains keys %v", resp.Keys)
+	}
+}
+
 func TestIndexAdapterQueryDocumentsStreamsMatches(t *testing.T) {
 	ctx := context.Background()
 	mem := memory.New()

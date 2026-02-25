@@ -18,6 +18,7 @@ This subsystem covers runtime safeguards (QRF/LSF, idle sweepers), verification 
 - Performance workflows:
   - benchmark and profiling guidance is captured in `ycsb/README.md`, `ycsb/BENCHMARKS.md`, and `docs/performance/*`.
   - search/index perf slices use the frozen benchmark profile set and command line in `docs/performance/2026-02-25-search-index-phase7-baseline/summary.md`.
+  - maintenance-mode perf guard is `make perf-guard-search` (see `docs/performance/search-perf-maintenance-mode.md`).
   - artifacts track queue baselines, query return=document baselines, attachments, and YCSB-style load runs.
 
 ## 3) Implemented non-style improvements (bugs, security, reliability)

@@ -122,7 +122,7 @@ Scope: lockd-side migration and performance program to complete true inline stre
 - [x] P7.3 Capture baseline table for all hot benchmarks (current head).
 - [x] P7.4 Require per-slice before/after table in commit notes.
 - [x] P7.5 Define diminishing-returns stop condition (e.g. <5% gain across 2 consecutive slices).
-- [ ] P7.6 Once stop condition reached, switch to maintenance/perf-regression guard mode.
+- [x] P7.6 Once stop condition reached, switch to maintenance/perf-regression guard mode.
 
 ## Phase 8: Documentation + DX cleanup
 - [x] P8.1 Update `docs/subsystems/search-and-index.md` with current architecture.
@@ -166,4 +166,5 @@ Scope: lockd-side migration and performance program to complete true inline stre
 - [x] 2026-02-25: Phase 8 docs + DX cleanup landed (pending commit): rewrote `docs/subsystems/search-and-index.md` for current query/mutate streaming architecture, added selector support matrix and wildcard/recursive complexity notes, linked benchmark acceptance gates, and updated README/MCP docs for `mutate` plus current LQL operator coverage.
 - [x] 2026-02-25: Phase 3.E adaptive postings landed (pending commit): compiled segment postings now use adaptive in-memory encoding (`delta+varint` for sparse, bitset for dense) with decode-on-iteration; added strategy round-trip tests plus selectivity-band decode/union benchmarks (`BenchmarkAdaptivePostingDecodeSelectivity`, `BenchmarkAdaptivePostingUnionSelectivity`).
 - [x] 2026-02-25: Phase 5 full-text index-side slice landed (pending commit): added text index policy (`raw|tokenized|both`), analyzer tokenization + optional simple stemming, optional `_all_text` synthetic token field, tokenized `icontains` prefilter routing with raw-contains verification for exact semantics, tokenized-only fallback behavior, and benchmark corpus/profile coverage (`BenchmarkAdapterQueryFullTextContainsProfiles`, `BenchmarkAdapterQueryFullTextAllTextProfiles`). Latest bench: contains profiles small `3,012,948 ns/op`/`760,686 B/op`/`1,146 allocs`, medium `13,207,843 ns/op`/`3,044,978 B/op`/`3,062 allocs`, large `36,465,815 ns/op`/`9,294,928 B/op`/`7,854 allocs`; all-text profiles small `3,453,156 ns/op`, medium `11,321,629 ns/op`, large `35,020,145 ns/op`.
+- [x] 2026-02-25: Phase 7 maintenance-mode guard landed (pending commit): added `scripts/check_search_perf_regression.sh` and `make perf-guard-search` to enforce frozen search/index benchmark regression thresholds (`ns/op`, `allocs/op`) against `docs/performance/2026-02-25-search-index-phase7-baseline/summary.md`; documented guard workflow in `docs/performance/search-perf-maintenance-mode.md`.
 - [ ] YYYY-MM-DD: Next slice commit + benchmark delta summary.

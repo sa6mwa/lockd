@@ -642,6 +642,8 @@ type segmentReader struct {
 	logger                pslog.Logger
 	cache                 map[string]*Segment
 	compiled              map[string]*compiledSegment
+	singleCompiled        *compiledSegment
+	singleCompiledReady   bool
 	keyIDs                map[string]uint32
 	keys                  []string
 	fieldIDs              map[string]uint32
@@ -760,6 +762,16 @@ func (r *segmentReader) fillDocIDsForTermID(ctx context.Context, fieldID uint32,
 	}
 	*out = (*out)[:0]
 	if strings.TrimSpace(term) == "" {
+		return nil
+	}
+	if single, ok, err := r.singleCompiledSegment(ctx); err != nil {
+		return err
+	} else if ok {
+		block, present := single.fieldsByID[fieldID]
+		if !present {
+			return nil
+		}
+		*out = block.docIDsForTermInto(term, (*out)[:0])
 		return nil
 	}
 	decoded := borrowDocIDScratch()
@@ -1001,6 +1013,28 @@ func (r *segmentReader) docIDsForContainsField(
 	defer releaseDocIDScratch(out)
 	decoded := borrowDocIDScratch()
 	defer releaseDocIDScratch(decoded)
+	if single, ok, err := r.singleCompiledSegment(ctx); err != nil {
+		return nil, err
+	} else if ok {
+		block, present := single.fieldsByID[fieldID]
+		if !present {
+			return nil, nil
+		}
+		for termID, termValue := range block.terms {
+			if !strings.Contains(termValue, needle) {
+				continue
+			}
+			posting := block.postingsByID[termID]
+			if len(candidateFilter) > 0 {
+				*out = posting.appendIntersectInto(*out, candidateFilter)
+				continue
+			}
+			docIDs := posting.decodeInto((*decoded)[:0])
+			*decoded = docIDs
+			*out = append(*out, docIDs...)
+		}
+		return sortUniqueDocIDs(append(docIDSet(nil), (*out)...)), nil
+	}
 	if err := r.forEachCompiledSegment(ctx, func(seg *compiledSegment) error {
 		block, ok := seg.fieldsByID[fieldID]
 		if !ok {
@@ -1151,7 +1185,61 @@ func (r *segmentReader) forEachCompiledSegment(ctx context.Context, fn func(*com
 	return nil
 }
 
+func (r *segmentReader) singleCompiledSegment(ctx context.Context) (*compiledSegment, bool, error) {
+	if r == nil {
+		return nil, false, nil
+	}
+	if r.singleCompiledReady {
+		return r.singleCompiled, r.singleCompiled != nil, nil
+	}
+	r.singleCompiledReady = true
+	if r.manifest == nil || len(r.manifest.Shards) == 0 {
+		return nil, false, nil
+	}
+	var segmentID string
+	count := 0
+	for _, shard := range r.manifest.Shards {
+		if shard == nil {
+			continue
+		}
+		for _, ref := range shard.Segments {
+			count++
+			if count > 1 {
+				return nil, false, nil
+			}
+			segmentID = ref.ID
+		}
+	}
+	if count != 1 || segmentID == "" {
+		return nil, false, nil
+	}
+	seg, err := r.loadCompiledSegment(ctx, segmentID)
+	if err != nil {
+		return nil, false, err
+	}
+	r.singleCompiled = seg
+	return seg, seg != nil, nil
+}
+
 func (r *segmentReader) forEachPostingDocIDsByFieldID(ctx context.Context, fieldID uint32, fn func(term string, docIDs []uint32) error) error {
+	if single, ok, err := r.singleCompiledSegment(ctx); err != nil {
+		return err
+	} else if ok {
+		block, present := single.fieldsByID[fieldID]
+		if !present {
+			return nil
+		}
+		decoded := borrowDocIDScratch()
+		defer releaseDocIDScratch(decoded)
+		for termID, termValue := range block.terms {
+			docIDs := block.postingsByID[termID].decodeInto((*decoded)[:0])
+			*decoded = docIDs
+			if err := fn(termValue, docIDs); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	decoded := borrowDocIDScratch()
 	defer releaseDocIDScratch(decoded)
 	return r.forEachCompiledSegment(ctx, func(seg *compiledSegment) error {
@@ -1295,6 +1383,8 @@ func (r *segmentReader) cloneForQuery(manifest *Manifest) *segmentReader {
 		logger:                r.logger,
 		cache:                 r.cache,
 		compiled:              r.compiled,
+		singleCompiled:        r.singleCompiled,
+		singleCompiledReady:   r.singleCompiledReady,
 		keyIDs:                r.keyIDs,
 		keys:                  r.keys,
 		fieldIDs:              r.fieldIDs,

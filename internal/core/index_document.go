@@ -12,6 +12,10 @@ import (
 )
 
 func buildDocumentFromJSON(key string, reader io.Reader) (indexer.Document, error) {
+	return buildDocumentFromJSONWithPolicy(key, reader, indexer.DefaultTextIndexPolicy())
+}
+
+func buildDocumentFromJSONWithPolicy(key string, reader io.Reader, policy indexer.TextIndexPolicy) (indexer.Document, error) {
 	doc := indexer.Document{Key: key}
 	dec := json.NewDecoder(reader)
 	dec.UseNumber()
@@ -19,7 +23,7 @@ func buildDocumentFromJSON(key string, reader io.Reader) (indexer.Document, erro
 	if err := dec.Decode(&raw); err != nil {
 		return doc, err
 	}
-	recursiveIndex("", raw, &doc)
+	recursiveIndex("", raw, &doc, policy)
 	return doc, nil
 }
 
@@ -43,7 +47,7 @@ func buildIndexDocumentMeta(meta *storage.Meta) *indexer.DocumentMetadata {
 	return out
 }
 
-func recursiveIndex(path string, value any, doc *indexer.Document) {
+func recursiveIndex(path string, value any, doc *indexer.Document, policy indexer.TextIndexPolicy) {
 	switch v := value.(type) {
 	case map[string]any:
 		keys := make([]string, 0, len(v))
@@ -54,14 +58,14 @@ func recursiveIndex(path string, value any, doc *indexer.Document) {
 		for _, k := range keys {
 			child := v[k]
 			childPath := joinPath(path, k)
-			recursiveIndex(childPath, child, doc)
+			recursiveIndex(childPath, child, doc, policy)
 		}
 	case []any:
 		for _, elem := range v {
-			recursiveIndex(path, elem, doc)
+			recursiveIndex(path, elem, doc, policy)
 		}
 	case string:
-		doc.AddString(path, v)
+		doc.AddStringWithPolicy(path, v, policy)
 	case json.Number:
 		doc.AddTerm(path, v.String())
 	case bool:

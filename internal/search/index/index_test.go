@@ -754,6 +754,152 @@ func TestIndexAdapterQueryContainsTrigramFilterAvoidsFalsePositives(t *testing.T
 	}
 }
 
+func TestIndexAdapterQueryIContainsTokenizedOnlyField(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	store := NewStore(mem, nil)
+	segment := NewSegment("seg-icontains-tokenized-only", time.Unix(1_700_000_034, 0))
+	segment.Fields[tokenizedField("/message")] = FieldBlock{Postings: map[string][]string{
+		"timeout": {"log-1"},
+		"while":   {"log-1"},
+		"syncing": {"log-1"},
+		"healthy": {"log-2"},
+	}}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+	manifest := NewManifest()
+	manifest.Seq = 5
+	manifest.UpdatedAt = segment.CreatedAt
+	manifest.Format = IndexFormatVersionV5
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{{
+			ID:        segment.ID,
+			CreatedAt: segment.CreatedAt,
+			DocCount:  segment.DocCount(),
+		}},
+	}
+	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+	for _, key := range []string{"log-1", "log-2"} {
+		meta := &storage.Meta{
+			Version:          1,
+			PublishedVersion: 1,
+			StateETag:        "etag-" + key,
+		}
+		if _, err := mem.StoreMeta(ctx, namespaces.Default, key, meta, ""); err != nil {
+			t.Fatalf("store meta %s: %v", key, err)
+		}
+	}
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+
+	resp, err := adapter.Query(ctx, search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			IContains: &api.Term{Field: "/message", Value: "TIMEOUT"},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	})
+	if err != nil {
+		t.Fatalf("query icontains: %v", err)
+	}
+	if !slices.Equal(resp.Keys, []string{"log-1"}) {
+		t.Fatalf("unexpected icontains keys %v", resp.Keys)
+	}
+
+	containsResp, err := adapter.Query(ctx, search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			Contains: &api.Term{Field: "/message", Value: "timeout"},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	})
+	if err != nil {
+		t.Fatalf("query contains: %v", err)
+	}
+	if len(containsResp.Keys) != 0 {
+		t.Fatalf("expected contains to require raw postings, got %v", containsResp.Keys)
+	}
+}
+
+func TestIndexAdapterQueryIContainsAllTextField(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	store := NewStore(mem, nil)
+	segment := NewSegment("seg-icontains-alltext", time.Unix(1_700_000_035, 0))
+	segment.Fields["/message"] = FieldBlock{Postings: map[string][]string{
+		"timeout while syncing": {"log-1"},
+		"healthy and green":     {"log-2"},
+	}}
+	segment.Fields[tokenizedField("/message")] = FieldBlock{Postings: map[string][]string{
+		"timeout": {"log-1"},
+		"while":   {"log-1"},
+		"syncing": {"log-1"},
+		"healthy": {"log-2"},
+		"green":   {"log-2"},
+	}}
+	segment.Fields[tokenAllTextField] = FieldBlock{Postings: map[string][]string{
+		"timeout": {"log-1"},
+		"while":   {"log-1"},
+		"syncing": {"log-1"},
+		"healthy": {"log-2"},
+		"green":   {"log-2"},
+	}}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+	manifest := NewManifest()
+	manifest.Seq = 6
+	manifest.UpdatedAt = segment.CreatedAt
+	manifest.Format = IndexFormatVersionV5
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{{
+			ID:        segment.ID,
+			CreatedAt: segment.CreatedAt,
+			DocCount:  segment.DocCount(),
+		}},
+	}
+	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+	for _, key := range []string{"log-1", "log-2"} {
+		meta := &storage.Meta{
+			Version:          1,
+			PublishedVersion: 1,
+			StateETag:        "etag-" + key,
+		}
+		if _, err := mem.StoreMeta(ctx, namespaces.Default, key, meta, ""); err != nil {
+			t.Fatalf("store meta %s: %v", key, err)
+		}
+	}
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	resp, err := adapter.Query(ctx, search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			IContains: &api.Term{Field: "/...", Value: "TIMEOUT"},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	})
+	if err != nil {
+		t.Fatalf("query icontains all_text: %v", err)
+	}
+	if !slices.Equal(resp.Keys, []string{"log-1"}) {
+		t.Fatalf("unexpected all_text icontains keys %v", resp.Keys)
+	}
+}
+
 func TestIndexAdapterQueryAndSelectorCombination(t *testing.T) {
 	ctx := context.Background()
 	mem := memory.New()

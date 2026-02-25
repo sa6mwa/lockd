@@ -71,6 +71,34 @@ If a selector family is not index-native, the index adapter falls back to:
 
 This preserves correctness while keeping index-native families fast.
 
+## Full-text Behavior (Phase 5)
+
+- scope is filtering-only; no ranking/scoring layer is added in lockd
+- string indexing supports per-field mode:
+  - `raw`: exact raw term + trigram postings only
+  - `tokenized`: analyzer token postings only
+  - `both`: raw/trigram + tokenized postings
+- analyzer behavior (default analyzer):
+  - lowercase normalization
+  - token split on non-alphanumeric boundaries
+  - optional simple suffix stemming toggle (`ing|ed|es|s`)
+- optional synthetic `_all_text` token field is supported via `__tok__:_all_text`
+
+`icontains` execution semantics:
+- tokenized postings are used as analyzer-aware prefilter when present
+- when raw postings exist, final match still validates exact substring semantics
+- when field is tokenized-only (no raw postings), `icontains` resolves by token-set match
+
+`contains` execution semantics:
+- remains raw substring semantics; tokenized postings are not used
+- this preserves exact-contains behavior when tokenized full-text mode differs
+
+Phrase/term-set behavior:
+- single token query uses direct token term lookup
+- multi-token query uses AND-intersection over tokens as candidate set
+- with raw postings present, candidates are validated against raw substring match
+- with tokenized-only mode, intersection result is the final match set
+
 ## Wildcard/Recursive Semantics and Complexity
 
 - wildcard and recursive selectors are resolved against indexed field dictionaries

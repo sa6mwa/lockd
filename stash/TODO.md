@@ -100,15 +100,15 @@ Scope: lockd-side migration and performance program to complete true inline stre
 - [x] P4.6 Add explicit fail-safe behavior tests when plan state cap is exceeded.
 
 ## Phase 5: Full-text Lucene-like Capability (index-side)
-- [ ] P5.1 Define full-text scope for lockd (filtering only vs optional scoring/ranking).
-- [ ] P5.2 Introduce analyzers (minimum): lowercase, token split, optional stemming toggle.
-- [ ] P5.3 Add per-field text indexing mode (`raw`, `tokenized`, `both`).
-- [ ] P5.4 Add optional namespace-level `_all_text` synthetic field for global text filters.
-- [ ] P5.5 Route `icontains{f=/...,v=...}` through analyzer-aware postings where configured.
-- [ ] P5.6 Keep exact contains semantics available where tokenized FTS would change behavior.
-- [ ] P5.7 Add phrase/term-set behavior specification (if enabled) with compatibility tests.
-- [ ] P5.8 Add full-text benchmark corpus generator (document length, vocabulary size, Zipf controls).
-- [ ] P5.9 Add benchmark suite for tokenized full-text selectors across selectivity buckets.
+- [x] P5.1 Define full-text scope for lockd (filtering only vs optional scoring/ranking).
+- [x] P5.2 Introduce analyzers (minimum): lowercase, token split, optional stemming toggle.
+- [x] P5.3 Add per-field text indexing mode (`raw`, `tokenized`, `both`).
+- [x] P5.4 Add optional namespace-level `_all_text` synthetic field for global text filters.
+- [x] P5.5 Route `icontains{f=/...,v=...}` through analyzer-aware postings where configured.
+- [x] P5.6 Keep exact contains semantics available where tokenized FTS would change behavior.
+- [x] P5.7 Add phrase/term-set behavior specification (if enabled) with compatibility tests.
+- [x] P5.8 Add full-text benchmark corpus generator (document length, vocabulary size, Zipf controls).
+- [x] P5.9 Add benchmark suite for tokenized full-text selectors across selectivity buckets.
 
 ## Phase 6: Integration Contract Verification (lockd test contract)
 - [x] P6.1 Run full integration sweep with `./run-integration-suites.sh all`.
@@ -165,4 +165,5 @@ Scope: lockd-side migration and performance program to complete true inline stre
 - [x] 2026-02-25: Phase 7 benchmark program baseline landed (pending commit): froze small/medium/large wildcard+recursive+fulltext profiles in `adapter_benchmark_test.go`, recorded reproducible command set and current-head hot benchmark table in `docs/performance/2026-02-25-search-index-phase7-baseline/summary.md`, and defined diminishing-returns/maintenance-mode policy.
 - [x] 2026-02-25: Phase 8 docs + DX cleanup landed (pending commit): rewrote `docs/subsystems/search-and-index.md` for current query/mutate streaming architecture, added selector support matrix and wildcard/recursive complexity notes, linked benchmark acceptance gates, and updated README/MCP docs for `mutate` plus current LQL operator coverage.
 - [x] 2026-02-25: Phase 3.E adaptive postings landed (pending commit): compiled segment postings now use adaptive in-memory encoding (`delta+varint` for sparse, bitset for dense) with decode-on-iteration; added strategy round-trip tests plus selectivity-band decode/union benchmarks (`BenchmarkAdaptivePostingDecodeSelectivity`, `BenchmarkAdaptivePostingUnionSelectivity`).
+- [x] 2026-02-25: Phase 5 full-text index-side slice landed (pending commit): added text index policy (`raw|tokenized|both`), analyzer tokenization + optional simple stemming, optional `_all_text` synthetic token field, tokenized `icontains` prefilter routing with raw-contains verification for exact semantics, tokenized-only fallback behavior, and benchmark corpus/profile coverage (`BenchmarkAdapterQueryFullTextContainsProfiles`, `BenchmarkAdapterQueryFullTextAllTextProfiles`). Latest bench: contains profiles small `3,012,948 ns/op`/`760,686 B/op`/`1,146 allocs`, medium `13,207,843 ns/op`/`3,044,978 B/op`/`3,062 allocs`, large `36,465,815 ns/op`/`9,294,928 B/op`/`7,854 allocs`; all-text profiles small `3,453,156 ns/op`, medium `11,321,629 ns/op`, large `35,020,145 ns/op`.
 - [ ] YYYY-MM-DD: Next slice commit + benchmark delta summary.

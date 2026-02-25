@@ -720,7 +720,7 @@ func (r *segmentReader) docIDsForContains(ctx context.Context, term *api.Term, u
 	acc := borrowDocIDAccumulator()
 	defer releaseDocIDAccumulator(acc)
 	for _, field := range fields {
-		set, err := r.docIDsForContainsField(ctx, field, r.internField(field), needle, useTrigramIndex)
+		set, err := r.docIDsForContainsField(ctx, field, r.internField(field), needle, useTrigramIndex, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -729,8 +729,100 @@ func (r *segmentReader) docIDsForContains(ctx context.Context, term *api.Term, u
 	return acc.result(), nil
 }
 
-func (r *segmentReader) docIDsForContainsField(ctx context.Context, field string, fieldID uint32, needle string, useTrigramIndex bool) (docIDSet, error) {
-	var candidateFilter docIDSet
+func (r *segmentReader) docIDsForIContains(ctx context.Context, term *api.Term, useTrigramIndex bool) (docIDSet, error) {
+	normalizedField := normalizeField(term)
+	fields, err := r.resolveSelectorFields(ctx, normalizedField)
+	if err != nil {
+		return nil, err
+	}
+	needle := normalizeTermValue(term.Value)
+	if needle == "" {
+		return r.docIDsForExists(ctx, normalizedField)
+	}
+	useAllText := strings.TrimSpace(normalizedField) == "/..."
+	if len(fields) == 0 {
+		prefilter, hasTokenIndex, err := r.tokenPrefilterForField(ctx, normalizedField, needle, useAllText)
+		if err != nil {
+			return nil, err
+		}
+		if hasTokenIndex {
+			return prefilter, nil
+		}
+		return nil, nil
+	}
+	acc := borrowDocIDAccumulator()
+	defer releaseDocIDAccumulator(acc)
+	for _, field := range fields {
+		prefilter, hasTokenIndex, err := r.tokenPrefilterForField(ctx, field, needle, useAllText)
+		if err != nil {
+			return nil, err
+		}
+		if hasTokenIndex && len(prefilter) == 0 {
+			continue
+		}
+		if hasTokenIndex {
+			rawExists, err := r.docIDsForExists(ctx, field)
+			if err != nil {
+				return nil, err
+			}
+			if len(rawExists) == 0 {
+				acc.union(prefilter)
+				continue
+			}
+		}
+		set, err := r.docIDsForContainsField(ctx, field, r.internField(field), needle, useTrigramIndex, prefilter)
+		if err != nil {
+			return nil, err
+		}
+		acc.union(set)
+	}
+	return acc.result(), nil
+}
+
+func (r *segmentReader) tokenPrefilterForField(ctx context.Context, field, needle string, useAllText bool) (docIDSet, bool, error) {
+	tokens := simpleTextAnalyzer{}.Tokens(needle)
+	if len(tokens) == 0 {
+		return nil, false, nil
+	}
+	tokenField := tokenizedField(field)
+	if useAllText {
+		tokenField = tokenAllTextField
+	}
+	tokenExists, err := r.docIDsForExists(ctx, tokenField)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(tokenExists) == 0 {
+		return nil, false, nil
+	}
+	tokenFieldID := r.internField(tokenField)
+	acc := borrowDocIDAccumulator()
+	defer releaseDocIDAccumulator(acc)
+	for _, token := range tokens {
+		set, err := r.docIDsForTermID(ctx, tokenFieldID, token)
+		if err != nil {
+			return nil, false, err
+		}
+		acc.intersect(set)
+		if acc.initialized && len(acc.current) == 0 {
+			break
+		}
+	}
+	if !acc.initialized {
+		return nil, true, nil
+	}
+	return acc.result(), true, nil
+}
+
+func (r *segmentReader) docIDsForContainsField(
+	ctx context.Context,
+	field string,
+	fieldID uint32,
+	needle string,
+	useTrigramIndex bool,
+	prefilter docIDSet,
+) (docIDSet, error) {
+	candidateFilter := prefilter
 	if useTrigramIndex {
 		grams := normalizedTrigrams(needle)
 		if len(grams) > 0 {
@@ -752,6 +844,11 @@ func (r *segmentReader) docIDsForContainsField(ctx context.Context, field string
 				}
 			}
 			candidate := acc.result()
+			if len(candidateFilter) > 0 && len(candidate) > 0 {
+				candidate = intersectDocIDs(candidateFilter, candidate)
+			} else if len(candidateFilter) > 0 && len(candidate) == 0 {
+				candidate = candidateFilter
+			}
 			if len(candidate) > 0 {
 				candidateFilter = candidate
 			} else if acc.initialized && sawGramPosting {
@@ -1115,7 +1212,7 @@ var selectorClauseResolvers = []selectorClauseResolver{
 			if sel.IContains == nil {
 				return nil, false, nil
 			}
-			set, err := e.reader.docIDsForContains(ctx, sel.IContains, e.containsNgram)
+			set, err := e.reader.docIDsForIContains(ctx, sel.IContains, e.containsNgram)
 			return set, true, err
 		},
 	},

@@ -412,6 +412,38 @@ func BenchmarkAdapterQueryFullTextContainsProfiles(b *testing.B) {
 	}
 }
 
+func BenchmarkAdapterQueryFullTextAllTextProfiles(b *testing.B) {
+	ctx := context.Background()
+	for _, profile := range benchDatasetProfiles {
+		profile := profile
+		b.Run(profile.Name, func(b *testing.B) {
+			_, adapter := buildSyntheticFullTextBenchIndex(ctx, b, profile.FullTextDocCount, profile.FullTextTemplateSize, profile.FullTextHitModulo)
+			req := search.Request{
+				Namespace: namespaces.Default,
+				Selector: api.Selector{
+					IContains: &api.Term{Field: "/...", Value: "TIMEOUT"},
+				},
+				Limit:  200_000,
+				Engine: search.EngineIndex,
+			}
+			warmResp, warmErr := adapter.Query(ctx, req)
+			if warmErr != nil {
+				b.Fatalf("adapter warm fulltext all-text query: %v", warmErr)
+			}
+			benchResultSize = len(warmResp.Keys)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				resp, err := adapter.Query(ctx, req)
+				if err != nil {
+					b.Fatalf("adapter fulltext all-text query: %v", err)
+				}
+				benchResultSize = len(resp.Keys)
+			}
+		})
+	}
+}
+
 func buildSyntheticWildcardBenchIndex(
 	ctx context.Context,
 	b testing.TB,
@@ -628,6 +660,8 @@ func buildSyntheticFullTextBenchIndex(
 	const field = "/body"
 	postings := make(map[string][]string, templateSize)
 	timeoutKeys := make([]string, 0, docCount/timeoutModulo+1)
+	tokenPostings := make(map[string][]string, templateSize)
+	allTextPostings := make(map[string][]string, templateSize)
 	for i := 0; i < docCount; i++ {
 		key := fmt.Sprintf("fdoc-%06d", i)
 		templateID := i % templateSize
@@ -637,6 +671,10 @@ func buildSyntheticFullTextBenchIndex(
 			timeoutKeys = append(timeoutKeys, key)
 		}
 		postings[text] = append(postings[text], key)
+		for _, token := range (simpleTextAnalyzer{}).Tokens(text) {
+			tokenPostings[token] = append(tokenPostings[token], key)
+			allTextPostings[token] = append(allTextPostings[token], key)
+		}
 		meta := &storage.Meta{
 			Version:          1,
 			PublishedVersion: 1,
@@ -647,6 +685,8 @@ func buildSyntheticFullTextBenchIndex(
 		}
 	}
 	segment.Fields[field] = FieldBlock{Postings: postings}
+	segment.Fields[tokenizedField(field)] = FieldBlock{Postings: tokenPostings}
+	segment.Fields[tokenAllTextField] = FieldBlock{Postings: allTextPostings}
 
 	gramPostings := make(map[string][]string)
 	for _, gram := range normalizedTrigrams("timeout") {

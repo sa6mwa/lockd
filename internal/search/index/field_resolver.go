@@ -95,6 +95,9 @@ func (r *segmentReader) allIndexFields(ctx context.Context) ([]string, error) {
 			if strings.HasPrefix(field, containsGramFieldPrefix) {
 				continue
 			}
+			if strings.HasPrefix(field, tokenFieldPrefix) {
+				continue
+			}
 			set[field] = struct{}{}
 		}
 		return nil

@@ -93,6 +93,11 @@ func BenchmarkAdapterQueryWildcardContains(b *testing.B) {
 		Limit:  10_000,
 		Engine: search.EngineIndex,
 	}
+	warmResp, warmErr := adapter.Query(ctx, req)
+	if warmErr != nil {
+		b.Fatalf("adapter warm query: %v", warmErr)
+	}
+	benchResultSize = len(warmResp.Keys)
 
 	b.ReportAllocs()
 	b.ResetTimer()

@@ -529,6 +529,9 @@ type segmentReader struct {
 	store                 *Store
 	logger                pslog.Logger
 	cache                 map[string]*Segment
+	compiled              map[string]*compiledSegment
+	keyIDs                map[string]uint32
+	keys                  []string
 	fieldList             []string
 	fieldListReady        bool
 	fieldSegments         map[string][]string
@@ -543,6 +546,8 @@ func newSegmentReader(namespace string, manifest *Manifest, store *Store, logger
 		store:                 store,
 		logger:                logger,
 		cache:                 make(map[string]*Segment),
+		compiled:              make(map[string]*compiledSegment),
+		keyIDs:                make(map[string]uint32),
 		fieldSegments:         make(map[string][]string),
 		fieldResolutionCached: make(map[string][]string),
 	}
@@ -550,12 +555,10 @@ func newSegmentReader(namespace string, manifest *Manifest, store *Store, logger
 
 func (r *segmentReader) allKeys(ctx context.Context) (keySet, error) {
 	result := make(keySet)
-	err := r.forEachSegment(ctx, func(seg *Segment) error {
-		for _, block := range seg.Fields {
-			for _, keys := range block.Postings {
-				for _, key := range keys {
-					result[key] = struct{}{}
-				}
+	err := r.forEachCompiledSegment(ctx, func(seg *compiledSegment) error {
+		for _, block := range seg.fields {
+			for _, docIDs := range block.postings {
+				r.addDocIDsToKeySet(result, docIDs)
 			}
 		}
 		return nil
@@ -596,14 +599,32 @@ func (r *segmentReader) keysForTerm(ctx context.Context, field, term string) (ke
 }
 
 func (r *segmentReader) collectKeysForTerm(ctx context.Context, field, term string, out keySet) error {
-	return r.forEachSegment(ctx, func(seg *Segment) error {
-		block, ok := seg.Fields[field]
+	return r.forEachCompiledSegment(ctx, func(seg *compiledSegment) error {
+		block, ok := seg.fields[field]
 		if !ok {
 			return nil
 		}
-		keys := block.Postings[term]
-		for _, key := range keys {
+		docIDs := block.postings[term]
+		for _, docID := range docIDs {
+			key := r.keyByDocID(docID)
+			if key == "" {
+				continue
+			}
 			out[key] = struct{}{}
+		}
+		return nil
+	})
+}
+
+func (r *segmentReader) collectDocIDsForTerm(ctx context.Context, field, term string, out map[uint32]struct{}) error {
+	return r.forEachCompiledSegment(ctx, func(seg *compiledSegment) error {
+		block, ok := seg.fields[field]
+		if !ok {
+			return nil
+		}
+		docIDs := block.postings[term]
+		for _, docID := range docIDs {
+			out[docID] = struct{}{}
 		}
 		return nil
 	})
@@ -620,11 +641,9 @@ func (r *segmentReader) keysForPrefix(ctx context.Context, term *api.Term) (keyS
 	prefix := normalizeTermValue(term.Value)
 	result := make(keySet)
 	for _, field := range fields {
-		if err := r.forEachPosting(ctx, field, func(termValue string, keys []string) error {
+		if err := r.forEachPostingDocIDs(ctx, field, func(termValue string, docIDs []uint32) error {
 			if strings.HasPrefix(termValue, prefix) {
-				for _, key := range keys {
-					result[key] = struct{}{}
-				}
+				r.addDocIDsToKeySet(result, docIDs)
 			}
 			return nil
 		}); err != nil {
@@ -648,8 +667,8 @@ func (r *segmentReader) keysForContains(ctx context.Context, term *api.Term, use
 	}
 	out := make(keySet)
 	ws := containsWorkspace{
-		candidate: make(keySet),
-		gram:      make(keySet),
+		candidate: make(map[uint32]struct{}),
+		gram:      make(map[uint32]struct{}),
 	}
 	for _, field := range fields {
 		set, err := r.keysForContainsField(ctx, field, needle, useTrigramIndex, &ws)
@@ -662,18 +681,18 @@ func (r *segmentReader) keysForContains(ctx context.Context, term *api.Term, use
 }
 
 type containsWorkspace struct {
-	candidate keySet
-	gram      keySet
+	candidate map[uint32]struct{}
+	gram      map[uint32]struct{}
 }
 
 func (r *segmentReader) keysForContainsField(ctx context.Context, field, needle string, useTrigramIndex bool, ws *containsWorkspace) (keySet, error) {
 	if ws == nil {
 		ws = &containsWorkspace{
-			candidate: make(keySet),
-			gram:      make(keySet),
+			candidate: make(map[uint32]struct{}),
+			gram:      make(map[uint32]struct{}),
 		}
 	}
-	var candidateFilter keySet
+	var candidateFilter map[uint32]struct{}
 	if useTrigramIndex {
 		grams := normalizedTrigrams(needle)
 		if len(grams) > 0 {
@@ -682,19 +701,19 @@ func (r *segmentReader) keysForContainsField(ctx context.Context, field, needle 
 			sawGramPosting := false
 			for _, gram := range grams {
 				clear(ws.gram)
-				if err := r.collectKeysForTerm(ctx, containsGramField(field), gram, ws.gram); err != nil {
+				if err := r.collectDocIDsForTerm(ctx, containsGramField(field), gram, ws.gram); err != nil {
 					return nil, err
 				}
 				if len(ws.gram) > 0 {
 					sawGramPosting = true
 				}
 				if !initialized {
-					mergeKeySet(ws.candidate, ws.gram)
+					mergeDocIDSet(ws.candidate, ws.gram)
 					initialized = true
 				} else {
-					for key := range ws.candidate {
-						if _, ok := ws.gram[key]; !ok {
-							delete(ws.candidate, key)
+					for docID := range ws.candidate {
+						if _, ok := ws.gram[docID]; !ok {
+							delete(ws.candidate, docID)
 						}
 					}
 				}
@@ -710,13 +729,17 @@ func (r *segmentReader) keysForContainsField(ctx context.Context, field, needle 
 		}
 	}
 	result := make(keySet)
-	if err := r.forEachPosting(ctx, field, func(termValue string, keys []string) error {
+	if err := r.forEachPostingDocIDs(ctx, field, func(termValue string, docIDs []uint32) error {
 		if strings.Contains(termValue, needle) {
-			for _, key := range keys {
+			for _, docID := range docIDs {
 				if len(candidateFilter) > 0 {
-					if _, ok := candidateFilter[key]; !ok {
+					if _, ok := candidateFilter[docID]; !ok {
 						continue
 					}
+				}
+				key := r.keyByDocID(docID)
+				if key == "" {
+					continue
 				}
 				result[key] = struct{}{}
 			}
@@ -738,7 +761,7 @@ func (r *segmentReader) keysForRange(ctx context.Context, term *api.RangeTerm) (
 	}
 	result := make(keySet)
 	for _, field := range fields {
-		if err := r.forEachPosting(ctx, field, func(termValue string, keys []string) error {
+		if err := r.forEachPostingDocIDs(ctx, field, func(termValue string, docIDs []uint32) error {
 			num, err := strconv.ParseFloat(termValue, 64)
 			if err != nil || math.IsNaN(num) {
 				return nil
@@ -746,9 +769,7 @@ func (r *segmentReader) keysForRange(ctx context.Context, term *api.RangeTerm) (
 			if !rangeMatches(term, num) {
 				return nil
 			}
-			for _, key := range keys {
-				result[key] = struct{}{}
-			}
+			r.addDocIDsToKeySet(result, docIDs)
 			return nil
 		}); err != nil {
 			return nil, err
@@ -767,10 +788,8 @@ func (r *segmentReader) keysForExists(ctx context.Context, field string) (keySet
 	}
 	result := make(keySet)
 	for _, field := range fields {
-		if err := r.forEachPosting(ctx, field, func(_ string, keys []string) error {
-			for _, key := range keys {
-				result[key] = struct{}{}
-			}
+		if err := r.forEachPostingDocIDs(ctx, field, func(_ string, docIDs []uint32) error {
+			r.addDocIDsToKeySet(result, docIDs)
 			return nil
 		}); err != nil {
 			return nil, err
@@ -827,14 +846,41 @@ func (r *segmentReader) forEachSegment(ctx context.Context, fn func(*Segment) er
 	return nil
 }
 
-func (r *segmentReader) forEachPosting(ctx context.Context, field string, fn func(term string, keys []string) error) error {
-	return r.forEachSegment(ctx, func(seg *Segment) error {
-		block, ok := seg.Fields[field]
+func (r *segmentReader) forEachCompiledSegment(ctx context.Context, fn func(*compiledSegment) error) error {
+	if r.manifest == nil || len(r.manifest.Shards) == 0 {
+		return nil
+	}
+	for _, shard := range r.manifest.Shards {
+		if shard == nil {
+			continue
+		}
+		for _, ref := range shard.Segments {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			segment, err := r.loadCompiledSegment(ctx, ref.ID)
+			if err != nil {
+				return err
+			}
+			if segment == nil {
+				continue
+			}
+			if err := fn(segment); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (r *segmentReader) forEachPostingDocIDs(ctx context.Context, field string, fn func(term string, docIDs []uint32) error) error {
+	return r.forEachCompiledSegment(ctx, func(seg *compiledSegment) error {
+		block, ok := seg.fields[field]
 		if !ok {
 			return nil
 		}
-		for term, keys := range block.Postings {
-			if err := fn(term, keys); err != nil {
+		for term, docIDs := range block.postings {
+			if err := fn(term, docIDs); err != nil {
 				return err
 			}
 		}
@@ -852,6 +898,77 @@ func (r *segmentReader) loadSegment(ctx context.Context, id string) (*Segment, e
 	}
 	r.cache[id] = segment
 	return segment, nil
+}
+
+func (r *segmentReader) loadCompiledSegment(ctx context.Context, id string) (*compiledSegment, error) {
+	if seg, ok := r.compiled[id]; ok {
+		return seg, nil
+	}
+	raw, err := r.loadSegment(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	compiled := r.compileSegment(raw)
+	r.compiled[id] = compiled
+	return compiled, nil
+}
+
+func (r *segmentReader) compileSegment(seg *Segment) *compiledSegment {
+	if seg == nil {
+		return &compiledSegment{fields: make(map[string]compiledField)}
+	}
+	out := &compiledSegment{
+		fields: make(map[string]compiledField, len(seg.Fields)),
+	}
+	for field, block := range seg.Fields {
+		compiledBlock := compiledField{
+			postings: make(map[string][]uint32, len(block.Postings)),
+		}
+		for term, keys := range block.Postings {
+			docIDs := make([]uint32, 0, len(keys))
+			for _, key := range keys {
+				docIDs = append(docIDs, r.internKey(key))
+			}
+			compiledBlock.postings[term] = docIDs
+		}
+		out.fields[field] = compiledBlock
+	}
+	return out
+}
+
+func (r *segmentReader) internKey(key string) uint32 {
+	if id, ok := r.keyIDs[key]; ok {
+		return id
+	}
+	id := uint32(len(r.keys))
+	r.keys = append(r.keys, key)
+	r.keyIDs[key] = id
+	return id
+}
+
+func (r *segmentReader) keyByDocID(id uint32) string {
+	if int(id) >= len(r.keys) {
+		return ""
+	}
+	return r.keys[id]
+}
+
+func (r *segmentReader) addDocIDsToKeySet(out keySet, docIDs []uint32) {
+	for _, id := range docIDs {
+		key := r.keyByDocID(id)
+		if key == "" {
+			continue
+		}
+		out[key] = struct{}{}
+	}
+}
+
+type compiledSegment struct {
+	fields map[string]compiledField
+}
+
+type compiledField struct {
+	postings map[string][]uint32
 }
 
 func (r *segmentReader) docMetaMap(ctx context.Context) (map[string]DocumentMetadata, error) {
@@ -1208,6 +1325,15 @@ func mergeKeySet(dst keySet, src keySet) {
 	}
 	for key := range src {
 		dst[key] = struct{}{}
+	}
+}
+
+func mergeDocIDSet(dst map[uint32]struct{}, src map[uint32]struct{}) {
+	if len(dst) == 0 && len(src) == 0 {
+		return
+	}
+	for id := range src {
+		dst[id] = struct{}{}
 	}
 }
 

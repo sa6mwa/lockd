@@ -524,20 +524,26 @@ func (a *Adapter) matchAndStreamDocument(
 }
 
 type segmentReader struct {
-	namespace string
-	manifest  *Manifest
-	store     *Store
-	logger    pslog.Logger
-	cache     map[string]*Segment
+	namespace             string
+	manifest              *Manifest
+	store                 *Store
+	logger                pslog.Logger
+	cache                 map[string]*Segment
+	fieldList             []string
+	fieldListReady        bool
+	fieldSegments         map[string][]string
+	fieldResolutionCached map[string][]string
 }
 
 func newSegmentReader(namespace string, manifest *Manifest, store *Store, logger pslog.Logger) *segmentReader {
 	return &segmentReader{
-		namespace: namespace,
-		manifest:  manifest,
-		store:     store,
-		logger:    logger,
-		cache:     make(map[string]*Segment),
+		namespace:             namespace,
+		manifest:              manifest,
+		store:                 store,
+		logger:                logger,
+		cache:                 make(map[string]*Segment),
+		fieldSegments:         make(map[string][]string),
+		fieldResolutionCached: make(map[string][]string),
 	}
 }
 
@@ -557,11 +563,23 @@ func (r *segmentReader) allKeys(ctx context.Context) (keySet, error) {
 }
 
 func (r *segmentReader) keysForEq(ctx context.Context, term *api.Term) (keySet, error) {
-	field := normalizeField(term)
-	if field == "" {
+	fields, err := r.resolveSelectorFields(ctx, normalizeField(term))
+	if err != nil {
+		return nil, err
+	}
+	if len(fields) == 0 {
 		return make(keySet), nil
 	}
-	return r.keysForTerm(ctx, field, normalizeTermValue(term.Value))
+	normalizedTerm := normalizeTermValue(term.Value)
+	out := make(keySet)
+	for _, field := range fields {
+		set, err := r.keysForTerm(ctx, field, normalizedTerm)
+		if err != nil {
+			return nil, err
+		}
+		mergeKeySet(out, set)
+	}
+	return out, nil
 }
 
 func (r *segmentReader) keysForTerm(ctx context.Context, field, term string) (keySet, error) {
@@ -585,32 +603,54 @@ func (r *segmentReader) keysForTerm(ctx context.Context, field, term string) (ke
 }
 
 func (r *segmentReader) keysForPrefix(ctx context.Context, term *api.Term) (keySet, error) {
-	field := normalizeField(term)
-	if field == "" {
+	fields, err := r.resolveSelectorFields(ctx, normalizeField(term))
+	if err != nil {
+		return nil, err
+	}
+	if len(fields) == 0 {
 		return make(keySet), nil
 	}
 	prefix := normalizeTermValue(term.Value)
 	result := make(keySet)
-	err := r.forEachPosting(ctx, field, func(termValue string, keys []string) error {
-		if strings.HasPrefix(termValue, prefix) {
-			for _, key := range keys {
-				result[key] = struct{}{}
+	for _, field := range fields {
+		if err := r.forEachPosting(ctx, field, func(termValue string, keys []string) error {
+			if strings.HasPrefix(termValue, prefix) {
+				for _, key := range keys {
+					result[key] = struct{}{}
+				}
 			}
+			return nil
+		}); err != nil {
+			return nil, err
 		}
-		return nil
-	})
-	return result, err
+	}
+	return result, nil
 }
 
 func (r *segmentReader) keysForContains(ctx context.Context, term *api.Term, useTrigramIndex bool) (keySet, error) {
-	field := normalizeField(term)
-	if field == "" {
+	fields, err := r.resolveSelectorFields(ctx, normalizeField(term))
+	if err != nil {
+		return nil, err
+	}
+	if len(fields) == 0 {
 		return make(keySet), nil
 	}
 	needle := normalizeTermValue(term.Value)
 	if needle == "" {
-		return r.keysForExists(ctx, field)
+		return r.keysForExists(ctx, normalizeField(term))
 	}
+	out := make(keySet)
+	for _, field := range fields {
+		set, err := r.keysForContainsField(ctx, field, needle, useTrigramIndex)
+		if err != nil {
+			return nil, err
+		}
+		mergeKeySet(out, set)
+	}
+	return out, nil
+}
+
+func (r *segmentReader) keysForContainsField(ctx context.Context, field, needle string, useTrigramIndex bool) (keySet, error) {
 	var candidateFilter keySet
 	if useTrigramIndex {
 		grams := normalizedTrigrams(needle)
@@ -633,7 +673,7 @@ func (r *segmentReader) keysForContains(ctx context.Context, term *api.Term, use
 		}
 	}
 	result := make(keySet)
-	err := r.forEachPosting(ctx, field, func(termValue string, keys []string) error {
+	if err := r.forEachPosting(ctx, field, func(termValue string, keys []string) error {
 		if strings.Contains(termValue, needle) {
 			for _, key := range keys {
 				if len(candidateFilter) > 0 {
@@ -645,59 +685,80 @@ func (r *segmentReader) keysForContains(ctx context.Context, term *api.Term, use
 			}
 		}
 		return nil
-	})
-	return result, err
+	}); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func (r *segmentReader) keysForRange(ctx context.Context, term *api.RangeTerm) (keySet, error) {
-	field := normalizeRangeField(term)
-	if field == "" {
+	fields, err := r.resolveSelectorFields(ctx, normalizeRangeField(term))
+	if err != nil {
+		return nil, err
+	}
+	if len(fields) == 0 {
 		return make(keySet), nil
 	}
 	result := make(keySet)
-	err := r.forEachPosting(ctx, field, func(termValue string, keys []string) error {
-		num, err := strconv.ParseFloat(termValue, 64)
-		if err != nil || math.IsNaN(num) {
+	for _, field := range fields {
+		if err := r.forEachPosting(ctx, field, func(termValue string, keys []string) error {
+			num, err := strconv.ParseFloat(termValue, 64)
+			if err != nil || math.IsNaN(num) {
+				return nil
+			}
+			if !rangeMatches(term, num) {
+				return nil
+			}
+			for _, key := range keys {
+				result[key] = struct{}{}
+			}
 			return nil
+		}); err != nil {
+			return nil, err
 		}
-		if !rangeMatches(term, num) {
-			return nil
-		}
-		for _, key := range keys {
-			result[key] = struct{}{}
-		}
-		return nil
-	})
-	return result, err
+	}
+	return result, nil
 }
 
 func (r *segmentReader) keysForExists(ctx context.Context, field string) (keySet, error) {
-	field = strings.TrimSpace(field)
-	if field == "" {
+	fields, err := r.resolveSelectorFields(ctx, strings.TrimSpace(field))
+	if err != nil {
+		return nil, err
+	}
+	if len(fields) == 0 {
 		return make(keySet), nil
 	}
 	result := make(keySet)
-	err := r.forEachPosting(ctx, field, func(_ string, keys []string) error {
-		for _, key := range keys {
-			result[key] = struct{}{}
+	for _, field := range fields {
+		if err := r.forEachPosting(ctx, field, func(_ string, keys []string) error {
+			for _, key := range keys {
+				result[key] = struct{}{}
+			}
+			return nil
+		}); err != nil {
+			return nil, err
 		}
-		return nil
-	})
-	return result, err
+	}
+	return result, nil
 }
 
 func (r *segmentReader) keysForIn(ctx context.Context, term *api.InTerm) (keySet, error) {
-	field := strings.TrimSpace(term.Field)
-	if field == "" || len(term.Any) == 0 {
+	fields, err := r.resolveSelectorFields(ctx, strings.TrimSpace(term.Field))
+	if err != nil {
+		return nil, err
+	}
+	if len(fields) == 0 || len(term.Any) == 0 {
 		return make(keySet), nil
 	}
 	unionSet := make(keySet)
-	for _, candidate := range term.Any {
-		eqSet, err := r.keysForEq(ctx, &api.Term{Field: field, Value: candidate})
-		if err != nil {
-			return nil, err
+	for _, field := range fields {
+		for _, candidate := range term.Any {
+			eqSet, err := r.keysForTerm(ctx, field, normalizeTermValue(candidate))
+			if err != nil {
+				return nil, err
+			}
+			mergeKeySet(unionSet, eqSet)
 		}
-		unionSet = union(unionSet, eqSet)
 	}
 	return unionSet, nil
 }
@@ -1104,6 +1165,15 @@ func (s keySet) sorted() []string {
 	return keys
 }
 
+func mergeKeySet(dst keySet, src keySet) {
+	if len(dst) == 0 && len(src) == 0 {
+		return
+	}
+	for key := range src {
+		dst[key] = struct{}{}
+	}
+}
+
 func union(a, b keySet) keySet {
 	if len(a) == 0 && len(b) == 0 {
 		return make(keySet)
@@ -1165,7 +1235,7 @@ func selectorSupportsLegacyIndexFilter(sel api.Selector) bool {
 		return true
 	}
 	caps := lql.InspectSelectorCapabilities(sel)
-	if caps.WildcardPath || caps.RecursivePath {
+	if caps.RecursivePath {
 		return false
 	}
 	families := caps.Families()

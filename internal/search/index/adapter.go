@@ -101,7 +101,7 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 		}
 		matches, err = eval.evaluate(ctx, req.Selector)
 	}
-	if !selector.IsEmpty() {
+	if !selector.IsEmpty() && !useLegacyFilter {
 		compiled, compileErr := lql.NewQueryStreamPlan(selector)
 		if compileErr != nil {
 			return search.Result{}, fmt.Errorf("compile selector: %w", compileErr)
@@ -295,7 +295,7 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 		}
 		matches, err = eval.evaluate(ctx, req.Selector)
 	}
-	if !selector.IsEmpty() {
+	if !selector.IsEmpty() && !useLegacyFilter {
 		compiled, compileErr := lql.NewQueryStreamPlan(selector)
 		if compileErr != nil {
 			return search.Result{}, fmt.Errorf("compile selector: %w", compileErr)
@@ -611,6 +611,7 @@ func (r *segmentReader) keysForContains(ctx context.Context, term *api.Term, use
 	if needle == "" {
 		return r.keysForExists(ctx, field)
 	}
+	var candidateFilter keySet
 	if useTrigramIndex {
 		grams := normalizedTrigrams(needle)
 		if len(grams) > 0 {
@@ -626,8 +627,8 @@ func (r *segmentReader) keysForContains(ctx context.Context, term *api.Term, use
 				}
 				out = intersect(out, gramSet)
 			}
-			if out != nil && len(out) > 0 {
-				return out, nil
+			if len(out) > 0 {
+				candidateFilter = out
 			}
 		}
 	}
@@ -635,6 +636,11 @@ func (r *segmentReader) keysForContains(ctx context.Context, term *api.Term, use
 	err := r.forEachPosting(ctx, field, func(termValue string, keys []string) error {
 		if strings.Contains(termValue, needle) {
 			for _, key := range keys {
+				if len(candidateFilter) > 0 {
+					if _, ok := candidateFilter[key]; !ok {
+						continue
+					}
+				}
 				result[key] = struct{}{}
 			}
 		}

@@ -357,6 +357,9 @@ func TestIndexAdapterQueryContainsUsesTrigramPostings(t *testing.T) {
 	mem := memory.New()
 	store := NewStore(mem, nil)
 	segment := NewSegment("seg-contains-grams", time.Unix(1_700_000_031, 0))
+	segment.Fields["/message"] = FieldBlock{Postings: map[string][]string{
+		"timeout": {"log-1"},
+	}}
 	gramField := containsGramField("/message")
 	segment.Fields[gramField] = FieldBlock{Postings: map[string][]string{
 		"tim": {"log-1"},
@@ -405,6 +408,142 @@ func TestIndexAdapterQueryContainsUsesTrigramPostings(t *testing.T) {
 	}
 	if !slices.Equal(resp.Keys, []string{"log-1"}) {
 		t.Fatalf("unexpected contains keys %v", resp.Keys)
+	}
+}
+
+func TestIndexAdapterQueryContainsTrigramFilterAvoidsFalsePositives(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	store := NewStore(mem, nil)
+	segment := NewSegment("seg-contains-grams-false-positive", time.Unix(1_700_000_033, 0))
+	segment.Fields["/message"] = FieldBlock{Postings: map[string][]string{
+		"abcbcd":   {"log-fp"},
+		"xxabcdyy": {"log-hit"},
+	}}
+	gramField := containsGramField("/message")
+	segment.Fields[gramField] = FieldBlock{Postings: map[string][]string{
+		"abc": {"log-fp", "log-hit"},
+		"bcd": {"log-fp", "log-hit"},
+	}}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+	manifest := NewManifest()
+	manifest.Seq = 4
+	manifest.UpdatedAt = segment.CreatedAt
+	manifest.Format = IndexFormatVersionV4
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{{
+			ID:        segment.ID,
+			CreatedAt: segment.CreatedAt,
+			DocCount:  segment.DocCount(),
+		}},
+	}
+	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+	for _, key := range []string{"log-fp", "log-hit"} {
+		meta := &storage.Meta{
+			Version:          1,
+			PublishedVersion: 1,
+			StateETag:        "etag-" + key,
+		}
+		if _, err := mem.StoreMeta(ctx, namespaces.Default, key, meta, ""); err != nil {
+			t.Fatalf("store meta %s: %v", key, err)
+		}
+	}
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	resp, err := adapter.Query(ctx, search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			Contains: &api.Term{Field: "/message", Value: "abcd"},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	})
+	if err != nil {
+		t.Fatalf("query contains: %v", err)
+	}
+	if !slices.Equal(resp.Keys, []string{"log-hit"}) {
+		t.Fatalf("unexpected contains keys %v", resp.Keys)
+	}
+}
+
+func TestIndexAdapterQueryAndSelectorCombination(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	store := NewStore(mem, nil)
+	segment := NewSegment("seg-and-combo", time.Unix(1_700_000_032, 0))
+	segment.Fields["/voucher/book"] = FieldBlock{Postings: map[string][]string{
+		"general": {"voucher-ap-2025-1101"},
+	}}
+	segment.Fields["/voucher/header/period"] = FieldBlock{Postings: map[string][]string{
+		"2025-11": {"voucher-ap-2025-1101"},
+	}}
+	segment.Fields["/voucher/header/posted"] = FieldBlock{Postings: map[string][]string{
+		"false": {"voucher-ap-2025-1101"},
+	}}
+	segment.Fields["/voucher/lines/10/amount"] = FieldBlock{Postings: map[string][]string{
+		"3500": {"voucher-ap-2025-1101"},
+	}}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+	manifest := NewManifest()
+	manifest.Seq = 5
+	manifest.UpdatedAt = segment.CreatedAt
+	manifest.Format = IndexFormatVersionV4
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{{
+			ID:        segment.ID,
+			CreatedAt: segment.CreatedAt,
+			DocCount:  segment.DocCount(),
+		}},
+	}
+	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+	writeIndexedState(t, mem, namespaces.Default, "voucher-ap-2025-1101", map[string]any{
+		"voucher": map[string]any{
+			"book": "GENERAL",
+			"header": map[string]any{
+				"period": "2025-11",
+				"posted": false,
+			},
+			"lines": map[string]any{
+				"10": map[string]any{"amount": 3500},
+				"20": map[string]any{"amount": -3500},
+			},
+		},
+	})
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	threeK := 3000.0
+	resp, err := adapter.Query(ctx, search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			And: []api.Selector{
+				{Eq: &api.Term{Field: "/voucher/book", Value: "GENERAL"}},
+				{Eq: &api.Term{Field: "/voucher/header/period", Value: "2025-11"}},
+				{Eq: &api.Term{Field: "/voucher/header/posted", Value: "false"}},
+				{Range: &api.RangeTerm{Field: "/voucher/lines/10/amount", GTE: &threeK}},
+			},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	})
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if !slices.Equal(resp.Keys, []string{"voucher-ap-2025-1101"}) {
+		t.Fatalf("unexpected keys %v", resp.Keys)
 	}
 }
 

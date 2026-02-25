@@ -83,7 +83,7 @@ Scope: lockd-side migration and performance program to complete true inline stre
 - [x] P3.D3 Implement reader/writer compatibility for v4 and v5.
 - [x] P3.D4 Add rebuild path and mixed-format handling tests.
 - [x] P3.D5 Add integration tests on upgrade/rebuild scenarios.
-- [ ] P3.D6 Benchmark delta report for D slice.
+- [x] P3.D6 Benchmark delta report for D slice.
 
 ### P3.E Compressed postings (optional but likely needed)
 - [ ] P3.E1 Evaluate roaring/bitset strategy for dense postings.
@@ -160,4 +160,5 @@ Scope: lockd-side migration and performance program to complete true inline stre
 - [x] 2026-02-25: P3.D1-P3.D3 v5 segment format wiring landed (pending commit): added v5 protobuf schema (`doc_table`, `field_dict`, `term_dict`, `doc_ids` postings), implemented v5 encode/decode in `Segment.ToProto/FromProto`, fixed manifest cache format cloning, added writer manifest-format inheritance, and added mixed v4/v5 query compatibility tests.
 - [x] 2026-02-25: P3.D4 rebuild-format handling landed (pending commit): rebuild now preserves/bootstrap target manifest format after `reset`, cleanup removes segments below target format (e.g. v4 when target is v5), and new core tests cover reset-format preservation and lower-format cleanup.
 - [x] 2026-02-25: P3.D5 integration rebuild coverage landed (pending commit): added `RunIndexRebuildUpgrade` in query suite and wired backend query integration tests (mem/disk/nfs/aws/azure/minio) to validate v4 legacy segment cleanup and v5 rebuild correctness on real backends.
+- [x] 2026-02-25: P3.D6 benchmark report recorded (pending commit): wildcard resolve `15.32 ns/op` (0 alloc), recursive resolve `23.62 ns/op` (0 alloc), wildcard contains `791,083 ns/op`, `186,004 B/op`, `4,106 allocs/op`, adapter wildcard contains `3,091,692 ns/op`, `1,962,550 B/op`, `12,386 allocs/op`.
 - [ ] YYYY-MM-DD: Next slice commit + benchmark delta summary.

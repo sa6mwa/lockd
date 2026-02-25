@@ -142,11 +142,11 @@ func TestIndexAdapterQuery(t *testing.T) {
 	mem := memory.New()
 	store := NewStore(mem, nil)
 	segment := NewSegment("seg-query", time.Unix(1_700_000_020, 0))
-	segment.Fields["status"] = FieldBlock{Postings: map[string][]string{
+	segment.Fields["/status"] = FieldBlock{Postings: map[string][]string{
 		"open":   {"orders-open-1", "orders-open-2", "orders-open-3"},
 		"closed": {"orders-closed"},
 	}}
-	segment.Fields["device.telemetry.battery_mv"] = FieldBlock{Postings: map[string][]string{
+	segment.Fields["/device/telemetry/battery_mv"] = FieldBlock{Postings: map[string][]string{
 		"4200": {"device-gw-42"},
 		"3300": {"device-gw-7"},
 	}}
@@ -199,7 +199,7 @@ func TestIndexAdapterQuery(t *testing.T) {
 	resp, err := adapter.Query(ctx, search.Request{
 		Namespace: namespaces.Default,
 		Selector: api.Selector{
-			Eq: &api.Term{Field: "status", Value: "open"},
+			Eq: &api.Term{Field: "/status", Value: "open"},
 		},
 		Limit:  10,
 		Engine: search.EngineIndex,
@@ -216,7 +216,7 @@ func TestIndexAdapterQuery(t *testing.T) {
 	rangeResp, err := adapter.Query(ctx, search.Request{
 		Namespace: namespaces.Default,
 		Selector: api.Selector{
-			Range: &api.RangeTerm{Field: "device.telemetry.battery_mv", GTE: floatPtr(4000)},
+			Range: &api.RangeTerm{Field: "/device/telemetry/battery_mv", GTE: floatPtr(4000)},
 		},
 		Limit:  5,
 		Engine: search.EngineIndex,
@@ -232,7 +232,7 @@ func TestIndexAdapterQuery(t *testing.T) {
 	page1, err := adapter.Query(ctx, search.Request{
 		Namespace: namespaces.Default,
 		Selector: api.Selector{
-			Eq: &api.Term{Field: "status", Value: "open"},
+			Eq: &api.Term{Field: "/status", Value: "open"},
 		},
 		Limit:  1,
 		Engine: search.EngineIndex,
@@ -246,7 +246,7 @@ func TestIndexAdapterQuery(t *testing.T) {
 	page2, err := adapter.Query(ctx, search.Request{
 		Namespace: namespaces.Default,
 		Selector: api.Selector{
-			Eq: &api.Term{Field: "status", Value: "open"},
+			Eq: &api.Term{Field: "/status", Value: "open"},
 		},
 		Limit:  2,
 		Cursor: page1.Cursor,
@@ -612,7 +612,7 @@ func TestIndexAdapterDocMeta(t *testing.T) {
 	mem := memory.New()
 	store := NewStore(mem, nil)
 	segment := NewSegment("seg-meta", time.Unix(1_700_000_060, 0))
-	segment.Fields["status"] = FieldBlock{Postings: map[string][]string{
+	segment.Fields["/status"] = FieldBlock{Postings: map[string][]string{
 		"open": {"doc-1"},
 	}}
 	segment.DocMeta["doc-1"] = DocumentMetadata{
@@ -652,7 +652,7 @@ func TestIndexAdapterDocMeta(t *testing.T) {
 	}
 	resp, err := adapter.Query(ctx, search.Request{
 		Namespace:      namespaces.Default,
-		Selector:       api.Selector{Eq: &api.Term{Field: "status", Value: "open"}},
+		Selector:       api.Selector{Eq: &api.Term{Field: "/status", Value: "open"}},
 		Limit:          1,
 		Engine:         search.EngineIndex,
 		IncludeDocMeta: true,
@@ -674,7 +674,7 @@ func TestIndexAdapterDocMetaPrefersNewestSegment(t *testing.T) {
 	store := NewStore(mem, nil)
 
 	oldSeg := NewSegment("seg-old", time.Unix(1_700_000_000, 0))
-	oldSeg.Fields["status"] = FieldBlock{Postings: map[string][]string{
+	oldSeg.Fields["/status"] = FieldBlock{Postings: map[string][]string{
 		"open": {"doc-1"},
 	}}
 	oldSeg.DocMeta["doc-1"] = DocumentMetadata{
@@ -687,7 +687,7 @@ func TestIndexAdapterDocMetaPrefersNewestSegment(t *testing.T) {
 	}
 
 	newSeg := NewSegment("seg-new", time.Unix(1_700_000_120, 0))
-	newSeg.Fields["status"] = FieldBlock{Postings: map[string][]string{
+	newSeg.Fields["/status"] = FieldBlock{Postings: map[string][]string{
 		"open": {"doc-1"},
 	}}
 	newSeg.DocMeta["doc-1"] = DocumentMetadata{
@@ -736,7 +736,7 @@ func TestIndexAdapterDocMetaPrefersNewestSegment(t *testing.T) {
 	}
 	resp, err := adapter.Query(ctx, search.Request{
 		Namespace:      namespaces.Default,
-		Selector:       api.Selector{Eq: &api.Term{Field: "status", Value: "open"}},
+		Selector:       api.Selector{Eq: &api.Term{Field: "/status", Value: "open"}},
 		Limit:          1,
 		Engine:         search.EngineIndex,
 		IncludeDocMeta: true,
@@ -754,7 +754,7 @@ func TestIndexAdapterRespectsVisibilityLedger(t *testing.T) {
 	mem := memory.New()
 	store := NewStore(mem, nil)
 	segment := NewSegment("seg-vis", time.Unix(1_700_000_040, 0))
-	segment.Fields["status"] = FieldBlock{Postings: map[string][]string{
+	segment.Fields["/status"] = FieldBlock{Postings: map[string][]string{
 		"open": {"orders-open-1", "orders-open-2", "orders-open-3"},
 	}}
 	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
@@ -819,7 +819,7 @@ func TestIndexAdapterRespectsVisibilityLedger(t *testing.T) {
 	resp, err := adapter.Query(ctx, search.Request{
 		Namespace: namespaces.Default,
 		Selector: api.Selector{
-			Eq: &api.Term{Field: "status", Value: "open"},
+			Eq: &api.Term{Field: "/status", Value: "open"},
 		},
 		Limit:  10,
 		Engine: search.EngineIndex,

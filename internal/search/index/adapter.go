@@ -1545,9 +1545,6 @@ func normalizePointerLenient(field string) (string, error) {
 	if field == "" || field == "/" {
 		return "", nil
 	}
-	if !strings.HasPrefix(field, "/") {
-		field = "/" + field
-	}
 	return jsonpointer.Normalize(field)
 }
 

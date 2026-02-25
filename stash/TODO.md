@@ -117,11 +117,11 @@ Scope: lockd-side migration and performance program to complete true inline stre
 - [x] P6.4 Re-run full sweep to green and record suite summary.
 
 ## Phase 7: Benchmark Program and Diminishing Returns Policy
-- [ ] P7.1 Freeze benchmark datasets (small/medium/large + wildcard/recursive/fulltext).
-- [ ] P7.2 Add reproducible benchmark command set in docs.
-- [ ] P7.3 Capture baseline table for all hot benchmarks (current head).
-- [ ] P7.4 Require per-slice before/after table in commit notes.
-- [ ] P7.5 Define diminishing-returns stop condition (e.g. <5% gain across 2 consecutive slices).
+- [x] P7.1 Freeze benchmark datasets (small/medium/large + wildcard/recursive/fulltext).
+- [x] P7.2 Add reproducible benchmark command set in docs.
+- [x] P7.3 Capture baseline table for all hot benchmarks (current head).
+- [x] P7.4 Require per-slice before/after table in commit notes.
+- [x] P7.5 Define diminishing-returns stop condition (e.g. <5% gain across 2 consecutive slices).
 - [ ] P7.6 Once stop condition reached, switch to maintenance/perf-regression guard mode.
 
 ## Phase 8: Documentation + DX cleanup
@@ -133,7 +133,7 @@ Scope: lockd-side migration and performance program to complete true inline stre
 
 ## Immediate Next Iteration Queue (pick in order)
 - [x] N1 Execute P3.A1-P3.A3 in one focused slice (compiled segment cache + docID postings in memory).
-- [ ] N2 Execute P3.B1-P3.B3 in next slice (set engine rewrite to `[]docID`).
+- [x] N2 Execute P3.B1-P3.B3 in next slice (set engine rewrite to `[]docID`).
 - [x] N3 Re-run benchmark suite and record delta in this file under "Iteration Log".
 
 ## Iteration Log (append after each slice)
@@ -162,4 +162,5 @@ Scope: lockd-side migration and performance program to complete true inline stre
 - [x] 2026-02-25: P3.D5 integration rebuild coverage landed (pending commit): added `RunIndexRebuildUpgrade` in query suite and wired backend query integration tests (mem/disk/nfs/aws/azure/minio) to validate v4 legacy segment cleanup and v5 rebuild correctness on real backends.
 - [x] 2026-02-25: P3.D6 benchmark report recorded (pending commit): wildcard resolve `15.32 ns/op` (0 alloc), recursive resolve `23.62 ns/op` (0 alloc), wildcard contains `791,083 ns/op`, `186,004 B/op`, `4,106 allocs/op`, adapter wildcard contains `3,091,692 ns/op`, `1,962,550 B/op`, `12,386 allocs/op`.
 - [x] 2026-02-25: Phase 4 baseline confirmed by existing implementation/tests: planner cost heuristics + selector plan cache + recursive fallback safeguards are active; deep-recursive and wide-wildcard benchmarks are present in `adapter_benchmark_test.go`; state-cap fail-safe is pinned in `field_resolver_test.go`.
+- [x] 2026-02-25: Phase 7 benchmark program baseline landed (pending commit): froze small/medium/large wildcard+recursive+fulltext profiles in `adapter_benchmark_test.go`, recorded reproducible command set and current-head hot benchmark table in `docs/performance/2026-02-25-search-index-phase7-baseline/summary.md`, and defined diminishing-returns/maintenance-mode policy.
 - [ ] YYYY-MM-DD: Next slice commit + benchmark delta summary.

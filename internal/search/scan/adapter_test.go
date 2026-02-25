@@ -7,13 +7,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"pkt.systems/lockd/internal/search"
 	"pkt.systems/lockd/internal/storage"
+	"pkt.systems/lockd/internal/storage/disk"
 	"pkt.systems/lockd/internal/storage/memory"
 	"pkt.systems/lockd/namespaces"
 	"pkt.systems/lql"
@@ -231,6 +234,103 @@ func TestScanAdapterQueryDocumentsLargeMatchReportsSpill(t *testing.T) {
 	}
 }
 
+func TestScanAdapterQueryDocumentsLargeMatchesHeapBounded(t *testing.T) {
+	ctx := context.Background()
+	store, err := disk.New(disk.Config{Root: t.TempDir(), QueueWatch: false})
+	if err != nil {
+		t.Fatalf("new disk store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	const (
+		docCount = 24
+		docBytes = 2 << 20
+	)
+	message := strings.Repeat("timeout payload ", docBytes/len("timeout payload "))
+	for i := 0; i < docCount; i++ {
+		writeState(t, store, "default", fmt.Sprintf("orders/%03d", i), map[string]any{
+			"message": message,
+			"id":      i,
+		})
+	}
+
+	adapter, err := New(Config{Backend: store, MaxDocumentBytes: 8 << 20})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	sel, err := lql.ParseSelectorString(`contains{field=/message,value=timeout}`)
+	if err != nil || sel.IsEmpty() {
+		t.Fatalf("selector parse: %v", err)
+	}
+
+	runtime.GC()
+	var baseline runtime.MemStats
+	runtime.ReadMemStats(&baseline)
+
+	var peakDelta atomic.Int64
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(2 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				var stats runtime.MemStats
+				runtime.ReadMemStats(&stats)
+				delta := int64(stats.HeapAlloc) - int64(baseline.HeapAlloc)
+				if delta < 0 {
+					delta = 0
+				}
+				for {
+					current := peakDelta.Load()
+					if delta <= current || peakDelta.CompareAndSwap(current, delta) {
+						break
+					}
+				}
+			}
+		}
+	}()
+
+	sink := &drainingDocumentSink{
+		chunkBytes: 32 << 10,
+		perChunk:   100 * time.Microsecond,
+	}
+	result, err := adapter.QueryDocuments(ctx, search.Request{
+		Namespace: "default",
+		Selector:  sel,
+		Limit:     docCount,
+	}, sink)
+	close(stop)
+	<-done
+	if err != nil {
+		t.Fatalf("query documents: %v", err)
+	}
+	if len(result.Keys) != docCount {
+		t.Fatalf("expected %d streamed keys, got %d", docCount, len(result.Keys))
+	}
+	if sink.docs != docCount {
+		t.Fatalf("expected %d streamed docs, got %d", docCount, sink.docs)
+	}
+	assertQueryMetadataInt(t, result.Metadata, search.MetadataQueryCandidatesSeen, docCount)
+	assertQueryMetadataInt(t, result.Metadata, search.MetadataQueryCandidatesMatched, docCount)
+	captured := queryMetadataInt(t, result.Metadata, search.MetadataQueryBytesCaptured)
+	if captured < int64(docCount*docBytes) {
+		t.Fatalf("expected captured bytes >= %d, got %d", docCount*docBytes, captured)
+	}
+	if spills := queryMetadataInt(t, result.Metadata, search.MetadataQuerySpillCount); spills < docCount {
+		t.Fatalf("expected spill count >= %d, got %d", docCount, spills)
+	}
+
+	const heapDeltaCap = int64(24 << 20) // 24 MiB additional heap while streaming ~48 MiB payload.
+	if got := peakDelta.Load(); got > heapDeltaCap {
+		t.Fatalf("query-doc heap delta too large: got=%d cap=%d", got, heapDeltaCap)
+	}
+}
+
 func TestScanAdapterInvalidCursor(t *testing.T) {
 	store := memory.New()
 	ctx := context.Background()
@@ -349,6 +449,33 @@ func (s *capturingDocumentSink) OnDocument(_ context.Context, namespace, key str
 		doc:       append([]byte(nil), data...),
 	})
 	return nil
+}
+
+type drainingDocumentSink struct {
+	chunkBytes int
+	perChunk   time.Duration
+	docs       int
+}
+
+func (s *drainingDocumentSink) OnDocument(_ context.Context, _ string, _ string, _ int64, reader io.Reader) error {
+	chunk := s.chunkBytes
+	if chunk <= 0 {
+		chunk = 32 << 10
+	}
+	buf := make([]byte, chunk)
+	for {
+		n, err := reader.Read(buf)
+		if n > 0 && s.perChunk > 0 {
+			time.Sleep(s.perChunk)
+		}
+		if err == io.EOF {
+			s.docs++
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
 }
 
 func TestScanAdapterReturnsNonTransientMetaError(t *testing.T) {

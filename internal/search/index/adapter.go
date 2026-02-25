@@ -6,9 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -483,28 +481,30 @@ func (a *Adapter) matchAndStreamDocument(
 	}
 	defer stateRes.Reader.Close()
 
-	spool, err := os.CreateTemp("", "lockd-index-query-doc-*.json")
-	if err != nil {
-		return false, fmt.Errorf("index: create document spool: %w", err)
-	}
-	spoolPath := spool.Name()
-	defer func() {
-		_ = spool.Close()
-		_ = os.Remove(spoolPath)
-	}()
-
-	tee := io.TeeReader(stateRes.Reader, spool)
 	matched := false
 	_, err = lql.QueryStreamWithResult(lql.QueryStreamRequest{
 		Ctx:               stateCtx,
-		Reader:            tee,
+		Reader:            stateRes.Reader,
 		Plan:              plan,
-		Mode:              lql.QueryDecisionOnly,
+		Mode:              lql.QueryDecisionPlusValue,
+		MatchedOnly:       true,
+		SpoolMemoryBytes:  1,
 		MaxCandidateBytes: 100 * 1024 * 1024,
-		OnDecision: func(d lql.QueryStreamDecision) error {
-			if d.Matched {
-				matched = true
+		MaxMatches:        1,
+		CapturePolicy:     lql.QueryCaptureAllCandidates,
+		OnValue: func(v lql.QueryStreamValue) error {
+			if !v.Matched {
+				return nil
 			}
+			docReader, openErr := v.OpenJSON()
+			if openErr != nil {
+				return openErr
+			}
+			defer docReader.Close()
+			if err := sink.OnDocument(ctx, namespace, key, version, docReader); err != nil {
+				return err
+			}
+			matched = true
 			return nil
 		},
 	})
@@ -513,12 +513,6 @@ func (a *Adapter) matchAndStreamDocument(
 	}
 	if !matched {
 		return false, nil
-	}
-	if _, err := spool.Seek(0, io.SeekStart); err != nil {
-		return false, fmt.Errorf("index: rewind document spool: %w", err)
-	}
-	if err := sink.OnDocument(ctx, namespace, key, version, spool); err != nil {
-		return false, err
 	}
 	return true, nil
 }

@@ -799,8 +799,8 @@ func (r *segmentReader) docIDsForContains(ctx context.Context, term *api.Term, u
 	if needle == "" {
 		return r.docIDsForExists(ctx, normalizeField(term))
 	}
-	acc := borrowDocIDAccumulator()
-	defer releaseDocIDAccumulator(acc)
+	out := borrowDocIDScratch()
+	defer releaseDocIDScratch(out)
 	for _, field := range fields {
 		fieldID, ok := r.fieldID(field)
 		if !ok {
@@ -810,9 +810,12 @@ func (r *segmentReader) docIDsForContains(ctx context.Context, term *api.Term, u
 		if err != nil {
 			return nil, err
 		}
-		acc.union(set)
+		if len(set) == 0 {
+			continue
+		}
+		*out = append(*out, set...)
 	}
-	return acc.result(), nil
+	return sortUniqueDocIDs(append(docIDSet(nil), (*out)...)), nil
 }
 
 func (r *segmentReader) docIDsForIContains(ctx context.Context, term *api.Term, useTrigramIndex bool) (docIDSet, error) {
@@ -836,8 +839,8 @@ func (r *segmentReader) docIDsForIContains(ctx context.Context, term *api.Term, 
 		}
 		return nil, nil
 	}
-	acc := borrowDocIDAccumulator()
-	defer releaseDocIDAccumulator(acc)
+	out := borrowDocIDScratch()
+	defer releaseDocIDScratch(out)
 	for _, field := range fields {
 		prefilter, hasTokenIndex, err := r.tokenPrefilterForField(ctx, field, needle, useAllText)
 		if err != nil {
@@ -852,7 +855,9 @@ func (r *segmentReader) docIDsForIContains(ctx context.Context, term *api.Term, 
 				return nil, err
 			}
 			if len(rawExists) == 0 {
-				acc.union(prefilter)
+				if len(prefilter) > 0 {
+					*out = append(*out, prefilter...)
+				}
 				continue
 			}
 		}
@@ -864,9 +869,12 @@ func (r *segmentReader) docIDsForIContains(ctx context.Context, term *api.Term, 
 		if err != nil {
 			return nil, err
 		}
-		acc.union(set)
+		if len(set) == 0 {
+			continue
+		}
+		*out = append(*out, set...)
 	}
-	return acc.result(), nil
+	return sortUniqueDocIDs(append(docIDSet(nil), (*out)...)), nil
 }
 
 func (r *segmentReader) tokenPrefilterForField(ctx context.Context, field, needle string, useAllText bool) (docIDSet, bool, error) {

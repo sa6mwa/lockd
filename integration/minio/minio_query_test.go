@@ -16,6 +16,7 @@ import (
 	"pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/integration/internal/cryptotest"
+	"pkt.systems/lockd/integration/internal/hatest"
 	querydata "pkt.systems/lockd/integration/query/querydata"
 	queriesuite "pkt.systems/lockd/integration/query/suite"
 	"pkt.systems/lockd/internal/core"
@@ -1043,6 +1044,13 @@ func TestMinioQueryRestartRollsBackStaged(t *testing.T) {
 
 	cfg.SweeperInterval = 200 * time.Millisecond
 	ts = startMinioQueryServerWithConfigNoPreclean(t, cfg)
+
+	activeCtx, activeCancel := context.WithTimeout(ctx, 30*time.Second)
+	if err := hatest.WaitForActive(activeCtx, ts); err != nil {
+		activeCancel()
+		t.Fatalf("wait for active server after restart: %v", err)
+	}
+	activeCancel()
 
 	waitCtx, waitCancel := context.WithTimeout(ctx, 45*time.Second)
 	defer waitCancel()

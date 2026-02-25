@@ -288,6 +288,7 @@ func RunIndexRebuildUpgrade(t *testing.T, factory ServerFactory) {
 			IndexManager:           idxManager,
 			DefaultNamespace:       ts.Config.DefaultNamespace,
 			DefaultNamespaceConfig: defaultCfg,
+			HALeaseTTL:             -1,
 		})
 		res, err := svc.RebuildIndex(ctx, namespace, core.IndexRebuildOptions{
 			Mode:         "wait",

@@ -74,8 +74,8 @@ Scope: lockd-side migration and performance program to complete true inline stre
 ### P3.C Dictionary and postings acceleration
 - [x] P3.C1 Add in-memory field dictionary IDs and term dictionary IDs.
 - [x] P3.C2 Route evaluator over IDs, not raw strings, in hot loops.
-- [ ] P3.C3 Add small-object pools for temporary posting iterators/work buffers.
-- [ ] P3.C4 Benchmark delta report for C slice.
+- [x] P3.C3 Add small-object pools for temporary posting iterators/work buffers.
+- [x] P3.C4 Benchmark delta report for C slice.
 
 ### P3.D Index format v5 (persistent lucene-like structure)
 - [ ] P3.D1 Write v5 format design doc (manifest + segment schema + migration behavior).
@@ -156,4 +156,5 @@ Scope: lockd-side migration and performance program to complete true inline stre
 - [x] 2026-02-25: P3.C1-P3.C2 field/term dictionary IDs landed (pending commit): compiled segments now keep field-ID and term-ID dictionaries with postings by term-ID; evaluator hot loops resolve selector fields to IDs and query postings by IDs. Bench: wildcard resolve `14.74 ns/op` (0 alloc), recursive resolve `25.06 ns/op` (0 alloc), wildcard contains `2,311,919 ns/op`, `2,539,641 B/op`, `8,214 allocs/op`, adapter wildcard contains `4,048,498 ns/op`, `2,578,739 B/op`, `14,435 allocs/op`.
 - [x] 2026-02-25: Scan/LQL numeric-map-key parity + object-store integration hardening landed (`9bef106`): scan adapter now preserves selector semantics for numeric JSON pointer segments by compatibility matching path; query integration suite now scales flow-control/low-match fixtures on object stores (`aws://`, `azure://`, `s3://`) to avoid false timeout failures while preserving behavioral assertions.
 - [x] 2026-02-25: Full integration contract sweep passed (`./run-integration-suites.sh all`, elapsed `52:46`): mem/disk/nfs/aws/azure/minio/mixed all green.
+- [x] 2026-02-25: P3.C3-P3.C4 pooling slice landed (pending commit): added pooled `docIDAccumulator` work buffers for repeated union/intersect/subtract loops in selector evaluation and postings aggregation. Bench: wildcard resolve `15.83 ns/op` (0 alloc), recursive resolve `24.92 ns/op` (0 alloc), wildcard contains `854,746 ns/op`, `186,210 B/op`, `4,106 allocs/op`, adapter wildcard contains `2,747,160 ns/op`, `1,963,217 B/op`, `12,386 allocs/op`.
 - [ ] YYYY-MM-DD: Next slice commit + benchmark delta summary.

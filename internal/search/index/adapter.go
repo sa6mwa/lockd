@@ -31,6 +31,15 @@ var docIDScratchPool = sync.Pool{
 	},
 }
 
+var docIDAccumulatorPool = sync.Pool{
+	New: func() any {
+		return &docIDAccumulator{
+			current: make(docIDSet, 0, 256),
+			scratch: make(docIDSet, 0, 256),
+		}
+	},
+}
+
 // AdapterConfig configures the index query adapter.
 type AdapterConfig struct {
 	Store  *Store
@@ -632,35 +641,37 @@ func (r *segmentReader) docIDsForEq(ctx context.Context, term *api.Term) (docIDS
 		return nil, nil
 	}
 	normalizedTerm := normalizeTermValue(term.Value)
-	out := make(docIDSet, 0)
+	acc := borrowDocIDAccumulator()
+	defer releaseDocIDAccumulator(acc)
 	for _, fieldID := range fieldIDs {
 		set, err := r.docIDsForTermID(ctx, fieldID, normalizedTerm)
 		if err != nil {
 			return nil, err
 		}
-		out = unionDocIDs(out, set)
+		acc.union(set)
 	}
-	return out, nil
+	return acc.result(), nil
 }
 
 func (r *segmentReader) docIDsForTermID(ctx context.Context, fieldID uint32, term string) (docIDSet, error) {
 	if strings.TrimSpace(term) == "" {
 		return nil, nil
 	}
-	var out docIDSet
+	acc := borrowDocIDAccumulator()
+	defer releaseDocIDAccumulator(acc)
 	err := r.forEachCompiledSegment(ctx, func(seg *compiledSegment) error {
 		block, ok := seg.fieldsByID[fieldID]
 		if !ok {
 			return nil
 		}
 		docIDs := block.docIDsForTerm(term)
-		out = unionDocIDs(out, docIDs)
+		acc.union(docIDs)
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return out, nil
+	return acc.result(), nil
 }
 
 func (r *segmentReader) docIDsForPrefix(ctx context.Context, term *api.Term) (docIDSet, error) {
@@ -699,15 +710,16 @@ func (r *segmentReader) docIDsForContains(ctx context.Context, term *api.Term, u
 	if needle == "" {
 		return r.docIDsForExists(ctx, normalizeField(term))
 	}
-	out := make(docIDSet, 0)
+	acc := borrowDocIDAccumulator()
+	defer releaseDocIDAccumulator(acc)
 	for _, field := range fields {
 		set, err := r.docIDsForContainsField(ctx, field, r.internField(field), needle, useTrigramIndex)
 		if err != nil {
 			return nil, err
 		}
-		out = unionDocIDs(out, set)
+		acc.union(set)
 	}
-	return out, nil
+	return acc.result(), nil
 }
 
 func (r *segmentReader) docIDsForContainsField(ctx context.Context, field string, fieldID uint32, needle string, useTrigramIndex bool) (docIDSet, error) {
@@ -715,9 +727,9 @@ func (r *segmentReader) docIDsForContainsField(ctx context.Context, field string
 	if useTrigramIndex {
 		grams := normalizedTrigrams(needle)
 		if len(grams) > 0 {
-			initialized := false
 			sawGramPosting := false
-			candidate := make(docIDSet, 0)
+			acc := borrowDocIDAccumulator()
+			defer releaseDocIDAccumulator(acc)
 			gramFieldID := r.internField(containsGramField(field))
 			for _, gram := range grams {
 				gramSet, err := r.docIDsForTermID(ctx, gramFieldID, gram)
@@ -727,19 +739,15 @@ func (r *segmentReader) docIDsForContainsField(ctx context.Context, field string
 				if len(gramSet) > 0 {
 					sawGramPosting = true
 				}
-				if !initialized {
-					candidate = cloneDocIDs(gramSet)
-					initialized = true
-				} else {
-					candidate = intersectDocIDs(candidate, gramSet)
-				}
-				if len(candidate) == 0 {
+				acc.intersect(gramSet)
+				if acc.initialized && len(acc.current) == 0 {
 					break
 				}
 			}
+			candidate := acc.result()
 			if len(candidate) > 0 {
 				candidateFilter = candidate
-			} else if initialized && sawGramPosting {
+			} else if acc.initialized && sawGramPosting {
 				return nil, nil
 			}
 		}
@@ -818,17 +826,18 @@ func (r *segmentReader) docIDsForIn(ctx context.Context, term *api.InTerm) (docI
 	if len(fieldIDs) == 0 || len(term.Any) == 0 {
 		return nil, nil
 	}
-	unionSet := make(docIDSet, 0)
+	acc := borrowDocIDAccumulator()
+	defer releaseDocIDAccumulator(acc)
 	for _, fieldID := range fieldIDs {
 		for _, candidate := range term.Any {
 			eqSet, err := r.docIDsForTermID(ctx, fieldID, normalizeTermValue(candidate))
 			if err != nil {
 				return nil, err
 			}
-			unionSet = unionDocIDs(unionSet, eqSet)
+			acc.union(eqSet)
 		}
 	}
-	return unionSet, nil
+	return acc.result(), nil
 }
 
 func (r *segmentReader) forEachSegment(ctx context.Context, fn func(*Segment) error) error {
@@ -1252,14 +1261,16 @@ func (e selectorEvaluator) evaluate(ctx context.Context, sel api.Selector) (docI
 		}
 		return baseSet, nil
 	}
-	unionSet := make(docIDSet, 0)
+	acc := borrowDocIDAccumulator()
+	defer releaseDocIDAccumulator(acc)
 	for _, branch := range sel.Or {
 		branchSet, err := e.evaluate(ctx, branch)
 		if err != nil {
 			return nil, err
 		}
-		unionSet = unionDocIDs(unionSet, branchSet)
+		acc.union(branchSet)
 	}
+	unionSet := acc.result()
 	if !initialized {
 		return unionSet, nil
 	}
@@ -1267,17 +1278,16 @@ func (e selectorEvaluator) evaluate(ctx context.Context, sel api.Selector) (docI
 }
 
 func (e selectorEvaluator) evaluateBase(ctx context.Context, sel api.Selector) (docIDSet, bool, error) {
-	var (
-		result      docIDSet
-		initialized bool
-	)
+	acc := borrowDocIDAccumulator()
+	defer releaseDocIDAccumulator(acc)
+	initialized := false
 	intersectWith := func(set docIDSet) {
 		if !initialized {
-			result = cloneDocIDs(set)
+			acc.set(set)
 			initialized = true
 			return
 		}
-		result = intersectDocIDs(result, set)
+		acc.intersect(set)
 	}
 	for _, resolver := range selectorClauseResolvers {
 		set, present, err := resolver.resolve(ctx, e, sel)
@@ -1307,14 +1317,15 @@ func (e selectorEvaluator) evaluateBase(ctx context.Context, sel api.Selector) (
 				if err != nil {
 					return nil, false, err
 				}
-				result = subtractDocIDs(all, notSet)
+				acc.set(all)
+				acc.subtract(notSet)
 				initialized = true
 			} else {
-				result = subtractDocIDs(result, notSet)
+				acc.subtract(notSet)
 			}
 		}
 	}
-	return result, initialized, nil
+	return acc.result(), initialized, nil
 }
 
 func (a *Adapter) visibilityMap(ctx context.Context, namespace string) (map[string]bool, error) {
@@ -1338,6 +1349,12 @@ func (a *Adapter) visibleFromLedger(ctx context.Context, namespace, key string, 
 
 type docIDSet []uint32
 
+type docIDAccumulator struct {
+	current     docIDSet
+	scratch     docIDSet
+	initialized bool
+}
+
 func borrowDocIDScratch() *docIDSet {
 	buf := docIDScratchPool.Get().(*docIDSet)
 	*buf = (*buf)[:0]
@@ -1354,6 +1371,74 @@ func releaseDocIDScratch(buf *docIDSet) {
 		*buf = (*buf)[:0]
 	}
 	docIDScratchPool.Put(buf)
+}
+
+func borrowDocIDAccumulator() *docIDAccumulator {
+	acc := docIDAccumulatorPool.Get().(*docIDAccumulator)
+	acc.current = acc.current[:0]
+	acc.scratch = acc.scratch[:0]
+	acc.initialized = false
+	return acc
+}
+
+func releaseDocIDAccumulator(acc *docIDAccumulator) {
+	if acc == nil {
+		return
+	}
+	const maxScratchCap = 1 << 20
+	if cap(acc.current) > maxScratchCap {
+		acc.current = make(docIDSet, 0, 256)
+	} else {
+		acc.current = acc.current[:0]
+	}
+	if cap(acc.scratch) > maxScratchCap {
+		acc.scratch = make(docIDSet, 0, 256)
+	} else {
+		acc.scratch = acc.scratch[:0]
+	}
+	acc.initialized = false
+	docIDAccumulatorPool.Put(acc)
+}
+
+func (a *docIDAccumulator) set(in docIDSet) {
+	a.current = append(a.current[:0], in...)
+	a.initialized = true
+}
+
+func (a *docIDAccumulator) union(in docIDSet) {
+	if len(in) == 0 {
+		return
+	}
+	if !a.initialized {
+		a.set(in)
+		return
+	}
+	a.scratch = unionDocIDsInto(a.scratch[:0], a.current, in)
+	a.current, a.scratch = a.scratch, a.current[:0]
+}
+
+func (a *docIDAccumulator) intersect(in docIDSet) {
+	if !a.initialized {
+		a.set(in)
+		return
+	}
+	a.scratch = intersectDocIDsInto(a.scratch[:0], a.current, in)
+	a.current, a.scratch = a.scratch, a.current[:0]
+}
+
+func (a *docIDAccumulator) subtract(in docIDSet) {
+	if !a.initialized || len(in) == 0 {
+		return
+	}
+	a.scratch = subtractDocIDsInto(a.scratch[:0], a.current, in)
+	a.current, a.scratch = a.scratch, a.current[:0]
+}
+
+func (a *docIDAccumulator) result() docIDSet {
+	if !a.initialized || len(a.current) == 0 {
+		return nil
+	}
+	return cloneDocIDs(a.current)
 }
 
 func cloneDocIDs(in docIDSet) docIDSet {
@@ -1381,39 +1466,33 @@ func sortUniqueDocIDs(in docIDSet) docIDSet {
 	return in[:w]
 }
 
-func unionDocIDs(a, b docIDSet) docIDSet {
-	if len(a) == 0 {
-		return cloneDocIDs(b)
-	}
-	if len(b) == 0 {
-		return cloneDocIDs(a)
-	}
-	out := make(docIDSet, 0, len(a)+len(b))
+func unionDocIDsInto(dst, a, b docIDSet) docIDSet {
+	dst = dst[:0]
 	i, j := 0, 0
 	for i < len(a) && j < len(b) {
 		av := a[i]
 		bv := b[j]
 		if av == bv {
-			out = append(out, av)
+			dst = append(dst, av)
 			i++
 			j++
 			continue
 		}
 		if av < bv {
-			out = append(out, av)
+			dst = append(dst, av)
 			i++
 			continue
 		}
-		out = append(out, bv)
+		dst = append(dst, bv)
 		j++
 	}
 	if i < len(a) {
-		out = append(out, a[i:]...)
+		dst = append(dst, a[i:]...)
 	}
 	if j < len(b) {
-		out = append(out, b[j:]...)
+		dst = append(dst, b[j:]...)
 	}
-	return out
+	return dst
 }
 
 func intersectDocIDs(a, b docIDSet) docIDSet {
@@ -1421,12 +1500,17 @@ func intersectDocIDs(a, b docIDSet) docIDSet {
 		return nil
 	}
 	out := make(docIDSet, 0, min(len(a), len(b)))
+	return intersectDocIDsInto(out, a, b)
+}
+
+func intersectDocIDsInto(dst, a, b docIDSet) docIDSet {
+	dst = dst[:0]
 	i, j := 0, 0
 	for i < len(a) && j < len(b) {
 		av := a[i]
 		bv := b[j]
 		if av == bv {
-			out = append(out, av)
+			dst = append(dst, av)
 			i++
 			j++
 			continue
@@ -1437,21 +1521,15 @@ func intersectDocIDs(a, b docIDSet) docIDSet {
 		}
 		j++
 	}
-	return out
+	return dst
 }
 
-func subtractDocIDs(a, b docIDSet) docIDSet {
-	if len(a) == 0 {
-		return nil
-	}
-	if len(b) == 0 {
-		return cloneDocIDs(a)
-	}
-	out := make(docIDSet, 0, len(a))
+func subtractDocIDsInto(dst, a, b docIDSet) docIDSet {
+	dst = dst[:0]
 	i, j := 0, 0
 	for i < len(a) {
 		if j >= len(b) {
-			out = append(out, a[i:]...)
+			dst = append(dst, a[i:]...)
 			break
 		}
 		av := a[i]
@@ -1462,13 +1540,13 @@ func subtractDocIDs(a, b docIDSet) docIDSet {
 			continue
 		}
 		if av < bv {
-			out = append(out, av)
+			dst = append(dst, av)
 			i++
 			continue
 		}
 		j++
 	}
-	return out
+	return dst
 }
 
 func appendIntersectDocIDs(dst docIDSet, a, b docIDSet) docIDSet {

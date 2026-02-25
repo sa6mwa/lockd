@@ -168,8 +168,20 @@ func (s *Service) runIndexRebuild(ctx context.Context, namespace string, opts In
 	}
 	defer release()
 
+	targetFormat, err := s.indexRebuildTargetFormat(ctx, namespace)
+	if err != nil {
+		return result, err
+	}
+
 	if opts.Reset {
 		if err := s.resetIndexArtifacts(ctx, namespace); err != nil {
+			return result, err
+		}
+		if err := s.bootstrapIndexManifest(ctx, namespace, targetFormat); err != nil {
+			return result, err
+		}
+	} else {
+		if err := s.ensureIndexManifestFormat(ctx, namespace, targetFormat); err != nil {
 			return result, err
 		}
 	}
@@ -259,7 +271,7 @@ func (s *Service) runIndexRebuild(ctx context.Context, namespace string, opts In
 		if delay < 0 {
 			delay = 0
 		}
-		if err := s.cleanupLegacySegments(ctx, namespace, delay); err != nil && hardErr == nil {
+		if err := s.cleanupLegacySegments(ctx, namespace, delay, targetFormat); err != nil && hardErr == nil {
 			hardErr = err
 		}
 	}
@@ -268,6 +280,77 @@ func (s *Service) runIndexRebuild(ctx context.Context, namespace string, opts In
 		return result, hardErr
 	}
 	return result, nil
+}
+
+func (s *Service) indexRebuildTargetFormat(ctx context.Context, namespace string) (uint32, error) {
+	if s == nil || s.indexManager == nil {
+		return indexer.IndexFormatVersionV4, nil
+	}
+	manifestRes, err := s.indexManager.LoadManifest(ctx, namespace)
+	if err != nil {
+		return 0, err
+	}
+	manifest := manifestRes.Manifest
+	if manifest == nil || manifest.Format < indexer.IndexFormatVersionV4 {
+		return indexer.IndexFormatVersionV4, nil
+	}
+	return manifest.Format, nil
+}
+
+func (s *Service) ensureIndexManifestFormat(ctx context.Context, namespace string, targetFormat uint32) error {
+	if s == nil || s.indexManager == nil {
+		return storage.ErrNotImplemented
+	}
+	if targetFormat < indexer.IndexFormatVersionV4 {
+		targetFormat = indexer.IndexFormatVersionV4
+	}
+	var lastErr error
+	for attempt := 0; attempt < indexRebuildManifestRetries; attempt++ {
+		manifestRes, err := s.indexManager.LoadManifest(ctx, namespace)
+		if err != nil {
+			return err
+		}
+		manifest := manifestRes.Manifest
+		etag := manifestRes.ETag
+		if manifest == nil {
+			manifest = indexer.NewManifest()
+		}
+		changed := false
+		if manifest.Format != targetFormat {
+			manifest.Format = targetFormat
+			manifest.Seq++
+			manifest.UpdatedAt = time.Now().UTC()
+			changed = true
+		}
+		if !changed && etag != "" {
+			return nil
+		}
+		if _, err := s.indexManager.SaveManifest(ctx, namespace, manifest, etag); err == nil {
+			return nil
+		}
+		lastErr = err
+		if !errors.Is(err, storage.ErrCASMismatch) {
+			return err
+		}
+		if attempt+1 < indexRebuildManifestRetries {
+			s.clock.Sleep(indexRebuildManifestDelay)
+		}
+	}
+	return lastErr
+}
+
+func (s *Service) bootstrapIndexManifest(ctx context.Context, namespace string, targetFormat uint32) error {
+	if s == nil || s.indexManager == nil {
+		return storage.ErrNotImplemented
+	}
+	if targetFormat < indexer.IndexFormatVersionV4 {
+		targetFormat = indexer.IndexFormatVersionV4
+	}
+	manifest := indexer.NewManifest()
+	manifest.Format = targetFormat
+	manifest.Shards[0] = &indexer.Shard{ID: 0}
+	_, err := s.indexManager.SaveManifest(ctx, namespace, manifest, "")
+	return err
 }
 
 func (s *Service) acquireIndexRebuildLock(ctx context.Context, namespace string) (func(), error) {
@@ -406,13 +489,16 @@ func (s *Service) resetIndexArtifacts(ctx context.Context, namespace string) err
 	return nil
 }
 
-func (s *Service) cleanupLegacySegments(ctx context.Context, namespace string, delay time.Duration) error {
+func (s *Service) cleanupLegacySegments(ctx context.Context, namespace string, delay time.Duration, targetFormat uint32) error {
 	if delay > 0 {
 		if err := s.waitWithContext(ctx, delay); err != nil {
 			return err
 		}
 	}
-	legacyIDs, err := s.collectLegacySegmentIDs(ctx, namespace)
+	if targetFormat < indexer.IndexFormatVersionV4 {
+		targetFormat = indexer.IndexFormatVersionV4
+	}
+	legacyIDs, err := s.collectLegacySegmentIDs(ctx, namespace, targetFormat)
 	if err != nil {
 		return err
 	}
@@ -430,7 +516,7 @@ func (s *Service) cleanupLegacySegments(ctx context.Context, namespace string, d
 		if manifest == nil || len(manifest.Shards) == 0 {
 			return nil
 		}
-		manifest.Format = indexer.IndexFormatVersionV4
+		manifest.Format = targetFormat
 		changed := false
 		for _, shard := range manifest.Shards {
 			if shard == nil || len(shard.Segments) == 0 {
@@ -474,7 +560,7 @@ func (s *Service) cleanupLegacySegments(ctx context.Context, namespace string, d
 	return nil
 }
 
-func (s *Service) collectLegacySegmentIDs(ctx context.Context, namespace string) (map[string]struct{}, error) {
+func (s *Service) collectLegacySegmentIDs(ctx context.Context, namespace string, targetFormat uint32) (map[string]struct{}, error) {
 	manifestRes, err := s.indexManager.LoadManifest(ctx, namespace)
 	if err != nil {
 		return nil, err
@@ -501,7 +587,7 @@ func (s *Service) collectLegacySegmentIDs(ctx context.Context, namespace string)
 				}
 				return nil, err
 			}
-			if segment != nil && segment.Format < indexer.IndexFormatVersionV4 {
+			if segment != nil && segment.Format < targetFormat {
 				legacy[ref.ID] = struct{}{}
 			}
 		}

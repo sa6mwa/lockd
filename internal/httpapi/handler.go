@@ -1091,10 +1091,7 @@ func (h *Handler) writeQueryKeysResponse(w http.ResponseWriter, resp api.QueryRe
 	return nil
 }
 
-func (h *Handler) writeQueryDocumentsCore(ctx context.Context, w http.ResponseWriter, cmd core.QueryCommand, result *core.QueryResult) error {
-	if result == nil {
-		return httpError{Status: http.StatusInternalServerError, Code: "internal", Detail: "query result required for documents stream"}
-	}
+func (h *Handler) writeQueryDocumentsCore(ctx context.Context, w http.ResponseWriter, cmd core.QueryCommand) error {
 	headers := w.Header()
 	headers.Set("Content-Type", contentTypeNDJSON)
 	headers.Set(headerQueryReturn, string(api.QueryReturnDocuments))
@@ -1115,13 +1112,11 @@ func (h *Handler) writeQueryDocumentsCore(ctx context.Context, w http.ResponseWr
 		rowBuf:     make([]byte, 0, queryStreamRowBufSize),
 		flushEvery: queryStreamFlushEvery,
 	}
-	keys := result.Keys
-	if len(cmd.Keys) > 0 {
-		keys = cmd.Keys
-	}
-	err := h.core.StreamPublishedDocuments(ctx, result.Namespace, keys, result.DocMeta, sink)
+	result, err := h.core.QueryDocuments(ctx, cmd, sink)
 	sink.Flush()
-	applyQueryDocumentTrailers(headers, result.Cursor, result.IndexSeq, result.Metadata)
+	if result != nil {
+		applyQueryDocumentTrailers(headers, result.Cursor, result.IndexSeq, result.Metadata)
+	}
 	return err
 }
 

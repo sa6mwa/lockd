@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -113,6 +114,80 @@ func TestScanAdapterCursor(t *testing.T) {
 	}
 }
 
+func TestScanAdapterQueryDocumentsMatchAll(t *testing.T) {
+	store := memory.New()
+	ctx := context.Background()
+	writeState(t, store, "default", "orders/1", map[string]any{"status": "open"})
+	writeState(t, store, "default", "orders/2", map[string]any{"status": "closed"})
+
+	adapter, err := New(Config{Backend: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	sink := &capturingDocumentSink{}
+	result, err := adapter.QueryDocuments(ctx, search.Request{
+		Namespace: "default",
+		Limit:     10,
+	}, sink)
+	if err != nil {
+		t.Fatalf("query documents: %v", err)
+	}
+	if len(result.Keys) != 2 {
+		t.Fatalf("expected 2 keys, got %d", len(result.Keys))
+	}
+	if len(sink.rows) != 2 {
+		t.Fatalf("expected 2 streamed docs, got %d", len(sink.rows))
+	}
+	if sink.rows[0].key != "orders/1" || sink.rows[1].key != "orders/2" {
+		t.Fatalf("unexpected streamed key order: %+v", sink.rows)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(sink.rows[0].doc, &doc); err != nil {
+		t.Fatalf("unmarshal doc: %v", err)
+	}
+	if doc["status"] != "open" {
+		t.Fatalf("unexpected document payload: %+v", doc)
+	}
+}
+
+func TestScanAdapterQueryDocumentsSelectorReadsStateOncePerCandidate(t *testing.T) {
+	store := memory.New()
+	ctx := context.Background()
+	writeState(t, store, "default", "orders/1", map[string]any{"status": "open"})
+	writeState(t, store, "default", "orders/2", map[string]any{"status": "closed"})
+
+	backend := &countingReadBackend{Backend: store, reads: map[string]int{}}
+	adapter, err := New(Config{Backend: backend})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	sel, err := lql.ParseSelectorString(`and.eq{field=/status,value=open}`)
+	if err != nil || sel.IsEmpty() {
+		t.Fatalf("selector parse: %v", err)
+	}
+	sink := &capturingDocumentSink{}
+	result, err := adapter.QueryDocuments(ctx, search.Request{
+		Namespace: "default",
+		Selector:  sel,
+		Limit:     10,
+	}, sink)
+	if err != nil {
+		t.Fatalf("query documents: %v", err)
+	}
+	if len(result.Keys) != 1 || result.Keys[0] != "orders/1" {
+		t.Fatalf("unexpected result keys: %+v", result.Keys)
+	}
+	if len(sink.rows) != 1 || sink.rows[0].key != "orders/1" {
+		t.Fatalf("unexpected streamed rows: %+v", sink.rows)
+	}
+	if got := backend.reads["orders/1"]; got != 1 {
+		t.Fatalf("expected one read for matched key, got %d", got)
+	}
+	if got := backend.reads["orders/2"]; got != 1 {
+		t.Fatalf("expected one read for non-matched candidate, got %d", got)
+	}
+}
+
 func TestScanAdapterInvalidCursor(t *testing.T) {
 	store := memory.New()
 	ctx := context.Background()
@@ -196,6 +271,41 @@ func (b stateErrorBackend) ReadState(ctx context.Context, namespace, key string)
 		return storage.ReadStateResult{}, b.err
 	}
 	return b.Backend.ReadState(ctx, namespace, key)
+}
+
+type countingReadBackend struct {
+	storage.Backend
+	reads map[string]int
+}
+
+func (b *countingReadBackend) ReadState(ctx context.Context, namespace, key string) (storage.ReadStateResult, error) {
+	b.reads[key]++
+	return b.Backend.ReadState(ctx, namespace, key)
+}
+
+type capturedDocument struct {
+	namespace string
+	key       string
+	version   int64
+	doc       []byte
+}
+
+type capturingDocumentSink struct {
+	rows []capturedDocument
+}
+
+func (s *capturingDocumentSink) OnDocument(_ context.Context, namespace, key string, version int64, reader io.Reader) error {
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return err
+	}
+	s.rows = append(s.rows, capturedDocument{
+		namespace: namespace,
+		key:       key,
+		version:   version,
+		doc:       append([]byte(nil), data...),
+	})
+	return nil
 }
 
 func TestScanAdapterReturnsNonTransientMetaError(t *testing.T) {

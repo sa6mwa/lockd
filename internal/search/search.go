@@ -3,12 +3,17 @@ package search
 import (
 	"context"
 	"errors"
+	"io"
 
 	"pkt.systems/lockd/api"
 )
 
 // ErrInvalidCursor indicates that the supplied cursor could not be decoded.
 var ErrInvalidCursor = errors.New("search: invalid cursor")
+
+// ErrDocumentStreamingUnsupported indicates the selected adapter cannot stream
+// query documents inline.
+var ErrDocumentStreamingUnsupported = errors.New("search: document streaming unsupported")
 
 // Request captures a namespace-scoped selector query.
 type Request struct {
@@ -44,6 +49,16 @@ type DocMetadata struct {
 type Adapter interface {
 	Capabilities(ctx context.Context, namespace string) (Capabilities, error)
 	Query(ctx context.Context, req Request) (Result, error)
+}
+
+// DocumentSink receives matched documents from a streaming query.
+type DocumentSink interface {
+	OnDocument(ctx context.Context, namespace, key string, version int64, reader io.Reader) error
+}
+
+// DocumentStreamer executes query return=documents as an inline stream.
+type DocumentStreamer interface {
+	QueryDocuments(ctx context.Context, req Request, sink DocumentSink) (Result, error)
 }
 
 // EngineHint guides the dispatcher when multiple engines (index vs scan) are available.

@@ -2,6 +2,7 @@ package search
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
 
@@ -86,5 +87,59 @@ func (d *Dispatcher) Query(ctx context.Context, req Request) (Result, error) {
 			return d.scan.Query(ctx, req)
 		}
 		return Result{}, fmt.Errorf("no query engine available")
+	}
+}
+
+// QueryDocuments streams matched documents in a single pass when supported by
+// the selected engine, with fallback to scan streaming when index streaming is
+// not available yet.
+func (d *Dispatcher) QueryDocuments(ctx context.Context, req Request, sink DocumentSink) (Result, error) {
+	if d == nil {
+		return Result{}, fmt.Errorf("search dispatcher unavailable")
+	}
+	try := func(adapter Adapter, request Request) (Result, error) {
+		if adapter == nil {
+			return Result{}, ErrDocumentStreamingUnsupported
+		}
+		streamer, ok := adapter.(DocumentStreamer)
+		if !ok {
+			return Result{}, ErrDocumentStreamingUnsupported
+		}
+		return streamer.QueryDocuments(ctx, request, sink)
+	}
+	fallbackScan := func(request Request) (Result, error) {
+		request.Engine = EngineScan
+		res, err := try(d.scan, request)
+		if err != nil {
+			return Result{}, err
+		}
+		if res.Metadata == nil {
+			res.Metadata = make(map[string]string)
+		}
+		res.Metadata["engine"] = string(EngineScan)
+		return res, nil
+	}
+
+	switch req.Engine {
+	case EngineIndex:
+		res, err := try(d.index, req)
+		if err == nil {
+			return res, nil
+		}
+		if !errors.Is(err, ErrDocumentStreamingUnsupported) {
+			return Result{}, err
+		}
+		return fallbackScan(req)
+	case EngineScan:
+		return try(d.scan, req)
+	default:
+		res, err := try(d.index, req)
+		if err == nil {
+			return res, nil
+		}
+		if !errors.Is(err, ErrDocumentStreamingUnsupported) {
+			return Result{}, err
+		}
+		return fallbackScan(req)
 	}
 }

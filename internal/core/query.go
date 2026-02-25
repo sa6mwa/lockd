@@ -10,7 +10,7 @@ import (
 	"pkt.systems/lockd/internal/search"
 )
 
-// Query executes a selector and returns keys/cursor. Document streaming is handled by callers using OpenPublishedDocument.
+// Query executes a selector and returns keys/cursor.
 func (s *Service) Query(ctx context.Context, cmd QueryCommand) (*QueryResult, error) {
 	if s.searchAdapter == nil {
 		return nil, Failure{Code: "query_disabled", Detail: "query service not configured", HTTPStatus: http.StatusNotImplemented}
@@ -100,24 +100,99 @@ func (s *Service) Query(ctx context.Context, cmd QueryCommand) (*QueryResult, er
 	}, nil
 }
 
-// QueryDocuments streams published documents for the selector to the provided sink.
+// QueryDocuments streams selector-matched documents directly to sink in a
+// single-pass adapter flow when available.
 func (s *Service) QueryDocuments(ctx context.Context, cmd QueryCommand, sink DocumentSink) (*QueryResult, error) {
-	cmd.Return = apiQueryReturnDocuments
-	result, err := s.Query(ctx, cmd)
-	if err != nil {
+	if s.searchAdapter == nil {
+		return nil, Failure{Code: "query_disabled", Detail: "query service not configured", HTTPStatus: http.StatusNotImplemented}
+	}
+	if err := s.maybeThrottleQuery(ctx); err != nil {
 		return nil, err
 	}
-	if sink == nil {
+	if err := s.applyShutdownGuard("query"); err != nil {
+		return nil, err
+	}
+	finish := s.beginQueryOp()
+	defer finish()
+
+	namespace, err := s.resolveNamespace(cmd.Namespace)
+	if err != nil {
+		return nil, Failure{Code: "invalid_namespace", Detail: err.Error(), HTTPStatus: http.StatusBadRequest}
+	}
+	s.observeNamespace(namespace)
+
+	limit := cmd.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+
+	engine := cmd.Engine
+	if engine == "" || engine == search.EngineAuto {
+		engine, err = s.selectQueryEngine(ctx, namespace, cmd.Engine)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if engine == search.EngineIndex && cmd.Refresh == RefreshWaitFor && s.indexManager != nil {
+		if err := s.indexManager.WaitForReadable(ctx, namespace); err != nil {
+			return nil, err
+		}
+		_ = s.indexManager.WarmNamespace(ctx, namespace)
+	}
+
+	req := search.Request{
+		Namespace: namespace,
+		Selector:  cmd.Selector,
+		Limit:     limit,
+		Cursor:    cmd.Cursor,
+		Fields:    cmd.Fields,
+		Engine:    engine,
+	}
+	streamer, ok := s.searchAdapter.(search.DocumentStreamer)
+	if !ok {
+		// Compatibility fallback for non-streaming adapters.
+		cmd.Return = apiQueryReturnDocuments
+		result, err := s.Query(ctx, cmd)
+		if err != nil {
+			return nil, err
+		}
+		if sink == nil {
+			return result, nil
+		}
+		keys := result.Keys
+		if len(cmd.Keys) > 0 {
+			keys = cmd.Keys
+		}
+		if err := s.StreamPublishedDocuments(ctx, result.Namespace, keys, result.DocMeta, sink); err != nil {
+			return nil, err
+		}
 		return result, nil
 	}
-	keys := result.Keys
-	if len(cmd.Keys) > 0 {
-		keys = cmd.Keys
+
+	result, err := streamer.QueryDocuments(ctx, req, sink)
+	if err != nil {
+		if errors.Is(err, search.ErrInvalidCursor) {
+			return nil, Failure{Code: "invalid_cursor", Detail: err.Error(), HTTPStatus: http.StatusBadRequest}
+		}
+		return nil, fmt.Errorf("query documents: %w", err)
 	}
-	if err := s.StreamPublishedDocuments(ctx, result.Namespace, keys, result.DocMeta, sink); err != nil {
-		return nil, err
+	if engine == search.EngineIndex && s.indexManager != nil {
+		if result.Metadata == nil {
+			result.Metadata = make(map[string]string)
+		}
+		result.Metadata["index_pending"] = fmt.Sprintf("%v", s.indexManager.Pending(namespace))
 	}
-	return result, nil
+	return &QueryResult{
+		Namespace: namespace,
+		Keys:      result.Keys,
+		Cursor:    result.Cursor,
+		IndexSeq:  result.IndexSeq,
+		Metadata:  result.Metadata,
+		DocMeta:   result.DocMeta,
+	}, nil
 }
 
 // StreamPublishedDocuments streams already-selected keys to the sink.

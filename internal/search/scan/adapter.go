@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"sort"
 	"strings"
 
@@ -130,18 +132,133 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 		if meta.StateETag == "" {
 			continue
 		}
-			matched, err := a.matchesSelector(ctx, req.Namespace, key, meta, plan)
-			if err != nil {
-				if shouldSkipReadError(err) {
-					a.logDebug("search.scan.load_state", "namespace", req.Namespace, "key", key, "error", err)
-					continue
-				}
-				return search.Result{}, fmt.Errorf("scan: load state %s: %w", key, err)
+		matched, err := a.matchesSelector(ctx, req.Namespace, key, meta, plan)
+		if err != nil {
+			if shouldSkipReadError(err) {
+				a.logDebug("search.scan.load_state", "namespace", req.Namespace, "key", key, "error", err)
+				continue
 			}
-			if matched {
-				matches = append(matches, key)
-				lastMatch = key
+			return search.Result{}, fmt.Errorf("scan: load state %s: %w", key, err)
+		}
+		if matched {
+			matches = append(matches, key)
+			lastMatch = key
+		}
+	}
+	result := search.Result{Keys: matches}
+	if len(matches) == limit && more && lastMatch != "" {
+		result.Cursor = encodeCursor(lastMatch)
+	}
+	return result, nil
+}
+
+// QueryDocuments enumerates namespace keys and streams matching documents in a
+// single read pass per candidate.
+func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink search.DocumentSink) (search.Result, error) {
+	if req.Namespace == "" {
+		return search.Result{}, fmt.Errorf("scan: namespace required")
+	}
+	if sink == nil {
+		return search.Result{}, fmt.Errorf("scan: document sink required")
+	}
+	keys, err := a.backend.ListMetaKeys(ctx, req.Namespace)
+	if err != nil {
+		return search.Result{}, err
+	}
+	if len(keys) == 0 {
+		return search.Result{}, nil
+	}
+	sort.Strings(keys)
+	startIdx, err := startIndexFromCursor(req.Cursor, keys)
+	if err != nil {
+		return search.Result{}, fmt.Errorf("%w: %v", search.ErrInvalidCursor, err)
+	}
+	if startIdx >= len(keys) {
+		return search.Result{}, nil
+	}
+	matchAll := req.Selector.IsEmpty()
+	var plan lql.QueryStreamPlan
+	if !matchAll {
+		compiled, compileErr := lql.NewQueryStreamPlan(req.Selector)
+		if compileErr != nil {
+			return search.Result{}, fmt.Errorf("scan: compile selector: %w", compileErr)
+		}
+		plan = compiled
+	}
+	limit := req.Limit
+	if limit <= 0 || limit > len(keys) {
+		limit = len(keys)
+	}
+	matches := make([]string, 0, limit)
+	var lastMatch string
+	more := false
+	for i := startIdx; i < len(keys); i++ {
+		if len(matches) >= limit {
+			if i+1 < len(keys) {
+				more = true
 			}
+			break
+		}
+		if err := ctx.Err(); err != nil {
+			return search.Result{}, err
+		}
+		key := keys[i]
+		if hasReservedPrefix(key) {
+			continue
+		}
+		res, err := a.backend.LoadMeta(ctx, req.Namespace, key)
+		if err != nil {
+			if shouldSkipReadError(err) {
+				a.logDebug("search.scan.load_meta", "namespace", req.Namespace, "key", key, "error", err)
+				continue
+			}
+			return search.Result{}, fmt.Errorf("scan: load meta %s: %w", key, err)
+		}
+		meta := res.Meta
+		if meta == nil || meta.QueryExcluded() || meta.PublishedVersion == 0 {
+			continue
+		}
+		if !matchAll && meta.StateETag == "" {
+			continue
+		}
+		version := meta.PublishedVersion
+		if version == 0 {
+			version = meta.Version
+		}
+		stateCtx := ctx
+		if len(meta.StateDescriptor) > 0 {
+			stateCtx = storage.ContextWithStateDescriptor(stateCtx, meta.StateDescriptor)
+		}
+		if meta.StatePlaintextBytes > 0 {
+			stateCtx = storage.ContextWithStatePlaintextSize(stateCtx, meta.StatePlaintextBytes)
+		}
+		stateRes, err := a.backend.ReadState(stateCtx, req.Namespace, key)
+		if err != nil {
+			if shouldSkipReadError(err) {
+				a.logDebug("search.scan.load_state", "namespace", req.Namespace, "key", key, "error", err)
+				continue
+			}
+			return search.Result{}, fmt.Errorf("scan: load state %s: %w", key, err)
+		}
+		if matchAll {
+			docReader := stateRes.Reader
+			if err := sink.OnDocument(ctx, req.Namespace, key, version, docReader); err != nil {
+				docReader.Close()
+				return search.Result{}, err
+			}
+			docReader.Close()
+			matches = append(matches, key)
+			lastMatch = key
+			continue
+		}
+		matched, err := a.matchAndStreamDocument(ctx, req.Namespace, key, version, stateRes.Reader, plan, sink)
+		if err != nil {
+			return search.Result{}, err
+		}
+		if matched {
+			matches = append(matches, key)
+			lastMatch = key
+		}
 	}
 	result := search.Result{Keys: matches}
 	if len(matches) == limit && more && lastMatch != "" {
@@ -184,6 +301,60 @@ func (a *Adapter) matchesSelector(ctx context.Context, namespace, key string, me
 		return false, err
 	}
 	return matched, nil
+}
+
+func (a *Adapter) matchAndStreamDocument(
+	ctx context.Context,
+	namespace string,
+	key string,
+	version int64,
+	reader io.ReadCloser,
+	plan lql.QueryStreamPlan,
+	sink search.DocumentSink,
+) (bool, error) {
+	if reader == nil {
+		return false, nil
+	}
+	defer reader.Close()
+
+	spool, err := os.CreateTemp("", "lockd-query-doc-*.json")
+	if err != nil {
+		return false, fmt.Errorf("scan: create document spool: %w", err)
+	}
+	spoolPath := spool.Name()
+	defer func() {
+		_ = spool.Close()
+		_ = os.Remove(spoolPath)
+	}()
+
+	tee := io.TeeReader(reader, spool)
+	matched := false
+	_, err = lql.QueryStreamWithResult(lql.QueryStreamRequest{
+		Ctx:               ctx,
+		Reader:            tee,
+		Plan:              plan,
+		Mode:              lql.QueryDecisionOnly,
+		MaxCandidateBytes: a.maxDocumentBytes,
+		OnDecision: func(d lql.QueryStreamDecision) error {
+			if d.Matched {
+				matched = true
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		return false, fmt.Errorf("scan: evaluate state %s: %w", key, err)
+	}
+	if !matched {
+		return false, nil
+	}
+	if _, err := spool.Seek(0, io.SeekStart); err != nil {
+		return false, fmt.Errorf("scan: rewind document spool: %w", err)
+	}
+	if err := sink.OnDocument(ctx, namespace, key, version, spool); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func startIndexFromCursor(cursor string, keys []string) (int, error) {

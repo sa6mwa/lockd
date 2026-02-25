@@ -1460,22 +1460,22 @@ func (h *Handler) handleQuery(w http.ResponseWriter, r *http.Request) error {
 		Return:    returnMode,
 		Refresh:   core.RefreshMode(refreshMode),
 	}
+	if returnMode == api.QueryReturnDocuments {
+		return h.writeQueryDocumentsCore(r.Context(), w, cmd)
+	}
+
 	result, err := h.core.Query(r.Context(), cmd)
 	if err != nil {
 		return convertCoreError(err)
 	}
-	if returnMode != api.QueryReturnDocuments {
-		resp := api.QueryResponse{
-			Namespace: namespace,
-			Keys:      result.Keys,
-			Cursor:    result.Cursor,
-			IndexSeq:  result.IndexSeq,
-			Metadata:  result.Metadata,
-		}
-		return h.writeQueryKeysResponse(w, resp, returnMode)
+	resp := api.QueryResponse{
+		Namespace: namespace,
+		Keys:      result.Keys,
+		Cursor:    result.Cursor,
+		IndexSeq:  result.IndexSeq,
+		Metadata:  result.Metadata,
 	}
-
-	return h.writeQueryDocumentsCore(r.Context(), w, cmd, result)
+	return h.writeQueryKeysResponse(w, resp, returnMode)
 }
 
 // handleIndexFlush godoc

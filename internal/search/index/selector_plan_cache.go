@@ -11,6 +11,7 @@ import (
 const defaultSelectorPlanCacheLimit = 512
 
 type selectorExecutionPlan struct {
+	cacheKey        string
 	selector        api.Selector
 	useLegacyFilter bool
 	requirePostEval bool

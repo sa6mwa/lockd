@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -20,6 +21,7 @@ const (
 	namespaceConfigKey        = "config/namespace.pb"
 	namespaceConfigContent    = storage.ContentTypeProtobuf
 	namespaceConfigContentEnc = storage.ContentTypeProtobufEncrypted
+	defaultConfigCacheTTL     = 250 * time.Millisecond
 )
 
 // ConfigStore persists namespace configuration documents inside the storage backend.
@@ -28,6 +30,16 @@ type ConfigStore struct {
 	crypto     *storage.Crypto
 	logger     pslog.Logger
 	defaultCfg Config
+	cacheTTL   time.Duration
+	now        func() time.Time
+	cacheMu    sync.RWMutex
+	cache      map[string]configCacheEntry
+}
+
+type configCacheEntry struct {
+	cfg       Config
+	etag      string
+	expiresAt time.Time
 }
 
 // ConfigLoadResult captures a namespace config and its ETag.
@@ -51,6 +63,9 @@ func NewConfigStore(backend storage.Backend, crypto *storage.Crypto, logger pslo
 		crypto:     crypto,
 		logger:     logger,
 		defaultCfg: defaultCfg,
+		cacheTTL:   defaultConfigCacheTTL,
+		now:        time.Now,
+		cache:      make(map[string]configCacheEntry),
 	}
 }
 
@@ -61,13 +76,18 @@ func (s *ConfigStore) Load(ctx context.Context, namespace string) (ConfigLoadRes
 	if s == nil {
 		return ConfigLoadResult{Config: cloneConfig(DefaultConfig())}, nil
 	}
+	if cached, ok := s.loadCached(namespace); ok {
+		return cached, nil
+	}
 	if s.backend == nil {
 		return ConfigLoadResult{Config: cloneConfig(s.defaultCfg)}, nil
 	}
 	obj, err := s.backend.GetObject(ctx, namespace, namespaceConfigKey)
 	if err != nil {
 		if err == storage.ErrNotFound {
-			return ConfigLoadResult{Config: cloneConfig(s.defaultCfg)}, nil
+			result := ConfigLoadResult{Config: cloneConfig(s.defaultCfg)}
+			s.storeCached(namespace, result)
+			return result, nil
 		}
 		return ConfigLoadResult{Config: empty}, err
 	}
@@ -91,7 +111,9 @@ func (s *ConfigStore) Load(ctx context.Context, namespace string) (ConfigLoadRes
 	if err := cfg.Validate(); err != nil {
 		return ConfigLoadResult{Config: empty}, err
 	}
-	return ConfigLoadResult{Config: cfg, ETag: obj.Info.ETag}, nil
+	result := ConfigLoadResult{Config: cfg, ETag: obj.Info.ETag}
+	s.storeCached(namespace, result)
+	return result, nil
 }
 
 // Save persists the namespace configuration enforcing the provided ETag when non-empty.
@@ -133,7 +155,49 @@ func (s *ConfigStore) Save(ctx context.Context, namespace string, cfg Config, ex
 			"fallback_engine", cfg.Query.Fallback,
 			"updated_at", time.Now().UTC().Format(time.RFC3339))
 	}
+	s.storeCached(namespace, ConfigLoadResult{Config: cfg, ETag: info.ETag})
 	return info.ETag, nil
+}
+
+func (s *ConfigStore) loadCached(namespace string) (ConfigLoadResult, bool) {
+	if s == nil || s.cacheTTL <= 0 {
+		return ConfigLoadResult{}, false
+	}
+	s.cacheMu.RLock()
+	entry, ok := s.cache[namespace]
+	s.cacheMu.RUnlock()
+	if !ok {
+		return ConfigLoadResult{}, false
+	}
+	now := time.Now
+	if s.now != nil {
+		now = s.now
+	}
+	if now().After(entry.expiresAt) {
+		s.cacheMu.Lock()
+		delete(s.cache, namespace)
+		s.cacheMu.Unlock()
+		return ConfigLoadResult{}, false
+	}
+	return ConfigLoadResult{Config: cloneConfig(entry.cfg), ETag: entry.etag}, true
+}
+
+func (s *ConfigStore) storeCached(namespace string, result ConfigLoadResult) {
+	if s == nil || s.cacheTTL <= 0 {
+		return
+	}
+	now := time.Now
+	if s.now != nil {
+		now = s.now
+	}
+	entry := configCacheEntry{
+		cfg:       cloneConfig(result.Config),
+		etag:      strings.TrimSpace(result.ETag),
+		expiresAt: now().Add(s.cacheTTL),
+	}
+	s.cacheMu.Lock()
+	s.cache[namespace] = entry
+	s.cacheMu.Unlock()
 }
 
 // SelectEngine determines the engine to use for the namespace based on the

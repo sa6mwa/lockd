@@ -1109,14 +1109,18 @@ func (h *Handler) writeQueryDocumentsCore(ctx context.Context, w http.ResponseWr
 	if logger == nil {
 		logger = h.logger
 	}
+	copyBuf := takeQueryStreamCopyBuf()
+	defer putQueryStreamCopyBuf(copyBuf)
+	rowBuf := takeQueryStreamRowBuf()
+	defer putQueryStreamRowBuf(rowBuf)
 	sink := &ndjsonSink{
 		writer:     w,
 		flusher:    flusher,
 		logger:     logger,
 		stream:     h.streamDocumentRow,
 		ns:         cmd.Namespace,
-		copyBuf:    make([]byte, queryStreamCopyBufSize),
-		rowBuf:     make([]byte, 0, queryStreamRowBufSize),
+		copyBuf:    copyBuf,
+		rowBuf:     rowBuf,
 		flushEvery: queryStreamFlushEvery,
 	}
 	result, err := h.core.QueryDocuments(ctx, cmd, sink)
@@ -1132,6 +1136,58 @@ const (
 	queryStreamRowBufSize  = 256
 	queryStreamFlushEvery  = 16
 )
+
+var queryStreamCopyBufPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, queryStreamCopyBufSize)
+		return &buf
+	},
+}
+
+var queryStreamRowBufPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 0, queryStreamRowBufSize)
+		return &buf
+	},
+}
+
+func takeQueryStreamCopyBuf() []byte {
+	if pooled, ok := queryStreamCopyBufPool.Get().(*[]byte); ok && pooled != nil {
+		buf := *pooled
+		if cap(buf) < queryStreamCopyBufSize {
+			buf = make([]byte, queryStreamCopyBufSize)
+		}
+		return buf[:queryStreamCopyBufSize]
+	}
+	return make([]byte, queryStreamCopyBufSize)
+}
+
+func putQueryStreamCopyBuf(buf []byte) {
+	if cap(buf) < queryStreamCopyBufSize {
+		return
+	}
+	buf = buf[:queryStreamCopyBufSize]
+	queryStreamCopyBufPool.Put(&buf)
+}
+
+func takeQueryStreamRowBuf() []byte {
+	if pooled, ok := queryStreamRowBufPool.Get().(*[]byte); ok && pooled != nil {
+		buf := *pooled
+		if cap(buf) < queryStreamRowBufSize {
+			buf = make([]byte, 0, queryStreamRowBufSize)
+		}
+		return buf[:0]
+	}
+	return make([]byte, 0, queryStreamRowBufSize)
+}
+
+func putQueryStreamRowBuf(buf []byte) {
+	if cap(buf) < queryStreamRowBufSize {
+		return
+	}
+	buf = buf[:0]
+	queryStreamRowBufPool.Put(&buf)
+}
 
 func (h *Handler) streamDocumentRow(w io.Writer, namespace, key string, version int64, doc io.Reader, copyBuf []byte, rowBuf []byte) ([]byte, error) {
 	buf := rowBuf[:0]

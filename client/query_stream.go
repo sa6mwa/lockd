@@ -7,6 +7,7 @@ import (
 	"io"
 	"strconv"
 	"unicode/utf16"
+	"unicode/utf8"
 )
 
 type queryStream struct {
@@ -168,7 +169,7 @@ func readJSONString(r *bufio.Reader) (string, error) {
 	if quote != '"' {
 		return "", fmt.Errorf("lockd: expected string literal, got %q", quote)
 	}
-	var out []rune
+	var out []byte
 	for {
 		b, err := r.ReadByte()
 		if err != nil {
@@ -184,17 +185,17 @@ func readJSONString(r *bufio.Reader) (string, error) {
 			}
 			switch esc {
 			case '"', '\\', '/':
-				out = append(out, rune(esc))
+				out = append(out, esc)
 			case 'b':
-				out = append(out, '\b')
+				out = append(out, byte('\b'))
 			case 'f':
-				out = append(out, '\f')
+				out = append(out, byte('\f'))
 			case 'n':
-				out = append(out, '\n')
+				out = append(out, byte('\n'))
 			case 'r':
-				out = append(out, '\r')
+				out = append(out, byte('\r'))
 			case 't':
-				out = append(out, '\t')
+				out = append(out, byte('\t'))
 			case 'u':
 				var hexChars [4]byte
 				if _, err := io.ReadFull(r, hexChars[:]); err != nil {
@@ -204,13 +205,13 @@ func readJSONString(r *bufio.Reader) (string, error) {
 				if err != nil {
 					return "", err
 				}
-				out = append(out, rn)
+				out = utf8.AppendRune(out, rn)
 			default:
 				return "", fmt.Errorf("lockd: invalid escape %q", esc)
 			}
 			continue
 		}
-		out = append(out, rune(b))
+		out = append(out, b)
 	}
 }
 
@@ -443,37 +444,63 @@ func newJSONValueReader(r *bufio.Reader) (*jsonValueReader, error) {
 }
 
 func (jr *jsonValueReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	n := 0
 	if len(jr.buf) > 0 {
-		n := copy(p, jr.buf)
-		jr.buf = jr.buf[n:]
+		copied := copy(p, jr.buf)
+		n += copied
+		jr.buf = jr.buf[copied:]
+		if n == len(p) {
+			return n, nil
+		}
+	}
+	if jr.done {
+		if n > 0 {
+			return n, nil
+		}
+		return 0, io.EOF
+	}
+	for n < len(p) && !jr.done {
+		b, err := jr.r.ReadByte()
+		if err != nil {
+			if err == io.EOF && n > 0 {
+				return n, nil
+			}
+			return n, err
+		}
+		emit, err := jr.consumeByte(b)
+		if err != nil {
+			return n, err
+		}
+		if !emit {
+			continue
+		}
+		p[n] = b
+		n++
+	}
+	if n > 0 {
 		return n, nil
 	}
 	if jr.done {
 		return 0, io.EOF
 	}
-	b, err := jr.r.ReadByte()
-	if err != nil {
-		return 0, err
-	}
-	if err := jr.consume(b); err != nil {
-		return 0, err
-	}
-	p[0] = b
-	return 1, nil
+	return 0, nil
 }
 
-func (jr *jsonValueReader) consume(b byte) error {
+func (jr *jsonValueReader) consumeByte(b byte) (bool, error) {
 	if jr.done {
-		return nil
+		return false, nil
 	}
 	if jr.inString {
 		if jr.escape {
 			jr.escape = false
-			return nil
+			return true, nil
 		}
 		if b == '\\' {
 			jr.escape = true
-			return nil
+			return true, nil
 		}
 		if b == '"' {
 			jr.inString = false
@@ -481,14 +508,14 @@ func (jr *jsonValueReader) consume(b byte) error {
 				jr.done = true
 			}
 		}
-		return nil
+		return true, nil
 	}
 	if jr.simple {
 		if isLiteralChar(b) {
-			return nil
+			return true, nil
 		}
 		jr.done = true
-		return jr.r.UnreadByte()
+		return false, jr.r.UnreadByte()
 	}
 	switch b {
 	case '{', '[':
@@ -501,7 +528,7 @@ func (jr *jsonValueReader) consume(b byte) error {
 	case '"':
 		jr.inString = true
 	}
-	return nil
+	return true, nil
 }
 
 func (jr *jsonValueReader) Close() error {

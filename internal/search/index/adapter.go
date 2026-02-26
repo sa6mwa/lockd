@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"slices"
 	"sort"
@@ -24,6 +25,7 @@ import (
 )
 
 const indexCursorPrefix = "indexv1:"
+const queryStreamPayloadSpoolMemoryBytes = 256 * 1024
 
 var docIDScratchPool = sync.Pool{
 	New: func() any {
@@ -41,6 +43,13 @@ var docIDAccumulatorPool = sync.Pool{
 	},
 }
 
+var keyPresencePool = sync.Pool{
+	New: func() any {
+		buf := make([]bool, 0, 256)
+		return &buf
+	},
+}
+
 // AdapterConfig configures the index query adapter.
 type AdapterConfig struct {
 	Store  *Store
@@ -53,6 +62,7 @@ type Adapter struct {
 	logger  pslog.Logger
 	plans   *selectorPlanCache
 	readers *preparedReaderCache
+	sorted  *sortedKeysCache
 
 	docMetaHits    atomic.Uint64
 	docMetaMisses  atomic.Uint64
@@ -70,6 +80,7 @@ func NewAdapter(cfg AdapterConfig) (*Adapter, error) {
 		logger:  cfg.Logger,
 		plans:   newSelectorPlanCache(defaultSelectorPlanCacheLimit),
 		readers: newPreparedReaderCache(defaultPreparedReaderCacheLimit),
+		sorted:  newSortedKeysCache(defaultSortedKeysCacheLimit),
 	}, nil
 }
 
@@ -84,6 +95,16 @@ func (a *Adapter) Capabilities(context.Context, string) (search.Capabilities, er
 func (a *Adapter) prepareSelectorExecutionPlan(sel api.Selector) (selectorExecutionPlan, error) {
 	if sel.IsEmpty() {
 		return selectorExecutionPlan{selector: api.Selector{}, useLegacyFilter: true}, nil
+	}
+	rawPayload, err := json.Marshal(sel)
+	if err != nil {
+		return selectorExecutionPlan{}, fmt.Errorf("marshal raw selector cache key: %w", err)
+	}
+	rawKey := string(rawPayload)
+	if a != nil && a.plans != nil && rawKey != "" {
+		if cached, ok := a.plans.get(rawKey); ok {
+			return cached, nil
+		}
 	}
 	normalized := cloneSelector(sel)
 	if normalizeErr := normalizeSelectorFieldsForLQL(&normalized); normalizeErr != nil {
@@ -101,6 +122,7 @@ func (a *Adapter) prepareSelectorExecutionPlan(sel api.Selector) (selectorExecut
 	}
 	useLegacy := selectorSupportsLegacyIndexFilter(sel)
 	out := selectorExecutionPlan{
+		cacheKey:        cacheKey,
 		selector:        normalized,
 		useLegacyFilter: useLegacy,
 	}
@@ -143,6 +165,41 @@ func (a *Adapter) queryReader(ctx context.Context, namespace string, manifest *M
 	return template.cloneForQuery(manifest), nil
 }
 
+func (a *Adapter) sortedMatchedKeys(ctx context.Context, reader *segmentReader, manifestETag string, format uint32, plan selectorExecutionPlan) ([]string, error) {
+	cacheKey := ""
+	if manifestETag != "" {
+		cacheKey = manifestETag + "|" + plan.cacheKey
+	}
+	if cacheKey != "" && a != nil && a.sorted != nil {
+		if cached, ok := a.sorted.get(cacheKey); ok {
+			return cached, nil
+		}
+	}
+	selector := plan.selector
+	useLegacyFilter := plan.useLegacyFilter
+	var (
+		matches docIDSet
+		err     error
+	)
+	if selector.IsEmpty() || !useLegacyFilter {
+		matches, err = reader.allDocIDs(ctx)
+	} else {
+		eval := selectorEvaluator{
+			reader:        reader,
+			containsNgram: format >= IndexFormatVersionV4,
+		}
+		matches, err = eval.evaluate(ctx, selector)
+	}
+	if err != nil {
+		return nil, err
+	}
+	sortedKeys := reader.sortedKeysForDocIDs(matches)
+	if cacheKey != "" && a != nil && a.sorted != nil {
+		a.sorted.put(cacheKey, sortedKeys)
+	}
+	return sortedKeys, nil
+}
+
 // Query evaluates the selector via the index and returns matching keys.
 func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result, error) {
 	if a == nil || a.store == nil {
@@ -167,26 +224,14 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 	if err != nil {
 		return search.Result{}, err
 	}
-	var matches docIDSet
 	execPlan, err := a.prepareSelectorExecutionPlan(req.Selector)
 	if err != nil {
 		return search.Result{}, err
 	}
-	selector := execPlan.selector
-	useLegacyFilter := execPlan.useLegacyFilter
-	if selector.IsEmpty() || !useLegacyFilter {
-		matches, err = reader.allDocIDs(ctx)
-	} else {
-		eval := selectorEvaluator{
-			reader:        reader,
-			containsNgram: manifest.Format >= IndexFormatVersionV4,
-		}
-		matches, err = eval.evaluate(ctx, selector)
-	}
+	sortedKeys, err := a.sortedMatchedKeys(ctx, reader, manifestRes.ETag, manifest.Format, execPlan)
 	if err != nil {
 		return search.Result{}, err
 	}
-	sortedKeys := reader.sortedKeysForDocIDs(matches)
 	startIdx, err := startIndexFromCursor(req.Cursor, sortedKeys)
 	if err != nil {
 		return search.Result{}, fmt.Errorf("%w: %v", search.ErrInvalidCursor, err)
@@ -234,13 +279,13 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 			}
 		}
 		if execPlan.requirePostEval {
-			var stateMeta *storage.Meta
+			var stateMeta *DocumentMetadata
 			if hasDocMeta {
-				m := docMetaToStorageMeta(docInfo)
-				if m.StateETag == "" {
+				docInfoCopy := docInfo
+				if docInfoCopy.StateETag == "" {
 					continue
 				}
-				stateMeta = &m
+				stateMeta = &docInfoCopy
 			}
 			matched, matchErr := a.matchesSelector(ctx, req.Namespace, key, stateMeta, execPlan.postFilterPlan)
 			if matchErr != nil {
@@ -306,26 +351,14 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 	if err != nil {
 		return search.Result{}, err
 	}
-	var matches docIDSet
 	execPlan, err := a.prepareSelectorExecutionPlan(req.Selector)
 	if err != nil {
 		return search.Result{}, err
 	}
-	selector := execPlan.selector
-	useLegacyFilter := execPlan.useLegacyFilter
-	if selector.IsEmpty() || !useLegacyFilter {
-		matches, err = reader.allDocIDs(ctx)
-	} else {
-		eval := selectorEvaluator{
-			reader:        reader,
-			containsNgram: manifest.Format >= IndexFormatVersionV4,
-		}
-		matches, err = eval.evaluate(ctx, selector)
-	}
+	sortedKeys, err := a.sortedMatchedKeys(ctx, reader, manifestRes.ETag, manifest.Format, execPlan)
 	if err != nil {
 		return search.Result{}, err
 	}
-	sortedKeys := reader.sortedKeysForDocIDs(matches)
 	startIdx, err := startIndexFromCursor(req.Cursor, sortedKeys)
 	if err != nil {
 		return search.Result{}, fmt.Errorf("%w: %v", search.ErrInvalidCursor, err)
@@ -351,69 +384,135 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 	var streamStats search.StreamStats
 	nextIndex := len(sortedKeys)
 	var lastReturned string
-	for i := startIdx; i < len(sortedKeys); i++ {
-		if len(streamed) >= limit {
-			nextIndex = i
-			break
-		}
-		if err := ctx.Err(); err != nil {
-			return search.Result{}, err
-		}
-		key := sortedKeys[i]
-		visibleKey, ok, err := a.visibleFromLedger(ctx, req.Namespace, key, visibility)
-		if err != nil {
-			return search.Result{}, err
-		}
-		if ok && !visibleKey {
-			continue
-		}
-		docInfo, hasDocMeta := docMeta[key]
-		var stateMeta *storage.Meta
-		var version int64
-		if hasDocMeta {
-			if docInfo.PublishedVersion == 0 || docInfo.QueryExcluded {
+	prefetch := req.DocPrefetch
+	if prefetch <= 1 || execPlan.requirePostEval {
+		for i := startIdx; i < len(sortedKeys); i++ {
+			if len(streamed) >= limit {
+				nextIndex = i
+				break
+			}
+			if err := ctx.Err(); err != nil {
+				return search.Result{}, err
+			}
+			key := sortedKeys[i]
+			visibleKey, ok, err := a.visibleFromLedger(ctx, req.Namespace, key, visibility)
+			if err != nil {
+				return search.Result{}, err
+			}
+			if ok && !visibleKey {
 				continue
 			}
-			m := docMetaToStorageMeta(docInfo)
-			stateMeta = &m
-			version = m.PublishedVersion
-		}
-		if !execPlan.requirePostEval {
-			if err := a.streamDocument(ctx, req.Namespace, key, version, stateMeta, sink); err != nil {
+			docInfo, hasDocMeta := docMeta[key]
+			var stateMeta *DocumentMetadata
+			var version int64
+			if hasDocMeta {
+				if docInfo.PublishedVersion == 0 || docInfo.QueryExcluded {
+					continue
+				}
+				docInfoCopy := docInfo
+				stateMeta = &docInfoCopy
+				version = docInfoCopy.PublishedVersion
+			}
+			if !execPlan.requirePostEval {
+				if err := a.streamDocument(ctx, req.Namespace, key, version, stateMeta, sink); err != nil {
+					if errors.Is(err, storage.ErrNotFound) || storage.IsTransient(err) {
+						continue
+					}
+					return search.Result{}, fmt.Errorf("stream document %s: %w", key, err)
+				}
+				streamed = append(streamed, key)
+				streamStats.AddCandidate(true)
+				lastReturned = key
+				nextIndex = i + 1
+				continue
+			}
+			if stateMeta != nil && stateMeta.StateETag == "" {
+				continue
+			}
+			matched, queryResult, err := a.matchAndStreamDocument(ctx, req.Namespace, key, version, stateMeta, execPlan.postFilterPlan, sink)
+			if err != nil {
 				if errors.Is(err, storage.ErrNotFound) || storage.IsTransient(err) {
 					continue
 				}
-				return search.Result{}, fmt.Errorf("stream document %s: %w", key, err)
+				return search.Result{}, fmt.Errorf("evaluate+stream selector %s: %w", key, err)
 			}
-			streamed = append(streamed, key)
-			streamStats.AddCandidate(true)
-			lastReturned = key
-			nextIndex = i + 1
-			continue
-		}
-		if stateMeta != nil && stateMeta.StateETag == "" {
-			continue
-		}
-		matched, queryResult, err := a.matchAndStreamDocument(ctx, req.Namespace, key, version, stateMeta, execPlan.postFilterPlan, sink)
-		if err != nil {
-			if errors.Is(err, storage.ErrNotFound) || storage.IsTransient(err) {
+			streamStats.Add(
+				queryResult.CandidatesSeen,
+				queryResult.CandidatesMatched,
+				queryResult.BytesCaptured,
+				queryResult.SpillCount,
+				queryResult.SpillBytes,
+			)
+			if !matched {
 				continue
 			}
-			return search.Result{}, fmt.Errorf("evaluate+stream selector %s: %w", key, err)
+			streamed = append(streamed, key)
+			lastReturned = key
+			nextIndex = i + 1
 		}
-		streamStats.Add(
-			queryResult.CandidatesSeen,
-			queryResult.CandidatesMatched,
-			queryResult.BytesCaptured,
-			queryResult.SpillCount,
-			queryResult.SpillBytes,
-		)
-		if !matched {
-			continue
+	} else {
+		maxBatch := prefetch * 4
+		if maxBatch < 1 {
+			maxBatch = 1
 		}
-		streamed = append(streamed, key)
-		lastReturned = key
-		nextIndex = i + 1
+		for i := startIdx; i < len(sortedKeys); {
+			if len(streamed) >= limit {
+				nextIndex = i
+				break
+			}
+			if err := ctx.Err(); err != nil {
+				return search.Result{}, err
+			}
+			remaining := limit - len(streamed)
+			batchSize := remaining
+			if batchSize > maxBatch {
+				batchSize = maxBatch
+			}
+			candidates := make([]documentStreamCandidate, 0, batchSize)
+			for ; i < len(sortedKeys) && len(candidates) < batchSize; i++ {
+				key := sortedKeys[i]
+				visibleKey, ok, err := a.visibleFromLedger(ctx, req.Namespace, key, visibility)
+				if err != nil {
+					return search.Result{}, err
+				}
+				if ok && !visibleKey {
+					continue
+				}
+				docInfo, hasDocMeta := docMeta[key]
+				var stateMeta *DocumentMetadata
+				var version int64
+				if hasDocMeta {
+					if docInfo.PublishedVersion == 0 || docInfo.QueryExcluded {
+						continue
+					}
+					docInfoCopy := docInfo
+					stateMeta = &docInfoCopy
+					version = docInfoCopy.PublishedVersion
+				}
+				candidates = append(candidates, documentStreamCandidate{
+					key:     key,
+					version: version,
+					meta:    stateMeta,
+				})
+			}
+			if len(candidates) == 0 {
+				nextIndex = i
+				continue
+			}
+			batchStreamed, err := a.streamDocumentBatch(ctx, req.Namespace, candidates, sink, prefetch)
+			if err != nil {
+				return search.Result{}, err
+			}
+			for _, key := range batchStreamed {
+				streamed = append(streamed, key)
+				streamStats.AddCandidate(true)
+				lastReturned = key
+				nextIndex = i
+				if len(streamed) >= limit {
+					break
+				}
+			}
+		}
 	}
 	result := search.Result{
 		Keys:     streamed,
@@ -433,7 +532,7 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 	return result, nil
 }
 
-func (a *Adapter) matchesSelector(ctx context.Context, namespace, key string, meta *storage.Meta, plan lql.QueryStreamPlan) (bool, error) {
+func (a *Adapter) matchesSelector(ctx context.Context, namespace, key string, meta *DocumentMetadata, plan lql.QueryStreamPlan) (bool, error) {
 	stateCtx := ctx
 	if meta != nil && len(meta.StateDescriptor) > 0 {
 		stateCtx = storage.ContextWithStateDescriptor(stateCtx, meta.StateDescriptor)
@@ -472,19 +571,19 @@ func (a *Adapter) matchesSelector(ctx context.Context, namespace, key string, me
 	return matched, nil
 }
 
-func docMetaToStorageMeta(meta DocumentMetadata) storage.Meta {
-	out := storage.Meta{
-		PublishedVersion:    meta.PublishedVersion,
-		StateETag:           meta.StateETag,
-		StatePlaintextBytes: meta.StatePlaintextBytes,
+func (a *Adapter) streamDocument(ctx context.Context, namespace, key string, version int64, meta *DocumentMetadata, sink search.DocumentSink) error {
+	reader, err := a.openDocumentReader(ctx, namespace, key, meta)
+	if err != nil {
+		return err
 	}
-	if len(meta.StateDescriptor) > 0 {
-		out.StateDescriptor = append([]byte(nil), meta.StateDescriptor...)
+	if reader == nil {
+		return nil
 	}
-	return out
+	defer reader.Close()
+	return sink.OnDocument(ctx, namespace, key, version, reader)
 }
 
-func (a *Adapter) streamDocument(ctx context.Context, namespace, key string, version int64, meta *storage.Meta, sink search.DocumentSink) error {
+func (a *Adapter) openDocumentReader(ctx context.Context, namespace, key string, meta *DocumentMetadata) (io.ReadCloser, error) {
 	stateCtx := ctx
 	if meta != nil && len(meta.StateDescriptor) > 0 {
 		stateCtx = storage.ContextWithStateDescriptor(stateCtx, meta.StateDescriptor)
@@ -494,13 +593,116 @@ func (a *Adapter) streamDocument(ctx context.Context, namespace, key string, ver
 	}
 	stateRes, err := a.store.backend.ReadState(stateCtx, namespace, key)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if stateRes.Reader == nil {
-		return nil
+		return nil, nil
 	}
-	defer stateRes.Reader.Close()
-	return sink.OnDocument(ctx, namespace, key, version, stateRes.Reader)
+	return stateRes.Reader, nil
+}
+
+type documentStreamCandidate struct {
+	key     string
+	version int64
+	meta    *DocumentMetadata
+}
+
+type documentStreamBatchResult struct {
+	index   int
+	key     string
+	version int64
+	reader  io.ReadCloser
+	err     error
+}
+
+func (a *Adapter) streamDocumentBatch(ctx context.Context, namespace string, candidates []documentStreamCandidate, sink search.DocumentSink, prefetch int) ([]string, error) {
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	if prefetch <= 1 || len(candidates) == 1 {
+		streamed := make([]string, 0, len(candidates))
+		for _, candidate := range candidates {
+			if err := a.streamDocument(ctx, namespace, candidate.key, candidate.version, candidate.meta, sink); err != nil {
+				if errors.Is(err, storage.ErrNotFound) || storage.IsTransient(err) {
+					continue
+				}
+				return nil, fmt.Errorf("stream document %s: %w", candidate.key, err)
+			}
+			streamed = append(streamed, candidate.key)
+		}
+		return streamed, nil
+	}
+	if prefetch > len(candidates) {
+		prefetch = len(candidates)
+	}
+	jobs := make(chan int)
+	results := make(chan documentStreamBatchResult, len(candidates))
+	var wg sync.WaitGroup
+	worker := func() {
+		defer wg.Done()
+		for idx := range jobs {
+			candidate := candidates[idx]
+			reader, err := a.openDocumentReader(ctx, namespace, candidate.key, candidate.meta)
+			results <- documentStreamBatchResult{
+				index:   idx,
+				key:     candidate.key,
+				version: candidate.version,
+				reader:  reader,
+				err:     err,
+			}
+		}
+	}
+	wg.Add(prefetch)
+	for i := 0; i < prefetch; i++ {
+		go worker()
+	}
+	go func() {
+		defer close(jobs)
+		for idx := range len(candidates) {
+			select {
+			case <-ctx.Done():
+				return
+			case jobs <- idx:
+			}
+		}
+	}()
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+	ordered := make([]documentStreamBatchResult, len(candidates))
+	for res := range results {
+		ordered[res.index] = res
+	}
+	streamed := make([]string, 0, len(candidates))
+	for _, res := range ordered {
+		if res.err != nil {
+			if errors.Is(res.err, storage.ErrNotFound) || storage.IsTransient(res.err) {
+				continue
+			}
+			for _, pending := range ordered {
+				if pending.reader != nil {
+					_ = pending.reader.Close()
+				}
+			}
+			return nil, fmt.Errorf("stream document %s: %w", res.key, res.err)
+		}
+		if res.reader == nil {
+			continue
+		}
+		if err := sink.OnDocument(ctx, namespace, res.key, res.version, res.reader); err != nil {
+			_ = res.reader.Close()
+			for _, pending := range ordered {
+				if pending.reader != nil {
+					_ = pending.reader.Close()
+				}
+			}
+			return nil, err
+		}
+		_ = res.reader.Close()
+		streamed = append(streamed, res.key)
+	}
+	return streamed, nil
 }
 
 func (a *Adapter) matchAndStreamDocument(
@@ -508,7 +710,7 @@ func (a *Adapter) matchAndStreamDocument(
 	namespace string,
 	key string,
 	version int64,
-	meta *storage.Meta,
+	meta *DocumentMetadata,
 	plan lql.QueryStreamPlan,
 	sink search.DocumentSink,
 ) (bool, lql.QueryStreamResult, error) {
@@ -535,7 +737,7 @@ func (a *Adapter) matchAndStreamDocument(
 		Plan:              plan,
 		Mode:              lql.QueryDecisionPlusValue,
 		MatchedOnly:       true,
-		SpoolMemoryBytes:  1,
+		SpoolMemoryBytes:  queryStreamPayloadSpoolMemoryBytes,
 		MaxCandidateBytes: 100 * 1024 * 1024,
 		MaxMatches:        1,
 		CapturePolicy:     lql.QueryCaptureMatchesOnlyBestEffort,
@@ -583,6 +785,10 @@ type segmentReader struct {
 	fieldResolutionCached map[string][]string
 	sharedFieldResolution *fieldResolutionCache
 	fieldTrie             *fieldPathTrie
+	docMeta               map[string]DocumentMetadata
+	docMetaReady          bool
+	keyOrderByName        []uint32
+	keyOrderByNameReady   bool
 	immutable             bool
 }
 
@@ -1320,6 +1526,10 @@ func (r *segmentReader) prime(ctx context.Context) error {
 	if _, err := r.allIndexFields(ctx); err != nil {
 		return err
 	}
+	if _, err := r.docMetaMap(ctx); err != nil {
+		return err
+	}
+	r.ensureKeyOrderByName()
 	return nil
 }
 
@@ -1349,6 +1559,10 @@ func (r *segmentReader) cloneForQuery(manifest *Manifest) *segmentReader {
 		fieldResolutionCached: make(map[string][]string, 16),
 		sharedFieldResolution: r.sharedFieldResolution,
 		fieldTrie:             r.fieldTrie,
+		docMeta:               r.docMeta,
+		docMetaReady:          r.docMetaReady,
+		keyOrderByName:        r.keyOrderByName,
+		keyOrderByNameReady:   r.keyOrderByNameReady,
 		immutable:             true,
 	}
 }
@@ -1404,6 +1618,9 @@ func (r *segmentReader) docMetaMap(ctx context.Context) (map[string]DocumentMeta
 	if r == nil {
 		return nil, nil
 	}
+	if r.docMetaReady {
+		return r.docMeta, nil
+	}
 	out := make(map[string]DocumentMetadata)
 	err := r.forEachSegment(ctx, func(seg *Segment) error {
 		if seg == nil || len(seg.DocMeta) == 0 {
@@ -1423,6 +1640,8 @@ func (r *segmentReader) docMetaMap(ctx context.Context) (map[string]DocumentMeta
 	if err != nil {
 		return nil, err
 	}
+	r.docMeta = out
+	r.docMetaReady = true
 	return out, nil
 }
 
@@ -1751,6 +1970,28 @@ func releaseDocIDScratch(buf *docIDSet) {
 	docIDScratchPool.Put(buf)
 }
 
+func borrowKeyPresence(size int) *[]bool {
+	buf := keyPresencePool.Get().(*[]bool)
+	if cap(*buf) < size {
+		*buf = make([]bool, size)
+	} else {
+		*buf = (*buf)[:size]
+	}
+	return buf
+}
+
+func releaseKeyPresence(buf *[]bool) {
+	if buf == nil {
+		return
+	}
+	if cap(*buf) > 1<<20 {
+		*buf = make([]bool, 0, 256)
+	} else {
+		*buf = (*buf)[:0]
+	}
+	keyPresencePool.Put(buf)
+}
+
 func borrowDocIDAccumulator() *docIDAccumulator {
 	acc := docIDAccumulatorPool.Get().(*docIDAccumulator)
 	acc.current = acc.current[:0]
@@ -1931,7 +2172,13 @@ func (r *segmentReader) sortedKeysForDocIDs(ids docIDSet) []string {
 	if len(ids) == 0 {
 		return nil
 	}
-	keys := make([]string, 0, len(ids))
+	r.ensureKeyOrderByName()
+	presentBuf := borrowKeyPresence(len(r.keys))
+	defer releaseKeyPresence(presentBuf)
+	present := *presentBuf
+	touched := borrowDocIDScratch()
+	defer releaseDocIDScratch(touched)
+	touchedIDs := (*touched)[:0]
 	var prev uint32
 	first := true
 	for _, id := range ids {
@@ -1940,14 +2187,49 @@ func (r *segmentReader) sortedKeysForDocIDs(ids docIDSet) []string {
 		}
 		first = false
 		prev = id
-		key := r.keyByDocID(id)
-		if key == "" {
+		if int(id) >= len(r.keys) {
 			continue
 		}
-		keys = append(keys, key)
+		if present[id] {
+			continue
+		}
+		present[id] = true
+		touchedIDs = append(touchedIDs, id)
 	}
-	sort.Strings(keys)
+	keys := make([]string, 0, len(ids))
+	for _, id := range r.keyOrderByName {
+		if int(id) >= len(present) || !present[id] {
+			continue
+		}
+		keys = append(keys, r.keys[id])
+	}
+	for _, id := range touchedIDs {
+		present[id] = false
+	}
+	*touched = touchedIDs[:0]
+	*presentBuf = present
 	return keys
+}
+
+func (r *segmentReader) ensureKeyOrderByName() {
+	if r == nil || r.keyOrderByNameReady {
+		return
+	}
+	n := len(r.keys)
+	if n == 0 {
+		r.keyOrderByName = nil
+		r.keyOrderByNameReady = true
+		return
+	}
+	ids := make([]uint32, n)
+	for i := 0; i < n; i++ {
+		ids[i] = uint32(i)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		return r.keys[ids[i]] < r.keys[ids[j]]
+	})
+	r.keyOrderByName = ids
+	r.keyOrderByNameReady = true
 }
 
 func selectorSupportsLegacyIndexFilter(sel api.Selector) bool {

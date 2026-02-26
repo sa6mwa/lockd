@@ -52,12 +52,13 @@ func (s *Service) Query(ctx context.Context, cmd QueryCommand) (*QueryResult, er
 	}
 
 	req := search.Request{
-		Namespace: namespace,
-		Selector:  cmd.Selector,
-		Limit:     limit,
-		Cursor:    cmd.Cursor,
-		Fields:    cmd.Fields,
-		Engine:    engine,
+		Namespace:   namespace,
+		Selector:    cmd.Selector,
+		Limit:       limit,
+		Cursor:      cmd.Cursor,
+		Fields:      cmd.Fields,
+		Engine:      engine,
+		DocPrefetch: s.queryDocPrefetch,
 	}
 	if cmd.Return == apiQueryReturnDocuments {
 		req.IncludeDocMeta = true
@@ -144,12 +145,13 @@ func (s *Service) QueryDocuments(ctx context.Context, cmd QueryCommand, sink Doc
 	}
 
 	req := search.Request{
-		Namespace: namespace,
-		Selector:  cmd.Selector,
-		Limit:     limit,
-		Cursor:    cmd.Cursor,
-		Fields:    cmd.Fields,
-		Engine:    engine,
+		Namespace:   namespace,
+		Selector:    cmd.Selector,
+		Limit:       limit,
+		Cursor:      cmd.Cursor,
+		Fields:      cmd.Fields,
+		Engine:      engine,
+		DocPrefetch: s.queryDocPrefetch,
 	}
 	streamer, ok := s.searchAdapter.(search.DocumentStreamer)
 	if !ok {

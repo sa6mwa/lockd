@@ -22,6 +22,8 @@ const cursorPrefix = "scanv1:"
 
 var reservedQueryPrefixes = []string{"lockd-diagnostics/"}
 
+const queryStreamPayloadSpoolMemoryBytes = 256 * 1024
+
 // Config wires the scan adapter to a backend.
 type Config struct {
 	Backend          storage.Backend
@@ -400,7 +402,7 @@ func (a *Adapter) matchAndStreamDocument(
 		Plan:              plan,
 		Mode:              lql.QueryDecisionPlusValue,
 		MatchedOnly:       true,
-		SpoolMemoryBytes:  1,
+		SpoolMemoryBytes:  queryStreamPayloadSpoolMemoryBytes,
 		MaxCandidateBytes: a.maxDocumentBytes,
 		MaxMatches:        1,
 		CapturePolicy:     lql.QueryCaptureMatchesOnlyBestEffort,

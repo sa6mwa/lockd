@@ -23,6 +23,8 @@ type Request struct {
 	Cursor    string
 	Fields    map[string]any
 	Engine    EngineHint
+	// DocPrefetch caps parallel document reads for return=documents flows.
+	DocPrefetch int
 	// IncludeDocMeta asks adapters to return document metadata for matched keys.
 	IncludeDocMeta bool
 }

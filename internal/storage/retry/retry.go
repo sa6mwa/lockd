@@ -97,13 +97,40 @@ func (b *backend) ListMetaKeys(ctx context.Context, namespace string) ([]string,
 }
 
 func (b *backend) ReadState(ctx context.Context, namespace, key string) (storage.ReadStateResult, error) {
-	var result storage.ReadStateResult
-	err := b.withRetry(ctx, "read_state", namespace, key, func(ctx context.Context) error {
-		var err error
-		result, err = b.inner.ReadState(ctx, namespace, key)
-		return err
-	})
-	return result, err
+	attempts := b.cfg.MaxAttempts
+	delay := b.cfg.BaseDelay
+	if attempts <= 1 {
+		return b.inner.ReadState(ctx, namespace, key)
+	}
+	for attempt := 1; attempt <= attempts; attempt++ {
+		result, err := b.inner.ReadState(ctx, namespace, key)
+		if err == nil {
+			return result, nil
+		}
+		if !storage.IsTransient(err) || attempt == attempts {
+			return storage.ReadStateResult{}, err
+		}
+		b.logger.Warn("storage transient error",
+			"operation", "read_state",
+			"namespace", namespace,
+			"key", key,
+			"attempt", attempt,
+			"max_attempts", attempts,
+			"error", err,
+		)
+		select {
+		case <-ctx.Done():
+			return storage.ReadStateResult{}, ctx.Err()
+		default:
+			b.clock.Sleep(delay)
+			next := time.Duration(float64(delay) * b.cfg.Multiplier)
+			if b.cfg.MaxDelay > 0 && next > b.cfg.MaxDelay {
+				next = b.cfg.MaxDelay
+			}
+			delay = next
+		}
+	}
+	return storage.ReadStateResult{}, nil
 }
 
 func (b *backend) WriteState(ctx context.Context, namespace, key string, body io.Reader, opts storage.PutStateOptions) (*storage.PutStateResult, error) {

@@ -907,11 +907,9 @@ func (s *Store) ReadState(ctx context.Context, namespace, key string) (storage.R
 		return storage.ReadStateResult{}, err
 	}
 	encrypted := s.crypto != nil && s.crypto.Enabled()
-	var descriptor []byte
+	descriptor := ref.meta.descriptor
 	if descFromCtx, ok := storage.StateDescriptorFromContext(ctx); ok && len(descFromCtx) > 0 {
-		descriptor = append([]byte(nil), descFromCtx...)
-	} else if len(ref.meta.descriptor) > 0 {
-		descriptor = append([]byte(nil), ref.meta.descriptor...)
+		descriptor = descFromCtx
 	}
 	outReader := reader
 	if encrypted {

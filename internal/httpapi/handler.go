@@ -1245,16 +1245,6 @@ func (h *Handler) selectQueryEngine(ctx context.Context, namespace string, hint 
 	return engine, nil
 }
 
-func (h *Handler) waitForIndexReadable(ctx context.Context, namespace string) error {
-	if h == nil || h.indexControl == nil {
-		return nil
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	return h.indexControl.WaitForReadable(ctx, namespace)
-}
-
 func (h *Handler) writeJSON(w http.ResponseWriter, status int, payload any, headers map[string]string) {
 	w.Header().Set("Content-Type", "application/json")
 	for k, v := range headers {

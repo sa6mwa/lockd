@@ -1445,11 +1445,6 @@ func (h *Handler) handleQuery(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	if engine == search.EngineIndex && refreshMode == refreshWaitFor {
-		if err := h.waitForIndexReadable(r.Context(), namespace); err != nil {
-			return err
-		}
-	}
 	cmd := core.QueryCommand{
 		Namespace: namespace,
 		Selector:  req.Selector,

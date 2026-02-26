@@ -3504,9 +3504,12 @@ func (c *Client) acquireRequestContext(parent context.Context, req api.AcquireRe
 type endpointRequestBuilder func(base string) (*http.Request, context.CancelFunc, error)
 
 func (c *Client) shuffledEndpoints() []string {
+	if len(c.endpoints) <= 1 {
+		return c.endpoints
+	}
 	endpoints := make([]string, len(c.endpoints))
 	copy(endpoints, c.endpoints)
-	if len(endpoints) > 1 && c.shuffleEndpoints {
+	if c.shuffleEndpoints {
 		acquireRandMu.Lock()
 		shuffler := acquireRand
 		shuffler.Shuffle(len(endpoints), func(i, j int) {

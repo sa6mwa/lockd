@@ -803,7 +803,6 @@ func newSegmentReader(namespace string, manifest *Manifest, store *Store, logger
 		keyIDs:                make(map[string]uint32),
 		fieldIDs:              make(map[string]uint32),
 		fieldSegments:         make(map[string][]string),
-		fieldResolutionCached: make(map[string][]string),
 		sharedFieldResolution: newFieldResolutionCache(),
 	}
 }
@@ -1556,7 +1555,7 @@ func (r *segmentReader) cloneForQuery(manifest *Manifest) *segmentReader {
 		fieldList:             r.fieldList,
 		fieldListReady:        r.fieldListReady,
 		fieldSegments:         r.fieldSegments,
-		fieldResolutionCached: make(map[string][]string, 16),
+		fieldResolutionCached: nil,
 		sharedFieldResolution: r.sharedFieldResolution,
 		fieldTrie:             r.fieldTrie,
 		docMeta:               r.docMeta,

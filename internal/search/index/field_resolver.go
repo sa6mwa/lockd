@@ -65,8 +65,10 @@ func (r *segmentReader) cachedFieldResolution(field string) ([]string, bool) {
 	if r == nil || field == "" {
 		return nil, false
 	}
-	if cached, ok := r.fieldResolutionCached[field]; ok {
-		return cached, true
+	if r.fieldResolutionCached != nil {
+		if cached, ok := r.fieldResolutionCached[field]; ok {
+			return cached, true
+		}
 	}
 	if r.sharedFieldResolution == nil {
 		return nil, false
@@ -75,6 +77,9 @@ func (r *segmentReader) cachedFieldResolution(field string) ([]string, bool) {
 	if !ok {
 		return nil, false
 	}
+	if r.fieldResolutionCached == nil {
+		r.fieldResolutionCached = make(map[string][]string, 8)
+	}
 	r.fieldResolutionCached[field] = cached
 	return cached, true
 }
@@ -82,6 +87,9 @@ func (r *segmentReader) cachedFieldResolution(field string) ([]string, bool) {
 func (r *segmentReader) rememberFieldResolution(field string, matches []string) {
 	if r == nil || field == "" {
 		return
+	}
+	if r.fieldResolutionCached == nil {
+		r.fieldResolutionCached = make(map[string][]string, 8)
 	}
 	r.fieldResolutionCached[field] = matches
 	if r.sharedFieldResolution != nil {

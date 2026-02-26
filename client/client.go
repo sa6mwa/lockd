@@ -5017,15 +5017,26 @@ func WithQuery(expr string) QueryOption {
 			opts.request.Selector = api.Selector{}
 			return
 		}
+		if cached, ok, cachedErr := querySelectorExprCache.get(expr); ok {
+			if cachedErr != nil {
+				opts.parseErr = cachedErr
+				return
+			}
+			opts.request.Selector = cached
+			return
+		}
 		sel, err := lql.ParseSelectorString(expr)
 		if err != nil {
+			querySelectorExprCache.put(expr, api.Selector{}, err)
 			opts.parseErr = err
 			return
 		}
 		if sel.IsEmpty() {
+			querySelectorExprCache.put(expr, api.Selector{}, nil)
 			opts.request.Selector = api.Selector{}
 			return
 		}
+		querySelectorExprCache.put(expr, sel, nil)
 		opts.request.Selector = sel
 	}
 }

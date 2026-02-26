@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"sync"
 	"unicode/utf16"
 	"unicode/utf8"
 )
@@ -17,12 +18,35 @@ type queryStream struct {
 	onClose func()
 }
 
+var queryStreamReaderPool = sync.Pool{
+	New: func() any {
+		return &bufio.Reader{}
+	},
+}
+
+func takeQueryStreamReader(body io.Reader) *bufio.Reader {
+	pooled, _ := queryStreamReaderPool.Get().(*bufio.Reader)
+	if pooled == nil {
+		pooled = &bufio.Reader{}
+	}
+	pooled.Reset(body)
+	return pooled
+}
+
+func putQueryStreamReader(reader *bufio.Reader) {
+	if reader == nil {
+		return
+	}
+	reader.Reset(nil)
+	queryStreamReaderPool.Put(reader)
+}
+
 func newQueryStream(body io.ReadCloser, onClose ...func()) *queryStream {
 	var closeFn func()
 	if len(onClose) > 0 {
 		closeFn = onClose[0]
 	}
-	return &queryStream{body: body, reader: bufio.NewReader(body), onClose: closeFn}
+	return &queryStream{body: body, reader: takeQueryStreamReader(body), onClose: closeFn}
 }
 
 func (qs *queryStream) Close() error {
@@ -33,6 +57,8 @@ func (qs *queryStream) Close() error {
 	if qs.onClose != nil {
 		qs.onClose()
 	}
+	putQueryStreamReader(qs.reader)
+	qs.reader = nil
 	if qs.body != nil {
 		return qs.body.Close()
 	}

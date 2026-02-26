@@ -50,6 +50,20 @@ var keyPresencePool = sync.Pool{
 	},
 }
 
+var querySegmentReaderPool = sync.Pool{
+	New: func() any {
+		return &segmentReader{}
+	},
+}
+
+func releaseQuerySegmentReader(reader *segmentReader) {
+	if reader == nil || !reader.immutable {
+		return
+	}
+	*reader = segmentReader{}
+	querySegmentReaderPool.Put(reader)
+}
+
 // AdapterConfig configures the index query adapter.
 type AdapterConfig struct {
 	Store  *Store
@@ -220,6 +234,7 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 	if err != nil {
 		return search.Result{}, err
 	}
+	defer releaseQuerySegmentReader(reader)
 	visibility, err := a.visibilityMap(ctx, req.Namespace)
 	if err != nil {
 		return search.Result{}, err
@@ -347,6 +362,7 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 	if err != nil {
 		return search.Result{}, err
 	}
+	defer releaseQuerySegmentReader(reader)
 	visibility, err := a.visibilityMap(ctx, req.Namespace)
 	if err != nil {
 		return search.Result{}, err
@@ -1543,7 +1559,8 @@ func (r *segmentReader) cloneForQuery(manifest *Manifest) *segmentReader {
 	if manifest == nil {
 		manifest = r.manifest
 	}
-	return &segmentReader{
+	clone := querySegmentReaderPool.Get().(*segmentReader)
+	*clone = segmentReader{
 		namespace:             r.namespace,
 		manifest:              manifest,
 		store:                 r.store,
@@ -1568,6 +1585,7 @@ func (r *segmentReader) cloneForQuery(manifest *Manifest) *segmentReader {
 		keyOrderByNameReady:   r.keyOrderByNameReady,
 		immutable:             true,
 	}
+	return clone
 }
 
 func (r *segmentReader) fieldID(field string) (uint32, bool) {

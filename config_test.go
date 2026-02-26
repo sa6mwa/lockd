@@ -96,6 +96,46 @@ func TestConfigValidateErrors(t *testing.T) {
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected error for negative txn replay interval")
 	}
+	cfg = Config{
+		Store:               "mem://",
+		ListenProto:         "unix",
+		ConnguardEnabled:    true,
+		ConnguardEnabledSet: true,
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for connguard on unix listener")
+	}
+}
+
+func TestConfigValidateConnguardDisabledForUnix(t *testing.T) {
+	cfg := Config{
+		Store:       "mem://",
+		ListenProto: "unix",
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if cfg.ConnguardEnabled {
+		t.Fatal("expected connguard to be disabled for unix listener")
+	}
+	if cfg.ConnguardProbeTimeout != 0 {
+		t.Fatalf("expected connguard probe timeout 0 for unix listener, got %s", cfg.ConnguardProbeTimeout)
+	}
+}
+
+func TestConfigValidateConnguardExplicitlyDisabledForUnix(t *testing.T) {
+	cfg := Config{
+		Store:               "mem://",
+		ListenProto:         "unix",
+		ConnguardEnabled:    false,
+		ConnguardEnabledSet: true,
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if cfg.ConnguardEnabled {
+		t.Fatal("expected connguard to remain disabled for unix listener")
+	}
 }
 
 func TestConfigTxnReplayIntervalDefaultsToSweeper(t *testing.T) {

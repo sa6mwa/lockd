@@ -404,7 +404,7 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 	flags.Int("indexer-flush-docs", lockd.DefaultIndexerFlushDocs, "flush index segments after this many documents")
 	flags.Duration("indexer-flush-interval", lockd.DefaultIndexerFlushInterval, "maximum duration to buffer index postings before flushing")
 	flags.Int("query-doc-prefetch", lockd.DefaultQueryDocPrefetch, "prefetch depth for query return=documents (1 disables parallelism)")
-	flags.Bool("connguard-enabled", true, "enable listener-level connection guarding")
+	flags.Bool("connguard-enabled", true, "enable listener-level connection guarding (tcp/tls only; unsupported for listen-proto=unix)")
 	flags.Int("connguard-failure-threshold", lockd.DefaultConnguardFailureThreshold, "number of suspicious connection failures before hard-blocking an IP")
 	flags.Duration("connguard-failure-window", lockd.DefaultConnguardFailureWindow, "window used to count suspicious connection failures")
 	flags.Duration("connguard-block-duration", lockd.DefaultConnguardBlockDuration, "time to block an IP after reaching failure threshold")

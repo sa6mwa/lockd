@@ -299,6 +299,10 @@ var (
 	targetArg           int
 	reportInterval      int
 	perfLogPath         string
+	perfSeries          string
+	perfBaselineRef     string
+	perfRunID           string
+	perfScenarioName    string
 	warmupOps           int
 	warmupMinWindows    int
 	warmupMaxWindows    int
@@ -315,6 +319,10 @@ func initClientCommand(m *cobra.Command) {
 	m.Flags().IntVar(&targetArg, "target", 0, "Attempt to do n operations per second (overrides target property)")
 	m.Flags().IntVar(&reportInterval, "interval", 10, "Interval (seconds) for outputting measurements")
 	m.Flags().StringVar(&perfLogPath, "perf-log", "performance.log", "Append summary metrics to this file (empty disables)")
+	m.Flags().StringVar(&perfSeries, "perf-series", "", "Perf series label for grouping related benchmark runs (defaults to YCSB_PERF_SERIES)")
+	m.Flags().StringVar(&perfBaselineRef, "perf-baseline-ref", "", "Baseline reference label used for comparison metadata (defaults to YCSB_PERF_BASELINE_REF)")
+	m.Flags().StringVar(&perfRunID, "perf-run-id", "", "Optional run identifier to tie a full benchmark matrix together (defaults to YCSB_PERF_RUN_ID)")
+	m.Flags().StringVar(&perfScenarioName, "perf-scenario", "", "Scenario label override for performance metadata (defaults to YCSB_PERF_SCENARIO)")
 	m.Flags().IntVar(&warmupOps, "warmup-ops", 0, "Warmup ops per window (0 disables)")
 	m.Flags().IntVar(&warmupMinWindows, "warmup-min-windows", 2, "Minimum warmup windows before considering stability")
 	m.Flags().IntVar(&warmupMaxWindows, "warmup-max-windows", 3, "Maximum warmup windows before running the benchmark")
@@ -404,6 +412,9 @@ func perfMetadata(dbName, phase string) string {
 	if globalProps == nil {
 		return fmt.Sprintf("backend=%s phase=%s", dbName, phase)
 	}
+	series := resolvePerfTag(perfSeries, "YCSB_PERF_SERIES")
+	baselineRef := resolvePerfTag(perfBaselineRef, "YCSB_PERF_BASELINE_REF")
+	runID := resolvePerfTag(perfRunID, "YCSB_PERF_RUN_ID")
 	workload := globalProps.GetString(prop.Workload, "core")
 	recordcount := globalProps.GetString(prop.RecordCount, "")
 	operationcount := globalProps.GetString(prop.OperationCount, "")
@@ -415,10 +426,23 @@ func perfMetadata(dbName, phase string) string {
 	walCommitSingleWait := perfWalCommitSingleWait(dbName, globalProps)
 	queryEngine := perfQueryEngine(dbName, globalProps)
 	queryReturn := perfQueryReturn(dbName, globalProps)
+	scenario := resolvePerfTag(perfScenarioName, "YCSB_PERF_SCENARIO")
+	if scenario == "" {
+		scenario = perfScenario(dbName, globalProps)
+	}
+	attachEnabled := perfLockdBool(dbName, globalProps, "lockd.attach.enable")
+	attachRead := perfLockdBool(dbName, globalProps, "lockd.attach.read")
+	attachBytes := perfLockdValue(dbName, globalProps, "lockd.attach.bytes")
+	txnExplicit := perfLockdBool(dbName, globalProps, "lockd.txn.explicit")
+	publicRead := perfLockdBool(dbName, globalProps, "lockd.public_read")
 	return fmt.Sprintf(
-		"backend=%s phase=%s workload=%s recordcount=%s operationcount=%s threads=%s target=%s endpoints=%s wal_fsync_interval=%s wal_commit_max_ops=%s wal_commit_single_wait=%s query_engine=%s query_return=%s",
+		"backend=%s phase=%s scenario=%s series=%s baseline_ref=%s run_id=%s workload=%s recordcount=%s operationcount=%s threads=%s target=%s endpoints=%s wal_fsync_interval=%s wal_commit_max_ops=%s wal_commit_single_wait=%s query_engine=%s query_return=%s attach_enabled=%s attach_read=%s attach_bytes=%s txn_explicit=%s public_read=%s",
 		dbName,
 		phase,
+		scenario,
+		series,
+		baselineRef,
+		runID,
 		workload,
 		recordcount,
 		operationcount,
@@ -430,7 +454,20 @@ func perfMetadata(dbName, phase string) string {
 		walCommitSingleWait,
 		queryEngine,
 		queryReturn,
+		attachEnabled,
+		attachRead,
+		attachBytes,
+		txnExplicit,
+		publicRead,
 	)
+}
+
+func resolvePerfTag(raw, envName string) string {
+	value := strings.TrimSpace(raw)
+	if value != "" {
+		return value
+	}
+	return strings.TrimSpace(os.Getenv(envName))
 }
 
 func perfEndpoints(dbName string, props *properties.Properties) string {
@@ -495,4 +532,49 @@ func perfQueryReturn(dbName string, props *properties.Properties) string {
 		return ""
 	}
 	return strings.TrimSpace(strings.ToLower(props.GetString("lockd.query.return", "")))
+}
+
+func perfLockdValue(dbName string, props *properties.Properties, key string) string {
+	if !strings.EqualFold(dbName, "lockd") || props == nil {
+		return ""
+	}
+	return strings.TrimSpace(props.GetString(key, ""))
+}
+
+func perfLockdBool(dbName string, props *properties.Properties, key string) string {
+	value := strings.ToLower(perfLockdValue(dbName, props, key))
+	switch value {
+	case "1", "true", "yes", "on":
+		return "true"
+	case "0", "false", "no", "off":
+		return "false"
+	default:
+		return ""
+	}
+}
+
+func perfScenario(dbName string, props *properties.Properties) string {
+	if props == nil {
+		return ""
+	}
+	workload := strings.TrimSpace(strings.ToLower(props.GetString(prop.Workload, "")))
+	if !strings.EqualFold(dbName, "lockd") {
+		return workload
+	}
+	queryEngine := perfQueryEngine(dbName, props)
+	if workload == "workloade" && queryEngine != "" {
+		return "query-" + queryEngine
+	}
+	attachEnabled := perfLockdBool(dbName, props, "lockd.attach.enable") == "true"
+	txnExplicit := perfLockdBool(dbName, props, "lockd.txn.explicit") == "true"
+	switch {
+	case attachEnabled && txnExplicit:
+		return workload + "-attach-txn"
+	case attachEnabled:
+		return workload + "-attach"
+	case txnExplicit:
+		return workload + "-txn"
+	default:
+		return workload
+	}
 }

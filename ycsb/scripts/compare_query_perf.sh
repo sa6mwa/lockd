@@ -51,6 +51,9 @@ awk '
     return out
   }
   function emit() {
+    if (capture && total_ops == "" && component_ops_sum > 0) {
+      total_ops = sprintf("%.1f", component_ops_sum)
+    }
     if (capture && engine != "") {
       printf "%s|%s|%s|%s\n", ts, engine, total_ops, scan_ops
     }
@@ -61,6 +64,7 @@ awk '
     engine = ""
     total_ops = ""
     scan_ops = ""
+    component_ops_sum = 0
   }
   /^## / {
     emit()
@@ -69,6 +73,7 @@ awk '
     engine = ""
     total_ops = ""
     scan_ops = ""
+    component_ops_sum = 0
     next
   }
   /^backend=/ {
@@ -76,6 +81,7 @@ awk '
     engine = ""
     total_ops = ""
     scan_ops = ""
+    component_ops_sum = 0
     if ($0 ~ /backend=lockd/ && $0 ~ /phase=run/ && $0 ~ /query_engine=/) {
       if (match($0, /query_engine=[^ ]+/)) {
         engine = substr($0, RSTART + length("query_engine="), RLENGTH - length("query_engine="))
@@ -84,12 +90,18 @@ awk '
     }
     next
   }
-  capture && /^TOTAL[[:space:]]+- Takes\(s\):/ {
-    total_ops = parse_ops($0)
-    next
-  }
-  capture && /^SCAN[[:space:]]+- Takes\(s\):/ {
-    scan_ops = parse_ops($0)
+  capture && /^[A-Z_]+[[:space:]]+- Takes\(s\):/ {
+    op = $1
+    sub(/_ERROR$/, "", op)
+    ops = parse_ops($0)
+    if (op == "TOTAL") {
+      total_ops = ops
+    } else {
+      component_ops_sum += ops + 0
+      if (op == "SCAN") {
+        scan_ops = ops
+      }
+    }
     next
   }
   /^$/ {
@@ -98,6 +110,7 @@ awk '
     engine = ""
     total_ops = ""
     scan_ops = ""
+    component_ops_sum = 0
     next
   }
   END {

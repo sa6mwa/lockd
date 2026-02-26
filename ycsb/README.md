@@ -35,12 +35,14 @@ make etcd-load
 make etcd-run
 make lockd-load-query
 make lockd-run-query-pair
+make full-rerun PERF_SERIES=2026-02-26-full-rerun-v2 PERF_BASELINE_REF=2026-01-27-baseline PERF_RUN_ID=20260226-r2
 ```
 
 Each `make *-load` / `make *-run` appends a summary to `performance.log` with the final YCSB stats.
 Disable logging by setting `PERF_LOG=` (empty) or run the binary with `--perf-log=`.
 For baseline runs, we also store a snapshot under `docs/performance/` so results are tracked alongside other perf notes.
-Each log entry now includes `query_engine` and `query_return` metadata for lockd runs so index-vs-scan comparisons can be parsed deterministically.
+Each log entry now includes structured metadata fields for deterministic comparison:
+`series`, `baseline_ref`, `run_id`, `scenario`, `query_engine`, and `query_return`.
 
 Benchmark methodology, caveats, and results live in [BENCHMARKS.md](BENCHMARKS.md).
 
@@ -57,6 +59,16 @@ make lockd-load-query
 make lockd-run-query-index
 make lockd-run-query-scan
 make lockd-compare-query
+make perf-summary PERF_SERIES=2026-02-26-full-rerun-v2
+```
+
+To run and archive the full benchmark matrix in one step:
+
+```bash
+make full-rerun \
+  PERF_SERIES=2026-02-26-full-rerun-v2 \
+  PERF_BASELINE_REF=2026-01-27-baseline \
+  PERF_RUN_ID=20260226-r2
 ```
 
 > **Note**: The standard `go-ycsb` binary can also exercise the lockd driver; just `go build` it from this module so the `_ "github.com/sa6mwa/lockd/ycsb/db/lockd"` import is included.

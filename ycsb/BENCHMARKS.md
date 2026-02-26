@@ -76,6 +76,51 @@ Etcd comparison (no attachments/explicit XA):
 - `make etcd-load`
 - `make etcd-run`
 
+## Latest full rerun (2026-02-26)
+
+Latest validated full matrix series:
+- Series: `2026-02-26-full-rerun-v2`
+- Run ID: `20260226-r2`
+- Artifacts: `docs/performance/2026-02-26-full-rerun-v2/`
+- Summary table: `docs/performance/2026-02-26-full-rerun-v2/summary.md`
+- Query comparison: `docs/performance/2026-02-26-full-rerun-v2/query-compare.md`
+
+Commands used:
+
+```bash
+cd ycsb
+make full-rerun \
+  PERF_SERIES=2026-02-26-full-rerun-v2 \
+  PERF_BASELINE_REF=2026-01-27-baseline \
+  PERF_RUN_ID=20260226-r2
+```
+
+Key throughput comparison (ops/s):
+
+| Scenario | Baseline (2026-01-27) | Current (2026-02-26) | Delta |
+| --- | ---: | ---: | ---: |
+| lockd load workloada | 1980.0 | 17218.6 | +769.63% |
+| lockd run workloada | 2803.6 | 21017.2 | +649.65% |
+| etcd load workloada | 2411.9 | 10174.3 | +321.84% |
+| etcd run workloada | 6517.7 | 13897.1 | +113.22% |
+| lockd run workloadb | 12597.2 | 23942.3 | +90.06% |
+| lockd run workloadc | 15170.4 | 24720.6 | +62.95% |
+| lockd run workloadd | 11105.3 | 23933.5 | +115.51% |
+| etcd run workloadb | 20067.6 | 18233.3 | -9.14% |
+| etcd run workloadc | 24380.1 | 31252.3 | +28.19% |
+| etcd run workloadd | 17391.2 | 19917.1 | +14.52% |
+
+Query path comparison (scan-heavy `workloade`, SCAN ops/s):
+
+| Engine | Historical reference | Current | Delta |
+| --- | ---: | ---: | ---: |
+| index | 814.4 | 16607.0 | +1939.17% |
+| scan | 422.5 | 16166.5 | +3726.39% |
+
+Notes:
+- Query references are from the historical lockd-bench section below (`query-index` / `query-scan`), so they are directionally useful but not strictly identical workloads.
+- Current index-vs-scan delta on the same 2026-02-26 series: index is `+2.72%` higher SCAN ops/s than scan.
+
 ## Performance & comparison (2026-01-27 baseline)
 
 Baseline environment:

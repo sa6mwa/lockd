@@ -304,7 +304,8 @@ and.range{field=/voucher/lines/10/amount,gte=3000}`)
 		t.Fatalf("selector parse: %v", err)
 	}
 
-	adapter, err := New(Config{Backend: store})
+	backend := &countingReadBackend{Backend: store, reads: map[string]int{}}
+	adapter, err := New(Config{Backend: backend})
 	if err != nil {
 		t.Fatalf("new adapter: %v", err)
 	}
@@ -325,6 +326,12 @@ and.range{field=/voucher/lines/10/amount,gte=3000}`)
 	}
 	assertQueryMetadataInt(t, result.Metadata, search.MetadataQueryCandidatesSeen, 2)
 	assertQueryMetadataInt(t, result.Metadata, search.MetadataQueryCandidatesMatched, 1)
+	if got := backend.reads["voucher/1"]; got != 1 {
+		t.Fatalf("expected one read for matched key, got %d", got)
+	}
+	if got := backend.reads["voucher/2"]; got != 1 {
+		t.Fatalf("expected one read for non-matched key, got %d", got)
+	}
 }
 
 func TestScanAdapterQueryDocumentsLargeMatchReportsSpill(t *testing.T) {

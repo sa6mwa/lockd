@@ -190,6 +190,9 @@ func (s *Service) runIndexRebuild(ctx context.Context, namespace string, opts In
 	if err != nil {
 		return result, err
 	}
+	for i := range keys {
+		keys[i] = strings.TrimPrefix(strings.TrimSpace(keys[i]), "/")
+	}
 	sort.Strings(keys)
 
 	var hardErr error

@@ -8,10 +8,8 @@ import (
 	"fmt"
 	"io"
 	"sort"
-	"strconv"
 	"strings"
 
-	"pkt.systems/lockd/internal/jsonpointer"
 	"pkt.systems/lockd/internal/search"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lql"
@@ -83,9 +81,8 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 		return search.Result{}, nil
 	}
 	matchAll := req.Selector.IsEmpty()
-	compatNumericSelector := !matchAll && selectorNeedsNumericSegmentCompat(req.Selector)
 	var plan lql.QueryStreamPlan
-	if !matchAll && !compatNumericSelector {
+	if !matchAll {
 		compiled, compileErr := a.compiledPlan(req.Selector)
 		if compileErr != nil {
 			return search.Result{}, fmt.Errorf("scan: compile selector: %w", compileErr)
@@ -139,12 +136,7 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 		if meta.StateETag == "" {
 			continue
 		}
-		var matched bool
-		if compatNumericSelector {
-			matched, err = a.matchesSelectorCompat(ctx, req.Namespace, key, meta, req.Selector)
-		} else {
-			matched, err = a.matchesSelector(ctx, req.Namespace, key, meta, plan)
-		}
+		matched, err := a.matchesSelector(ctx, req.Namespace, key, meta, plan)
 		if err != nil {
 			if shouldSkipReadError(err) {
 				a.logDebug("search.scan.load_state", "namespace", req.Namespace, "key", key, "error", err)
@@ -189,9 +181,8 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 		return search.Result{}, nil
 	}
 	matchAll := req.Selector.IsEmpty()
-	compatNumericSelector := !matchAll && selectorNeedsNumericSegmentCompat(req.Selector)
 	var plan lql.QueryStreamPlan
-	if !matchAll && !compatNumericSelector {
+	if !matchAll {
 		compiled, compileErr := a.compiledPlan(req.Selector)
 		if compileErr != nil {
 			return search.Result{}, fmt.Errorf("scan: compile selector: %w", compileErr)
@@ -266,38 +257,6 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 			lastMatch = key
 			continue
 		}
-		if compatNumericSelector {
-			_ = stateRes.Reader.Close()
-			matched, err := a.matchesSelectorCompat(ctx, req.Namespace, key, meta, req.Selector)
-			if err != nil {
-				if shouldSkipReadError(err) {
-					a.logDebug("search.scan.load_state", "namespace", req.Namespace, "key", key, "error", err)
-					continue
-				}
-				return search.Result{}, fmt.Errorf("scan: load state %s: %w", key, err)
-			}
-			streamStats.AddCandidate(matched)
-			if !matched {
-				continue
-			}
-			stateRes, err = a.backend.ReadState(stateCtx, req.Namespace, key)
-			if err != nil {
-				if shouldSkipReadError(err) {
-					a.logDebug("search.scan.load_state", "namespace", req.Namespace, "key", key, "error", err)
-					continue
-				}
-				return search.Result{}, fmt.Errorf("scan: load state %s: %w", key, err)
-			}
-			docReader := stateRes.Reader
-			if err := sink.OnDocument(ctx, req.Namespace, key, version, docReader); err != nil {
-				docReader.Close()
-				return search.Result{}, err
-			}
-			docReader.Close()
-			matches = append(matches, key)
-			lastMatch = key
-			continue
-		}
 		matched, queryResult, err := a.matchAndStreamDocument(ctx, req.Namespace, key, version, stateRes.Reader, plan, sink)
 		if err != nil {
 			return search.Result{}, err
@@ -356,29 +315,6 @@ func (a *Adapter) matchesSelector(ctx context.Context, namespace, key string, me
 		return false, err
 	}
 	return matched, nil
-}
-
-func (a *Adapter) matchesSelectorCompat(ctx context.Context, namespace, key string, meta *storage.Meta, selector lql.Selector) (bool, error) {
-	stateCtx := ctx
-	if len(meta.StateDescriptor) > 0 {
-		stateCtx = storage.ContextWithStateDescriptor(stateCtx, meta.StateDescriptor)
-	}
-	if meta.StatePlaintextBytes > 0 {
-		stateCtx = storage.ContextWithStatePlaintextSize(stateCtx, meta.StatePlaintextBytes)
-	}
-	stateRes, err := a.backend.ReadState(stateCtx, namespace, key)
-	if err != nil {
-		return false, err
-	}
-	defer stateRes.Reader.Close()
-
-	dec := json.NewDecoder(stateRes.Reader)
-	dec.UseNumber()
-	var value any
-	if err := dec.Decode(&value); err != nil {
-		return false, err
-	}
-	return lql.MatchesValue(selector, value), nil
 }
 
 func (a *Adapter) matchAndStreamDocument(
@@ -486,108 +422,6 @@ func shouldSkipReadError(err error) bool {
 		return false
 	}
 	return errors.Is(err, storage.ErrNotFound) || storage.IsTransient(err)
-}
-
-func selectorNeedsNumericSegmentCompat(sel lql.Selector) bool {
-	if sel.Eq != nil && fieldHasNumericSegment(sel.Eq.Field) {
-		return true
-	}
-	if sel.Contains != nil && fieldHasNumericSegment(sel.Contains.Field) {
-		return true
-	}
-	if sel.IContains != nil && fieldHasNumericSegment(sel.IContains.Field) {
-		return true
-	}
-	if sel.Prefix != nil && fieldHasNumericSegment(sel.Prefix.Field) {
-		return true
-	}
-	if sel.IPrefix != nil && fieldHasNumericSegment(sel.IPrefix.Field) {
-		return true
-	}
-	if sel.Range != nil && fieldHasNumericSegment(sel.Range.Field) {
-		return true
-	}
-	if sel.In != nil && fieldHasNumericSegment(sel.In.Field) {
-		return true
-	}
-	if sel.Exists != "" && fieldHasNumericSegment(sel.Exists) {
-		return true
-	}
-	for i := range sel.And {
-		if selectorNeedsNumericSegmentCompat(sel.And[i]) {
-			return true
-		}
-	}
-	for i := range sel.Or {
-		if selectorNeedsNumericSegmentCompat(sel.Or[i]) {
-			return true
-		}
-	}
-	if sel.Not != nil && selectorNeedsNumericSegmentCompat(*sel.Not) {
-		return true
-	}
-	return false
-}
-
-func fieldHasNumericSegment(field string) bool {
-	field = strings.TrimSpace(field)
-	if field == "" || field == "/" {
-		return false
-	}
-	segments, err := jsonpointer.Split(field)
-	if err != nil || len(segments) == 0 {
-		return false
-	}
-	segments = expandBracketSugarSegments(segments)
-	for _, segment := range segments {
-		switch segment {
-		case "*", "[]", "**", "...":
-			continue
-		}
-		if isDigits(segment) {
-			return true
-		}
-	}
-	return false
-}
-
-func expandBracketSugarSegments(segments []string) []string {
-	out := make([]string, 0, len(segments))
-	for _, segment := range segments {
-		if segment == "" || segment == "[]" || segment == "*" || segment == "**" || segment == "..." || !strings.HasSuffix(segment, "[]") {
-			out = append(out, segment)
-			continue
-		}
-		base := segment
-		count := 0
-		for strings.HasSuffix(base, "[]") && base != "[]" {
-			base = strings.TrimSuffix(base, "[]")
-			count++
-		}
-		if base == "" {
-			out = append(out, segment)
-			continue
-		}
-		out = append(out, base)
-		for i := 0; i < count; i++ {
-			out = append(out, "[]")
-		}
-	}
-	return out
-}
-
-func isDigits(segment string) bool {
-	if segment == "" {
-		return false
-	}
-	for _, ch := range segment {
-		if ch < '0' || ch > '9' {
-			return false
-		}
-	}
-	// Keep semantics aligned with stream path compilation (non-negative int tokens).
-	_, err := strconv.Atoi(segment)
-	return err == nil
 }
 
 func (a *Adapter) compiledPlan(sel lql.Selector) (lql.QueryStreamPlan, error) {

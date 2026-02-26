@@ -21,6 +21,25 @@ type rebuildHarness struct {
 	idxStore *indexer.Store
 }
 
+type slashListMetaBackend struct {
+	storage.Backend
+}
+
+func (b *slashListMetaBackend) ListMetaKeys(ctx context.Context, namespace string) ([]string, error) {
+	keys, err := b.Backend.ListMetaKeys(ctx, namespace)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if key == "" {
+			continue
+		}
+		out = append(out, "/"+strings.TrimPrefix(key, "/"))
+	}
+	return out, nil
+}
+
 func newRebuildHarness(t testing.TB) rebuildHarness {
 	t.Helper()
 	mem := memory.New()
@@ -166,5 +185,75 @@ func TestRebuildIndexCleanupDropsLowerFormatSegments(t *testing.T) {
 	}
 	if _, err := h.idxMgr.LoadSegment(ctx, namespaces.Default, legacy.ID); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected legacy segment deleted, got err=%v", err)
+	}
+}
+
+func TestRebuildIndexNormalizesSlashPrefixedListMetaKeys(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	backend := &slashListMetaBackend{Backend: mem}
+	idxStore := indexer.NewStore(backend, nil)
+	idxMgr := indexer.NewManager(idxStore, indexer.WriterOptions{
+		FlushDocs:     1000,
+		FlushInterval: time.Minute,
+		Logger:        pslog.NoopLogger(),
+	})
+	defer idxMgr.Close(context.Background())
+	svc := New(Config{
+		Store:            backend,
+		IndexManager:     idxMgr,
+		DefaultNamespace: namespaces.Default,
+		BackendHash:      "test-backend",
+	})
+
+	writeRes, err := backend.WriteState(ctx, namespaces.Default, "doc-1", strings.NewReader(`{"status":"open"}`), storage.PutStateOptions{})
+	if err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+	meta := &storage.Meta{
+		Version:             1,
+		PublishedVersion:    1,
+		StateETag:           writeRes.NewETag,
+		StateDescriptor:     append([]byte(nil), writeRes.Descriptor...),
+		StatePlaintextBytes: writeRes.BytesWritten,
+	}
+	if _, err := backend.StoreMeta(ctx, namespaces.Default, "doc-1", meta, ""); err != nil {
+		t.Fatalf("store meta: %v", err)
+	}
+
+	res, err := svc.RebuildIndex(ctx, namespaces.Default, IndexRebuildOptions{
+		Mode:    "wait",
+		Reset:   true,
+		Cleanup: true,
+	})
+	if err != nil {
+		t.Fatalf("rebuild index: %v", err)
+	}
+	if !res.Rebuilt {
+		t.Fatalf("expected rebuilt=true, got %+v", res)
+	}
+
+	manifestRes, err := idxMgr.LoadManifest(ctx, namespaces.Default)
+	if err != nil {
+		t.Fatalf("load manifest: %v", err)
+	}
+	manifest := manifestRes.Manifest
+	if manifest == nil || manifest.Shards[0] == nil || len(manifest.Shards[0].Segments) == 0 {
+		t.Fatalf("expected rebuilt segment in manifest")
+	}
+	for _, ref := range manifest.Shards[0].Segments {
+		seg, err := idxMgr.LoadSegment(ctx, namespaces.Default, ref.ID)
+		if err != nil {
+			t.Fatalf("load segment %s: %v", ref.ID, err)
+		}
+		for _, block := range seg.Fields {
+			for _, keys := range block.Postings {
+				for _, key := range keys {
+					if strings.HasPrefix(key, "/") {
+						t.Fatalf("segment contains slash-prefixed key %q", key)
+					}
+				}
+			}
+		}
 	}
 }

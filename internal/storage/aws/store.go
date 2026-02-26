@@ -427,8 +427,7 @@ func (s *Store) ListMetaKeys(ctx context.Context, namespace string) ([]string, e
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
 	start := time.Now()
-	prefixPath := path.Join(namespace, "meta") + "/"
-	fullPrefix := s.withPrefix(prefixPath)
+	fullPrefix := s.withPrefix(path.Join(namespace, "meta")) + "/"
 	verbose.Trace("aws.list_meta_keys.begin", "namespace", namespace, "prefix", fullPrefix)
 	var keys []string
 	var token *string
@@ -453,7 +452,7 @@ func (s *Store) ListMetaKeys(ctx context.Context, namespace string) ([]string, e
 			if !strings.HasSuffix(rel, ".pb") {
 				continue
 			}
-			entry := strings.TrimSuffix(rel, ".pb")
+			entry := strings.TrimPrefix(strings.TrimSuffix(rel, ".pb"), "/")
 			if entry == "" {
 				continue
 			}

@@ -409,8 +409,7 @@ func (s *Store) DeleteMeta(ctx context.Context, namespace, key string, expectedE
 func (s *Store) ListMetaKeys(ctx context.Context, namespace string) ([]string, error) {
 	logger, verbose := s.loggers(ctx)
 	start := time.Now()
-	prefixPath := path.Join(namespace, "meta") + "/"
-	fullPrefix := s.withPrefix(prefixPath)
+	fullPrefix := s.withPrefix(path.Join(namespace, "meta")) + "/"
 	verbose.Trace("s3.list_meta_keys.begin", "namespace", namespace, "prefix", fullPrefix)
 	opts := minio.ListObjectsOptions{Prefix: fullPrefix, Recursive: true}
 	var keys []string
@@ -429,7 +428,7 @@ func (s *Store) ListMetaKeys(ctx context.Context, namespace string) ([]string, e
 		if !strings.HasSuffix(rel, ".pb") {
 			continue
 		}
-		entry := strings.TrimSuffix(rel, ".pb")
+		entry := strings.TrimPrefix(strings.TrimSuffix(rel, ".pb"), "/")
 		if entry == "" {
 			continue
 		}

@@ -98,7 +98,8 @@ const (
 	// DefaultLogstoreSegmentSize caps the size of a single logstore segment before rolling.
 	DefaultLogstoreSegmentSize = int64(64 << 20)
 	// DefaultQueryDocPrefetch caps the number of in-flight document fetches for query return=documents.
-	DefaultQueryDocPrefetch = 8
+	// A conservative default avoids over-saturating local disk backends; callers can raise this explicitly.
+	DefaultQueryDocPrefetch = 1
 	// DefaultDiskLockFileCacheSize caps cached lockfile descriptors (disk/NFS).
 	DefaultDiskLockFileCacheSize = 2048
 	// DefaultS3MaxPartSize tunes multipart uploads when writing state to S3-compatible stores.

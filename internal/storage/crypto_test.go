@@ -194,6 +194,54 @@ func TestCryptoSnappyRoundTrip(t *testing.T) {
 	}
 }
 
+func TestCryptoMaterialDescriptorCacheBounded(t *testing.T) {
+	crypto := mustNewTestCrypto(t, false)
+	crypto.materialCacheCap = 2
+	crypto.materialCache = make(map[materialCacheKey]kryptograf.Material, crypto.materialCacheCap)
+
+	m1, err := crypto.MintMaterial("state:cache-1")
+	if err != nil {
+		t.Fatalf("mint material 1: %v", err)
+	}
+	m2, err := crypto.MintMaterial("state:cache-2")
+	if err != nil {
+		t.Fatalf("mint material 2: %v", err)
+	}
+	m3, err := crypto.MintMaterial("state:cache-3")
+	if err != nil {
+		t.Fatalf("mint material 3: %v", err)
+	}
+
+	r1, err := crypto.MaterialFromDescriptor("state:cache-1", m1.Descriptor)
+	if err != nil {
+		t.Fatalf("reconstruct 1: %v", err)
+	}
+	r1b, err := crypto.MaterialFromDescriptor("state:cache-1", m1.Descriptor)
+	if err != nil {
+		t.Fatalf("reconstruct 1 (cache hit): %v", err)
+	}
+	if r1 != r1b {
+		t.Fatalf("expected cached material to match")
+	}
+	if got := len(crypto.materialCache); got != 1 {
+		t.Fatalf("cache size after repeated same descriptor = %d, want 1", got)
+	}
+
+	if _, err := crypto.MaterialFromDescriptor("state:cache-2", m2.Descriptor); err != nil {
+		t.Fatalf("reconstruct 2: %v", err)
+	}
+	if got := len(crypto.materialCache); got != 2 {
+		t.Fatalf("cache size after second descriptor = %d, want 2", got)
+	}
+
+	if _, err := crypto.MaterialFromDescriptor("state:cache-3", m3.Descriptor); err != nil {
+		t.Fatalf("reconstruct 3: %v", err)
+	}
+	if got := len(crypto.materialCache); got != 1 {
+		t.Fatalf("cache size after bounded flush = %d, want 1", got)
+	}
+}
+
 func mustNewTestCrypto(t *testing.T, snappy bool) *Crypto {
 	t.Helper()
 	cfg := mustNewTestCryptoConfig(t, snappy)

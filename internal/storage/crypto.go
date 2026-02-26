@@ -27,6 +27,16 @@ type Crypto struct {
 	kg               kryptograf.Kryptograf
 	metadataMaterial kryptograf.Material
 	metadataContext  []byte
+	materialCacheCap int
+	materialCacheMu  sync.RWMutex
+	materialCache    map[materialCacheKey]kryptograf.Material
+}
+
+const defaultMaterialCacheEntries = 1024
+
+type materialCacheKey struct {
+	context    string
+	descriptor keymgmt.Descriptor
 }
 
 // MaterialResult captures minted crypto material and its descriptor bytes.
@@ -68,6 +78,8 @@ func NewCrypto(cfg CryptoConfig) (*Crypto, error) {
 		kg:               kg,
 		metadataMaterial: mat,
 		metadataContext:  append([]byte(nil), cfg.MetadataContext...),
+		materialCacheCap: defaultMaterialCacheEntries,
+		materialCache:    make(map[materialCacheKey]kryptograf.Material, defaultMaterialCacheEntries),
 	}, nil
 }
 
@@ -143,11 +155,51 @@ func (c *Crypto) MaterialFromDescriptor(context string, descriptor []byte) (kryp
 	if err := desc.UnmarshalBinary(descriptor); err != nil {
 		return kryptograf.Material{}, fmt.Errorf("storage crypto: decode descriptor for %q: %w", context, err)
 	}
+	cacheKey := materialCacheKey{context: context, descriptor: desc}
+	if mat, ok := c.materialCacheGet(cacheKey); ok {
+		return mat, nil
+	}
 	mat, err := c.kg.ReconstructDEK([]byte(context), desc)
 	if err != nil {
 		return kryptograf.Material{}, fmt.Errorf("storage crypto: reconstruct material for %q: %w", context, err)
 	}
+	c.materialCachePut(cacheKey, mat)
 	return mat, nil
+}
+
+func (c *Crypto) materialCacheGet(key materialCacheKey) (kryptograf.Material, bool) {
+	if c == nil || c.materialCacheCap <= 0 {
+		return kryptograf.Material{}, false
+	}
+	c.materialCacheMu.RLock()
+	defer c.materialCacheMu.RUnlock()
+	if len(c.materialCache) == 0 {
+		return kryptograf.Material{}, false
+	}
+	mat, ok := c.materialCache[key]
+	return mat, ok
+}
+
+func (c *Crypto) materialCachePut(key materialCacheKey, material kryptograf.Material) {
+	if c == nil || c.materialCacheCap <= 0 {
+		return
+	}
+	c.materialCacheMu.Lock()
+	defer c.materialCacheMu.Unlock()
+	if c.materialCache == nil {
+		c.materialCache = make(map[materialCacheKey]kryptograf.Material, c.materialCacheCap)
+	}
+	if _, exists := c.materialCache[key]; exists {
+		c.materialCache[key] = material
+		return
+	}
+	if len(c.materialCache) >= c.materialCacheCap {
+		for cacheKey, cached := range c.materialCache {
+			cached.Zero()
+			delete(c.materialCache, cacheKey)
+		}
+	}
+	c.materialCache[key] = material
 }
 
 // StateObjectContext returns the encryption context used for a lock state object.

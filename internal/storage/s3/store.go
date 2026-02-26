@@ -235,10 +235,6 @@ func (s *Store) Config() Config {
 
 func (s *Store) loggers(ctx context.Context) (pslog.Logger, pslog.Logger) {
 	logger := pslog.LoggerFromContext(ctx)
-	logger = logger.With("storage_backend", "s3", "bucket", s.cfg.Bucket)
-	if s.cfg.Prefix != "" {
-		logger = logger.With("prefix", s.cfg.Prefix)
-	}
 	return logger, logger
 }
 

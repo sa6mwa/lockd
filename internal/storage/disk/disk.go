@@ -341,7 +341,6 @@ func (s *Store) BackendHash(ctx context.Context) (string, error) {
 
 func (s *Store) loggers(ctx context.Context) (pslog.Logger, pslog.Logger) {
 	logger := pslog.LoggerFromContext(ctx)
-	logger = logger.With("storage_backend", "disk")
 	return logger, logger
 }
 

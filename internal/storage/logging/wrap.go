@@ -51,7 +51,6 @@ func (b *backend) start(ctx context.Context, op string) (context.Context, trace.
 	} else if corr := correlation.ID(ctx); corr != "" {
 		logger = logger.With("cid", corr)
 	}
-	logger = logger.With("storage_op", op)
 	verbose := logger
 	if corr := correlation.ID(ctx); corr != "" {
 		span.SetAttributes(attribute.String("lockd.correlation_id", corr))
@@ -246,7 +245,6 @@ func (b *backend) ReadState(ctx context.Context, namespace, key string) (storage
 	ctx, span, _, verbose, begin, finish := b.start(ctx, "read_state")
 	defer span.End()
 
-	verbose = verbose.With("namespace", namespace)
 	span.SetAttributes(
 		attribute.String("lockd.storage.namespace", namespace),
 		attribute.Bool("lockd.storage.has_key", key != ""),

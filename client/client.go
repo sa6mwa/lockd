@@ -7899,6 +7899,7 @@ func newUnixHTTPClient(raw string) (*http.Client, string, error) {
 	query := u.Query()
 	basePath := strings.TrimRight(query.Get("path"), "/")
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	applyDefaultTransportTuning(transport)
 	dialer := &net.Dialer{Timeout: defaultHTTPTimeout, KeepAlive: 15 * time.Second}
 	transport.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return dialer.DialContext(ctx, "unix", socketPath)

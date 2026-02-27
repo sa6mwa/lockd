@@ -1193,9 +1193,9 @@ func (h *Handler) streamDocumentRow(w io.Writer, namespace, key string, version 
 	buf := rowBuf[:0]
 	buf = append(buf, '{')
 	buf = append(buf, `"ns":`...)
-	buf = strconv.AppendQuote(buf, namespace)
+	buf = appendJSONQuoted(buf, namespace)
 	buf = append(buf, `,"key":`...)
-	buf = strconv.AppendQuote(buf, key)
+	buf = appendJSONQuoted(buf, key)
 	if version != 0 {
 		buf = append(buf, `,"ver":`...)
 		buf = strconv.AppendInt(buf, version, 10)
@@ -1204,18 +1204,38 @@ func (h *Handler) streamDocumentRow(w io.Writer, namespace, key string, version 
 	if _, err := w.Write(buf); err != nil {
 		return rowBuf, err
 	}
-	lw := &limitedWriter{Writer: w, limit: h.jsonMaxBytes}
+	lw := limitedWriter{Writer: w, limit: h.jsonMaxBytes}
 	if len(copyBuf) == 0 {
-		if _, err := io.Copy(lw, doc); err != nil {
+		if _, err := io.Copy(&lw, doc); err != nil {
 			return rowBuf, err
 		}
-	} else if _, err := io.CopyBuffer(lw, doc, copyBuf); err != nil {
+	} else if _, err := io.CopyBuffer(&lw, doc, copyBuf); err != nil {
 		return rowBuf, err
 	}
 	if _, err := io.WriteString(w, "}\n"); err != nil {
 		return rowBuf, err
 	}
 	return buf[:0], nil
+}
+
+func appendJSONQuoted(dst []byte, value string) []byte {
+	if !requiresJSONEscape(value) {
+		dst = append(dst, '"')
+		dst = append(dst, value...)
+		dst = append(dst, '"')
+		return dst
+	}
+	return strconv.AppendQuote(dst, value)
+}
+
+func requiresJSONEscape(value string) bool {
+	for i := 0; i < len(value); i++ {
+		ch := value[i]
+		if ch < 0x20 || ch == '"' || ch == '\\' {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Handler) selectQueryEngine(ctx context.Context, namespace string, hint search.EngineHint) (search.EngineHint, error) {

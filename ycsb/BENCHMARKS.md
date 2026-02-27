@@ -158,6 +158,11 @@ Historical reference (`b77723e`) with the same query-only flags:
 - Current: `10826.0 ops/s`
 - Delta: `+13.05%`
 
+Additional slice check (`a07ba64` -> current), same flags:
+- Reference (`a07ba64`): `10899.2 ops/s` (`query avg=375.99us`)
+- Current: `11294.4 ops/s` (`query avg=365.17us`)
+- Delta: `+3.63%`
+
 ## Performance & comparison (2026-01-27 baseline)
 
 Baseline environment:

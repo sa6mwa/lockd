@@ -469,6 +469,97 @@ func TestScanAdapterQueryDocumentsLargeMatchesHeapBounded(t *testing.T) {
 	}
 }
 
+func TestScanAdapterQueryDocumentsSingle50MiBMatchHeapBounded(t *testing.T) {
+	ctx := context.Background()
+	store, err := disk.New(disk.Config{Root: t.TempDir(), QueueWatch: false})
+	if err != nil {
+		t.Fatalf("new disk store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	const docBytes = 50 << 20
+	writeState(t, store, "default", "orders/huge", map[string]any{
+		"kind":    "alloc-gate",
+		"message": strings.Repeat("timeout payload ", docBytes/len("timeout payload ")),
+		"id":      1,
+	})
+
+	adapter, err := New(Config{Backend: store, MaxDocumentBytes: 80 << 20})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	sel, err := lql.ParseSelectorString(`eq{field=/kind,value=alloc-gate}`)
+	if err != nil || sel.IsEmpty() {
+		t.Fatalf("selector parse: %v", err)
+	}
+	req := search.Request{
+		Namespace: "default",
+		Selector:  sel,
+		Limit:     1,
+	}
+
+	// Warm once so one-time setup cost does not pollute the gate.
+	if _, err := adapter.QueryDocuments(ctx, req, &drainingDocumentSink{}); err != nil {
+		t.Fatalf("warm query documents: %v", err)
+	}
+
+	runtime.GC()
+	var baseline runtime.MemStats
+	runtime.ReadMemStats(&baseline)
+
+	var peakDelta atomic.Int64
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(2 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				var stats runtime.MemStats
+				runtime.ReadMemStats(&stats)
+				delta := int64(stats.HeapAlloc) - int64(baseline.HeapAlloc)
+				if delta < 0 {
+					delta = 0
+				}
+				for {
+					current := peakDelta.Load()
+					if delta <= current || peakDelta.CompareAndSwap(current, delta) {
+						break
+					}
+				}
+			}
+		}
+	}()
+
+	sink := &drainingDocumentSink{}
+	result, err := adapter.QueryDocuments(ctx, req, sink)
+	close(stop)
+	<-done
+	if err != nil {
+		t.Fatalf("query documents: %v", err)
+	}
+	if len(result.Keys) != 1 || result.Keys[0] != "orders/huge" {
+		t.Fatalf("unexpected result keys: %+v", result.Keys)
+	}
+	if sink.docs != 1 {
+		t.Fatalf("expected one streamed doc, got %d", sink.docs)
+	}
+	assertQueryMetadataInt(t, result.Metadata, search.MetadataQueryCandidatesSeen, 1)
+	assertQueryMetadataInt(t, result.Metadata, search.MetadataQueryCandidatesMatched, 1)
+	if spills := queryMetadataInt(t, result.Metadata, search.MetadataQuerySpillCount); spills < 1 {
+		t.Fatalf("expected spill count >= 1, got %d", spills)
+	}
+
+	const heapDeltaCap = int64(24 << 20) // 24 MiB cap while matching/streaming 50 MiB.
+	if got := peakDelta.Load(); got > heapDeltaCap {
+		t.Fatalf("query-doc heap delta too large: got=%d cap=%d payload=%d", got, heapDeltaCap, docBytes)
+	}
+}
+
 func TestScanAdapterInvalidCursor(t *testing.T) {
 	store := memory.New()
 	ctx := context.Background()

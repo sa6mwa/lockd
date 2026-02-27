@@ -354,6 +354,11 @@ func (s *Store) LoadMeta(ctx context.Context, namespace, key string) (storage.Lo
 	return storage.LoadMetaResult{Meta: meta, ETag: etag}, nil
 }
 
+// ScanMetaSummaries enumerates key+summary rows for the namespace.
+func (s *Store) ScanMetaSummaries(ctx context.Context, req storage.ScanMetaSummariesRequest, visit func(storage.ScanMetaSummaryRow) error) (storage.ScanMetaSummariesResult, error) {
+	return storage.ScanMetaSummariesFallback(ctx, s, req, visit)
+}
+
 // StoreMeta writes the protobuf metadata document using conditional semantics when expectedETag is supplied.
 func (s *Store) StoreMeta(ctx context.Context, namespace, key string, meta *storage.Meta, expectedETag string) (string, error) {
 	payload, err := storage.MarshalMeta(meta, s.crypto)

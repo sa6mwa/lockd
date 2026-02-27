@@ -163,6 +163,39 @@ func (b *backend) LoadMetaSummary(ctx context.Context, namespace, key string) (s
 	return result, nil
 }
 
+func (b *backend) ScanMetaSummaries(ctx context.Context, req storage.ScanMetaSummariesRequest, visit func(storage.ScanMetaSummaryRow) error) (storage.ScanMetaSummariesResult, error) {
+	ctx, span, _, verbose, begin, finish := b.start(ctx, "scan_meta_summaries")
+	defer span.End()
+
+	verbose = verbose.With("namespace", req.Namespace)
+	span.SetAttributes(
+		attribute.String("lockd.storage.namespace", req.Namespace),
+		attribute.Bool("lockd.storage.has_start_after", req.StartAfter != ""),
+		attribute.Int("lockd.storage.limit", req.Limit),
+	)
+	visited := 0
+	result, err := storage.ScanMetaSummaries(ctx, b.inner, req, func(row storage.ScanMetaSummaryRow) error {
+		visited++
+		if visit == nil {
+			return nil
+		}
+		return visit(row)
+	})
+	if err != nil {
+		finish("error", err)
+		verbose.Debug("storage.scan_meta_summaries.error", "error", err, "visited", visited, "elapsed", time.Since(begin))
+		return result, err
+	}
+	finish("ok", nil)
+	verbose.Debug("storage.scan_meta_summaries.success",
+		"visited", visited,
+		"truncated", result.Truncated,
+		"next_start_after", result.NextStartAfter,
+		"elapsed", time.Since(begin),
+	)
+	return result, nil
+}
+
 func (b *backend) StoreMeta(ctx context.Context, namespace, key string, meta *storage.Meta, expectedETag string) (string, error) {
 	ctx, span, _, verbose, begin, finish := b.start(ctx, "store_meta")
 	defer span.End()

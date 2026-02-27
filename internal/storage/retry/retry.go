@@ -80,6 +80,13 @@ func (b *backend) LoadMetaSummary(ctx context.Context, namespace, key string) (s
 	return result, err
 }
 
+func (b *backend) ScanMetaSummaries(ctx context.Context, req storage.ScanMetaSummariesRequest, visit func(storage.ScanMetaSummaryRow) error) (storage.ScanMetaSummariesResult, error) {
+	if scanner, ok := b.inner.(storage.MetaSummaryScanner); ok {
+		return scanner.ScanMetaSummaries(ctx, req, visit)
+	}
+	return storage.ScanMetaSummariesFallback(ctx, b, req, visit)
+}
+
 func (b *backend) StoreMeta(ctx context.Context, namespace, key string, meta *storage.Meta, expectedETag string) (string, error) {
 	var newETag string
 	err := b.withRetry(ctx, "store_meta", namespace, key, func(ctx context.Context) error {

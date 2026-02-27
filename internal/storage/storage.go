@@ -3,7 +3,9 @@ package storage
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"sort"
 	"time"
 )
 
@@ -173,9 +175,34 @@ type LoadMetaSummaryResult struct {
 	ETag string
 }
 
+// ScanMetaSummariesRequest configures metadata-summary scanning for query paths.
+type ScanMetaSummariesRequest struct {
+	Namespace  string
+	StartAfter string
+	Limit      int
+}
+
+// ScanMetaSummaryRow contains one key and its query-relevant metadata summary.
+type ScanMetaSummaryRow struct {
+	Key  string
+	Meta *MetaSummary
+	ETag string
+}
+
+// ScanMetaSummariesResult captures pagination details for summary scans.
+type ScanMetaSummariesResult struct {
+	NextStartAfter string
+	Truncated      bool
+}
+
 // MetaSummaryLoader is an optional fast path for query hot loops.
 type MetaSummaryLoader interface {
 	LoadMetaSummary(ctx context.Context, namespace, key string) (LoadMetaSummaryResult, error)
+}
+
+// MetaSummaryScanner is an optional backend capability for scanning key+summary rows in one pass.
+type MetaSummaryScanner interface {
+	ScanMetaSummaries(ctx context.Context, req ScanMetaSummariesRequest, visit func(ScanMetaSummaryRow) error) (ScanMetaSummariesResult, error)
 }
 
 // LoadMetaSummary uses an optimized backend path when available.
@@ -191,6 +218,79 @@ func LoadMetaSummary(ctx context.Context, backend Backend, namespace, key string
 		Meta: MetaSummaryFromMeta(result.Meta),
 		ETag: result.ETag,
 	}, nil
+}
+
+// ScanMetaSummaries uses backend scanning support when available.
+func ScanMetaSummaries(ctx context.Context, backend Backend, req ScanMetaSummariesRequest, visit func(ScanMetaSummaryRow) error) (ScanMetaSummariesResult, error) {
+	if scanner, ok := backend.(MetaSummaryScanner); ok {
+		return scanner.ScanMetaSummaries(ctx, req, visit)
+	}
+	return ScanMetaSummariesFallback(ctx, backend, req, visit)
+}
+
+// ScanMetaSummariesFallback scans via ListMetaKeys + LoadMetaSummary.
+func ScanMetaSummariesFallback(ctx context.Context, backend Backend, req ScanMetaSummariesRequest, visit func(ScanMetaSummaryRow) error) (ScanMetaSummariesResult, error) {
+	if backend == nil {
+		return ScanMetaSummariesResult{}, ErrNotImplemented
+	}
+	if visit == nil {
+		return ScanMetaSummariesResult{}, ErrNotImplemented
+	}
+	keys, err := backend.ListMetaKeys(ctx, req.Namespace)
+	if err != nil {
+		return ScanMetaSummariesResult{}, err
+	}
+	if len(keys) == 0 {
+		return ScanMetaSummariesResult{}, nil
+	}
+	if !sort.StringsAreSorted(keys) {
+		sort.Strings(keys)
+	}
+	start := 0
+	if req.StartAfter != "" {
+		start = sort.SearchStrings(keys, req.StartAfter)
+		for start < len(keys) && keys[start] <= req.StartAfter {
+			start++
+		}
+	}
+	if start >= len(keys) {
+		return ScanMetaSummariesResult{}, nil
+	}
+	limit := req.Limit
+	if limit <= 0 {
+		limit = len(keys) - start
+	}
+	visited := 0
+	last := ""
+	for i := start; i < len(keys); i++ {
+		if err := ctx.Err(); err != nil {
+			return ScanMetaSummariesResult{}, err
+		}
+		if visited >= limit {
+			return ScanMetaSummariesResult{
+				Truncated:      true,
+				NextStartAfter: last,
+			}, nil
+		}
+		key := keys[i]
+		summary, err := LoadMetaSummary(ctx, backend, req.Namespace, key)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) || IsTransient(err) {
+				continue
+			}
+			return ScanMetaSummariesResult{}, fmt.Errorf("load meta %s: %w", key, err)
+		}
+		if err := visit(ScanMetaSummaryRow{
+			Key:  key,
+			Meta: summary.Meta,
+			ETag: summary.ETag,
+		}); err != nil {
+			return ScanMetaSummariesResult{}, err
+		}
+		visited++
+		last = key
+	}
+	return ScanMetaSummariesResult{}, nil
 }
 
 // ReadStateResult captures a state reader with its metadata.

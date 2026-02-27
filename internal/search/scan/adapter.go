@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"sort"
 	"strings"
 	"sync"
 
@@ -21,6 +20,7 @@ import (
 const cursorPrefix = "scanv1:"
 
 var reservedQueryPrefixes = []string{"lockd-diagnostics/"}
+var errScanLimitReached = errors.New("scan: limit reached")
 
 const queryStreamPayloadSpoolMemoryBytes = 256 * 1024
 const queryStreamReaderBufferBytes = 64 * 1024
@@ -70,22 +70,9 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 	if req.Namespace == "" {
 		return search.Result{}, fmt.Errorf("scan: namespace required")
 	}
-	keys, err := a.backend.ListMetaKeys(ctx, req.Namespace)
-	if err != nil {
-		return search.Result{}, err
-	}
-	if len(keys) == 0 {
-		return search.Result{}, nil
-	}
-	if !sort.StringsAreSorted(keys) {
-		sort.Strings(keys)
-	}
-	startIdx, err := startIndexFromCursor(req.Cursor, keys)
+	startAfter, err := decodeCursor(req.Cursor)
 	if err != nil {
 		return search.Result{}, fmt.Errorf("%w: %v", search.ErrInvalidCursor, err)
-	}
-	if startIdx >= len(keys) {
-		return search.Result{}, nil
 	}
 	matchAll := req.Selector.IsEmpty()
 	var plan lql.QueryStreamPlan
@@ -97,67 +84,65 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 		plan = compiled
 	}
 	limit := req.Limit
-	if limit <= 0 || limit > len(keys) {
-		limit = len(keys)
+	if limit < 0 {
+		limit = 0
 	}
 	matches := make([]string, 0, limit)
 	var lastMatch string
 	more := false
-	for i := startIdx; i < len(keys); i++ {
-		if len(matches) >= limit {
-			if i+1 < len(keys) {
-				more = true
+	nextStartAfter := startAfter
+	scanReq := storage.ScanMetaSummariesRequest{
+		Namespace: req.Namespace,
+		Limit:     scanSummaryPageSize(limit),
+	}
+	for {
+		scanReq.StartAfter = nextStartAfter
+		page, err := storage.ScanMetaSummaries(ctx, a.backend, scanReq, func(row storage.ScanMetaSummaryRow) error {
+			key := row.Key
+			if hasReservedPrefix(key) {
+				return nil
 			}
+			meta := row.Meta
+			if meta == nil || meta.QueryExcluded || meta.PublishedVersion == 0 {
+				return nil
+			}
+			if !matchAll && meta.StateETag == "" {
+				return nil
+			}
+			if !matchAll {
+				matched, matchErr := a.matchesSelector(ctx, req.Namespace, key, meta, plan)
+				if matchErr != nil {
+					if shouldSkipReadError(matchErr) {
+						a.logDebug("search.scan.load_state", "namespace", req.Namespace, "key", key, "error", matchErr)
+						return nil
+					}
+					return fmt.Errorf("scan: load state %s: %w", key, matchErr)
+				}
+				if !matched {
+					return nil
+				}
+			}
+			matches = append(matches, key)
+			lastMatch = key
+			if limit > 0 && len(matches) >= limit {
+				return errScanLimitReached
+			}
+			return nil
+		})
+		if err != nil {
+			if errors.Is(err, errScanLimitReached) {
+				more = true
+				break
+			}
+			return search.Result{}, fmt.Errorf("scan: %w", err)
+		}
+		if !page.Truncated || page.NextStartAfter == "" {
 			break
 		}
-		if err := ctx.Err(); err != nil {
-			return search.Result{}, err
-		}
-		key := keys[i]
-		if hasReservedPrefix(key) {
-			continue
-		}
-		res, err := storage.LoadMetaSummary(ctx, a.backend, req.Namespace, key)
-		if err != nil {
-			if shouldSkipReadError(err) {
-				a.logDebug("search.scan.load_meta", "namespace", req.Namespace, "key", key, "error", err)
-				continue
-			}
-			return search.Result{}, fmt.Errorf("scan: load meta %s: %w", key, err)
-		}
-		meta := res.Meta
-		if meta == nil {
-			continue
-		}
-		if meta.QueryExcluded {
-			continue
-		}
-		if meta.PublishedVersion == 0 {
-			continue
-		}
-		if matchAll {
-			matches = append(matches, key)
-			lastMatch = key
-			continue
-		}
-		if meta.StateETag == "" {
-			continue
-		}
-		matched, err := a.matchesSelector(ctx, req.Namespace, key, meta, plan)
-		if err != nil {
-			if shouldSkipReadError(err) {
-				a.logDebug("search.scan.load_state", "namespace", req.Namespace, "key", key, "error", err)
-				continue
-			}
-			return search.Result{}, fmt.Errorf("scan: load state %s: %w", key, err)
-		}
-		if matched {
-			matches = append(matches, key)
-			lastMatch = key
-		}
+		nextStartAfter = page.NextStartAfter
 	}
 	result := search.Result{Keys: matches}
-	if len(matches) == limit && more && lastMatch != "" {
+	if limit > 0 && len(matches) == limit && more && lastMatch != "" {
 		result.Cursor = encodeCursor(lastMatch)
 	}
 	return result, nil
@@ -172,22 +157,9 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 	if sink == nil {
 		return search.Result{}, fmt.Errorf("scan: document sink required")
 	}
-	keys, err := a.backend.ListMetaKeys(ctx, req.Namespace)
-	if err != nil {
-		return search.Result{}, err
-	}
-	if len(keys) == 0 {
-		return search.Result{}, nil
-	}
-	if !sort.StringsAreSorted(keys) {
-		sort.Strings(keys)
-	}
-	startIdx, err := startIndexFromCursor(req.Cursor, keys)
+	startAfter, err := decodeCursor(req.Cursor)
 	if err != nil {
 		return search.Result{}, fmt.Errorf("%w: %v", search.ErrInvalidCursor, err)
-	}
-	if startIdx >= len(keys) {
-		return search.Result{}, nil
 	}
 	matchAll := req.Selector.IsEmpty()
 	var plan lql.QueryStreamPlan
@@ -199,83 +171,92 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 		plan = compiled
 	}
 	limit := req.Limit
-	if limit <= 0 || limit > len(keys) {
-		limit = len(keys)
+	if limit < 0 {
+		limit = 0
 	}
 	matches := make([]string, 0, limit)
 	var streamStats search.StreamStats
 	var lastMatch string
 	more := false
-	for i := startIdx; i < len(keys); i++ {
-		if len(matches) >= limit {
-			if i+1 < len(keys) {
-				more = true
+	nextStartAfter := startAfter
+	scanReq := storage.ScanMetaSummariesRequest{
+		Namespace: req.Namespace,
+		Limit:     scanSummaryPageSize(limit),
+	}
+	for {
+		scanReq.StartAfter = nextStartAfter
+		page, err := storage.ScanMetaSummaries(ctx, a.backend, scanReq, func(row storage.ScanMetaSummaryRow) error {
+			key := row.Key
+			if hasReservedPrefix(key) {
+				return nil
 			}
+			meta := row.Meta
+			if meta == nil || meta.QueryExcluded || meta.PublishedVersion == 0 {
+				return nil
+			}
+			if !matchAll && meta.StateETag == "" {
+				return nil
+			}
+			version := meta.EffectiveVersion()
+			stateCtx := storage.ContextWithStateReadHintsBorrowed(ctx, meta.StateDescriptor, meta.StatePlaintextBytes)
+			stateRes, readErr := a.backend.ReadState(stateCtx, req.Namespace, key)
+			if readErr != nil {
+				if shouldSkipReadError(readErr) {
+					a.logDebug("search.scan.load_state", "namespace", req.Namespace, "key", key, "error", readErr)
+					return nil
+				}
+				return fmt.Errorf("scan: load state %s: %w", key, readErr)
+			}
+			if matchAll {
+				docReader := stateRes.Reader
+				if err := sink.OnDocument(ctx, req.Namespace, key, version, docReader); err != nil {
+					docReader.Close()
+					return err
+				}
+				docReader.Close()
+				matches = append(matches, key)
+				streamStats.AddCandidate(true)
+				lastMatch = key
+				if limit > 0 && len(matches) >= limit {
+					return errScanLimitReached
+				}
+				return nil
+			}
+			matched, queryResult, err := a.matchAndStreamDocument(ctx, req.Namespace, key, version, stateRes.Reader, plan, sink)
+			if err != nil {
+				return err
+			}
+			streamStats.Add(
+				queryResult.CandidatesSeen,
+				queryResult.CandidatesMatched,
+				queryResult.BytesCaptured,
+				queryResult.SpillCount,
+				queryResult.SpillBytes,
+			)
+			if matched {
+				matches = append(matches, key)
+				lastMatch = key
+				if limit > 0 && len(matches) >= limit {
+					return errScanLimitReached
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			if errors.Is(err, errScanLimitReached) {
+				more = true
+				break
+			}
+			return search.Result{}, fmt.Errorf("scan: %w", err)
+		}
+		if !page.Truncated || page.NextStartAfter == "" {
 			break
 		}
-		if err := ctx.Err(); err != nil {
-			return search.Result{}, err
-		}
-		key := keys[i]
-		if hasReservedPrefix(key) {
-			continue
-		}
-		res, err := storage.LoadMetaSummary(ctx, a.backend, req.Namespace, key)
-		if err != nil {
-			if shouldSkipReadError(err) {
-				a.logDebug("search.scan.load_meta", "namespace", req.Namespace, "key", key, "error", err)
-				continue
-			}
-			return search.Result{}, fmt.Errorf("scan: load meta %s: %w", key, err)
-		}
-		meta := res.Meta
-		if meta == nil || meta.QueryExcluded || meta.PublishedVersion == 0 {
-			continue
-		}
-		if !matchAll && meta.StateETag == "" {
-			continue
-		}
-		version := meta.EffectiveVersion()
-		stateCtx := storage.ContextWithStateReadHintsBorrowed(ctx, meta.StateDescriptor, meta.StatePlaintextBytes)
-		stateRes, err := a.backend.ReadState(stateCtx, req.Namespace, key)
-		if err != nil {
-			if shouldSkipReadError(err) {
-				a.logDebug("search.scan.load_state", "namespace", req.Namespace, "key", key, "error", err)
-				continue
-			}
-			return search.Result{}, fmt.Errorf("scan: load state %s: %w", key, err)
-		}
-		if matchAll {
-			docReader := stateRes.Reader
-			if err := sink.OnDocument(ctx, req.Namespace, key, version, docReader); err != nil {
-				docReader.Close()
-				return search.Result{}, err
-			}
-			docReader.Close()
-			matches = append(matches, key)
-			streamStats.AddCandidate(true)
-			lastMatch = key
-			continue
-		}
-		matched, queryResult, err := a.matchAndStreamDocument(ctx, req.Namespace, key, version, stateRes.Reader, plan, sink)
-		if err != nil {
-			return search.Result{}, err
-		}
-		streamStats.Add(
-			queryResult.CandidatesSeen,
-			queryResult.CandidatesMatched,
-			queryResult.BytesCaptured,
-			queryResult.SpillCount,
-			queryResult.SpillBytes,
-		)
-		if matched {
-			matches = append(matches, key)
-			lastMatch = key
-		}
+		nextStartAfter = page.NextStartAfter
 	}
 	result := search.Result{Keys: matches}
 	result.Metadata = streamStats.ApplyMetadata(result.Metadata)
-	if len(matches) == limit && more && lastMatch != "" {
+	if limit > 0 && len(matches) == limit && more && lastMatch != "" {
 		result.Cursor = encodeCursor(lastMatch)
 	}
 	return result, nil
@@ -399,19 +380,18 @@ func (scanEOFReader) Read([]byte) (int, error) {
 	return 0, io.EOF
 }
 
-func startIndexFromCursor(cursor string, keys []string) (int, error) {
-	if cursor == "" {
-		return 0, nil
+func scanSummaryPageSize(resultLimit int) int {
+	if resultLimit <= 0 {
+		return 2048
 	}
-	value, err := decodeCursor(cursor)
-	if err != nil {
-		return 0, err
+	page := resultLimit * 2
+	if page < 512 {
+		page = 512
 	}
-	pos := sort.SearchStrings(keys, value)
-	if pos < len(keys) && keys[pos] == value {
-		return pos + 1, nil
+	if page > 4096 {
+		page = 4096
 	}
-	return pos, nil
+	return page
 }
 
 func encodeCursor(key string) string {

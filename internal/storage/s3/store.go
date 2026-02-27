@@ -312,6 +312,11 @@ func (s *Store) LoadMeta(ctx context.Context, namespace, key string) (storage.Lo
 	return storage.LoadMetaResult{Meta: meta, ETag: etag}, nil
 }
 
+// ScanMetaSummaries enumerates key+summary rows for the namespace.
+func (s *Store) ScanMetaSummaries(ctx context.Context, req storage.ScanMetaSummariesRequest, visit func(storage.ScanMetaSummaryRow) error) (storage.ScanMetaSummariesResult, error) {
+	return storage.ScanMetaSummariesFallback(ctx, s, req, visit)
+}
+
 // StoreMeta uploads the metadata protobuf, applying conditional copy semantics via expectedETag.
 func (s *Store) StoreMeta(ctx context.Context, namespace, key string, meta *storage.Meta, expectedETag string) (string, error) {
 	logger, verbose := s.loggers(ctx)

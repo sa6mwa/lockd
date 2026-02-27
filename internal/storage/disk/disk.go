@@ -946,6 +946,111 @@ func (s *Store) ListMetaKeys(ctx context.Context, namespace string) ([]string, e
 	return keys, nil
 }
 
+// ScanMetaSummaries enumerates key+summary rows in lexical order.
+func (s *Store) ScanMetaSummaries(ctx context.Context, req storage.ScanMetaSummariesRequest, visit func(storage.ScanMetaSummaryRow) error) (storage.ScanMetaSummariesResult, error) {
+	logger, verbose := s.loggers(ctx)
+	start := time.Now()
+	verbose.Trace("disk.scan_meta_summaries.begin", "namespace", req.Namespace, "start_after", req.StartAfter, "limit", req.Limit)
+
+	namespace := strings.TrimSpace(req.Namespace)
+	if namespace == "" {
+		return storage.ScanMetaSummariesResult{}, fmt.Errorf("disk: namespace required")
+	}
+	if visit == nil {
+		return storage.ScanMetaSummariesResult{}, fmt.Errorf("disk: visit required")
+	}
+	ln, err := s.logstore.namespace(namespace)
+	if err != nil {
+		logger.Debug("disk.scan_meta_summaries.namespace_error", "namespace", namespace, "error", err)
+		return storage.ScanMetaSummariesResult{}, err
+	}
+	if err := ln.refresh(); err != nil {
+		logger.Debug("disk.scan_meta_summaries.refresh_error", "namespace", namespace, "error", err)
+		return storage.ScanMetaSummariesResult{}, err
+	}
+	ln.mu.Lock()
+	keys := make([]string, 0, len(ln.metaIndex))
+	refs := make(map[string]*recordRef, len(ln.metaIndex))
+	for key, ref := range ln.metaIndex {
+		keys = append(keys, key)
+		refs[key] = ref
+	}
+	ln.mu.Unlock()
+	if len(keys) == 0 {
+		return storage.ScanMetaSummariesResult{}, nil
+	}
+	if !sort.StringsAreSorted(keys) {
+		sort.Strings(keys)
+	}
+	startIdx := 0
+	if req.StartAfter != "" {
+		startIdx = sort.SearchStrings(keys, req.StartAfter)
+		for startIdx < len(keys) && keys[startIdx] <= req.StartAfter {
+			startIdx++
+		}
+	}
+	if startIdx >= len(keys) {
+		return storage.ScanMetaSummariesResult{}, nil
+	}
+	limit := req.Limit
+	if limit <= 0 {
+		limit = len(keys) - startIdx
+	}
+	visited := 0
+	last := ""
+	for i := startIdx; i < len(keys); i++ {
+		if err := ctx.Err(); err != nil {
+			return storage.ScanMetaSummariesResult{}, err
+		}
+		if visited >= limit {
+			return storage.ScanMetaSummariesResult{
+				Truncated:      true,
+				NextStartAfter: last,
+			}, nil
+		}
+		key := keys[i]
+		ref := refs[key]
+		if ref == nil {
+			continue
+		}
+		summary := ref.cachedSummary
+		etag := ref.meta.etag
+		if summary == nil {
+			payload, err := ln.readPayload(ref)
+			if err != nil {
+				logger.Debug("disk.scan_meta_summaries.payload_error", "namespace", namespace, "key", key, "error", err)
+				return storage.ScanMetaSummariesResult{}, err
+			}
+			decoded, err := storage.UnmarshalMetaRecordSummary(payload, s.crypto)
+			if err != nil {
+				logger.Debug("disk.scan_meta_summaries.decode_error", "namespace", namespace, "key", key, "error", err)
+				return storage.ScanMetaSummariesResult{}, err
+			}
+			etag = decoded.ETag
+			summary = decoded.Meta
+			if summary == nil {
+				summary = &storage.MetaSummary{}
+			}
+			ln.mu.Lock()
+			if ln.metaIndex[key] == ref {
+				ref.cachedSummary = summary
+			}
+			ln.mu.Unlock()
+		}
+		if err := visit(storage.ScanMetaSummaryRow{
+			Key:  key,
+			Meta: summary,
+			ETag: etag,
+		}); err != nil {
+			return storage.ScanMetaSummariesResult{}, err
+		}
+		visited++
+		last = key
+	}
+	verbose.Debug("disk.scan_meta_summaries.success", "namespace", namespace, "visited", visited, "elapsed", time.Since(start))
+	return storage.ScanMetaSummariesResult{}, nil
+}
+
 // ListNamespaces enumerates namespace roots on disk.
 func (s *Store) ListNamespaces(ctx context.Context) ([]string, error) {
 	if s == nil {

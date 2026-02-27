@@ -153,6 +153,11 @@ func (s *Store) LoadMeta(_ context.Context, namespace, key string) (storage.Load
 	return storage.LoadMetaResult{Meta: &clone, ETag: entry.etag}, nil
 }
 
+// ScanMetaSummaries enumerates key+summary rows for the namespace.
+func (s *Store) ScanMetaSummaries(ctx context.Context, req storage.ScanMetaSummariesRequest, visit func(storage.ScanMetaSummaryRow) error) (storage.ScanMetaSummariesResult, error) {
+	return storage.ScanMetaSummariesFallback(ctx, s, req, visit)
+}
+
 // StoreMeta writes metadata for key, enforcing CAS when expectedETag is provided.
 func (s *Store) StoreMeta(_ context.Context, namespace, key string, meta *storage.Meta, expectedETag string) (string, error) {
 	storageKey, err := canonicalKey(namespace, key)

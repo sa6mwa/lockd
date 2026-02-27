@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -87,6 +88,39 @@ func TestCompactWriterFuzzSeeds(t *testing.T) {
 	}
 }
 
+func TestCompactWriterLargePayloadTotalAllocBounded(t *testing.T) {
+	const (
+		payloadBytes = 50 << 20 // 50 MiB synthetic payload
+		allocCap     = 4 << 20  // 4 MiB total allocations for compaction path
+	)
+
+	item := `{ "k" : "v" , "n" : 123 , "s" : "` + strings.Repeat("x", 512) + `" }`
+	payload := buildLargeJSONArrayPayload(payloadBytes, item)
+	if len(payload) < payloadBytes {
+		t.Fatalf("payload too small: got=%d want>=%d", len(payload), payloadBytes)
+	}
+
+	// Warm once so one-time package/runtime setup does not pollute the gate.
+	if err := CompactWriter(io.Discard, bytes.NewReader(payload), int64(len(payload))); err != nil {
+		t.Fatalf("warm compact failed: %v", err)
+	}
+
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	if err := CompactWriter(io.Discard, bytes.NewReader(payload), int64(len(payload))); err != nil {
+		t.Fatalf("compact failed: %v", err)
+	}
+
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	delta := after.TotalAlloc - before.TotalAlloc
+	if delta > allocCap {
+		t.Fatalf("compact total alloc too large: got=%d cap=%d payload=%d", delta, allocCap, len(payload))
+	}
+}
+
 func FuzzCompactWriter(f *testing.F) {
 	corpus := []string{
 		`{ "foo": [1, 2, 3], "bar": {"baz": true} }`,
@@ -134,6 +168,22 @@ func fuzzBoundaryInt(sel uint8, values []int) int {
 		return 0
 	}
 	return values[int(sel)%len(values)]
+}
+
+func buildLargeJSONArrayPayload(target int, item string) []byte {
+	var buf bytes.Buffer
+	buf.Grow(target + 1024)
+	buf.WriteString(`{ "items" : [`)
+	first := true
+	for buf.Len() < target-4 {
+		if !first {
+			buf.WriteByte(',')
+		}
+		first = false
+		buf.WriteString(item)
+	}
+	buf.WriteString(`]}`)
+	return buf.Bytes()
 }
 
 func fuzzBoundaryMax(sel uint8, payloadLen int64, threshold int) int64 {

@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"runtime"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -14,6 +16,7 @@ import (
 	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/internal/search"
 	"pkt.systems/lockd/internal/storage"
+	"pkt.systems/lockd/internal/storage/disk"
 	"pkt.systems/lockd/internal/storage/memory"
 	"pkt.systems/lockd/namespaces"
 )
@@ -1127,6 +1130,88 @@ func TestIndexAdapterQueryDocumentsUsesSegmentDocMetaWithoutLoadMeta(t *testing.
 	}
 }
 
+func TestIndexAdapterQueryDocumentsSingleLargeMatchTotalAllocBounded(t *testing.T) {
+	ctx := context.Background()
+	backend, err := disk.New(disk.Config{Root: t.TempDir(), QueueWatch: false})
+	if err != nil {
+		t.Fatalf("disk store: %v", err)
+	}
+	t.Cleanup(func() { _ = backend.Close() })
+
+	store := NewStore(backend, nil)
+	segment := NewSegment("seg-docs-large", time.Unix(1_700_000_057, 0))
+	segment.Fields["/message"] = FieldBlock{Postings: map[string][]string{
+		"timeout": {"orders-huge-1"},
+	}}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+	manifest := NewManifest()
+	manifest.Seq = 6
+	manifest.UpdatedAt = segment.CreatedAt
+	manifest.Format = IndexFormatVersionV4
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{{
+			ID:        segment.ID,
+			CreatedAt: segment.CreatedAt,
+			DocCount:  segment.DocCount(),
+		}},
+	}
+	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+
+	const docBytes = 50 << 20
+	writeIndexedState(t, backend, namespaces.Default, "orders-huge-1", map[string]any{
+		"message": strings.Repeat("timeout payload ", docBytes/len("timeout payload ")),
+		"id":      1,
+	})
+
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	req := search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			Contains: &api.Term{Field: "/message", Value: "timeout"},
+		},
+		Limit:  1,
+		Engine: search.EngineIndex,
+	}
+
+	// Warm once to remove one-time setup noise from alloc accounting.
+	if _, err := adapter.QueryDocuments(ctx, req, &drainingIndexDocumentSink{}); err != nil {
+		t.Fatalf("warm query documents: %v", err)
+	}
+
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	sink := &drainingIndexDocumentSink{}
+	result, err := adapter.QueryDocuments(ctx, req, sink)
+	if err != nil {
+		t.Fatalf("query documents: %v", err)
+	}
+	if len(result.Keys) != 1 || result.Keys[0] != "orders-huge-1" {
+		t.Fatalf("unexpected keys %v", result.Keys)
+	}
+	if sink.docs != 1 {
+		t.Fatalf("expected one streamed doc, got %d", sink.docs)
+	}
+
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	delta := after.TotalAlloc - before.TotalAlloc
+
+	const allocCap = uint64(24 << 20) // Must remain far below 50 MiB document size.
+	if delta > allocCap {
+		t.Fatalf("query documents total alloc too large: got=%d cap=%d payload=%d", delta, allocCap, docBytes)
+	}
+}
+
 func TestIndexAdapterQueryUsesSegmentDocMetaWithoutLoadMeta(t *testing.T) {
 	ctx := context.Background()
 	mem := memory.New()
@@ -1439,6 +1524,33 @@ func (s *capturingIndexDocumentSink) OnDocument(_ context.Context, namespace, ke
 		doc:       append([]byte(nil), data...),
 	})
 	return nil
+}
+
+type drainingIndexDocumentSink struct {
+	chunkBytes int
+	perChunk   time.Duration
+	docs       int
+}
+
+func (s *drainingIndexDocumentSink) OnDocument(_ context.Context, _ string, _ string, _ int64, reader io.Reader) error {
+	chunk := s.chunkBytes
+	if chunk <= 0 {
+		chunk = 32 << 10
+	}
+	buf := make([]byte, chunk)
+	for {
+		n, err := reader.Read(buf)
+		if n > 0 && s.perChunk > 0 {
+			time.Sleep(s.perChunk)
+		}
+		if err == io.EOF {
+			s.docs++
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
 }
 
 func writeIndexedState(t *testing.T, store storage.Backend, namespace, key string, doc map[string]any) {

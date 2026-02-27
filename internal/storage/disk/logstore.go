@@ -128,6 +128,7 @@ type logNamespace struct {
 	stateIndex  map[string]*recordRef
 	objectIndex map[string]*recordRef
 
+	sortedMeta    []string
 	sortedObjects []string
 
 	batcher *fsyncBatcher
@@ -916,10 +917,16 @@ func (n *logNamespace) applyRecordLocked(ref *recordRef) {
 	case logRecordMetaPut:
 		current := n.metaIndex[ref.key]
 		if current == nil || ref.meta.gen >= current.meta.gen {
+			if current == nil {
+				n.insertMetaKeyLocked(ref.key)
+			}
 			n.metaIndex[ref.key] = ref
 		}
 	case logRecordMetaDelete:
 		if current := n.metaIndex[ref.key]; current == nil || ref.meta.gen >= current.meta.gen {
+			if current != nil {
+				n.removeMetaKeyLocked(ref.key)
+			}
 			delete(n.metaIndex, ref.key)
 		}
 	case logRecordStatePut:
@@ -951,6 +958,23 @@ func (n *logNamespace) applyRecordLocked(ref *recordRef) {
 			}
 			delete(n.objectIndex, ref.key)
 		}
+	}
+}
+
+func (n *logNamespace) insertMetaKeyLocked(key string) {
+	idx := sort.SearchStrings(n.sortedMeta, key)
+	if idx < len(n.sortedMeta) && n.sortedMeta[idx] == key {
+		return
+	}
+	n.sortedMeta = append(n.sortedMeta, "")
+	copy(n.sortedMeta[idx+1:], n.sortedMeta[idx:])
+	n.sortedMeta[idx] = key
+}
+
+func (n *logNamespace) removeMetaKeyLocked(key string) {
+	idx := sort.SearchStrings(n.sortedMeta, key)
+	if idx < len(n.sortedMeta) && n.sortedMeta[idx] == key {
+		n.sortedMeta = append(n.sortedMeta[:idx], n.sortedMeta[idx+1:]...)
 	}
 }
 

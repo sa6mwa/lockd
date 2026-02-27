@@ -936,12 +936,8 @@ func (s *Store) ListMetaKeys(ctx context.Context, namespace string) ([]string, e
 		return nil, err
 	}
 	ln.mu.Lock()
-	keys := make([]string, 0, len(ln.metaIndex))
-	for key := range ln.metaIndex {
-		keys = append(keys, key)
-	}
+	keys := append([]string(nil), ln.sortedMeta...)
 	ln.mu.Unlock()
-	sort.Strings(keys)
 	verbose.Debug("disk.list_meta_keys.success", "namespace", namespace, "count", len(keys), "elapsed", time.Since(start))
 	return keys, nil
 }
@@ -969,47 +965,46 @@ func (s *Store) ScanMetaSummaries(ctx context.Context, req storage.ScanMetaSumma
 		return storage.ScanMetaSummariesResult{}, err
 	}
 	ln.mu.Lock()
-	keys := make([]string, 0, len(ln.metaIndex))
-	refs := make(map[string]*recordRef, len(ln.metaIndex))
-	for key, ref := range ln.metaIndex {
-		keys = append(keys, key)
-		refs[key] = ref
-	}
-	ln.mu.Unlock()
-	if len(keys) == 0 {
+	if len(ln.sortedMeta) == 0 {
+		ln.mu.Unlock()
 		return storage.ScanMetaSummariesResult{}, nil
 	}
-	if !sort.StringsAreSorted(keys) {
-		sort.Strings(keys)
-	}
+
 	startIdx := 0
 	if req.StartAfter != "" {
-		startIdx = sort.SearchStrings(keys, req.StartAfter)
-		for startIdx < len(keys) && keys[startIdx] <= req.StartAfter {
+		startIdx = sort.SearchStrings(ln.sortedMeta, req.StartAfter)
+		for startIdx < len(ln.sortedMeta) && ln.sortedMeta[startIdx] <= req.StartAfter {
 			startIdx++
 		}
 	}
-	if startIdx >= len(keys) {
+	if startIdx >= len(ln.sortedMeta) {
+		ln.mu.Unlock()
 		return storage.ScanMetaSummariesResult{}, nil
 	}
+
 	limit := req.Limit
 	if limit <= 0 {
-		limit = len(keys) - startIdx
+		limit = len(ln.sortedMeta) - startIdx
 	}
+	endIdx := startIdx + limit
+	if endIdx > len(ln.sortedMeta) {
+		endIdx = len(ln.sortedMeta)
+	}
+	truncated := endIdx < len(ln.sortedMeta)
+	keys := append([]string(nil), ln.sortedMeta[startIdx:endIdx]...)
+	refs := make([]*recordRef, len(keys))
+	for i, key := range keys {
+		refs[i] = ln.metaIndex[key]
+	}
+	ln.mu.Unlock()
+
 	visited := 0
 	last := ""
-	for i := startIdx; i < len(keys); i++ {
+	for i, key := range keys {
 		if err := ctx.Err(); err != nil {
 			return storage.ScanMetaSummariesResult{}, err
 		}
-		if visited >= limit {
-			return storage.ScanMetaSummariesResult{
-				Truncated:      true,
-				NextStartAfter: last,
-			}, nil
-		}
-		key := keys[i]
-		ref := refs[key]
+		ref := refs[i]
 		if ref == nil {
 			continue
 		}
@@ -1046,6 +1041,16 @@ func (s *Store) ScanMetaSummaries(ctx context.Context, req storage.ScanMetaSumma
 		}
 		visited++
 		last = key
+	}
+	if truncated {
+		next := last
+		if next == "" && len(keys) > 0 {
+			next = keys[len(keys)-1]
+		}
+		return storage.ScanMetaSummariesResult{
+			Truncated:      true,
+			NextStartAfter: next,
+		}, nil
 	}
 	verbose.Debug("disk.scan_meta_summaries.success", "namespace", namespace, "visited", visited, "elapsed", time.Since(start))
 	return storage.ScanMetaSummariesResult{}, nil

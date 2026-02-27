@@ -207,6 +207,7 @@ type recordRef struct {
 	payloadLen    int64
 	link          *recordLink
 	cachedMeta    *storage.Meta
+	cachedSummary *storage.MetaSummary
 }
 
 type recordLink struct {

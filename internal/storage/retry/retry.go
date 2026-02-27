@@ -70,6 +70,16 @@ func (b *backend) LoadMeta(ctx context.Context, namespace, key string) (storage.
 	return result, err
 }
 
+func (b *backend) LoadMetaSummary(ctx context.Context, namespace, key string) (storage.LoadMetaSummaryResult, error) {
+	var result storage.LoadMetaSummaryResult
+	err := b.withRetry(ctx, "load_meta_summary", namespace, key, func(ctx context.Context) error {
+		var err error
+		result, err = storage.LoadMetaSummary(ctx, b.inner, namespace, key)
+		return err
+	})
+	return result, err
+}
+
 func (b *backend) StoreMeta(ctx context.Context, namespace, key string, meta *storage.Meta, expectedETag string) (string, error) {
 	var newETag string
 	err := b.withRetry(ctx, "store_meta", namespace, key, func(ctx context.Context) error {

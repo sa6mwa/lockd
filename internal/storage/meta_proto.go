@@ -2,6 +2,7 @@ package storage
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 
 	"google.golang.org/protobuf/proto"
@@ -85,6 +86,44 @@ func UnmarshalMetaRecord(payload []byte, crypto *Crypto) (MetaRecord, error) {
 		return MetaRecord{}, fmt.Errorf("storage: decode meta record protobuf: %w", err)
 	}
 	return MetaRecord{ETag: record.GetEtag(), Meta: metaFromProto(record.GetMeta())}, nil
+}
+
+// UnmarshalMetaRecordSummary decodes only the query-relevant metadata fields.
+func UnmarshalMetaRecordSummary(payload []byte, crypto *Crypto) (LoadMetaSummaryResult, error) {
+	var err error
+	if crypto != nil && crypto.Enabled() {
+		payload, err = crypto.DecryptMetadata(payload)
+		if err != nil {
+			return LoadMetaSummaryResult{}, err
+		}
+	}
+	var record lockdproto.MetaRecord
+	if err := proto.Unmarshal(payload, &record); err != nil {
+		return LoadMetaSummaryResult{}, fmt.Errorf("storage: decode meta record protobuf: %w", err)
+	}
+	pm := record.GetMeta()
+	summary := &MetaSummary{}
+	if pm != nil {
+		summary.Version = pm.GetVersion()
+		summary.PublishedVersion = pm.GetPublishedVersion()
+		summary.StateETag = pm.GetStateEtag()
+		summary.StatePlaintextBytes = pm.GetStatePlaintextBytes()
+		if desc := pm.GetStateDescriptor(); len(desc) > 0 {
+			summary.StateDescriptor = append([]byte(nil), desc...)
+		}
+		if attrs := pm.GetAttributes(); attrs != nil {
+			if value, ok := attrs.Fields[MetaAttributeQueryExclude]; ok {
+				switch strings.ToLower(value.GetStringValue()) {
+				case "true", "1", "yes", "y", "on":
+					summary.QueryExcluded = true
+				}
+			}
+		}
+	}
+	return LoadMetaSummaryResult{
+		Meta: summary,
+		ETag: record.GetEtag(),
+	}, nil
 }
 
 var lockMetaPool = sync.Pool{

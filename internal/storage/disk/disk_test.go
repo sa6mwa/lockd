@@ -117,6 +117,88 @@ func TestDiskStoreCAS(t *testing.T) {
 	}
 }
 
+func TestDiskLoadMetaSummary(t *testing.T) {
+	t.Parallel()
+
+	root := filepath.Join(t.TempDir(), "store")
+	store, err := New(Config{Root: root})
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	key := "orders/summary"
+
+	meta := storage.Meta{
+		Version:             10,
+		PublishedVersion:    8,
+		StateETag:           "state-etag-a",
+		StateDescriptor:     []byte("desc-a"),
+		StatePlaintextBytes: 2048,
+	}
+	meta.MarkQueryExcluded()
+	etag, err := store.StoreMeta(ctx, testNamespace, key, &meta, "")
+	if err != nil {
+		t.Fatalf("store meta: %v", err)
+	}
+
+	summary, err := store.LoadMetaSummary(ctx, testNamespace, key)
+	if err != nil {
+		t.Fatalf("load meta summary: %v", err)
+	}
+	if summary.ETag != etag {
+		t.Fatalf("etag mismatch: got %q want %q", summary.ETag, etag)
+	}
+	if summary.Meta == nil {
+		t.Fatalf("summary missing")
+	}
+	if !summary.Meta.QueryExcluded {
+		t.Fatalf("expected query excluded")
+	}
+	if summary.Meta.EffectiveVersion() != 8 {
+		t.Fatalf("effective version mismatch: got %d", summary.Meta.EffectiveVersion())
+	}
+	if string(summary.Meta.StateDescriptor) != "desc-a" {
+		t.Fatalf("state descriptor mismatch: got %q", string(summary.Meta.StateDescriptor))
+	}
+
+	meta.ClearQueryExcluded()
+	meta.PublishedVersion = 9
+	meta.StateETag = "state-etag-b"
+	meta.StateDescriptor = []byte("desc-b")
+	meta.StatePlaintextBytes = 4096
+	newETag, err := store.StoreMeta(ctx, testNamespace, key, &meta, etag)
+	if err != nil {
+		t.Fatalf("update meta: %v", err)
+	}
+	updated, err := store.LoadMetaSummary(ctx, testNamespace, key)
+	if err != nil {
+		t.Fatalf("load updated summary: %v", err)
+	}
+	if updated.ETag != newETag {
+		t.Fatalf("updated etag mismatch: got %q want %q", updated.ETag, newETag)
+	}
+	if updated.Meta == nil {
+		t.Fatalf("updated summary missing")
+	}
+	if updated.Meta.QueryExcluded {
+		t.Fatalf("did not expect query excluded after clear")
+	}
+	if updated.Meta.PublishedVersion != 9 {
+		t.Fatalf("published version mismatch: got %d", updated.Meta.PublishedVersion)
+	}
+	if updated.Meta.StateETag != "state-etag-b" {
+		t.Fatalf("state etag mismatch: got %q", updated.Meta.StateETag)
+	}
+	if updated.Meta.StatePlaintextBytes != 4096 {
+		t.Fatalf("plaintext bytes mismatch: got %d", updated.Meta.StatePlaintextBytes)
+	}
+	if string(updated.Meta.StateDescriptor) != "desc-b" {
+		t.Fatalf("state descriptor mismatch: got %q", string(updated.Meta.StateDescriptor))
+	}
+}
+
 func TestDiskRetentionSweep(t *testing.T) {
 	t.Parallel()
 

@@ -528,9 +528,11 @@ func (s *Store) LoadMeta(ctx context.Context, namespace, key string) (storage.Lo
 		meta.Lease = &leaseCopy
 	}
 	cachedMeta := meta
+	cachedSummary := storage.MetaSummaryFromMeta(&meta)
 	ln.mu.Lock()
 	if ref != nil && ln.metaIndex[clean] == ref {
 		ref.cachedMeta = &cachedMeta
+		ref.cachedSummary = cachedSummary
 	}
 	ln.mu.Unlock()
 	leaseOwner := ""
@@ -549,6 +551,119 @@ func (s *Store) LoadMeta(ctx context.Context, namespace, key string) (storage.Lo
 		"elapsed", time.Since(start),
 	)
 	return storage.LoadMetaResult{Meta: &meta, ETag: record.ETag}, nil
+}
+
+// LoadMetaSummary loads only query-relevant metadata fields for hot query paths.
+func (s *Store) LoadMetaSummary(ctx context.Context, namespace, key string) (storage.LoadMetaSummaryResult, error) {
+	logger, verbose := s.loggers(ctx)
+	start := time.Now()
+	verbose.Trace("disk.load_meta_summary.begin", "key", key)
+
+	ns, clean, err := s.normalizeKey(namespace, key)
+	if err != nil {
+		logger.Debug("disk.load_meta_summary.encode_error", "key", key, "error", err)
+		return storage.LoadMetaSummaryResult{}, err
+	}
+	ln, err := s.logstore.namespace(ns)
+	if err != nil {
+		logger.Debug("disk.load_meta_summary.namespace_error", "key", key, "error", err)
+		return storage.LoadMetaSummaryResult{}, err
+	}
+	if err := ln.refresh(); err != nil {
+		logger.Debug("disk.load_meta_summary.refresh_error", "key", key, "error", err)
+		return storage.LoadMetaSummaryResult{}, err
+	}
+	ln.mu.Lock()
+	ref := ln.metaIndex[clean]
+	pending := ln.pendingMeta[clean]
+	var cached *storage.MetaSummary
+	var cachedETag string
+	if pending == nil && ref != nil && ref.cachedSummary != nil {
+		cached = ref.cachedSummary
+		cachedETag = ref.meta.etag
+	}
+	ln.mu.Unlock()
+	if cached != nil {
+		verbose.Debug("disk.load_meta_summary.cache_hit", "key", key, "elapsed", time.Since(start))
+		return storage.LoadMetaSummaryResult{Meta: cached, ETag: cachedETag}, nil
+	}
+	if pending != nil && !pendingGroupMatch(ctx, pending) {
+		if err := waitForPendingCommit(ctx, ln, pending); err != nil {
+			logger.Debug("disk.load_meta_summary.pending_wait_error", "key", key, "error", err)
+			return storage.LoadMetaSummaryResult{}, err
+		}
+		ln.mu.Lock()
+		ref = ln.metaIndex[clean]
+		pending = ln.pendingMeta[clean]
+		cached = nil
+		cachedETag = ""
+		if pending == nil && ref != nil && ref.cachedSummary != nil {
+			cached = ref.cachedSummary
+			cachedETag = ref.meta.etag
+		}
+		ln.mu.Unlock()
+		if cached != nil {
+			verbose.Debug("disk.load_meta_summary.cache_hit", "key", key, "elapsed", time.Since(start))
+			return storage.LoadMetaSummaryResult{Meta: cached, ETag: cachedETag}, nil
+		}
+		if pending != nil && !pendingGroupMatch(ctx, pending) {
+			logger.Debug("disk.load_meta_summary.pending_mismatch", "key", key)
+			return storage.LoadMetaSummaryResult{}, storage.ErrCASMismatch
+		}
+	}
+	if ref == nil {
+		verbose.Debug("disk.load_meta_summary.not_found", "key", key, "elapsed", time.Since(start))
+		return storage.LoadMetaSummaryResult{}, storage.ErrNotFound
+	}
+	payload, err := ln.readPayload(ref)
+	if err != nil {
+		logger.Debug("disk.load_meta_summary.payload_error", "key", key, "error", err)
+		return storage.LoadMetaSummaryResult{}, err
+	}
+	summary, err := storage.UnmarshalMetaRecordSummary(payload, s.crypto)
+	if err != nil {
+		logger.Debug("disk.load_meta_summary.decode_error", "key", key, "error", err)
+		if refreshErr := ln.refreshForce(); refreshErr != nil {
+			logger.Debug("disk.load_meta_summary.refresh_force_error", "key", key, "error", refreshErr)
+			return storage.LoadMetaSummaryResult{}, err
+		}
+		ln.mu.Lock()
+		ref = ln.metaIndex[clean]
+		ln.mu.Unlock()
+		if ref == nil {
+			verbose.Debug("disk.load_meta_summary.not_found", "key", key, "elapsed", time.Since(start))
+			return storage.LoadMetaSummaryResult{}, storage.ErrNotFound
+		}
+		payload, payloadErr := ln.readPayload(ref)
+		if payloadErr != nil {
+			logger.Debug("disk.load_meta_summary.payload_error", "key", key, "error", payloadErr)
+			return storage.LoadMetaSummaryResult{}, payloadErr
+		}
+		summary, err = storage.UnmarshalMetaRecordSummary(payload, s.crypto)
+		if err != nil {
+			logger.Debug("disk.load_meta_summary.decode_error", "key", key, "error", err)
+			return storage.LoadMetaSummaryResult{}, err
+		}
+	}
+	if summary.Meta == nil {
+		summary.Meta = &storage.MetaSummary{}
+	}
+	ln.mu.Lock()
+	if ref != nil && ln.metaIndex[clean] == ref {
+		ref.cachedSummary = summary.Meta
+	}
+	ln.mu.Unlock()
+
+	verbose.Debug("disk.load_meta_summary.success",
+		"key", key,
+		"version", summary.Meta.Version,
+		"published_version", summary.Meta.PublishedVersion,
+		"state_etag", summary.Meta.StateETag,
+		"query_excluded", summary.Meta.QueryExcluded,
+		"meta_etag", summary.ETag,
+		"elapsed", time.Since(start),
+	)
+	return summary, nil
 }
 
 // StoreMeta persists metadata with conditional semantics when expectedETag is provided.
@@ -688,8 +803,10 @@ func (s *Store) StoreMeta(ctx context.Context, namespace, key string, meta *stor
 	}
 	if ref != nil {
 		cached := copyMeta
+		summary := storage.MetaSummaryFromMeta(&copyMeta)
 		ln.mu.Lock()
 		ref.cachedMeta = &cached
+		ref.cachedSummary = summary
 		ln.mu.Unlock()
 	}
 

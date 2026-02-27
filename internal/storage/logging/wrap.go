@@ -124,6 +124,45 @@ func (b *backend) LoadMeta(ctx context.Context, namespace, key string) (storage.
 	return result, nil
 }
 
+func (b *backend) LoadMetaSummary(ctx context.Context, namespace, key string) (storage.LoadMetaSummaryResult, error) {
+	ctx, span, _, verbose, begin, finish := b.start(ctx, "load_meta_summary")
+	defer span.End()
+
+	verbose = verbose.With("namespace", namespace)
+	span.SetAttributes(attribute.String("lockd.storage.namespace", namespace))
+	verbose.Trace("storage.load_meta_summary.begin", "key", key)
+	span.SetAttributes(attribute.Bool("lockd.storage.has_key", key != ""))
+
+	result, err := storage.LoadMetaSummary(ctx, b.inner, namespace, key)
+	if err != nil {
+		finish("error", err)
+		verbose.Debug("storage.load_meta_summary.error", "key", key, "error", err, "elapsed", time.Since(begin))
+		return result, err
+	}
+	summary := result.Meta
+	version := int64(0)
+	published := int64(0)
+	stateETag := ""
+	queryExcluded := false
+	if summary != nil {
+		version = summary.Version
+		published = summary.PublishedVersion
+		stateETag = summary.StateETag
+		queryExcluded = summary.QueryExcluded
+	}
+	finish("ok", nil)
+	verbose.Debug("storage.load_meta_summary.success",
+		"key", key,
+		"version", version,
+		"published_version", published,
+		"state_etag", stateETag,
+		"query_excluded", queryExcluded,
+		"meta_etag", result.ETag,
+		"elapsed", time.Since(begin),
+	)
+	return result, nil
+}
+
 func (b *backend) StoreMeta(ctx context.Context, namespace, key string, meta *storage.Meta, expectedETag string) (string, error) {
 	ctx, span, _, verbose, begin, finish := b.start(ctx, "store_meta")
 	defer span.End()

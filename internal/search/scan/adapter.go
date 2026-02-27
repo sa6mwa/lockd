@@ -117,7 +117,7 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 		if hasReservedPrefix(key) {
 			continue
 		}
-		res, err := a.backend.LoadMeta(ctx, req.Namespace, key)
+		res, err := storage.LoadMetaSummary(ctx, a.backend, req.Namespace, key)
 		if err != nil {
 			if shouldSkipReadError(err) {
 				a.logDebug("search.scan.load_meta", "namespace", req.Namespace, "key", key, "error", err)
@@ -129,7 +129,7 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 		if meta == nil {
 			continue
 		}
-		if meta.QueryExcluded() {
+		if meta.QueryExcluded {
 			continue
 		}
 		if meta.PublishedVersion == 0 {
@@ -220,7 +220,7 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 		if hasReservedPrefix(key) {
 			continue
 		}
-		res, err := a.backend.LoadMeta(ctx, req.Namespace, key)
+		res, err := storage.LoadMetaSummary(ctx, a.backend, req.Namespace, key)
 		if err != nil {
 			if shouldSkipReadError(err) {
 				a.logDebug("search.scan.load_meta", "namespace", req.Namespace, "key", key, "error", err)
@@ -229,16 +229,13 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 			return search.Result{}, fmt.Errorf("scan: load meta %s: %w", key, err)
 		}
 		meta := res.Meta
-		if meta == nil || meta.QueryExcluded() || meta.PublishedVersion == 0 {
+		if meta == nil || meta.QueryExcluded || meta.PublishedVersion == 0 {
 			continue
 		}
 		if !matchAll && meta.StateETag == "" {
 			continue
 		}
-		version := meta.PublishedVersion
-		if version == 0 {
-			version = meta.Version
-		}
+		version := meta.EffectiveVersion()
 		stateCtx := storage.ContextWithStateReadHintsBorrowed(ctx, meta.StateDescriptor, meta.StatePlaintextBytes)
 		stateRes, err := a.backend.ReadState(stateCtx, req.Namespace, key)
 		if err != nil {
@@ -284,7 +281,7 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 	return result, nil
 }
 
-func (a *Adapter) matchesSelector(ctx context.Context, namespace, key string, meta *storage.Meta, plan lql.QueryStreamPlan) (bool, error) {
+func (a *Adapter) matchesSelector(ctx context.Context, namespace, key string, meta *storage.MetaSummary, plan lql.QueryStreamPlan) (bool, error) {
 	stateCtx := storage.ContextWithStateReadHintsBorrowed(ctx, meta.StateDescriptor, meta.StatePlaintextBytes)
 	stateRes, err := a.backend.ReadState(stateCtx, namespace, key)
 	if err != nil {

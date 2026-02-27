@@ -51,6 +51,45 @@ type Meta struct {
 	StagedAttachmentsClear    bool               `json:"staged_attachments_clear,omitempty"`
 }
 
+// MetaSummary contains the metadata fields needed by query/filter hot paths.
+type MetaSummary struct {
+	Version             int64
+	PublishedVersion    int64
+	StateETag           string
+	StateDescriptor     []byte
+	StatePlaintextBytes int64
+	QueryExcluded       bool
+}
+
+// EffectiveVersion returns published version when present, otherwise the latest version.
+func (m *MetaSummary) EffectiveVersion() int64 {
+	if m == nil {
+		return 0
+	}
+	if m.PublishedVersion != 0 {
+		return m.PublishedVersion
+	}
+	return m.Version
+}
+
+// MetaSummaryFromMeta extracts query-relevant fields from meta.
+func MetaSummaryFromMeta(meta *Meta) *MetaSummary {
+	if meta == nil {
+		return nil
+	}
+	summary := &MetaSummary{
+		Version:             meta.Version,
+		PublishedVersion:    meta.PublishedVersion,
+		StateETag:           meta.StateETag,
+		StatePlaintextBytes: meta.StatePlaintextBytes,
+		QueryExcluded:       meta.QueryExcluded(),
+	}
+	if len(meta.StateDescriptor) > 0 {
+		summary.StateDescriptor = append([]byte(nil), meta.StateDescriptor...)
+	}
+	return summary
+}
+
 // MetaRecord pairs metadata with its ETag for backends that persist them together.
 type MetaRecord struct {
 	ETag string
@@ -126,6 +165,32 @@ type PutStateResult struct {
 type LoadMetaResult struct {
 	Meta *Meta
 	ETag string
+}
+
+// LoadMetaSummaryResult captures query-relevant metadata and its ETag.
+type LoadMetaSummaryResult struct {
+	Meta *MetaSummary
+	ETag string
+}
+
+// MetaSummaryLoader is an optional fast path for query hot loops.
+type MetaSummaryLoader interface {
+	LoadMetaSummary(ctx context.Context, namespace, key string) (LoadMetaSummaryResult, error)
+}
+
+// LoadMetaSummary uses an optimized backend path when available.
+func LoadMetaSummary(ctx context.Context, backend Backend, namespace, key string) (LoadMetaSummaryResult, error) {
+	if loader, ok := backend.(MetaSummaryLoader); ok {
+		return loader.LoadMetaSummary(ctx, namespace, key)
+	}
+	result, err := backend.LoadMeta(ctx, namespace, key)
+	if err != nil {
+		return LoadMetaSummaryResult{}, err
+	}
+	return LoadMetaSummaryResult{
+		Meta: MetaSummaryFromMeta(result.Meta),
+		ETag: result.ETag,
+	}, nil
 }
 
 // ReadStateResult captures a state reader with its metadata.

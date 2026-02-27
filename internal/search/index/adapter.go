@@ -550,11 +550,8 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 
 func (a *Adapter) matchesSelector(ctx context.Context, namespace, key string, meta *DocumentMetadata, plan lql.QueryStreamPlan) (bool, error) {
 	stateCtx := ctx
-	if meta != nil && len(meta.StateDescriptor) > 0 {
-		stateCtx = storage.ContextWithStateDescriptor(stateCtx, meta.StateDescriptor)
-	}
-	if meta != nil && meta.StatePlaintextBytes > 0 {
-		stateCtx = storage.ContextWithStatePlaintextSize(stateCtx, meta.StatePlaintextBytes)
+	if meta != nil {
+		stateCtx = storage.ContextWithStateReadHintsBorrowed(stateCtx, meta.StateDescriptor, meta.StatePlaintextBytes)
 	}
 	stateRes, err := a.store.backend.ReadState(stateCtx, namespace, key)
 	if err != nil {
@@ -600,14 +597,11 @@ func (a *Adapter) streamDocument(ctx context.Context, namespace, key string, ver
 }
 
 func (a *Adapter) openDocumentReader(ctx context.Context, namespace, key string, meta *DocumentMetadata) (io.ReadCloser, error) {
-	stateRes, err := a.store.backend.ReadState(ctx, namespace, key)
-	if err != nil && meta != nil && len(meta.StateDescriptor) > 0 && isMissingStateDescriptorError(err) {
-		stateCtx := storage.ContextWithStateDescriptor(ctx, meta.StateDescriptor)
-		if meta.StatePlaintextBytes > 0 {
-			stateCtx = storage.ContextWithStatePlaintextSize(stateCtx, meta.StatePlaintextBytes)
-		}
-		stateRes, err = a.store.backend.ReadState(stateCtx, namespace, key)
+	stateCtx := ctx
+	if meta != nil {
+		stateCtx = storage.ContextWithStateReadHintsBorrowed(stateCtx, meta.StateDescriptor, meta.StatePlaintextBytes)
 	}
+	stateRes, err := a.store.backend.ReadState(stateCtx, namespace, key)
 	if err != nil {
 		return nil, err
 	}
@@ -615,10 +609,6 @@ func (a *Adapter) openDocumentReader(ctx context.Context, namespace, key string,
 		return nil, nil
 	}
 	return stateRes.Reader, nil
-}
-
-func isMissingStateDescriptorError(err error) bool {
-	return err != nil && strings.Contains(strings.ToLower(err.Error()), "missing state descriptor")
 }
 
 type documentStreamCandidate struct {
@@ -735,11 +725,8 @@ func (a *Adapter) matchAndStreamDocument(
 	sink search.DocumentSink,
 ) (bool, lql.QueryStreamResult, error) {
 	stateCtx := ctx
-	if meta != nil && len(meta.StateDescriptor) > 0 {
-		stateCtx = storage.ContextWithStateDescriptor(stateCtx, meta.StateDescriptor)
-	}
-	if meta != nil && meta.StatePlaintextBytes > 0 {
-		stateCtx = storage.ContextWithStatePlaintextSize(stateCtx, meta.StatePlaintextBytes)
+	if meta != nil {
+		stateCtx = storage.ContextWithStateReadHintsBorrowed(stateCtx, meta.StateDescriptor, meta.StatePlaintextBytes)
 	}
 	stateRes, err := a.store.backend.ReadState(stateCtx, namespace, key)
 	if err != nil {

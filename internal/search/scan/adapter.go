@@ -235,13 +235,7 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 		if version == 0 {
 			version = meta.Version
 		}
-		stateCtx := ctx
-		if len(meta.StateDescriptor) > 0 {
-			stateCtx = storage.ContextWithStateDescriptor(stateCtx, meta.StateDescriptor)
-		}
-		if meta.StatePlaintextBytes > 0 {
-			stateCtx = storage.ContextWithStatePlaintextSize(stateCtx, meta.StatePlaintextBytes)
-		}
+		stateCtx := storage.ContextWithStateReadHintsBorrowed(ctx, meta.StateDescriptor, meta.StatePlaintextBytes)
 		stateRes, err := a.backend.ReadState(stateCtx, req.Namespace, key)
 		if err != nil {
 			if shouldSkipReadError(err) {
@@ -287,13 +281,7 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 }
 
 func (a *Adapter) matchesSelector(ctx context.Context, namespace, key string, meta *storage.Meta, plan lql.QueryStreamPlan) (bool, error) {
-	stateCtx := ctx
-	if len(meta.StateDescriptor) > 0 {
-		stateCtx = storage.ContextWithStateDescriptor(stateCtx, meta.StateDescriptor)
-	}
-	if meta.StatePlaintextBytes > 0 {
-		stateCtx = storage.ContextWithStatePlaintextSize(stateCtx, meta.StatePlaintextBytes)
-	}
+	stateCtx := storage.ContextWithStateReadHintsBorrowed(ctx, meta.StateDescriptor, meta.StatePlaintextBytes)
 	stateRes, err := a.backend.ReadState(stateCtx, namespace, key)
 	if err != nil {
 		return false, err

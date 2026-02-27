@@ -2770,6 +2770,38 @@ func detectQueryReturn(headerValue, contentType string) QueryReturn {
 	return QueryReturnKeys
 }
 
+func buildQueryPath(namespace, engine, refresh string, returnMode QueryReturn) string {
+	const basePath = "/v1/query"
+	wroteParam := false
+	var b strings.Builder
+	b.Grow(len(basePath) + 96)
+	b.WriteString(basePath)
+	appendParam := func(key, value string) {
+		if strings.TrimSpace(value) == "" {
+			return
+		}
+		if wroteParam {
+			b.WriteByte('&')
+		} else {
+			b.WriteByte('?')
+			wroteParam = true
+		}
+		b.WriteString(key)
+		b.WriteByte('=')
+		b.WriteString(url.QueryEscape(value))
+	}
+	appendParam("namespace", namespace)
+	appendParam("engine", engine)
+	appendParam("refresh", refresh)
+	if mode := returnMode.normalize(); mode != "" {
+		appendParam("return", string(mode))
+	}
+	if !wroteParam {
+		return basePath
+	}
+	return b.String()
+}
+
 func parseUintHeader(value string) uint64 {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -5186,29 +5218,12 @@ func (c *Client) Query(ctx context.Context, optFns ...QueryOption) (*QueryRespon
 	if err != nil {
 		return nil, err
 	}
-	params := url.Values{}
-	if ns != "" {
-		params.Set("namespace", ns)
-	}
-	if opts.Engine != "" {
-		params.Set("engine", opts.Engine)
-	}
-	if opts.Refresh != "" {
-		params.Set("refresh", opts.Refresh)
-	}
+	path := buildQueryPath(ns, opts.Engine, opts.Refresh, returnMode)
+	modeLabel := ""
 	if returnMode != "" {
-		params.Set("return", string(returnMode))
+		modeLabel = string(returnMode)
 	}
-	path := "/v1/query"
-	if encoded := params.Encode(); encoded != "" {
-		path += "?" + encoded
-	}
-	c.logTraceCtx(ctx, "client.query.start", "namespace", ns, "engine", opts.Engine, "mode", func() string {
-		if returnMode == "" {
-			return ""
-		}
-		return string(returnMode)
-	}(), "endpoint", c.lastEndpoint)
+	c.logTraceCtx(ctx, "client.query.start", "namespace", ns, "engine", opts.Engine, "mode", modeLabel, "endpoint", c.lastEndpoint)
 	builder := func(base string) (*http.Request, context.CancelFunc, error) {
 		reqCtx, cancel := c.requestContext(ctx)
 		httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, base+path, bytes.NewReader(payload))

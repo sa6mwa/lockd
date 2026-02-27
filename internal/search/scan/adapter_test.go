@@ -479,7 +479,6 @@ func TestScanAdapterQueryDocumentsSingle50MiBMatchHeapBounded(t *testing.T) {
 
 	const docBytes = 50 << 20
 	writeState(t, store, "default", "orders/huge", map[string]any{
-		"kind":    "alloc-gate",
 		"message": strings.Repeat("timeout payload ", docBytes/len("timeout payload ")),
 		"id":      1,
 	})
@@ -488,7 +487,7 @@ func TestScanAdapterQueryDocumentsSingle50MiBMatchHeapBounded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new adapter: %v", err)
 	}
-	sel, err := lql.ParseSelectorString(`eq{field=/kind,value=alloc-gate}`)
+	sel, err := lql.ParseSelectorString(`contains{field=/message,value=timeout}`)
 	if err != nil || sel.IsEmpty() {
 		t.Fatalf("selector parse: %v", err)
 	}

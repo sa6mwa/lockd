@@ -2147,6 +2147,11 @@ func (n *logNamespace) resolvePayloadSpan(ref *recordRef, file *os.File) (string
 	if ref.segment == nil {
 		return "", 0, 0, fmt.Errorf("disk: logstore missing segment")
 	}
+	// Fast-path for refs created by append/replay paths where payload offsets
+	// are already known and validated.
+	if ref.payloadOffset > 0 {
+		return ref.segment.path, ref.payloadOffset, ref.payloadLen, nil
+	}
 	if file == nil {
 		return "", 0, 0, fmt.Errorf("disk: logstore missing segment file")
 	}

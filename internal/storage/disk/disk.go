@@ -1,6 +1,7 @@
 package disk
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -103,7 +104,53 @@ const (
 	defaultLockFileCacheSize = 2048
 	lockStripeCount          = 4096
 	lockStripeMask           = lockStripeCount - 1
+	stateReadBufferSize      = 8 * 1024
 )
+
+var stateReadBufferPool = sync.Pool{
+	New: func() any {
+		return bufio.NewReaderSize(nil, stateReadBufferSize)
+	},
+}
+
+type pooledBufferedReadCloser struct {
+	reader *bufio.Reader
+	src    io.ReadCloser
+}
+
+func (p *pooledBufferedReadCloser) Read(dst []byte) (int, error) {
+	if p == nil || p.reader == nil {
+		return 0, io.EOF
+	}
+	return p.reader.Read(dst)
+}
+
+func (p *pooledBufferedReadCloser) Close() error {
+	if p == nil {
+		return nil
+	}
+	if p.reader != nil {
+		p.reader.Reset(nil)
+		stateReadBufferPool.Put(p.reader)
+		p.reader = nil
+	}
+	if p.src != nil {
+		return p.src.Close()
+	}
+	return nil
+}
+
+func wrapBufferedStateReader(src io.ReadCloser) io.ReadCloser {
+	if src == nil {
+		return nil
+	}
+	reader, _ := stateReadBufferPool.Get().(*bufio.Reader)
+	if reader == nil {
+		reader = bufio.NewReaderSize(nil, stateReadBufferSize)
+	}
+	reader.Reset(src)
+	return &pooledBufferedReadCloser{reader: reader, src: src}
+}
 
 type lockStripes struct {
 	stripes [lockStripeCount]sync.Mutex
@@ -926,9 +973,10 @@ func (s *Store) ReadState(ctx context.Context, namespace, key string) (storage.R
 			logger.Debug("disk.read_state.material_error", "key", key, "error", err)
 			return storage.ReadStateResult{}, err
 		}
-		decReader, err := s.crypto.DecryptReaderForMaterial(reader, mat)
+		bufferedReader := wrapBufferedStateReader(reader)
+		decReader, err := s.crypto.DecryptReaderForMaterial(bufferedReader, mat)
 		if err != nil {
-			reader.Close()
+			bufferedReader.Close()
 			logger.Debug("disk.read_state.decrypt_error", "key", key, "error", err)
 			return storage.ReadStateResult{}, err
 		}

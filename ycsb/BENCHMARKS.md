@@ -163,6 +163,11 @@ Additional slice check (`a07ba64` -> current), same flags:
 - Current: `11294.4 ops/s` (`query avg=365.17us`)
 - Delta: `+3.63%`
 
+Additional slice check (`f53f597` -> current), same flags:
+- Reference (`f53f597`): `11093.5 ops/s` (`query avg=376.58us`)
+- Current: `12193.3 ops/s` (`query avg=361.64us`)
+- Delta: `+9.91%`
+
 ## Performance & comparison (2026-01-27 baseline)
 
 Baseline environment:

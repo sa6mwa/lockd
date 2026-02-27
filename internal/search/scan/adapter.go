@@ -77,7 +77,9 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 	if len(keys) == 0 {
 		return search.Result{}, nil
 	}
-	sort.Strings(keys)
+	if !sort.StringsAreSorted(keys) {
+		sort.Strings(keys)
+	}
 	startIdx, err := startIndexFromCursor(req.Cursor, keys)
 	if err != nil {
 		return search.Result{}, fmt.Errorf("%w: %v", search.ErrInvalidCursor, err)
@@ -177,7 +179,9 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 	if len(keys) == 0 {
 		return search.Result{}, nil
 	}
-	sort.Strings(keys)
+	if !sort.StringsAreSorted(keys) {
+		sort.Strings(keys)
+	}
 	startIdx, err := startIndexFromCursor(req.Cursor, keys)
 	if err != nil {
 		return search.Result{}, fmt.Errorf("%w: %v", search.ErrInvalidCursor, err)

@@ -319,9 +319,9 @@ func BenchmarkLockdSmallJSONStream(b *testing.B) {
 		if err != nil {
 			b.Fatalf("acquire: %v", err)
 		}
-		version := strconv.FormatInt(lease.Version, 10)
+		ifVersion := lockdclient.Int64(lease.Version)
 		stream := newJSONPayloadStream(int64(smallJSONSize))
-		if _, err := client.Update(ctx, key, lease.LeaseID, stream, lockdclient.UpdateOptions{IfVersion: version}); err != nil {
+		if _, err := client.Update(ctx, key, lease.LeaseID, stream, lockdclient.UpdateOptions{IfVersion: ifVersion}); err != nil {
 			b.Fatalf("update state (stream): %v", err)
 		}
 		if _, err := client.Release(ctx, api.ReleaseRequest{
@@ -476,12 +476,12 @@ func runLockdSmallJSONMinio(b *testing.B, env *benchmarkEnv) {
 		if err != nil {
 			b.Fatalf("acquire: %v", err)
 		}
-		version := strconv.FormatInt(lease.Version, 10)
+		ifVersion := lockdclient.Int64(lease.Version)
 		for _, payload := range batch {
-			if _, err := client.UpdateBytes(ctx, key, lease.LeaseID, payload, lockdclient.UpdateOptions{IfVersion: version}); err != nil {
+			if _, err := client.UpdateBytes(ctx, key, lease.LeaseID, payload, lockdclient.UpdateOptions{IfVersion: ifVersion}); err != nil {
 				b.Fatalf("update state: %v", err)
 			}
-			version = ""
+			ifVersion = nil
 		}
 		if _, err := client.Release(ctx, api.ReleaseRequest{
 			Namespace: namespaces.Default,

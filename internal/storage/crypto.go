@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"io"
@@ -37,6 +38,7 @@ type Crypto struct {
 }
 
 const defaultMaterialCacheEntries = 1024
+const defaultDecryptSourceReadBufferSize = 8 * 1024
 
 type materialCacheKey struct {
 	context    string
@@ -50,6 +52,11 @@ type MaterialResult struct {
 }
 
 var cryptoBufferPool sync.Pool
+var cryptoSourceReadBufferPool = sync.Pool{
+	New: func() any {
+		return bufio.NewReaderSize(bytes.NewReader(nil), defaultDecryptSourceReadBufferSize)
+	},
+}
 
 // NewCrypto initialises a Crypto helper according to cfg. When encryption is disabled the returned value is nil.
 func NewCrypto(cfg CryptoConfig) (*Crypto, error) {
@@ -68,7 +75,10 @@ func NewCrypto(cfg CryptoConfig) (*Crypto, error) {
 	}
 	kg := kryptograf.New(cfg.RootKey).WithChunkSize(defaultStreamChunkSize)
 	if !cfg.DisableBufferPool {
-		kg = kg.WithOptions(kryptograf.WithBufferPool(&cryptoBufferPool))
+		kg = kg.WithOptions(
+			kryptograf.WithBufferPool(&cryptoBufferPool),
+			kryptograf.WithSourceReadBufferPool(&cryptoSourceReadBufferPool),
+		)
 	}
 	if cfg.Snappy {
 		kg = kg.WithSnappy()
@@ -268,7 +278,7 @@ func (c *Crypto) DecryptReaderForMaterial(src io.Reader, mat kryptograf.Material
 	}
 	reader, err := c.kg.DecryptReader(src, mat, kryptograf.WithCipher(func([]byte) (kryptocipher.Cipher, error) {
 		return cachedCipher, nil
-	}))
+	}), kryptograf.WithSourceReadBuffer(defaultDecryptSourceReadBufferSize))
 	if err != nil {
 		mat.Zero()
 		return nil, err

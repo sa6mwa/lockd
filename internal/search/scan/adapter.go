@@ -1,6 +1,7 @@
 package scan
 
 import (
+	"bufio"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"sync"
 
 	"pkt.systems/lockd/internal/search"
 	"pkt.systems/lockd/internal/storage"
@@ -21,6 +23,9 @@ const cursorPrefix = "scanv1:"
 var reservedQueryPrefixes = []string{"lockd-diagnostics/"}
 
 const queryStreamPayloadSpoolMemoryBytes = 256 * 1024
+const queryStreamReaderBufferBytes = 64 * 1024
+
+var queryStreamReaderPool sync.Pool
 
 // Config wires the scan adapter to a backend.
 type Config struct {
@@ -294,11 +299,15 @@ func (a *Adapter) matchesSelector(ctx context.Context, namespace, key string, me
 		return false, err
 	}
 	defer stateRes.Reader.Close()
+	queryReader, pooled := borrowQueryStreamReader(stateRes.Reader)
+	if pooled {
+		defer releaseQueryStreamReader(queryReader)
+	}
 
 	matched := false
 	_, err = lql.QueryStreamWithResult(lql.QueryStreamRequest{
 		Ctx:               stateCtx,
-		Reader:            stateRes.Reader,
+		Reader:            queryReader,
 		Plan:              plan,
 		Mode:              lql.QueryDecisionOnly,
 		MaxCandidateBytes: a.maxDocumentBytes,
@@ -330,11 +339,15 @@ func (a *Adapter) matchAndStreamDocument(
 		return false, lql.QueryStreamResult{}, nil
 	}
 	defer reader.Close()
+	queryReader, pooled := borrowQueryStreamReader(reader)
+	if pooled {
+		defer releaseQueryStreamReader(queryReader)
+	}
 
 	matched := false
 	result, err := lql.QueryStreamWithResult(lql.QueryStreamRequest{
 		Ctx:               ctx,
-		Reader:            reader,
+		Reader:            queryReader,
 		Plan:              plan,
 		Mode:              lql.QueryDecisionPlusValue,
 		MatchedOnly:       true,
@@ -365,6 +378,36 @@ func (a *Adapter) matchAndStreamDocument(
 		return false, result, nil
 	}
 	return true, result, nil
+}
+
+func borrowQueryStreamReader(src io.Reader) (*bufio.Reader, bool) {
+	if src == nil {
+		return nil, false
+	}
+	if reader, ok := src.(*bufio.Reader); ok && reader.Size() >= queryStreamReaderBufferBytes {
+		return reader, false
+	}
+	if pooled := queryStreamReaderPool.Get(); pooled != nil {
+		if reader, ok := pooled.(*bufio.Reader); ok && reader.Size() >= queryStreamReaderBufferBytes {
+			reader.Reset(src)
+			return reader, true
+		}
+	}
+	return bufio.NewReaderSize(src, queryStreamReaderBufferBytes), true
+}
+
+func releaseQueryStreamReader(reader *bufio.Reader) {
+	if reader == nil {
+		return
+	}
+	reader.Reset(scanEOFReader{})
+	queryStreamReaderPool.Put(reader)
+}
+
+type scanEOFReader struct{}
+
+func (scanEOFReader) Read([]byte) (int, error) {
+	return 0, io.EOF
 }
 
 func startIndexFromCursor(cursor string, keys []string) (int, error) {

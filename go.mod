@@ -39,7 +39,7 @@ require (
 	gopkg.in/yaml.v2 v2.4.0
 	gopkg.in/yaml.v3 v3.0.1
 	pkt.systems/jpact v0.1.0
-	pkt.systems/kryptograf v0.5.1
+	pkt.systems/kryptograf v0.6.0
 	pkt.systems/psi v0.3.0
 	pkt.systems/pslog v0.20.0
 )
@@ -154,5 +154,5 @@ require (
 	golang.org/x/tools v0.42.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260217215200-42d3e9bedb6d // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260217215200-42d3e9bedb6d // indirect
-	pkt.systems/lql v0.9.0
+	pkt.systems/lql v0.10.0
 )

@@ -1,6 +1,7 @@
 package scan
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -21,6 +23,39 @@ import (
 	"pkt.systems/lockd/namespaces"
 	"pkt.systems/lql"
 )
+
+func TestBorrowQueryStreamReaderReuse(t *testing.T) {
+	queryStreamReaderPool = sync.Pool{}
+	t.Cleanup(func() {
+		queryStreamReaderPool = sync.Pool{}
+	})
+
+	readerOne, pooledOne := borrowQueryStreamReader(strings.NewReader(`{"status":"open"}`))
+	if readerOne == nil || !pooledOne {
+		t.Fatalf("expected pooled reader from plain source, got reader=%v pooled=%v", readerOne, pooledOne)
+	}
+	releaseQueryStreamReader(readerOne)
+
+	readerTwo, pooledTwo := borrowQueryStreamReader(strings.NewReader(`{"status":"closed"}`))
+	if readerTwo == nil || !pooledTwo {
+		t.Fatalf("expected pooled reader reuse from plain source, got reader=%v pooled=%v", readerTwo, pooledTwo)
+	}
+	if readerOne != readerTwo {
+		t.Fatalf("expected query stream reader reuse, got different reader pointers")
+	}
+	releaseQueryStreamReader(readerTwo)
+}
+
+func TestBorrowQueryStreamReaderKeepsBufferedSources(t *testing.T) {
+	src := bufio.NewReaderSize(strings.NewReader(`{"status":"open"}`), queryStreamReaderBufferBytes)
+	reader, pooled := borrowQueryStreamReader(src)
+	if pooled {
+		t.Fatalf("expected existing buffered reader to bypass pool")
+	}
+	if reader != src {
+		t.Fatalf("expected original buffered reader to be reused")
+	}
+}
 
 func TestScanAdapterMatchAll(t *testing.T) {
 	store := memory.New()

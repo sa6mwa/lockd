@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -308,12 +307,12 @@ func runLockdDiskSmallJSON(b *testing.B, env *diskBenchmarkEnv) {
 	for i := 0; i < b.N; i++ {
 		key := nextDiskKey("lockd-small", i)
 		lease := acquireWithRetry(b, ctx, cli, key, "bench-small", diskBenchmarkLeaseTTL, diskBenchmarkBlockSecs)
-		version := strconv.FormatInt(lease.Version, 10)
+		ifVersion := lockdclient.Int64(lease.Version)
 		for _, payload := range batch {
-			if _, err := cli.UpdateBytes(ctx, key, lease.LeaseID, payload, lockdclient.UpdateOptions{IfVersion: version}); err != nil {
+			if _, err := cli.UpdateBytes(ctx, key, lease.LeaseID, payload, lockdclient.UpdateOptions{IfVersion: ifVersion}); err != nil {
 				b.Fatalf("update state: %v", err)
 			}
-			version = ""
+			ifVersion = nil
 		}
 		if _, err := cli.Release(ctx, api.ReleaseRequest{
 			Namespace: namespaces.Default,

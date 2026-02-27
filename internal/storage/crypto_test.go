@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bufio"
 	"bytes"
 	"io"
 	"sync"
@@ -340,6 +341,25 @@ func TestCryptoBufferPoolToggle(t *testing.T) {
 	})
 }
 
+func TestCryptoSourceReadBufferPoolToggle(t *testing.T) {
+	t.Run("enabled_by_default", func(t *testing.T) {
+		cfg := mustNewTestCryptoConfig(t, false)
+		calls := exerciseCryptoSourceReadPool(t, cfg)
+		if calls == 0 {
+			t.Fatalf("expected source read buffer pool to be used by default")
+		}
+	})
+
+	t.Run("disabled_via_config", func(t *testing.T) {
+		cfg := mustNewTestCryptoConfig(t, false)
+		cfg.DisableBufferPool = true
+		calls := exerciseCryptoSourceReadPool(t, cfg)
+		if calls != 0 {
+			t.Fatalf("expected source read buffer pool to be disabled via config; got %d allocations", calls)
+		}
+	})
+}
+
 // exerciseCryptoPool encrypts and decrypts metadata while counting pool.Get calls.
 func exerciseCryptoPool(t *testing.T, cfg CryptoConfig) int32 {
 	t.Helper()
@@ -368,6 +388,61 @@ func exerciseCryptoPool(t *testing.T, cfg CryptoConfig) int32 {
 	}
 	if !bytes.Equal(plaintext, payload) {
 		t.Fatalf("round trip mismatch")
+	}
+	return atomic.LoadInt32(&gets)
+}
+
+func exerciseCryptoSourceReadPool(t *testing.T, cfg CryptoConfig) int32 {
+	t.Helper()
+	var gets int32
+	cryptoSourceReadBufferPool = sync.Pool{
+		New: func() any {
+			atomic.AddInt32(&gets, 1)
+			return bufio.NewReaderSize(bytes.NewReader(nil), defaultDecryptSourceReadBufferSize)
+		},
+	}
+	t.Cleanup(func() {
+		cryptoSourceReadBufferPool = sync.Pool{
+			New: func() any {
+				return bufio.NewReaderSize(bytes.NewReader(nil), defaultDecryptSourceReadBufferSize)
+			},
+		}
+	})
+	crypto, err := NewCrypto(cfg)
+	if err != nil {
+		t.Fatalf("init crypto: %v", err)
+	}
+	minted, err := crypto.MintMaterial("state:source-buffer-pool")
+	if err != nil {
+		t.Fatalf("mint material: %v", err)
+	}
+	var cipherBuf bytes.Buffer
+	writer, err := crypto.EncryptWriterForMaterial(&cipherBuf, minted.Material)
+	if err != nil {
+		t.Fatalf("encrypt writer: %v", err)
+	}
+	payload := bytes.Repeat([]byte("source-pool-check"), 64)
+	if _, err := writer.Write(payload); err != nil {
+		writer.Close()
+		t.Fatalf("encrypt write: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("encrypt close: %v", err)
+	}
+	mat, err := crypto.MaterialFromDescriptor("state:source-buffer-pool", minted.Descriptor)
+	if err != nil {
+		t.Fatalf("material from descriptor: %v", err)
+	}
+	reader, err := crypto.DecryptReaderForMaterial(bytes.NewReader(cipherBuf.Bytes()), mat)
+	if err != nil {
+		t.Fatalf("decrypt reader: %v", err)
+	}
+	if _, err := io.Copy(io.Discard, reader); err != nil {
+		reader.Close()
+		t.Fatalf("decrypt read: %v", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatalf("decrypt close: %v", err)
 	}
 	return atomic.LoadInt32(&gets)
 }

@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"pkt.systems/kryptograf"
+	kryptocipher "pkt.systems/kryptograf/cipher"
+	"pkt.systems/kryptograf/keymgmt"
 )
 
 func TestNewCryptoRequiresMaterial(t *testing.T) {
@@ -239,6 +241,54 @@ func TestCryptoMaterialDescriptorCacheBounded(t *testing.T) {
 	}
 	if got := len(crypto.materialCache); got != 1 {
 		t.Fatalf("cache size after bounded flush = %d, want 1", got)
+	}
+}
+
+func TestCryptoCipherCacheBounded(t *testing.T) {
+	crypto := mustNewTestCrypto(t, false)
+	crypto.cipherCacheCap = 2
+	crypto.cipherCache = make(map[keymgmt.Descriptor]kryptocipher.Cipher, crypto.cipherCacheCap)
+
+	m1, err := crypto.MintMaterial("state:cipher-1")
+	if err != nil {
+		t.Fatalf("mint material 1: %v", err)
+	}
+	m2, err := crypto.MintMaterial("state:cipher-2")
+	if err != nil {
+		t.Fatalf("mint material 2: %v", err)
+	}
+	m3, err := crypto.MintMaterial("state:cipher-3")
+	if err != nil {
+		t.Fatalf("mint material 3: %v", err)
+	}
+
+	c1, err := crypto.cipherForMaterial(m1.Material)
+	if err != nil {
+		t.Fatalf("cipher material 1: %v", err)
+	}
+	c1b, err := crypto.cipherForMaterial(m1.Material)
+	if err != nil {
+		t.Fatalf("cipher material 1 cached: %v", err)
+	}
+	if c1 != c1b {
+		t.Fatalf("expected cached cipher instance for repeated descriptor")
+	}
+	if got := len(crypto.cipherCache); got != 1 {
+		t.Fatalf("cipher cache size after repeated same descriptor = %d, want 1", got)
+	}
+
+	if _, err := crypto.cipherForMaterial(m2.Material); err != nil {
+		t.Fatalf("cipher material 2: %v", err)
+	}
+	if got := len(crypto.cipherCache); got != 2 {
+		t.Fatalf("cipher cache size after second descriptor = %d, want 2", got)
+	}
+
+	if _, err := crypto.cipherForMaterial(m3.Material); err != nil {
+		t.Fatalf("cipher material 3: %v", err)
+	}
+	if got := len(crypto.cipherCache); got != 1 {
+		t.Fatalf("cipher cache size after bounded flush = %d, want 1", got)
 	}
 }
 

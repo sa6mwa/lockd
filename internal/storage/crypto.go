@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"pkt.systems/kryptograf"
+	kryptocipher "pkt.systems/kryptograf/cipher"
 	"pkt.systems/kryptograf/keymgmt"
 )
 
@@ -30,6 +31,9 @@ type Crypto struct {
 	materialCacheCap int
 	materialCacheMu  sync.RWMutex
 	materialCache    map[materialCacheKey]kryptograf.Material
+	cipherCacheCap   int
+	cipherCacheMu    sync.RWMutex
+	cipherCache      map[keymgmt.Descriptor]kryptocipher.Cipher
 }
 
 const defaultMaterialCacheEntries = 1024
@@ -80,6 +84,8 @@ func NewCrypto(cfg CryptoConfig) (*Crypto, error) {
 		metadataContext:  append([]byte(nil), cfg.MetadataContext...),
 		materialCacheCap: defaultMaterialCacheEntries,
 		materialCache:    make(map[materialCacheKey]kryptograf.Material, defaultMaterialCacheEntries),
+		cipherCacheCap:   defaultMaterialCacheEntries,
+		cipherCache:      make(map[keymgmt.Descriptor]kryptocipher.Cipher, defaultMaterialCacheEntries),
 	}, nil
 }
 
@@ -235,7 +241,14 @@ func (c *Crypto) EncryptWriterForMaterial(dst io.Writer, mat kryptograf.Material
 	if !c.Enabled() {
 		return nopCloser{Writer: dst}, nil
 	}
-	writer, err := c.kg.EncryptWriter(dst, mat)
+	cachedCipher, err := c.cipherForMaterial(mat)
+	if err != nil {
+		mat.Zero()
+		return nil, err
+	}
+	writer, err := c.kg.EncryptWriter(dst, mat, kryptograf.WithCipher(func([]byte) (kryptocipher.Cipher, error) {
+		return cachedCipher, nil
+	}))
 	if err != nil {
 		mat.Zero()
 		return nil, err
@@ -248,12 +261,70 @@ func (c *Crypto) DecryptReaderForMaterial(src io.Reader, mat kryptograf.Material
 	if !c.Enabled() {
 		return io.NopCloser(src), nil
 	}
-	reader, err := c.kg.DecryptReader(src, mat)
+	cachedCipher, err := c.cipherForMaterial(mat)
+	if err != nil {
+		mat.Zero()
+		return nil, err
+	}
+	reader, err := c.kg.DecryptReader(src, mat, kryptograf.WithCipher(func([]byte) (kryptocipher.Cipher, error) {
+		return cachedCipher, nil
+	}))
 	if err != nil {
 		mat.Zero()
 		return nil, err
 	}
 	return &materialReadCloser{ReadCloser: reader, material: mat}, nil
+}
+
+func (c *Crypto) cipherForMaterial(mat kryptograf.Material) (kryptocipher.Cipher, error) {
+	if !c.Enabled() {
+		return nil, nil
+	}
+	key := mat.Descriptor
+	if cached, ok := c.cipherCacheGet(key); ok {
+		return cached, nil
+	}
+	factory := kryptocipher.AESGCM()
+	cipherImpl, err := factory(mat.Key.Bytes())
+	if err != nil {
+		return nil, err
+	}
+	c.cipherCachePut(key, cipherImpl)
+	return cipherImpl, nil
+}
+
+func (c *Crypto) cipherCacheGet(key keymgmt.Descriptor) (kryptocipher.Cipher, bool) {
+	if c == nil || c.cipherCacheCap <= 0 {
+		return nil, false
+	}
+	c.cipherCacheMu.RLock()
+	defer c.cipherCacheMu.RUnlock()
+	if len(c.cipherCache) == 0 {
+		return nil, false
+	}
+	cached, ok := c.cipherCache[key]
+	return cached, ok
+}
+
+func (c *Crypto) cipherCachePut(key keymgmt.Descriptor, cipherImpl kryptocipher.Cipher) {
+	if c == nil || c.cipherCacheCap <= 0 {
+		return
+	}
+	c.cipherCacheMu.Lock()
+	defer c.cipherCacheMu.Unlock()
+	if c.cipherCache == nil {
+		c.cipherCache = make(map[keymgmt.Descriptor]kryptocipher.Cipher, c.cipherCacheCap)
+	}
+	if _, exists := c.cipherCache[key]; exists {
+		c.cipherCache[key] = cipherImpl
+		return
+	}
+	if len(c.cipherCache) >= c.cipherCacheCap {
+		for cacheKey := range c.cipherCache {
+			delete(c.cipherCache, cacheKey)
+		}
+	}
+	c.cipherCache[key] = cipherImpl
 }
 
 type materialWriteCloser struct {

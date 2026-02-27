@@ -148,6 +148,16 @@ Delta vs prior trustworthy pair from the same day (`index=15315.5`, `scan=15178.
 - Index: `+1.54%`
 - Scan: `-1.46%`
 
+Lockd-bench query-only cross-commit check (same day, disk backend, `ha=failover`, `qrf-disabled`, `ops=20000`, `concurrency=8`, `query-return=documents`, `query-seed=false`, `query-flush=false`):
+- Reference (`f726321`): `10481.4 ops/s` (`query avg=394.53us`)
+- Current: `10826.0 ops/s` (`query avg=382.16us`)
+- Delta: `+3.29%`
+
+Historical reference (`b77723e`) with the same query-only flags:
+- Reference (`b77723e`): `9576.6 ops/s`
+- Current: `10826.0 ops/s`
+- Delta: `+13.05%`
+
 ## Performance & comparison (2026-01-27 baseline)
 
 Baseline environment:

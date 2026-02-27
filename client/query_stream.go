@@ -2,6 +2,7 @@ package client
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -195,50 +196,89 @@ func readJSONString(r *bufio.Reader) (string, error) {
 	if quote != '"' {
 		return "", fmt.Errorf("lockd: expected string literal, got %q", quote)
 	}
-	var out []byte
+
+	var raw []byte
 	for {
-		b, err := r.ReadByte()
-		if err != nil {
-			return "", err
+		fragment, readErr := r.ReadSlice('"')
+		if readErr == nil {
+			chunk := fragment[:len(fragment)-1]
+			if len(raw) == 0 && bytes.IndexByte(chunk, '\\') < 0 {
+				return string(chunk), nil
+			}
+			raw = append(raw, chunk...)
+			if trailingBackslashes(chunk)%2 == 0 {
+				return unescapeJSONString(raw)
+			}
+			// Escaped quote inside the string literal.
+			raw = append(raw, '"')
+			continue
 		}
-		if b == '"' {
-			return string(out), nil
+		if readErr == bufio.ErrBufferFull {
+			raw = append(raw, fragment...)
+			continue
 		}
-		if b == '\\' {
-			esc, err := r.ReadByte()
+		return "", readErr
+	}
+}
+
+func trailingBackslashes(chunk []byte) int {
+	count := 0
+	for i := len(chunk) - 1; i >= 0; i-- {
+		if chunk[i] != '\\' {
+			break
+		}
+		count++
+	}
+	return count
+}
+
+func unescapeJSONString(raw []byte) (string, error) {
+	if len(raw) == 0 {
+		return "", nil
+	}
+	if bytes.IndexByte(raw, '\\') < 0 {
+		return string(raw), nil
+	}
+	out := make([]byte, 0, len(raw))
+	for i := 0; i < len(raw); i++ {
+		b := raw[i]
+		if b != '\\' {
+			out = append(out, b)
+			continue
+		}
+		i++
+		if i >= len(raw) {
+			return "", io.ErrUnexpectedEOF
+		}
+		esc := raw[i]
+		switch esc {
+		case '"', '\\', '/':
+			out = append(out, esc)
+		case 'b':
+			out = append(out, byte('\b'))
+		case 'f':
+			out = append(out, byte('\f'))
+		case 'n':
+			out = append(out, byte('\n'))
+		case 'r':
+			out = append(out, byte('\r'))
+		case 't':
+			out = append(out, byte('\t'))
+		case 'u':
+			if i+4 >= len(raw) {
+				return "", io.ErrUnexpectedEOF
+			}
+			rn, err := decodeHexRune(raw[i+1 : i+5])
 			if err != nil {
 				return "", err
 			}
-			switch esc {
-			case '"', '\\', '/':
-				out = append(out, esc)
-			case 'b':
-				out = append(out, byte('\b'))
-			case 'f':
-				out = append(out, byte('\f'))
-			case 'n':
-				out = append(out, byte('\n'))
-			case 'r':
-				out = append(out, byte('\r'))
-			case 't':
-				out = append(out, byte('\t'))
-			case 'u':
-				var hexChars [4]byte
-				if _, err := io.ReadFull(r, hexChars[:]); err != nil {
-					return "", err
-				}
-				rn, err := decodeHexRune(hexChars[:])
-				if err != nil {
-					return "", err
-				}
-				out = utf8.AppendRune(out, rn)
-			default:
-				return "", fmt.Errorf("lockd: invalid escape %q", esc)
-			}
-			continue
+			out = utf8.AppendRune(out, rn)
+			i += 4
+		default:
+			return "", fmt.Errorf("lockd: invalid escape %q", esc)
 		}
-		out = append(out, b)
 	}
+	return string(out), nil
 }
 
 func decodeHexRune(b []byte) (rune, error) {

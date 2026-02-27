@@ -178,6 +178,36 @@ func BenchmarkAdapterQueryWildcardContains(b *testing.B) {
 	}
 }
 
+func BenchmarkAdapterQueryYCSBTableSeqRange(b *testing.B) {
+	ctx := context.Background()
+	_, adapter := buildSyntheticYCSBRangeBenchIndex(ctx, b, 10_000)
+
+	req := search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			And: []api.Selector{
+				{Eq: &api.Term{Field: "/_table", Value: "usertable"}},
+				{Range: &api.RangeTerm{Field: "/_seq"}},
+			},
+		},
+		Limit:  100,
+		Engine: search.EngineIndex,
+	}
+	rangeClause := req.Selector.And[1].Range
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		gte := float64(i % 9_000)
+		rangeClause.GTE = &gte
+		resp, err := adapter.Query(ctx, req)
+		if err != nil {
+			b.Fatalf("adapter ycsb range query: %v", err)
+		}
+		benchResultSize = len(resp.Keys)
+	}
+}
+
 func BenchmarkAdapterPrepareSelectorExecutionPlanLegacy(b *testing.B) {
 	store := NewStore(memory.New(), nil)
 	adapter, err := NewAdapter(AdapterConfig{Store: store})
@@ -765,6 +795,70 @@ func buildSyntheticFullTextBenchIndex(
 	}
 	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
 		b.Fatalf("save fulltext manifest: %v", err)
+	}
+
+	reader := newSegmentReader(namespaces.Default, manifest, store, nil)
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		b.Fatalf("new adapter: %v", err)
+	}
+	return reader, adapter
+}
+
+func buildSyntheticYCSBRangeBenchIndex(
+	ctx context.Context,
+	b testing.TB,
+	docCount int,
+) (*segmentReader, *Adapter) {
+	b.Helper()
+	if docCount <= 0 {
+		docCount = 10_000
+	}
+
+	mem := memory.New()
+	store := NewStore(mem, nil)
+	segment := NewSegment("bench-ycsb-range-seg", time.Unix(1_700_000_300, 0))
+	segment.Format = IndexFormatVersionV5
+
+	tablePostings := make([]string, 0, docCount)
+	seqPostings := make(map[string][]string, docCount)
+	for i := 0; i < docCount; i++ {
+		key := fmt.Sprintf("ydoc-%06d", i)
+		tablePostings = append(tablePostings, key)
+		seqPostings[fmt.Sprintf("%d", i)] = append(seqPostings[fmt.Sprintf("%d", i)], key)
+		meta := &storage.Meta{
+			Version:          1,
+			PublishedVersion: 1,
+			StateETag:        "etag-" + key,
+		}
+		if _, err := mem.StoreMeta(ctx, namespaces.Default, key, meta, ""); err != nil {
+			b.Fatalf("store meta %s: %v", key, err)
+		}
+	}
+	segment.Fields["/_table"] = FieldBlock{
+		Postings: map[string][]string{
+			"usertable": tablePostings,
+		},
+	}
+	segment.Fields["/_seq"] = FieldBlock{Postings: seqPostings}
+
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
+		b.Fatalf("write ycsb range segment: %v", err)
+	}
+	manifest := NewManifest()
+	manifest.Seq = 1
+	manifest.UpdatedAt = segment.CreatedAt
+	manifest.Format = IndexFormatVersionV5
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{{
+			ID:        segment.ID,
+			CreatedAt: segment.CreatedAt,
+			DocCount:  segment.DocCount(),
+		}},
+	}
+	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
+		b.Fatalf("save ycsb range manifest: %v", err)
 	}
 
 	reader := newSegmentReader(namespaces.Default, manifest, store, nil)

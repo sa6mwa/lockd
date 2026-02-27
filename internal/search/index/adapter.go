@@ -1245,20 +1245,31 @@ func (r *segmentReader) docIDsForRange(ctx context.Context, term *api.RangeTerm)
 	}
 	out := borrowDocIDScratch()
 	defer releaseDocIDScratch(out)
-	for _, fieldID := range fieldIDs {
-		if err := r.forEachPostingDocIDsByFieldID(ctx, fieldID, func(termValue string, docIDs []uint32) error {
-			num, err := strconv.ParseFloat(termValue, 64)
-			if err != nil || math.IsNaN(num) {
-				return nil
+	decoded := borrowDocIDScratch()
+	defer releaseDocIDScratch(decoded)
+	if single, ok, err := r.singleCompiledSegment(ctx); err != nil {
+		return nil, err
+	} else if ok {
+		for _, fieldID := range fieldIDs {
+			block, present := single.fieldsByID[fieldID]
+			if !present {
+				continue
 			}
-			if !rangeMatches(term, num) {
-				return nil
-			}
-			*out = append(*out, docIDs...)
-			return nil
-		}); err != nil {
-			return nil, err
+			*out = block.appendDocIDsForRangeInto(term, *out, decoded)
 		}
+		return sortUniqueDocIDs(append(docIDSet(nil), (*out)...)), nil
+	}
+	if err := r.forEachCompiledSegment(ctx, func(seg *compiledSegment) error {
+		for _, fieldID := range fieldIDs {
+			block, ok := seg.fieldsByID[fieldID]
+			if !ok {
+				continue
+			}
+			*out = block.appendDocIDsForRangeInto(term, *out, decoded)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 	return sortUniqueDocIDs(append(docIDSet(nil), (*out)...)), nil
 }
@@ -1475,8 +1486,9 @@ func (r *segmentReader) compileSegment(seg *Segment) *compiledSegment {
 	for field, block := range seg.Fields {
 		fieldID := r.internField(field)
 		compiledBlock := compiledField{
-			terms:        make([]string, 0, len(block.Postings)),
-			postingsByID: make([]adaptivePosting, 0, len(block.Postings)),
+			terms:           make([]string, 0, len(block.Postings)),
+			postingsByID:    make([]adaptivePosting, 0, len(block.Postings)),
+			numericPostings: make([]numericPostingRef, 0, len(block.Postings)),
 		}
 		terms := make([]string, 0, len(block.Postings))
 		for term := range block.Postings {
@@ -1496,8 +1508,24 @@ func (r *segmentReader) compileSegment(seg *Segment) *compiledSegment {
 			if compiledBlock.termIDs != nil {
 				compiledBlock.termIDs[term] = termID
 			}
+			num, parseErr := strconv.ParseFloat(term, 64)
+			isNumeric := parseErr == nil && !math.IsNaN(num)
 			compiledBlock.terms = append(compiledBlock.terms, term)
+			if isNumeric {
+				compiledBlock.numericPostings = append(compiledBlock.numericPostings, numericPostingRef{
+					value:  num,
+					termID: termID,
+				})
+			}
 			compiledBlock.postingsByID = append(compiledBlock.postingsByID, newAdaptivePosting(docIDs))
+		}
+		if len(compiledBlock.numericPostings) > 1 {
+			sort.Slice(compiledBlock.numericPostings, func(i, j int) bool {
+				if compiledBlock.numericPostings[i].value == compiledBlock.numericPostings[j].value {
+					return compiledBlock.numericPostings[i].termID < compiledBlock.numericPostings[j].termID
+				}
+				return compiledBlock.numericPostings[i].value < compiledBlock.numericPostings[j].value
+			})
 		}
 		out.fieldIDs = append(out.fieldIDs, fieldID)
 		out.fieldsByID[fieldID] = compiledBlock
@@ -1607,9 +1635,15 @@ type compiledSegment struct {
 }
 
 type compiledField struct {
-	termIDs      map[string]uint32
-	terms        []string
-	postingsByID []adaptivePosting
+	termIDs         map[string]uint32
+	terms           []string
+	postingsByID    []adaptivePosting
+	numericPostings []numericPostingRef
+}
+
+type numericPostingRef struct {
+	value  float64
+	termID uint32
 }
 
 func (f compiledField) docIDsForTermInto(term string, dst docIDSet) docIDSet {
@@ -1633,6 +1667,53 @@ func (f compiledField) docIDsForTermInto(term string, dst docIDSet) docIDSet {
 		return dst[:0]
 	}
 	return f.postingsByID[termID].decodeInto(dst)
+}
+
+func (f compiledField) appendDocIDsForRangeInto(term *api.RangeTerm, dst docIDSet, decoded *docIDSet) docIDSet {
+	if term == nil || decoded == nil {
+		return dst
+	}
+	if len(f.numericPostings) == 0 {
+		return dst
+	}
+	start := 0
+	end := len(f.numericPostings)
+	if term.GT != nil {
+		start = sort.Search(len(f.numericPostings), func(i int) bool {
+			return f.numericPostings[i].value > *term.GT
+		})
+	}
+	if term.GTE != nil {
+		gteStart := sort.Search(len(f.numericPostings), func(i int) bool {
+			return f.numericPostings[i].value >= *term.GTE
+		})
+		if gteStart > start {
+			start = gteStart
+		}
+	}
+	if term.LT != nil {
+		end = min(end, sort.Search(len(f.numericPostings), func(i int) bool {
+			return f.numericPostings[i].value >= *term.LT
+		}))
+	}
+	if term.LTE != nil {
+		end = min(end, sort.Search(len(f.numericPostings), func(i int) bool {
+			return f.numericPostings[i].value > *term.LTE
+		}))
+	}
+	if start >= end {
+		return dst
+	}
+	for i := start; i < end; i++ {
+		postingRef := f.numericPostings[i]
+		if int(postingRef.termID) >= len(f.postingsByID) {
+			continue
+		}
+		docIDs := f.postingsByID[postingRef.termID].decodeInto((*decoded)[:0])
+		*decoded = docIDs
+		dst = append(dst, docIDs...)
+	}
+	return dst
 }
 
 func (r *segmentReader) docMetaMap(ctx context.Context) (map[string]DocumentMetadata, error) {
@@ -2447,25 +2528,6 @@ func normalizeRangeField(term *api.RangeTerm) string {
 
 func normalizeTermValue(value string) string {
 	return strings.ToLower(strings.TrimSpace(value))
-}
-
-func rangeMatches(term *api.RangeTerm, value float64) bool {
-	if term == nil {
-		return false
-	}
-	if term.GTE != nil && value < *term.GTE {
-		return false
-	}
-	if term.GT != nil && value <= *term.GT {
-		return false
-	}
-	if term.LTE != nil && value > *term.LTE {
-		return false
-	}
-	if term.LT != nil && value >= *term.LT {
-		return false
-	}
-	return true
 }
 
 func normalizeSelectorFieldsForLQL(sel *api.Selector) error {

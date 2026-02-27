@@ -173,6 +173,18 @@ Additional slice check (`801d46e` -> current), same flags:
 - Current: `13517.3 ops/s` (`query avg=328.39us`)
 - Delta: `+9.65%`
 
+Indexer range-query optimization slice (`2026-02-27`):
+- Change: precompute numeric term postings per field at compile-time and evaluate range bounds via binary search instead of per-query `ParseFloat` scans.
+- New benchmark: `BenchmarkAdapterQueryYCSBTableSeqRange` (`internal/search/index/adapter_benchmark_test.go`), selector shape `Eq(/_table=usertable) AND Range(/_seq>=X)`, `limit=100`.
+- Before optimization (3 runs): `723200`, `637597`, `607784 ns/op` (median `637597 ns/op`), `555k-561k B/op`, `60-63 allocs/op`.
+- After optimization (5 runs): `349337`, `328397`, `319902`, `311691`, `378421 ns/op` (median `328397 ns/op`), `509k-523k B/op`, `54-56 allocs/op`.
+- Median delta on the synthetic benchmark: `-48.49% ns/op` (faster).
+
+Latest fair YCSB pair after this slice (with `make lockd-load-query` before runs):
+- Index run (`2026-02-27T07:43:38Z`): `SCAN ops/s = 15177.7`
+- Scan run (`2026-02-27T07:44:02Z`): `SCAN ops/s = 15001.1`
+- Index advantage in-pair: `+1.18%`
+
 ## Performance & comparison (2026-01-27 baseline)
 
 Baseline environment:

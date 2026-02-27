@@ -1140,7 +1140,7 @@ func (h *Handler) writeQueryDocumentsCore(ctx context.Context, w http.ResponseWr
 }
 
 const (
-	queryStreamCopyBufSize = 32 * 1024
+	queryStreamCopyBufSize = 8 * 1024
 	queryStreamRowBufSize  = 256
 	queryStreamFlushEvery  = 16
 )

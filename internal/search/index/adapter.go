@@ -222,7 +222,7 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 	if req.Namespace == "" {
 		return search.Result{}, fmt.Errorf("index adapter: namespace required")
 	}
-	manifestRes, err := a.store.LoadManifest(ctx, req.Namespace)
+	manifestRes, err := a.store.LoadManifestReadOnly(ctx, req.Namespace)
 	if err != nil {
 		return search.Result{}, fmt.Errorf("load manifest: %w", err)
 	}
@@ -350,7 +350,7 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 	if sink == nil {
 		return search.Result{}, fmt.Errorf("index adapter: document sink required")
 	}
-	manifestRes, err := a.store.LoadManifest(ctx, req.Namespace)
+	manifestRes, err := a.store.LoadManifestReadOnly(ctx, req.Namespace)
 	if err != nil {
 		return search.Result{}, fmt.Errorf("load manifest: %w", err)
 	}

@@ -112,6 +112,58 @@ func TestStoreManifestLifecycle(t *testing.T) {
 	}
 }
 
+func TestStoreLoadManifestReadOnlySharesCachedManifest(t *testing.T) {
+	store := memory.New()
+	idxStore := NewStore(store, nil)
+	ctx := context.Background()
+
+	manifest := NewManifest()
+	manifest.Seq = 7
+	manifest.UpdatedAt = time.Now().UTC()
+	manifest.Shards[0] = &Shard{ID: 0}
+	if _, err := idxStore.SaveManifest(ctx, "default", manifest, ""); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+
+	first, err := idxStore.LoadManifestReadOnly(ctx, "default")
+	if err != nil {
+		t.Fatalf("first read-only load: %v", err)
+	}
+	second, err := idxStore.LoadManifestReadOnly(ctx, "default")
+	if err != nil {
+		t.Fatalf("second read-only load: %v", err)
+	}
+	if first.Manifest == nil || second.Manifest == nil {
+		t.Fatalf("expected non-nil manifests")
+	}
+	if first.Manifest != second.Manifest {
+		t.Fatalf("expected shared cached manifest pointer for read-only loads")
+	}
+
+	cloned, err := idxStore.LoadManifest(ctx, "default")
+	if err != nil {
+		t.Fatalf("cloned load: %v", err)
+	}
+	if cloned.Manifest == nil {
+		t.Fatalf("expected non-nil cloned manifest")
+	}
+	if cloned.Manifest == first.Manifest {
+		t.Fatalf("expected cloned load to return a distinct manifest pointer")
+	}
+	cloned.Manifest.Seq = 99
+
+	after, err := idxStore.LoadManifestReadOnly(ctx, "default")
+	if err != nil {
+		t.Fatalf("post-mutation read-only load: %v", err)
+	}
+	if after.Manifest == nil {
+		t.Fatalf("expected non-nil manifest after mutation check")
+	}
+	if got, want := after.Manifest.Seq, uint64(7); got != want {
+		t.Fatalf("cached read-only manifest mutated through cloned load: got seq %d want %d", got, want)
+	}
+}
+
 func TestStoreSegmentLifecycle(t *testing.T) {
 	store := memory.New()
 	idxStore := NewStore(store, nil)

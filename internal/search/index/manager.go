@@ -152,7 +152,7 @@ func (m *Manager) ManifestSeq(ctx context.Context, namespace string) (uint64, er
 	if m == nil || m.store == nil {
 		return 0, fmt.Errorf("index store unavailable")
 	}
-	manifestRes, err := m.store.LoadManifest(ctx, namespace)
+	manifestRes, err := m.store.LoadManifestReadOnly(ctx, namespace)
 	if err != nil {
 		return 0, err
 	}

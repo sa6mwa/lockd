@@ -951,7 +951,6 @@ func (h *Handler) wrap(operation string, fn handlerFunc) http.Handler {
 		if h.activityHook != nil {
 			h.activityHook()
 		}
-		reqID := uuidv7.NewString()
 		instrument := h.httpTracingEnabled
 		var span trace.Span
 		if instrument {
@@ -979,20 +978,7 @@ func (h *Handler) wrap(operation string, fn handlerFunc) http.Handler {
 		if !correlation.Has(ctx) {
 			ctx = correlation.Set(ctx, correlation.Generate())
 		}
-		corrID := correlation.ID(ctx)
-
-		logFields := []any{
-			"req_id", reqID,
-			"method", r.Method,
-			"path", r.URL.Path,
-		}
-		if corrID != "" {
-			// Mark correlation as already attached so applyCorrelation avoids a
-			// second logger.With() allocation for the same request id.
-			ctx = context.WithValue(ctx, correlationAppliedKey{}, struct{}{})
-			logFields = append(logFields, "cid", corrID)
-		}
-		logger := opLogger.With(logFields...)
+		logger := opLogger
 		ctx = pslog.ContextWithLogger(ctx, logger)
 
 		if h.enforceClientIdentity {

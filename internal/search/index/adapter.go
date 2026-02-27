@@ -110,28 +110,28 @@ func (a *Adapter) prepareSelectorExecutionPlan(sel api.Selector) (selectorExecut
 	if sel.IsEmpty() {
 		return selectorExecutionPlan{selector: api.Selector{}, useLegacyFilter: true}, nil
 	}
-	rawPayload, err := json.Marshal(sel)
+	needsNormalization, err := selectorNeedsNormalization(sel)
 	if err != nil {
-		return selectorExecutionPlan{}, fmt.Errorf("marshal raw selector cache key: %w", err)
+		return selectorExecutionPlan{}, fmt.Errorf("normalize selector: %w", err)
 	}
-	rawKey := string(rawPayload)
-	if a != nil && a.plans != nil && rawKey != "" {
-		if cached, ok := a.plans.get(rawKey); ok {
-			return cached, nil
+	normalized := sel
+	if needsNormalization {
+		normalized = cloneSelector(sel)
+		if normalizeErr := normalizeSelectorFieldsForLQL(&normalized); normalizeErr != nil {
+			return selectorExecutionPlan{}, fmt.Errorf("normalize selector: %w", normalizeErr)
 		}
 	}
-	normalized := cloneSelector(sel)
-	if normalizeErr := normalizeSelectorFieldsForLQL(&normalized); normalizeErr != nil {
-		return selectorExecutionPlan{}, fmt.Errorf("normalize selector: %w", normalizeErr)
-	}
-	keyPayload, err := json.Marshal(normalized)
-	if err != nil {
-		return selectorExecutionPlan{}, fmt.Errorf("marshal selector cache key: %w", err)
-	}
-	cacheKey := string(keyPayload)
-	if a != nil && a.plans != nil {
-		if cached, ok := a.plans.get(cacheKey); ok {
-			return cached, nil
+	cacheKey := ""
+	if shouldCacheSelectorPlan(normalized) {
+		keyPayload, err := json.Marshal(normalized)
+		if err != nil {
+			return selectorExecutionPlan{}, fmt.Errorf("marshal selector cache key: %w", err)
+		}
+		cacheKey = string(keyPayload)
+		if a != nil && a.plans != nil && cacheKey != "" {
+			if cached, ok := a.plans.get(cacheKey); ok {
+				return cached, nil
+			}
 		}
 	}
 	useLegacy := selectorSupportsLegacyIndexFilter(sel)
@@ -148,7 +148,7 @@ func (a *Adapter) prepareSelectorExecutionPlan(sel api.Selector) (selectorExecut
 		out.requirePostEval = true
 		out.postFilterPlan = compiled
 	}
-	if a != nil && a.plans != nil {
+	if a != nil && a.plans != nil && cacheKey != "" {
 		a.plans.put(cacheKey, out)
 	}
 	return out, nil
@@ -2271,18 +2271,164 @@ func selectorSupportsLegacyIndexFilter(sel api.Selector) bool {
 }
 
 func cloneSelector(sel api.Selector) api.Selector {
-	payload, err := json.Marshal(sel)
-	if err != nil {
-		return sel
+	out := sel
+	if sel.Eq != nil {
+		eq := *sel.Eq
+		out.Eq = &eq
 	}
-	if len(payload) == 0 || string(payload) == "{}" {
-		return api.Selector{}
+	if sel.Contains != nil {
+		contains := *sel.Contains
+		out.Contains = &contains
 	}
-	var out api.Selector
-	if err := json.Unmarshal(payload, &out); err != nil {
-		return sel
+	if sel.IContains != nil {
+		icontains := *sel.IContains
+		out.IContains = &icontains
+	}
+	if sel.Prefix != nil {
+		prefix := *sel.Prefix
+		out.Prefix = &prefix
+	}
+	if sel.IPrefix != nil {
+		iprefix := *sel.IPrefix
+		out.IPrefix = &iprefix
+	}
+	if sel.Range != nil {
+		rng := *sel.Range
+		out.Range = &rng
+	}
+	if sel.In != nil {
+		in := *sel.In
+		if len(sel.In.Any) > 0 {
+			in.Any = append([]string(nil), sel.In.Any...)
+		}
+		out.In = &in
+	}
+	if sel.Not != nil {
+		notSel := cloneSelector(*sel.Not)
+		out.Not = &notSel
+	}
+	if len(sel.And) > 0 {
+		out.And = make([]api.Selector, len(sel.And))
+		for i := range sel.And {
+			out.And[i] = cloneSelector(sel.And[i])
+		}
+	}
+	if len(sel.Or) > 0 {
+		out.Or = make([]api.Selector, len(sel.Or))
+		for i := range sel.Or {
+			out.Or[i] = cloneSelector(sel.Or[i])
+		}
 	}
 	return out
+}
+
+func shouldCacheSelectorPlan(sel api.Selector) bool {
+	return !sel.IsEmpty()
+}
+
+func selectorNeedsNormalization(sel api.Selector) (bool, error) {
+	needs := false
+	checkField := func(field string) error {
+		changed, err := pointerNeedsNormalization(field)
+		if err != nil {
+			return err
+		}
+		if changed {
+			needs = true
+		}
+		return nil
+	}
+	if sel.Eq != nil {
+		if err := checkField(sel.Eq.Field); err != nil {
+			return false, fmt.Errorf("eq.field: %w", err)
+		}
+	}
+	if sel.Contains != nil {
+		if err := checkField(sel.Contains.Field); err != nil {
+			return false, fmt.Errorf("contains.field: %w", err)
+		}
+	}
+	if sel.IContains != nil {
+		if err := checkField(sel.IContains.Field); err != nil {
+			return false, fmt.Errorf("icontains.field: %w", err)
+		}
+	}
+	if sel.Prefix != nil {
+		if err := checkField(sel.Prefix.Field); err != nil {
+			return false, fmt.Errorf("prefix.field: %w", err)
+		}
+	}
+	if sel.IPrefix != nil {
+		if err := checkField(sel.IPrefix.Field); err != nil {
+			return false, fmt.Errorf("iprefix.field: %w", err)
+		}
+	}
+	if sel.Range != nil {
+		if err := checkField(sel.Range.Field); err != nil {
+			return false, fmt.Errorf("range.field: %w", err)
+		}
+	}
+	if sel.In != nil {
+		if err := checkField(sel.In.Field); err != nil {
+			return false, fmt.Errorf("in.field: %w", err)
+		}
+	}
+	if sel.Exists != "" {
+		if err := checkField(sel.Exists); err != nil {
+			return false, fmt.Errorf("exists.field: %w", err)
+		}
+	}
+	for i := range sel.And {
+		childNeeds, err := selectorNeedsNormalization(sel.And[i])
+		if err != nil {
+			return false, err
+		}
+		if childNeeds {
+			needs = true
+		}
+	}
+	for i := range sel.Or {
+		childNeeds, err := selectorNeedsNormalization(sel.Or[i])
+		if err != nil {
+			return false, err
+		}
+		if childNeeds {
+			needs = true
+		}
+	}
+	if sel.Not != nil {
+		childNeeds, err := selectorNeedsNormalization(*sel.Not)
+		if err != nil {
+			return false, err
+		}
+		if childNeeds {
+			needs = true
+		}
+	}
+	return needs, nil
+}
+
+func pointerNeedsNormalization(field string) (bool, error) {
+	trimmed := strings.TrimSpace(field)
+	if trimmed != field {
+		normalized, err := normalizePointerLenient(field)
+		if err != nil {
+			return false, err
+		}
+		return normalized != field, nil
+	}
+	switch trimmed {
+	case "", "/":
+		return trimmed == "/", nil
+	}
+	if strings.HasPrefix(trimmed, "/") && !strings.Contains(trimmed, "~") {
+		return false, nil
+	}
+	normalized, err := normalizePointerLenient(field)
+	if err != nil {
+		return false, err
+	}
+	return normalized != field, nil
 }
 
 func normalizeField(term *api.Term) string {

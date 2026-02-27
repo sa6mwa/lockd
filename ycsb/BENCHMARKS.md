@@ -121,6 +121,33 @@ Notes:
 - Query references are from the historical lockd-bench section below (`query-index` / `query-scan`), so they are directionally useful but not strictly identical workloads.
 - Current index-vs-scan delta on the same 2026-02-26 series: index is `+2.72%` higher SCAN ops/s than scan.
 
+## Query iteration log (2026-02-27)
+
+Context:
+- Clean disk-backed dev env redeploy (`nerdctl compose -f devenv/docker-compose.yaml up --build -d`) with storage reset.
+- Workload: `workloade` (scan-heavy), `recordcount=10000`, `operationcount=100000`, `threadcount=8`.
+- Query return mode: `documents`.
+- Index run uses `lockd.query.refresh=wait_for`.
+
+Commands:
+
+```bash
+cd ycsb
+make lockd-load-query
+make lockd-run-query-index
+make lockd-run-query-scan
+make lockd-compare-query
+```
+
+Latest sequential pair (UTC):
+- Index run (`2026-02-27T00:22:21Z`): `SCAN ops/s = 15551.4`
+- Scan run (`2026-02-27T00:22:49Z`): `SCAN ops/s = 14956.9`
+- Index advantage in-pair: `+3.97%`
+
+Delta vs prior trustworthy pair from the same day (`index=15315.5`, `scan=15178.2`):
+- Index: `+1.54%`
+- Scan: `-1.46%`
+
 ## Performance & comparison (2026-01-27 baseline)
 
 Baseline environment:

@@ -178,6 +178,60 @@ func BenchmarkAdapterQueryWildcardContains(b *testing.B) {
 	}
 }
 
+func BenchmarkAdapterPrepareSelectorExecutionPlanLegacy(b *testing.B) {
+	store := NewStore(memory.New(), nil)
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		b.Fatalf("new adapter: %v", err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		gte := float64(i % 10_000)
+		plan, err := adapter.prepareSelectorExecutionPlan(api.Selector{
+			And: []api.Selector{
+				{Eq: &api.Term{Field: " /_table ", Value: "usertable"}},
+				{Range: &api.RangeTerm{Field: " /_seq ", GTE: &gte}},
+			},
+		})
+		if err != nil {
+			b.Fatalf("prepare selector plan: %v", err)
+		}
+		if !plan.useLegacyFilter || plan.requirePostEval {
+			b.Fatalf("unexpected plan flags: %+v", plan)
+		}
+		benchResultSize = len(plan.cacheKey)
+	}
+}
+
+func BenchmarkAdapterPrepareSelectorExecutionPlanLegacyCanonical(b *testing.B) {
+	store := NewStore(memory.New(), nil)
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		b.Fatalf("new adapter: %v", err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		gte := float64(i % 10_000)
+		plan, err := adapter.prepareSelectorExecutionPlan(api.Selector{
+			And: []api.Selector{
+				{Eq: &api.Term{Field: "/_table", Value: "usertable"}},
+				{Range: &api.RangeTerm{Field: "/_seq", GTE: &gte}},
+			},
+		})
+		if err != nil {
+			b.Fatalf("prepare selector plan: %v", err)
+		}
+		if !plan.useLegacyFilter || plan.requirePostEval {
+			b.Fatalf("unexpected plan flags: %+v", plan)
+		}
+		benchResultSize = len(plan.cacheKey)
+	}
+}
+
 func BenchmarkAdapterQueryRecursiveDeepLowSelectivity(b *testing.B) {
 	ctx := context.Background()
 	_, adapter := buildSyntheticHierarchyBenchIndex(ctx, b, 4, 7, 2, 20)

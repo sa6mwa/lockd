@@ -943,6 +943,7 @@ func (h *Handler) wrap(operation string, fn handlerFunc) http.Handler {
 	sys := routerSys(operation)
 	httpSpanName := "lockd.http." + operation
 	txSpanName := "lockd.tx." + operation
+	opLogger := svcfields.WithSubsystem(h.logger, sys)
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -970,12 +971,28 @@ func (h *Handler) wrap(operation string, fn handlerFunc) http.Handler {
 		}
 
 		ctx = correlation.Ensure(ctx)
+		if corr := strings.TrimSpace(r.Header.Get(headerCorrelationID)); corr != "" {
+			if normalized, ok := correlation.Normalize(corr); ok {
+				ctx = correlation.Set(ctx, normalized)
+			}
+		}
+		if !correlation.Has(ctx) {
+			ctx = correlation.Set(ctx, correlation.Generate())
+		}
+		corrID := correlation.ID(ctx)
 
-		logger := svcfields.WithSubsystem(h.logger, sys).With(
+		logFields := []any{
 			"req_id", reqID,
 			"method", r.Method,
 			"path", r.URL.Path,
-		)
+		}
+		if corrID != "" {
+			// Mark correlation as already attached so applyCorrelation avoids a
+			// second logger.With() allocation for the same request id.
+			ctx = context.WithValue(ctx, correlationAppliedKey{}, struct{}{})
+			logFields = append(logFields, "cid", corrID)
+		}
+		logger := opLogger.With(logFields...)
 		ctx = pslog.ContextWithLogger(ctx, logger)
 
 		if h.enforceClientIdentity {
@@ -991,14 +1008,6 @@ func (h *Handler) wrap(operation string, fn handlerFunc) http.Handler {
 			}
 		}
 
-		if corr := strings.TrimSpace(r.Header.Get(headerCorrelationID)); corr != "" {
-			if normalized, ok := correlation.Normalize(corr); ok {
-				ctx = correlation.Set(ctx, normalized)
-			}
-		}
-		if !correlation.Has(ctx) {
-			ctx = correlation.Set(ctx, correlation.Generate())
-		}
 		ctx, logger = applyCorrelation(ctx, logger, span)
 		verboseLogger := logger
 
@@ -1032,10 +1041,9 @@ func (h *Handler) wrap(operation string, fn handlerFunc) http.Handler {
 					attribute.Int64("lockd.duration_ms", duration),
 				))
 			}
-		}()
+			}()
 
-		r = r.WithContext(ctx)
-		if err := fn(w, r); err != nil {
+			if err := fn(w, r); err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				result = "context"
 				status = codes.Error

@@ -28,6 +28,14 @@ func TestAzureQuerySelectors(t *testing.T) {
 	queriesuite.RunSelectors(t, startAzureQueryServer)
 }
 
+func TestAzureQueryFlushWaitReadabilityContract(t *testing.T) {
+	queriesuite.RunFlushWaitReadabilityContract(t, startAzureQueryServer)
+}
+
+func TestAzureQueryRefreshWaitForContract(t *testing.T) {
+	queriesuite.RunQueryRefreshWaitForContract(t, startAzureQueryServer)
+}
+
 func TestAzureQueryPagination(t *testing.T) {
 	queriesuite.RunPagination(t, startAzureQueryServer)
 }

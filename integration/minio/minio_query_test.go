@@ -28,6 +28,14 @@ func TestMinioQuerySelectors(t *testing.T) {
 	queriesuite.RunSelectors(t, startMinioQueryServer)
 }
 
+func TestMinioQueryFlushWaitReadabilityContract(t *testing.T) {
+	queriesuite.RunFlushWaitReadabilityContract(t, startMinioQueryServer)
+}
+
+func TestMinioQueryRefreshWaitForContract(t *testing.T) {
+	queriesuite.RunQueryRefreshWaitForContract(t, startMinioQueryServer)
+}
+
 func TestMinioQueryPagination(t *testing.T) {
 	queriesuite.RunPagination(t, startMinioQueryServer)
 }

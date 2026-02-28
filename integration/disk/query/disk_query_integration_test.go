@@ -32,6 +32,14 @@ func TestDiskQuerySelectors(t *testing.T) {
 	queriesuite.RunSelectors(t, startDiskQueryServer)
 }
 
+func TestDiskQueryFlushWaitReadabilityContract(t *testing.T) {
+	queriesuite.RunFlushWaitReadabilityContract(t, startDiskQueryServer)
+}
+
+func TestDiskQueryRefreshWaitForContract(t *testing.T) {
+	queriesuite.RunQueryRefreshWaitForContract(t, startDiskQueryServer)
+}
+
 func TestDiskQueryPagination(t *testing.T) {
 	queriesuite.RunPagination(t, startDiskQueryServer)
 }

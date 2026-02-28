@@ -108,6 +108,11 @@ var readErrorDebugEnabled = func() bool {
 	return raw == "1" || raw == "true" || raw == "yes" || raw == "on"
 }()
 
+var scanErrorDebugEnabled = func() bool {
+	raw := strings.TrimSpace(strings.ToLower(os.Getenv("LOCKD_YCSB_DEBUG_SCAN_ERRORS")))
+	return raw == "1" || raw == "true" || raw == "yes" || raw == "on"
+}()
+
 func (doc *recordDocument) normalize() {
 	if doc.Data == nil {
 		doc.Data = make(map[string]string)
@@ -320,6 +325,9 @@ func (db *lockdDB) Scan(ctx context.Context, table string, startKey string, coun
 	optFns = append(optFns, lockdclient.WithQueryRequest(&req))
 	resp, err := db.client.Query(ctx, optFns...)
 	if err != nil {
+		if scanErrorDebugEnabled {
+			fmt.Fprintf(os.Stderr, "lockd-ycsb: scan-error stage=query table=%s start_key=%s err=%T %v\n", table, startKey, err, err)
+		}
 		return nil, err
 	}
 	if resp == nil {
@@ -345,6 +353,9 @@ func (db *lockdDB) Scan(ctx context.Context, table string, startKey string, coun
 			return nil
 		})
 		if err != nil && !errors.Is(err, errScanLimit) {
+			if scanErrorDebugEnabled {
+				fmt.Fprintf(os.Stderr, "lockd-ycsb: scan-error stage=document_stream table=%s start_key=%s err=%T %v\n", table, startKey, err, err)
+			}
 			return nil, err
 		}
 		return results, nil

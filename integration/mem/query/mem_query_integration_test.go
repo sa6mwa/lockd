@@ -29,6 +29,14 @@ func TestMemQuerySelectors(t *testing.T) {
 	queriesuite.RunSelectors(t, startMemQueryServer)
 }
 
+func TestMemQueryFlushWaitReadabilityContract(t *testing.T) {
+	queriesuite.RunFlushWaitReadabilityContract(t, startMemQueryServer)
+}
+
+func TestMemQueryRefreshWaitForContract(t *testing.T) {
+	queriesuite.RunQueryRefreshWaitForContract(t, startMemQueryServer)
+}
+
 func TestMemQueryPagination(t *testing.T) {
 	queriesuite.RunPagination(t, startMemQueryServer)
 }

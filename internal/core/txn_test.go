@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,6 +16,28 @@ import (
 	"pkt.systems/lockd/internal/storage/memory"
 	"pkt.systems/pslog"
 )
+
+type delayedReadStateBackend struct {
+	storage.Backend
+	namespace string
+	key       string
+	delay     time.Duration
+	calls     int32
+}
+
+func (b *delayedReadStateBackend) ReadState(ctx context.Context, namespace, key string) (storage.ReadStateResult, error) {
+	if b != nil && namespace == b.namespace && key == b.key && b.delay > 0 {
+		atomic.AddInt32(&b.calls, 1)
+		timer := time.NewTimer(b.delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return storage.ReadStateResult{}, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return b.Backend.ReadState(ctx, namespace, key)
+}
 
 func newTestService(t testing.TB) *Service {
 	t.Helper()
@@ -164,6 +187,96 @@ func TestApplyTxnDecisionCommitIndexesState(t *testing.T) {
 	}
 	if !foundSegment {
 		t.Fatalf("expected index manifest segments")
+	}
+}
+
+func TestApplyTxnDecisionCommitIndexesStateAfterRequestContextCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mem := memory.New()
+	ns, key := "default", "commit-indexed-context-canceled"
+	store := &delayedReadStateBackend{
+		Backend:   mem,
+		namespace: ns,
+		key:       key,
+		delay:     200 * time.Millisecond,
+	}
+	indexStore := index.NewStore(store, nil)
+	indexManager := index.NewManager(indexStore, index.WriterOptions{
+		FlushDocs:     1,
+		FlushInterval: time.Second,
+		Logger:        pslog.NoopLogger(),
+	})
+	svc := New(Config{
+		Store:            store,
+		BackendHash:      "test-backend",
+		DefaultNamespace: ns,
+		IndexManager:     indexManager,
+		Logger:           pslog.NoopLogger(),
+	})
+
+	txnID := "c5v9d0sl70b3m3q8ndg1c"
+	body := bytes.NewBufferString(`{"value":"indexed"}`)
+	stageRes, err := svc.staging.StageState(ctx, ns, key, txnID, body, storage.PutStateOptions{})
+	if err != nil {
+		t.Fatalf("stage state: %v", err)
+	}
+	meta := &storage.Meta{
+		Lease: &storage.Lease{
+			ID:            "lease-1",
+			Owner:         "test",
+			ExpiresAtUnix: time.Now().Add(5 * time.Minute).Unix(),
+			TxnID:         txnID,
+		},
+		StagedTxnID:           txnID,
+		StagedStateETag:       stageRes.NewETag,
+		StagedVersion:         1,
+		StagedStateDescriptor: stageRes.Descriptor,
+	}
+	if _, err := svc.store.StoreMeta(ctx, ns, key, meta, ""); err != nil {
+		t.Fatalf("store meta: %v", err)
+	}
+
+	rec := &TxnRecord{
+		TxnID:        txnID,
+		State:        TxnStateCommit,
+		Participants: []TxnParticipant{{Namespace: ns, Key: key}},
+	}
+	if err := svc.applyTxnDecision(ctx, rec); err != nil {
+		t.Fatalf("apply decision: %v", err)
+	}
+
+	// Simulate request teardown immediately after the API method returns.
+	cancel()
+
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer waitCancel()
+	if err := indexManager.WaitForReadable(waitCtx, ns); err != nil {
+		t.Fatalf("index wait: %v", err)
+	}
+	manifestRes, err := indexStore.LoadManifest(context.Background(), ns)
+	if err != nil {
+		t.Fatalf("load manifest: %v", err)
+	}
+	if manifestRes.Manifest == nil {
+		t.Fatalf("expected manifest")
+	}
+	foundSegment := false
+	for _, shard := range manifestRes.Manifest.Shards {
+		if shard == nil {
+			continue
+		}
+		if len(shard.Segments) > 0 {
+			foundSegment = true
+			break
+		}
+	}
+	if !foundSegment {
+		t.Fatalf("expected index manifest segments")
+	}
+	if got := atomic.LoadInt32(&store.calls); got == 0 {
+		t.Fatalf("expected delayed read-state path to be exercised")
 	}
 }
 

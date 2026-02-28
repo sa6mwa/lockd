@@ -27,6 +27,14 @@ func TestAWSQuerySelectors(t *testing.T) {
 	queriesuite.RunSelectors(t, startAWSQueryServer)
 }
 
+func TestAWSQueryFlushWaitReadabilityContract(t *testing.T) {
+	queriesuite.RunFlushWaitReadabilityContract(t, startAWSQueryServer)
+}
+
+func TestAWSQueryRefreshWaitForContract(t *testing.T) {
+	queriesuite.RunQueryRefreshWaitForContract(t, startAWSQueryServer)
+}
+
 func TestAWSQueryPagination(t *testing.T) {
 	queriesuite.RunPagination(t, startAWSQueryServer)
 }

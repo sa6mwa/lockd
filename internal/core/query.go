@@ -48,7 +48,6 @@ func (s *Service) Query(ctx context.Context, cmd QueryCommand) (*QueryResult, er
 		if err := s.indexManager.WaitForReadable(ctx, namespace); err != nil {
 			return nil, err
 		}
-		_ = s.indexManager.WarmNamespace(ctx, namespace)
 	}
 
 	req := search.Request{
@@ -141,7 +140,6 @@ func (s *Service) QueryDocuments(ctx context.Context, cmd QueryCommand, sink Doc
 		if err := s.indexManager.WaitForReadable(ctx, namespace); err != nil {
 			return nil, err
 		}
-		_ = s.indexManager.WarmNamespace(ctx, namespace)
 	}
 
 	req := search.Request{

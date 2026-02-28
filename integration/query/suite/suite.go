@@ -84,6 +84,185 @@ and.range{field=/amount,gte=100,lt=200}`)
 	})
 }
 
+// RunFlushWaitReadabilityContract verifies that an explicit index flush in wait
+// mode makes recently committed documents query-visible in the index engine.
+func RunFlushWaitReadabilityContract(t *testing.T, factory ServerFactory) {
+	withServer(t, factory, 2*time.Minute, func(ctx context.Context, ts *lockd.TestServer, httpClient *http.Client) {
+		namespace := "q-flush-contract-" + xid.New().String()
+		const totalDocs = 32
+		const tag = "flush-wait-contract"
+
+		seedOne := func(i int) error {
+			key := fmt.Sprintf("fwc-%03d", i)
+			body := map[string]any{
+				"kind":   tag,
+				"index":  i,
+				"status": "ready",
+			}
+			payload, err := json.Marshal(body)
+			if err != nil {
+				return err
+			}
+			lease, err := ts.Client.Acquire(ctx, api.AcquireRequest{
+				Namespace:  namespace,
+				Key:        key,
+				Owner:      "query-flush-contract",
+				TTLSeconds: 60,
+			})
+			if err != nil {
+				return err
+			}
+			if _, err := lease.UpdateBytes(ctx, payload); err != nil {
+				return err
+			}
+			return lease.Release(ctx)
+		}
+
+		for i := 0; i < totalDocs; i++ {
+			if err := seedOne(i); err != nil {
+				t.Fatalf("seed flush-wait contract dataset: %v", err)
+			}
+		}
+
+		flushNamespaces(ctx, t, ts.Client, namespace)
+
+		selector, err := lql.ParseSelectorString(fmt.Sprintf(`eq{field=/kind,value=%s}`, tag))
+		if err != nil || selector.IsEmpty() {
+			t.Fatalf("parse selector: %v", err)
+		}
+
+		var (
+			cursor    string
+			collected []string
+		)
+		for {
+			resp := doQuery(t, httpClient, ts.URL(), api.QueryRequest{
+				Namespace: namespace,
+				Selector:  selector,
+				Limit:     32,
+				Cursor:    cursor,
+			})
+			collected = append(collected, resp.Keys...)
+			if resp.Cursor == "" {
+				break
+			}
+			cursor = resp.Cursor
+			if len(collected) > totalDocs*2 {
+				t.Fatalf("query pagination runaway: %d keys", len(collected))
+			}
+		}
+
+		expected := make([]string, 0, totalDocs)
+		for i := 0; i < totalDocs; i++ {
+			expected = append(expected, fmt.Sprintf("fwc-%03d", i))
+		}
+		querydata.ExpectKeySet(t, collected, expected)
+	})
+}
+
+// RunQueryRefreshWaitForContract verifies refresh=wait_for does not stall until
+// request timeout when writes are actively arriving in the same namespace.
+func RunQueryRefreshWaitForContract(t *testing.T, factory ServerFactory) {
+	withServer(t, factory, 2*time.Minute, func(ctx context.Context, ts *lockd.TestServer, _ *http.Client) {
+		namespace := namespaces.Default
+		keyPrefix := "qwf-" + xid.New().String()
+		selector, err := lql.ParseSelectorString(`eq{field=/kind,value=wait-for-contract}`)
+		if err != nil || selector.IsEmpty() {
+			t.Fatalf("parse selector: %v", err)
+		}
+		if _, err := ts.Client.UpdateNamespaceConfig(ctx, api.NamespaceConfigRequest{
+			Namespace: namespace,
+			Query: &api.NamespaceQueryConfig{
+				PreferredEngine: "index",
+				FallbackEngine:  "scan",
+			},
+		}, lockdclient.NamespaceConfigOptions{}); err != nil {
+			t.Fatalf("set namespace query config: %v", err)
+		}
+
+		querydata.SeedState(ctx, t, ts.Client, namespace, keyPrefix+"-seed", map[string]any{
+			"kind":   "wait-for-contract",
+			"seq":    -1,
+			"status": "seed",
+		})
+		flushNamespaces(ctx, t, ts.Client, namespace)
+
+		const writes = 40
+		firstWriteDone := make(chan struct{})
+		writeErr := make(chan error, 1)
+		go func() {
+			for i := 0; i < writes; i++ {
+				key := fmt.Sprintf("%s-%03d", keyPrefix, i)
+				body := map[string]any{
+					"kind":   "wait-for-contract",
+					"seq":    i,
+					"status": "active",
+				}
+				payload, err := json.Marshal(body)
+				if err != nil {
+					writeErr <- err
+					return
+				}
+				lease, err := ts.Client.Acquire(ctx, api.AcquireRequest{
+					Namespace:  namespace,
+					Key:        key,
+					Owner:      "query-wait-for-contract",
+					TTLSeconds: 60,
+				})
+				if err != nil {
+					writeErr <- err
+					return
+				}
+				if _, err := lease.UpdateBytes(ctx, payload); err != nil {
+					writeErr <- err
+					return
+				}
+				if err := lease.Release(ctx); err != nil {
+					writeErr <- err
+					return
+				}
+				if i == 0 {
+					close(firstWriteDone)
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			writeErr <- nil
+		}()
+
+		select {
+		case <-firstWriteDone:
+		case <-ctx.Done():
+			t.Fatalf("timed out waiting for first write: %v", ctx.Err())
+		}
+
+		req := api.QueryRequest{
+			Namespace: namespace,
+			Selector:  selector,
+			Limit:     16,
+		}
+		for i := 0; i < 6; i++ {
+			qctx, cancel := context.WithTimeout(ctx, 12*time.Second)
+			resp, err := ts.Client.Query(qctx,
+				lockdclient.WithQueryEngine("index"),
+				lockdclient.WithQueryRefreshWaitFor(),
+				lockdclient.WithQueryRequest(&req),
+			)
+			cancel()
+			if err != nil {
+				t.Fatalf("wait_for query %d: %v", i, err)
+			}
+			if resp == nil {
+				t.Fatalf("wait_for query %d: nil response", i)
+			}
+			resp.Close()
+		}
+
+		if err := <-writeErr; err != nil {
+			t.Fatalf("write loop failed: %v", err)
+		}
+	})
+}
+
 // RunPagination verifies cursor pagination works across all backends.
 func RunPagination(t *testing.T, factory ServerFactory) {
 	withServer(t, factory, 15*time.Second, func(ctx context.Context, ts *lockd.TestServer, httpClient *http.Client) {

@@ -1045,9 +1045,7 @@ func runMemAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase failo
 	}); err != nil {
 		t.Fatalf("seed save: %v", err)
 	}
-	if err := seedLease.Release(ctx); err != nil {
-		t.Fatalf("seed release: %v", err)
-	}
+	releaseLeaseWithRetry(t, seedLease, 10*time.Second)
 
 	clientLogger, clientLogs := testlog.NewRecorder(t, pslog.TraceLevel)
 	failoverOptions := []lockdclient.Option{
@@ -1455,6 +1453,25 @@ func releaseLease(tb testing.TB, ctx context.Context, sess *lockdclient.LeaseSes
 		tb.Fatalf("release: %v", err)
 	}
 	return true
+}
+
+func releaseLeaseWithRetry(tb testing.TB, sess *lockdclient.LeaseSession, window time.Duration) {
+	tb.Helper()
+	deadline := time.Now().Add(window)
+	var lastErr error
+	for {
+		attemptCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		err := sess.Release(attemptCtx)
+		cancel()
+		if err == nil {
+			return
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			tb.Fatalf("release with retry: %v", lastErr)
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
 }
 
 func distributeQuota(total, workers int) []int {

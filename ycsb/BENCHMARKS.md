@@ -325,3 +325,57 @@ Baseline source notes:
 | lockd run workloada-attach | 1642.0 | 2525.9 | +53.83% |
 | lockd load workloada-txn | 2111.2 | 2142.9 | +1.50% |
 | lockd run workloada-txn | 3117.9 | 3187.1 | +2.22% |
+
+Lockd query benchmarks (lockd-bench, embedded disk backend, ha=failover, isolated rerun):
+- **query-index** (ops=2000, concurrency=8, warmup=0): 10215.7 ops/s
+  - Avg: 0.780 ms; p50: 0.563 ms; p90: 1.247 ms; p95: 1.527 ms; p99: 2.794 ms;
+    p99.9: 8.551 ms; min: 0.248 ms; max: 8.646 ms; index_flush: 0.197 s
+- **query-scan** (ops=2000, concurrency=8, warmup=0): 3063.6 ops/s
+  - Avg: 2.607 ms; p50: 2.476 ms; p90: 4.092 ms; p95: 4.856 ms; p99: 6.713 ms;
+    p99.9: 9.847 ms; min: 0.453 ms; max: 10.171 ms
+
+How this lockd-bench query block was run (exact contract):
+- Backend/protocol: embedded disk backend via lockd-bench in-process server (`unix://` socket), `ha=failover`.
+- Run model: `-runs 3 -warmup 0`; reported value is the `bench summary` median from each log.
+- Query return mode: `documents` (`-query-return documents`).
+- QRF: default enabled (not `-qrf-disabled`).
+- Connection guard: not exercised in this path (UDS/in-process benchmark path, not TCP endpoint mode).
+
+Repro commands for this block:
+
+```bash
+go run ./cmd/lockd-bench \
+  -workload query-index \
+  -backend disk \
+  --ha failover \
+  --log-level error \
+  -ops 2000 \
+  -concurrency 8 \
+  -warmup 0 \
+  -runs 3 \
+  -query-return documents \
+  | tee docs/performance/2026-02-28-benchmark-update/lockd-bench-query/query-index.log
+
+go run ./cmd/lockd-bench \
+  -workload query-scan \
+  -backend disk \
+  --ha failover \
+  --log-level error \
+  -ops 2000 \
+  -concurrency 8 \
+  -warmup 0 \
+  -runs 3 \
+  -query-return documents \
+  | tee docs/performance/2026-02-28-benchmark-update/lockd-bench-query/query-scan.log
+```
+
+Lockd query benchmark comparison vs historical block above:
+- query-index throughput: `814.4 -> 10215.7 ops/s` (`+1154.38%`)
+- query-scan throughput: `422.5 -> 3063.6 ops/s` (`+625.11%`)
+- query-index average latency: `9.811 ms -> 0.780 ms` (`-92.05%`)
+- query-scan average latency: `18.915 ms -> 2.607 ms` (`-86.22%`)
+- index/scan throughput ratio: `1.93x -> 3.33x`
+
+Lockd-bench artifacts for this refresh:
+- `docs/performance/2026-02-28-benchmark-update/lockd-bench-query/query-index.log`
+- `docs/performance/2026-02-28-benchmark-update/lockd-bench-query/query-scan.log`

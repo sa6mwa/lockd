@@ -122,14 +122,19 @@ func (m *Manager) UpdateVisibility(namespace, key string, visible bool) error {
 // to flush so queries observe the latest index state.
 func (m *Manager) WaitForReadable(ctx context.Context, namespace string) error {
 	writer := m.writer(namespace)
-	if writer == nil {
-		return nil
-	}
-	if err := writer.WaitForReadable(ctx); err != nil {
-		return err
+	if writer != nil {
+		if writer.HasPending() {
+			if err := writer.Flush(ctx); err != nil {
+				return err
+			}
+		}
 	}
 	if vis := m.visibilityWriter(namespace); vis != nil {
-		return vis.WaitForReadable(ctx)
+		if vis.HasPending() {
+			if err := vis.Flush(ctx); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }

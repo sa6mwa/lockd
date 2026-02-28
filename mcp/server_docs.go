@@ -14,6 +14,7 @@ const (
 	docLocksURI     = "resource://docs/locks.md"
 	docMessagingURI = "resource://docs/messaging.md"
 	docSyncURI      = "resource://docs/agent-sync.md"
+	docLQLURI       = "resource://docs/lql.md"
 )
 
 func defaultServerInstructions(cfg Config) string {
@@ -21,7 +22,7 @@ func defaultServerInstructions(cfg Config) string {
 lockd MCP facade operating manual:
 - Default namespace: %s
 - Default coordination queue: %s
-- Discovery workflow: call lockd.hint first to learn namespace-access hints and inline payload limits, then lockd.help for workflows.
+- Discovery workflow: call lockd.hint first to learn namespace-access hints and inline payload limits, then lockd.help for workflows (use topic=lql for complete selector syntax).
 - Queue workflow: dequeue -> ack | nack(failure) | defer(intentional). Use queue.extend for long-running handlers.
 - Queue introspection: use lockd.queue.stats for side-effect-free queue availability and dispatcher counters.
 - Queue pagination: dequeue returns `+"`next_cursor`"+`; pass it back as `+"`cursor`"+` when continuing scans.
@@ -34,8 +35,11 @@ lockd MCP facade operating manual:
 - Transfer URL hygiene: capability URLs are bearer-style secrets; avoid shell history/process-list leakage and avoid pasting capability URLs into chat/tickets.
 - Partial mutation: use lockd.state.mutate for LQL expression-based updates and lockd.state.patch for RFC 7396 merge patch updates.
 - Query first when uncertain: use lockd.query for key discovery, lockd.query.stream for NDJSON document stream URLs, and lockd.state.stream / lockd.attachments.stream for point payload reads.
-- Documentation resources: %s, %s, %s, %s
-`, cfg.DefaultNamespace, cfg.AgentBusQueue, docOverviewURI, docLocksURI, docMessagingURI, docSyncURI))
+- Memory tagging convention: unless a workflow says otherwise, store a top-level `+"`tags`"+` JSON array on saved objects and query tags with `+"`in{field=/tags,any=planning|finance}`"+`.
+- Schema guidance: no fixed schema fields are required beyond `+"`tags`"+`; preserve caller-defined fields.
+- Full-text retrieval: use `+"`icontains{field=/...,value=contract}`"+` for broad recall and combine with tag filters for precision.
+- Documentation resources: %s, %s, %s, %s, %s
+`, cfg.DefaultNamespace, cfg.AgentBusQueue, docOverviewURI, docLocksURI, docMessagingURI, docSyncURI, docLQLURI))
 }
 
 func (s *server) registerResources(srv *mcpsdk.Server) {
@@ -71,11 +75,17 @@ Default coordination queue is %q in that namespace.
 Recommended discovery sequence:
 1. Call lockd.hint for namespace-access hints.
 2. Call lockd.help.
-3. Read %s and %s.
+3. Read %s, %s, and %s.
 4. Use lockd.query for keys, lockd.query.stream for query documents, and lockd.get for point metadata.
-5. Use queue tools for agent coordination and messaging.
-6. For large writes, use lockd.*.write_stream.begin to get upload_url, upload bytes directly, optionally call write_stream.status, then commit (optionally with expected_bytes/expected_sha256).
-`, s.cfg.DefaultNamespace, s.cfg.AgentBusQueue, docMessagingURI, docSyncURI)),
+5. Unless workflow constraints say otherwise, persist a top-level `+"`tags`"+` array on documents (for example ["planning","finance","q3"]).
+   No fixed schema fields are required beyond tags; preserve the caller's existing JSON structure.
+6. Use tag-first retrieval and full-text fallback:
+   - in{field=/tags,any=planning|finance}
+   - and.in{field=/tags,any=customer},and.icontains{field=/...,value=renewal}
+   - icontains{field=/...,value=contract}
+7. Use queue tools for agent coordination and messaging.
+8. For large writes, use lockd.*.write_stream.begin to get upload_url, upload bytes directly, optionally call write_stream.status, then commit (optionally with expected_bytes/expected_sha256).
+`, s.cfg.DefaultNamespace, s.cfg.AgentBusQueue, docMessagingURI, docSyncURI, docLQLURI)),
 		docLocksURI: strings.TrimSpace(`
 # lockd Locking Workflow
 
@@ -116,11 +126,86 @@ For push-notify:
 Use queues for eventing and lock/state operations for shared context updates.
 Keep queue payloads small and use key/state references for large context.
 Use write_stream tools for large payload writes (begin -> upload_url -> commit).
+Unless caller-specific policy says otherwise, write memory-like state with a
+top-level tags array and keep it current as context evolves.
+No fixed schema fields are required beyond tags.
+Prefer query pattern:
+- in{field=/tags,any=planning|operations}
+- and.in{field=/tags,any=customer},and.icontains{field=/...,value=renewal}
+Use icontains over /... for broad keyword recall when exact tags are missing.
 Capability URLs are bearer-style secrets: avoid command-history and process-list leakage.
 Use lockd.query.stream for query-document NDJSON stream URLs and lockd.state.stream / lockd.attachments.stream to obtain one-time download URLs for point payload reads.
 Use lockd.attachments.head before lockd.attachments.stream when only metadata is needed.
 Use namespace scoping to isolate agent groups.
 Use txn_id only when you need cross-key atomic decisions; normal single-key operations should omit it.
+`),
+		docLQLURI: strings.TrimSpace(`
+# LQL Selector Reference
+
+Use this section as the canonical selector syntax for lockd.query and lockd.query.stream.
+
+Selector clause families:
+- Equality:
+  - ` + "`eq{field=/status,value=open}`" + `
+  - ` + "`eq{field=/department/code,value=finance}`" + `
+- Contains (case-sensitive):
+  - ` + "`contains{field=/summary,value=Budget}`" + `
+  - ` + "`contains{field=/notes,value=approved}`" + `
+- IContains (case-insensitive):
+  - ` + "`icontains{field=/summary,value=budget}`" + `
+  - ` + "`icontains{field=/...,value=renewal}`" + `
+- Prefix (case-sensitive):
+  - ` + "`prefix{field=/owner,value=dept-}`" + `
+- IPrefix (case-insensitive):
+  - ` + "`iprefix{field=/owner,value=DEPT-}`" + `
+- Range (numeric bounds; use one or more of gt/gte/lt/lte):
+  - ` + "`range{field=/amount,gte=100}`" + `
+  - ` + "`range{field=/amount,gt=50,lt=1000}`" + `
+- Membership (` + "`any`" + ` is pipe-delimited):
+  - ` + "`in{field=/tags,any=planning|finance|customer}`" + `
+  - ` + "`in{field=/region,any=us|eu|apac}`" + `
+- Exists:
+  - ` + "`exists{/metadata/etag}`" + `
+  - ` + "`exists{/contract/renewal_date}`" + `
+
+Boolean composition examples:
+- AND: ` + "`and.eq{field=/status,value=open},and.range{field=/amount,gte=100}`" + `
+- OR: ` + "`or.eq{field=/status,value=open},or.eq{field=/status,value=queued}`" + `
+- NOT: ` + "`not.eq{field=/archived,value=true}`" + `
+- Indexed groups: ` + "`and.0.eq{field=/status,value=open},and.0.range{field=/amount,gte=100},or.1.eq{field=/region,value=eu}`" + `
+
+Shorthand operators:
+- ` + "`/status=\"open\"`" + ` -> equality
+- ` + "`/status!=\"closed\"`" + ` -> not-equality
+- ` + "`/amount>100`" + `, ` + "`/amount>=100`" + `, ` + "`/amount<1000`" + `, ` + "`/amount<=1000`" + ` -> range
+- Multiple expressions separated by comma/newline are combined with AND by default.
+
+Term parameter aliases:
+- ` + "`field`" + ` or ` + "`f`" + ` (example: ` + "`eq{f=/status,v=open}`" + `)
+- ` + "`value`" + ` or ` + "`v`" + `
+- ` + "`any`" + ` or ` + "`a`" + ` (example: ` + "`in{f=/tags,a=planning|finance}`" + `)
+- ` + "`ignoreCase`" + ` or ` + "`ic`" + ` (` + "`true|false|t|f`" + `; example: ` + "`contains{f=/summary,v=budget,ic=t}`" + `)
+
+Path wildcards:
+- ` + "`*`" + ` any object child value
+- ` + "`[]`" + ` any array element
+- ` + "`**`" + ` any immediate child (object value or array element)
+- ` + "`...`" + ` any descendant at any depth
+- ` + "`/items[]/sku`" + ` is sugar for ` + "`/items/[]/sku`" + `
+
+Value parsing:
+- Unquoted literals are accepted for simple values.
+- Quoted literals are supported with single or double quotes.
+- Booleans and numeric literals are parsed for comparisons.
+- For ` + "`in{field=/tags,any=planning|finance|customer}`" + `, ` + "`any`" + ` uses ` + "`|`" + ` as the separator.
+
+Recommended retrieval pattern:
+1. Tags-first key discovery with ` + "`in{field=/tags,any=planning|finance}`" + `.
+2. Add full-text recall with ` + "`icontains{field=/...,value=contract}`" + `.
+3. Use lockd.query.stream when full documents are required.
+
+Schema guidance:
+- No fixed schema fields are required beyond a top-level ` + "`tags`" + ` array convention.
 `),
 	}
 }
@@ -145,7 +230,7 @@ func (s *server) handleDocResource(_ context.Context, req *mcpsdk.ReadResourceRe
 }
 
 type helpToolInput struct {
-	Topic string `json:"topic,omitempty" jsonschema:"Optional topic: overview, locks, messaging, sync"`
+	Topic string `json:"topic,omitempty" jsonschema:"Optional topic: overview, locks, messaging, sync, lql"`
 }
 
 type helpToolOutput struct {
@@ -180,14 +265,17 @@ func (s *server) handleHelpTool(_ context.Context, _ *mcpsdk.CallToolRequest, in
 			"namespace isolation follows client certificate claims",
 			"lock writes must preserve lease/fencing semantics",
 			"for inline payload_mode requests above the limit, use streaming variants and consult lockd.hint inline_max_payload_bytes",
+			"unless workflow-specific policy says otherwise, persist a top-level tags array on documents and query with in{field=/tags,any=planning|finance}",
+			"no fixed schema fields are required beyond tags; preserve caller-defined document fields",
+			"for broad memory recall, use icontains{field=/...,value=contract} and combine with tag filters for precision",
 			"XA is optional: only include txn_id when coordinating multiple participants",
 		},
 	}
 	switch topic {
 	case "overview":
-		out.Summary = "Start with lockd.hint and lockd.help, acquire lock when mutating shared state, inspect queue readiness with lockd.queue.stats, use queue.watch for bounded wakeups, then dequeue and ack/nack/defer messages. Use payload_mode inline for small data and stream/write_stream variants for large data."
+		out.Summary = "Start with lockd.hint and lockd.help, use tags-backed state as memory, query with in/icontains patterns, acquire lock when mutating shared state, inspect queue readiness with lockd.queue.stats, use queue.watch for bounded wakeups, then dequeue and ack/nack/defer messages. Use payload_mode inline for small data and stream/write_stream variants for large data."
 		out.NextCalls = []string{"lockd.hint", "lockd.get", "lockd.state.stream", "lockd.lock.acquire", "lockd.state.update", "lockd.state.mutate", "lockd.state.patch", "lockd.state.write_stream.begin", "lockd.state.write_stream.status", "lockd.attachments.put", "lockd.attachments.write_stream.begin", "lockd.attachments.write_stream.status", "lockd.queue.stats", "lockd.queue.enqueue", "lockd.queue.write_stream.begin", "lockd.queue.write_stream.status", "lockd.queue.watch", "lockd.queue.dequeue", "lockd.queue.ack", "lockd.queue.nack", "lockd.queue.defer"}
-		out.Resources = []string{docOverviewURI, docMessagingURI, docSyncURI}
+		out.Resources = []string{docOverviewURI, docLQLURI, docMessagingURI, docSyncURI}
 	case "locks":
 		out.Summary = "Locks gate state mutation; keep lease identity and fencing token through the full mutation lifecycle."
 		out.NextCalls = []string{"lockd.hint", "lockd.lock.acquire", "lockd.state.update", "lockd.state.mutate", "lockd.state.patch", "lockd.state.write_stream.begin", "lockd.state.write_stream.status", "lockd.attachments.put", "lockd.attachments.write_stream.begin", "lockd.attachments.write_stream.status", "lockd.lock.release"}
@@ -197,9 +285,13 @@ func (s *server) handleHelpTool(_ context.Context, _ *mcpsdk.CallToolRequest, in
 		out.NextCalls = []string{"lockd.hint", "lockd.queue.stats", "lockd.queue.enqueue", "lockd.queue.write_stream.begin", "lockd.queue.write_stream.status", "lockd.queue.watch", "lockd.queue.subscribe", "lockd.queue.dequeue", "lockd.queue.ack", "lockd.queue.nack", "lockd.queue.defer", "lockd.queue.extend"}
 		out.Resources = []string{docMessagingURI}
 	case "sync":
-		out.Summary = "Coordinate through queue events and shared state; keep large context in lockd documents."
+		out.Summary = "Coordinate through queue events and shared state; keep large context in lockd documents with tags arrays for fast in-selector retrieval plus icontains for keyword recall."
 		out.NextCalls = []string{"lockd.hint", "lockd.query", "lockd.query.stream", "lockd.get", "lockd.queue.subscribe"}
-		out.Resources = []string{docSyncURI, docOverviewURI}
+		out.Resources = []string{docSyncURI, docLQLURI, docOverviewURI}
+	case "lql":
+		out.Summary = "LQL selectors use JSON Pointer paths and support eq/contains/icontains/prefix/iprefix/range/in/exists plus and/or/not composition, shorthand operators, aliases, and wildcard paths."
+		out.NextCalls = []string{"lockd.query", "lockd.query.stream"}
+		out.Resources = []string{docLQLURI, docOverviewURI}
 	default:
 		return nil, helpToolOutput{}, fmt.Errorf("unknown help topic %q", topic)
 	}

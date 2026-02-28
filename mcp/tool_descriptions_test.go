@@ -73,3 +73,28 @@ func TestBuildToolDescriptionsIncludeConfiguredDefaults(t *testing.T) {
 		t.Fatalf("get description missing configured namespace default: %q", descriptions[toolGet])
 	}
 }
+
+func TestBuildToolDescriptionsIncludeMemoryTaggingGuidance(t *testing.T) {
+	t.Parallel()
+
+	descriptions := buildToolDescriptions(Config{
+		DefaultNamespace: "mcp",
+		AgentBusQueue:    "lockd.agent.bus",
+	})
+
+	queryDesc := descriptions[toolQuery]
+	if !strings.Contains(queryDesc, "in{field=/tags,any=") {
+		t.Fatalf("query description missing tags guidance: %q", queryDesc)
+	}
+	if !strings.Contains(queryDesc, "icontains{field=/...,value=") {
+		t.Fatalf("query description missing full-text guidance: %q", queryDesc)
+	}
+
+	updateDesc := descriptions[toolStateUpdate]
+	if !strings.Contains(updateDesc, "top-level `tags` JSON array") {
+		t.Fatalf("state update description missing tags-write guidance: %q", updateDesc)
+	}
+	if !strings.Contains(updateDesc, "in{field=/tags,any=") {
+		t.Fatalf("state update description missing tags query example: %q", updateDesc)
+	}
+}

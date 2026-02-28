@@ -50,6 +50,14 @@
 // hints derived from upstream client-bundle claims before selecting namespaces
 // for lock/query/queue calls.
 //
+// Memory retrieval convention:
+//
+// Unless workflow-specific policy says otherwise, persist documents with a
+// top-level `tags` JSON array so agents can retrieve candidates quickly using
+// `in{field=/tags,any=planning|finance}`. No fixed schema fields are required
+// beyond `tags`; keep caller-defined fields. For broader recall, combine tag
+// filters with `icontains{field=/...,value=contract}` keyword clauses.
+//
 // Large payload handling:
 //
 // State documents, queue payloads, and attachments can be very large. The MCP

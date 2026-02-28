@@ -290,7 +290,7 @@ Use `lockd.get` + `lockd.state.stream` for point payload reads.
 
 `lockd.query.stream` NDJSON rows are:
 
-- `{"ns":"<namespace>","key":"<key>","ver":<version>,"doc":{...}}`
+- `{"ns":"mcp","key":"memory/customer-42","ver":17,"doc":{"tags":["customer","renewal"],"status":"draft"}}`
 
 Engine behavior:
 
@@ -307,6 +307,7 @@ Advanced options exposed:
 ### LQL Primer (for agents)
 
 LQL selectors are JSON Pointer based.
+For the canonical full selector syntax, call `lockd.help` with `topic="lql"` (or read `resource://docs/lql.md`).
 
 - field paths use RFC 6901 style pointers (`/status`, `/meta/owner`, `/items/0/id`)
 - multiple expressions in one query string are combined with `AND` by default
@@ -325,6 +326,7 @@ Full-form examples:
 - `prefix{field=/owner,value="team-"}`
 - `range{field=/progress,gte=10,lt=100}`
 - `in{field=/region,any=us|eu|apac}`
+- `in{field=/tags,any=planning|finance|customer}`
 - `exists{/metadata/etag}`
 - `and.eq{field=/status,value="open"},and.range{field=/amount,gte=100}`
 - `or.eq{field=/state,value="queued"},or.eq{field=/state,value="running"}`
@@ -346,15 +348,37 @@ Examples:
 
 Additional operators available in current lockd builds:
 
-- `contains{field=/message,value=timeout}`
-- `icontains{field=/message,value=TIMEOUT}`
-- `iprefix{field=/owner,value=TEAM-}`
+- `contains{field=/summary,value=approval}`
+- `icontains{field=/summary,value=Q3}`
+- `iprefix{field=/owner,value=DEPT-}`
+- `icontains{field=/...,value=renewal}` (broad full-text style recall across descendant fields)
+- `and.in{field=/tags,any=finance},and.icontains{field=/...,value=budget}` (tag precision + keyword recall)
+
+### Tags-First Memory Pattern
+
+Unless a caller-specific policy overrides it, treat lockd state documents as
+retrievable memory objects with a top-level `tags` array.
+No fixed schema fields are required beyond `tags`; keep your existing document structure.
+
+Suggested write shapes:
+
+- `{"tags":["planning","finance","q3"],"title":"Budget proposal","status":"draft"}`
+- `{"tags":["customer","renewal"],"account_id":"acct-42","priority":"high"}`
+
+Suggested retrieval flow:
+
+1. primary filter with tags:
+   - `in{field=/tags,any=planning|finance}`
+2. combine tags + keyword when needed:
+   - `and.in{field=/tags,any=customer},and.icontains{field=/...,value=renewal}`
+3. fallback to broad keyword search when tags are incomplete:
+   - `icontains{field=/...,value=contract}`
 
 ### Practical Query Pattern
 
 For agent workflows:
 
-1. call `lockd.query` first to fetch candidate keys cheaply
+1. call `lockd.query` first with a tags-first selector to fetch candidate keys cheaply
 2. if full documents are needed, call `lockd.query.stream` and consume NDJSON
 3. for single-key reads, call `lockd.get` (and stream only when needed)
 4. continue pagination by passing returned `cursor` back into the next call
@@ -412,6 +436,7 @@ At session start:
 1. call `lockd.hint` to discover namespace-access hints from client-bundle claims
    and `inline_max_payload_bytes` for inline-vs-stream planning
 2. call `lockd.help` for operation sequencing
-3. run queue/query/lock workflows using hinted namespaces
+3. default to writing documents with top-level `tags` arrays unless your system prompt/AGENTS policy says otherwise; do not assume any fixed field schema beyond `tags`
+4. run queue/query/lock workflows using hinted namespaces, using `in{field=/tags,any=planning|finance}` first and `icontains{field=/...,value=contract}` as recall fallback
 
 `lockd.hint` is advisory, but it is the fastest way for an agent to avoid namespace-forbidden calls before first operation.

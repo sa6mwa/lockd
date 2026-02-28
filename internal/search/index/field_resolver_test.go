@@ -30,6 +30,50 @@ func TestSelectorSupportsLegacyIndexFilterAllowsRecursive(t *testing.T) {
 	}
 }
 
+func TestPrepareSelectorExecutionPlanTreatsTextSelectorsAsIndexNative(t *testing.T) {
+	t.Parallel()
+	adapter := &Adapter{}
+	tests := []struct {
+		name string
+		sel  api.Selector
+	}{
+		{
+			name: "contains",
+			sel: api.Selector{
+				Contains: &api.Term{Field: "/message", Value: "timeout"},
+			},
+		},
+		{
+			name: "icontains",
+			sel: api.Selector{
+				IContains: &api.Term{Field: "/message", Value: "TIMEOUT"},
+			},
+		},
+		{
+			name: "iprefix",
+			sel: api.Selector{
+				IPrefix: &api.Term{Field: "/owner", Value: "TEAM-"},
+			},
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			plan, err := adapter.prepareSelectorExecutionPlan(tt.sel)
+			if err != nil {
+				t.Fatalf("prepare selector execution plan: %v", err)
+			}
+			if !plan.useLegacyFilter {
+				t.Fatalf("expected native index execution for %s selector", tt.name)
+			}
+			if plan.requirePostEval {
+				t.Fatalf("unexpected post-eval fallback for %s selector", tt.name)
+			}
+		})
+	}
+}
+
 func TestIndexAdapterQueryWildcardContains(t *testing.T) {
 	ctx := context.Background()
 	mem := memory.New()

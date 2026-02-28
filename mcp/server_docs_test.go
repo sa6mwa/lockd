@@ -27,6 +27,12 @@ func TestDefaultServerInstructionsIncludeNamespaceAndQueue(t *testing.T) {
 	if !strings.Contains(text, "lockd.state.stream") {
 		t.Fatalf("expected lockd.state.stream guidance in instructions: %q", text)
 	}
+	if !strings.Contains(text, "in{field=/tags,any=") {
+		t.Fatalf("expected tags query guidance in instructions: %q", text)
+	}
+	if !strings.Contains(text, "icontains{field=/...,value=") {
+		t.Fatalf("expected full-text guidance in instructions: %q", text)
+	}
 }
 
 func TestHelpToolMessagingTopic(t *testing.T) {
@@ -63,6 +69,24 @@ func TestHelpToolOverviewIncludesHintFirst(t *testing.T) {
 	}
 	if len(out.NextCalls) == 0 || out.NextCalls[0] != "lockd.hint" {
 		t.Fatalf("expected lockd.hint as first overview next_call, got %#v", out.NextCalls)
+	}
+}
+
+func TestHelpToolLQLTopicIncludesLQLResource(t *testing.T) {
+	t.Parallel()
+	s := &server{cfg: Config{DefaultNamespace: "mcp", AgentBusQueue: "lockd.agent.bus"}}
+	_, out, err := s.handleHelpTool(context.Background(), nil, helpToolInput{Topic: "lql"})
+	if err != nil {
+		t.Fatalf("help tool: %v", err)
+	}
+	if out.Topic != "lql" {
+		t.Fatalf("expected lql topic, got %q", out.Topic)
+	}
+	if len(out.Resources) == 0 || out.Resources[0] != docLQLURI {
+		t.Fatalf("expected lql docs resource, got %#v", out.Resources)
+	}
+	if !strings.Contains(out.Summary, "eq/contains/icontains/prefix/iprefix/range/in/exists") {
+		t.Fatalf("expected lql selector summary, got %q", out.Summary)
 	}
 }
 

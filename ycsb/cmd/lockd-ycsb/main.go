@@ -156,6 +156,7 @@ func main() {
 		newShellCommand(),
 		newLoadCommand(),
 		newRunCommand(),
+		newProbeCommand(),
 	)
 
 	cobra.EnablePrefixMatching = true

@@ -98,7 +98,7 @@ build:
 clean:
 	@rm -f $(RUNNER)
 
-preflight-lockd:
+preflight-lockd: build
 	@bash -c '\
 		set -e; \
 		if [ ! -f "$(LOCKD_BUNDLE)" ]; then \
@@ -106,27 +106,8 @@ preflight-lockd:
 			echo "hint: cd ../devenv && docker compose up -d"; \
 			exit 1; \
 		fi; \
-		endpoint="$(LOCKD_ENDPOINTS)"; \
-		endpoint="$${endpoint%%,*}"; \
-		endpoint="$${endpoint#*://}"; \
-		hostport="$$endpoint"; \
-		host="$${hostport%%:*}"; \
-		port="$${hostport##*:}"; \
-		if [[ "$$hostport" == "$$port" ]]; then port=9341; fi; \
-		if command -v timeout >/dev/null 2>&1; then \
-			if ! timeout 1 bash -c "</dev/tcp/$$host/$$port" >/dev/null 2>&1; then \
-				echo "lockd not reachable at $$host:$$port. Is docker compose up?"; \
-				echo "hint: cd ../devenv && docker compose up -d"; \
-				exit 1; \
-			fi; \
-		else \
-			if ! (exec 3<>/dev/tcp/$$host/$$port) >/dev/null 2>&1; then \
-				echo "lockd not reachable at $$host:$$port. Is docker compose up?"; \
-				echo "hint: cd ../devenv && docker compose up -d"; \
-				exit 1; \
-			fi; \
-		fi; \
 	'
+	@$(RUNNER) probe lockd -P $(LOCKD_PROPS) $(foreach p,$(LOCKD_EXTRA_PROPS),-P $(p)) -p lockd.endpoints=$(LOCKD_ENDPOINTS) -p lockd.bundle=$(LOCKD_BUNDLE) --probe-timeout=3s
 
 preflight-etcd:
 	@bash -c '\

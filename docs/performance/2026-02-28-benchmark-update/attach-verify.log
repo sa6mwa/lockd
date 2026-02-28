@@ -1,0 +1,40 @@
+## 2026-02-28T13:15:25Z
+backend=lockd phase=load scenario=core-attach series=2026-02-28-attach-verify baseline_ref= run_id=attachfix1 workload=core recordcount=10000 operationcount=100000 threads=8 target=0 endpoints=https://127.0.0.1:9341 wal_fsync_interval= wal_commit_max_ops= wal_commit_single_wait= query_engine=index query_return=documents attach_enabled=true attach_read=true attach_bytes=1024 txn_explicit= public_read=true
+Run finished, takes 17.170571157s
+INSERT - Takes(s): 17.1, Count: 20000, OPS: 1166.5, Avg(us): 13415, Min(us): 3316, Max(us): 810495, 50th(us): 9111, 90th(us): 11527, 95th(us): 12367, 99th(us): 126015, 99.9th(us): 627199, 99.99th(us): 802815
+TOTAL  - Takes(s): 17.1, Count: 20000, OPS: 1166.5, Avg(us): 13415, Min(us): 3316, Max(us): 810495, 50th(us): 9111, 90th(us): 11527, 95th(us): 12367, 99th(us): 126015, 99.9th(us): 627199, 99.99th(us): 802815
+
+## 2026-02-28T13:17:32Z
+backend=lockd phase=run scenario=core-attach series=2026-02-28-attach-verify baseline_ref= run_id=attachfix1 workload=core recordcount=10000 operationcount=100000 threads=8 target=0 endpoints=https://127.0.0.1:9341 wal_fsync_interval= wal_commit_max_ops= wal_commit_single_wait= query_engine=index query_return=documents attach_enabled=true attach_read=true attach_bytes=1024 txn_explicit= public_read=true
+Run finished, takes 1m42.315230934s
+READ   - Takes(s): 102.3, Count: 99954, OPS: 977.0, Avg(us): 2598, Min(us): 754, Max(us): 777215, 50th(us): 2199, 90th(us): 3003, 95th(us): 3335, 99th(us): 7711, 99.9th(us): 27071, 99.99th(us): 762367
+TOTAL  - Takes(s): 102.3, Count: 200000, OPS: 1954.9, Avg(us): 8131, Min(us): 754, Max(us): 977919, 50th(us): 4339, 90th(us): 23679, 95th(us): 26959, 99th(us): 31679, 99.9th(us): 135935, 99.99th(us): 766975
+UPDATE - Takes(s): 102.3, Count: 100046, OPS: 978.0, Avg(us): 13659, Min(us): 2608, Max(us): 977919, 50th(us): 8239, 90th(us): 26911, 95th(us): 28655, 99th(us): 59167, 99.9th(us): 262399, 99.99th(us): 770559
+
+## 2026-02-28T13:23:05Z
+backend=lockd phase=load scenario=core-attach series=2026-02-28-attach-verify-v2 baseline_ref= run_id=attachfix2 workload=core recordcount=10000 operationcount=100000 threads=8 target=0 endpoints=https://127.0.0.1:9341 wal_fsync_interval= wal_commit_max_ops= wal_commit_single_wait= query_engine=index query_return=documents attach_enabled=true attach_read=true attach_bytes=1024 txn_explicit= public_read=true
+Run finished, takes 17.03994352s
+INSERT - Takes(s): 17.0, Count: 20000, OPS: 1175.5, Avg(us): 13549, Min(us): 3448, Max(us): 777727, 50th(us): 9279, 90th(us): 11767, 95th(us): 12887, 99th(us): 273151, 99.9th(us): 477951, 99.99th(us): 777727
+TOTAL  - Takes(s): 17.0, Count: 20000, OPS: 1175.5, Avg(us): 13549, Min(us): 3448, Max(us): 777727, 50th(us): 9279, 90th(us): 11767, 95th(us): 12887, 99th(us): 273151, 99.9th(us): 477951, 99.99th(us): 777727
+
+## 2026-02-28T13:25:07Z
+backend=lockd phase=run scenario=core-attach series=2026-02-28-attach-verify-v2 baseline_ref= run_id=attachfix2 workload=core recordcount=10000 operationcount=100000 threads=8 target=0 endpoints=https://127.0.0.1:9341 wal_fsync_interval= wal_commit_max_ops= wal_commit_single_wait= query_engine=index query_return=documents attach_enabled=true attach_read=true attach_bytes=1024 txn_explicit= public_read=true
+Run finished, takes 1m47.397882001s
+READ   - Takes(s): 107.4, Count: 100058, OPS: 931.7, Avg(us): 2425, Min(us): 738, Max(us): 507647, 50th(us): 2109, 90th(us): 2937, 95th(us): 3201, 99th(us): 3941, 99.9th(us): 28127, 99.99th(us): 506623
+READ_ERROR - Takes(s): 42.2, Count: 2, OPS: 0.0, Avg(us): 1234, Min(us): 1226, Max(us): 1242, 50th(us): 1226, 90th(us): 1242, 95th(us): 1242, 99th(us): 1242, 99.9th(us): 1242, 99.99th(us): 1242
+TOTAL  - Takes(s): 107.4, Count: 199998, OPS: 1862.3, Avg(us): 8341, Min(us): 738, Max(us): 1281023, 50th(us): 4053, 90th(us): 24383, 95th(us): 27247, 99th(us): 36543, 99.9th(us): 251775, 99.99th(us): 526335
+UPDATE - Takes(s): 107.4, Count: 99940, OPS: 930.7, Avg(us): 14264, Min(us): 2682, Max(us): 1281023, 50th(us): 8311, 90th(us): 27231, 95th(us): 29087, 99th(us): 64671, 99.9th(us): 310015, 99.99th(us): 557055
+
+## 2026-02-28T13:35:36Z
+backend=lockd phase=load scenario=core-attach series=2026-02-28-attach-verify-v3 baseline_ref= run_id=attachfix3 workload=core recordcount=10000 operationcount=100000 threads=8 target=0 endpoints=https://127.0.0.1:9341 wal_fsync_interval= wal_commit_max_ops= wal_commit_single_wait= query_engine=index query_return=documents attach_enabled=true attach_read=true attach_bytes=1024 txn_explicit= public_read=true
+Run finished, takes 28.070250839s
+INSERT - Takes(s): 28.0, Count: 20000, OPS: 713.2, Avg(us): 22384, Min(us): 3634, Max(us): 950271, 50th(us): 13831, 90th(us): 29743, 95th(us): 32095, 99th(us): 131199, 99.9th(us): 764927, 99.99th(us): 949759
+TOTAL  - Takes(s): 28.0, Count: 20000, OPS: 713.2, Avg(us): 22384, Min(us): 3634, Max(us): 950271, 50th(us): 13831, 90th(us): 29743, 95th(us): 32095, 99th(us): 131199, 99.9th(us): 764927, 99.99th(us): 949759
+
+## 2026-02-28T13:37:34Z
+backend=lockd phase=run scenario=core-attach series=2026-02-28-attach-verify-v3 baseline_ref= run_id=attachfix3 workload=core recordcount=10000 operationcount=100000 threads=8 target=0 endpoints=https://127.0.0.1:9341 wal_fsync_interval= wal_commit_max_ops= wal_commit_single_wait= query_engine=index query_return=documents attach_enabled=true attach_read=true attach_bytes=1024 txn_explicit= public_read=true
+Run finished, takes 1m36.552921407s
+READ   - Takes(s): 96.5, Count: 100098, OPS: 1036.8, Avg(us): 2509, Min(us): 736, Max(us): 758783, 50th(us): 2263, 90th(us): 3027, 95th(us): 3287, 99th(us): 3965, 99.9th(us): 34623, 99.99th(us): 748031
+TOTAL  - Takes(s): 96.5, Count: 200000, OPS: 2071.6, Avg(us): 7627, Min(us): 736, Max(us): 1047039, 50th(us): 4045, 90th(us): 21071, 95th(us): 26367, 99th(us): 32831, 99.9th(us): 130943, 99.99th(us): 808959
+UPDATE - Takes(s): 96.5, Count: 99902, OPS: 1034.9, Avg(us): 12756, Min(us): 2752, Max(us): 1047039, 50th(us): 7959, 90th(us): 26319, 95th(us): 28303, 99th(us): 60319, 99.9th(us): 302335, 99.99th(us): 956927
+

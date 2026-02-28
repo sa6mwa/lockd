@@ -26,6 +26,9 @@ bin/
 *~
 *.log
 !ycsb/performance.log
+!ycsb/performance*.log
+!docs/performance/2026-02-28-benchmark-update/**/*.log
+!docs/performance/2026-02-28-benchmark-validation/**/*.log
 *.test
 *.pprof
 *.out

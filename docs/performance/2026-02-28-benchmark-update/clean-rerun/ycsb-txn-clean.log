@@ -1,0 +1,13 @@
+## 2026-02-28T14:34:41Z
+backend=lockd phase=load scenario=txn-load series=txn-clean baseline_ref= run_id= workload=core recordcount=10000 operationcount=100000 threads=8 target=0 endpoints=https://127.0.0.1:9341 wal_fsync_interval= wal_commit_max_ops= wal_commit_single_wait= query_engine=index query_return=documents attach_enabled= attach_read= attach_bytes= txn_explicit=true public_read=true
+Run finished, takes 9.368554459s
+INSERT - Takes(s): 9.3, Count: 20000, OPS: 2142.8, Avg(us): 7437, Min(us): 2596, Max(us): 204415, 50th(us): 6363, 90th(us): 8863, 95th(us): 13423, 99th(us): 25631, 99.9th(us): 82175, 99.99th(us): 198783
+TOTAL  - Takes(s): 9.3, Count: 20000, OPS: 2142.9, Avg(us): 7437, Min(us): 2596, Max(us): 204415, 50th(us): 6363, 90th(us): 8863, 95th(us): 13423, 99th(us): 25631, 99.9th(us): 82175, 99.99th(us): 198783
+
+## 2026-02-28T14:35:44Z
+backend=lockd phase=run scenario=txn-run series=txn-clean baseline_ref= run_id= workload=core recordcount=10000 operationcount=100000 threads=8 target=0 endpoints=https://127.0.0.1:9341 wal_fsync_interval= wal_commit_max_ops= wal_commit_single_wait= query_engine=index query_return=documents attach_enabled= attach_read= attach_bytes= txn_explicit=true public_read=true
+Run finished, takes 1m2.75811808s
+READ   - Takes(s): 62.8, Count: 99996, OPS: 1593.5, Avg(us): 742, Min(us): 148, Max(us): 252799, 50th(us): 607, 90th(us): 983, 95th(us): 1156, 99th(us): 2379, 99.9th(us): 18975, 99.99th(us): 43103
+TOTAL  - Takes(s): 62.8, Count: 200000, OPS: 3187.1, Avg(us): 4916, Min(us): 148, Max(us): 529919, 50th(us): 2777, 90th(us): 7955, 95th(us): 25103, 99th(us): 30031, 99.9th(us): 72767, 99.99th(us): 505343
+UPDATE - Takes(s): 62.7, Count: 100004, OPS: 1594.6, Avg(us): 9090, Min(us): 1975, Max(us): 529919, 50th(us): 5699, 90th(us): 25055, 95th(us): 27663, 99th(us): 37183, 99.9th(us): 126719, 99.99th(us): 508927
+

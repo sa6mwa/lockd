@@ -1,0 +1,7 @@
+## 2026-02-28T14:34:07Z
+backend=lockd phase=run scenario=attach-run-debug2 series=attach-debug2 baseline_ref= run_id= workload=core recordcount=10000 operationcount=100000 threads=8 target=0 endpoints=https://127.0.0.1:9341 wal_fsync_interval= wal_commit_max_ops= wal_commit_single_wait= query_engine=index query_return=documents attach_enabled=true attach_read=true attach_bytes=1024 txn_explicit= public_read=true
+Run finished, takes 1m19.187093222s
+READ   - Takes(s): 79.2, Count: 99598, OPS: 1257.9, Avg(us): 2433, Min(us): 630, Max(us): 511999, 50th(us): 2257, 90th(us): 3017, 95th(us): 3283, 99th(us): 4057, 99.9th(us): 28207, 99.99th(us): 506623
+TOTAL  - Takes(s): 79.2, Count: 200000, OPS: 2525.9, Avg(us): 6200, Min(us): 630, Max(us): 766463, 50th(us): 3983, 90th(us): 9167, 95th(us): 23375, 99th(us): 31391, 99.9th(us): 60799, 99.99th(us): 509695
+UPDATE - Takes(s): 79.2, Count: 100402, OPS: 1268.2, Avg(us): 9937, Min(us): 2668, Max(us): 766463, 50th(us): 7259, 90th(us): 23199, 95th(us): 27439, 99th(us): 36159, 99.9th(us): 103743, 99.99th(us): 515839
+

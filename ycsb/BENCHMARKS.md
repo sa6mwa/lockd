@@ -76,7 +76,7 @@ Etcd comparison (no attachments/explicit XA):
 - `make etcd-load`
 - `make etcd-run`
 
-## Latest full rerun (2026-02-26)
+## Historical full rerun snapshot (2026-02-26, tainted)
 
 Latest validated full matrix series:
 - Series: `2026-02-26-full-rerun-v2`
@@ -94,6 +94,10 @@ make full-rerun \
   PERF_BASELINE_REF=2026-01-27-baseline \
   PERF_RUN_ID=20260226-r2
 ```
+
+Important:
+- This snapshot includes tainted rows where YCSB emitted only `*_ERROR` metrics.
+- Treat this table as historical context only; do not use it as a baseline.
 
 Key throughput comparison (ops/s):
 
@@ -296,3 +300,28 @@ Lockd query benchmarks (lockd-bench, embedded disk backend, ha=failover):
     p99.9: 31.634 ms; min: 9.544 ms; max: 36.776 ms
 
 Full logs for these runs live under `docs/performance/2026-01-27-ycsb-load/`.
+
+## Benchmark update (2026-02-28, corrected clean rerun)
+
+Data-quality corrections for this section:
+- Benchmark summaries now exclude any run block containing `*_ERROR` counters.
+- Query compare tooling now only uses entries that include real `SCAN` metrics.
+- Previous high-throughput rows from `2026-02-26-full-rerun-v2` are tainted (`*_ERROR`) and are not used for comparison.
+
+Clean rerun artifacts:
+- Core: `docs/performance/2026-02-28-benchmark-update/clean-rerun/ycsb-core-clean.log`
+- Attach: `docs/performance/2026-02-28-benchmark-update/clean-rerun/ycsb-attach-clean.log` and `docs/performance/2026-02-28-benchmark-update/clean-rerun/ycsb-attach-debug2.log`
+- Txn: `docs/performance/2026-02-28-benchmark-update/clean-rerun/ycsb-txn-clean.log`
+
+Baseline source notes:
+- Core and attach baselines come from `docs/performance/2026-01-27-ycsb-load/README.md`, `docs/performance/2026-01-27-ycsb-load/run-summary.md`, and `docs/performance/2026-01-27-ycsb-load/attach-summary.md`.
+- Txn baseline values remain from this document's legacy baseline block (`2111.2` / `3117.9`) because `2026-01-27-ycsb-load` does not include an explicit txn series.
+
+| Scenario | Baseline ops/s | Current clean ops/s | Delta |
+| --- | ---: | ---: | ---: |
+| lockd load workloada | 408.9 | 2066.8 | +405.46% |
+| lockd run workloada | 1641.1 | 3495.8 | +113.01% |
+| lockd load workloada-attach | 1053.8 | 1603.7 | +52.18% |
+| lockd run workloada-attach | 1642.0 | 2525.9 | +53.83% |
+| lockd load workloada-txn | 2111.2 | 2142.9 | +1.50% |
+| lockd run workloada-txn | 3117.9 | 3187.1 | +2.22% |

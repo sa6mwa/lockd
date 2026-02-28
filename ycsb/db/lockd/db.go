@@ -50,6 +50,11 @@ const (
 
 const attachmentDefaultName = "ycsb.bin"
 
+const (
+	stateReadRetryAttempts = 3
+	stateReadRetryStep     = 2 * time.Millisecond
+)
+
 func init() {
 	ycsb.RegisterDBCreator("lockd", lockdCreator{})
 }
@@ -83,6 +88,7 @@ type lockdDB struct {
 	client   *lockdclient.Client
 	cfg      *driverConfig
 	ownerSeq atomic.Uint64
+	readLogs atomic.Uint32
 }
 
 type ownerKey struct{}
@@ -94,6 +100,13 @@ type recordDocument struct {
 	UpdatedAt int64             `json:"_updated_at"`
 	Data      map[string]string `json:"data"`
 }
+
+const readErrorLogLimit = 8
+
+var readErrorDebugEnabled = func() bool {
+	raw := strings.TrimSpace(strings.ToLower(os.Getenv("LOCKD_YCSB_DEBUG_READ_ERRORS")))
+	return raw == "1" || raw == "true" || raw == "yes" || raw == "on"
+}()
 
 func (doc *recordDocument) normalize() {
 	if doc.Data == nil {
@@ -265,7 +278,13 @@ func (db *lockdDB) CleanupThread(_ context.Context) {}
 func (db *lockdDB) Read(ctx context.Context, table string, key string, fields []string) (map[string][]byte, error) {
 	data, err := db.loadDocument(ctx, table, key)
 	if err != nil {
+		if isStateNotFoundError(err) {
+			return map[string][]byte{}, nil
+		}
 		return nil, err
+	}
+	if data == nil {
+		return map[string][]byte{}, nil
 	}
 	return filterFields(data.Data, fields), nil
 }
@@ -339,7 +358,13 @@ func (db *lockdDB) Scan(ctx context.Context, table string, startKey string, coun
 		}
 		doc, err := db.loadDocument(ctx, table, logical)
 		if err != nil {
+			if isStateNotFoundError(err) {
+				continue
+			}
 			return nil, err
+		}
+		if doc == nil {
+			continue
 		}
 		doc.normalize()
 		results = append(results, filterFields(doc.Data, fields))
@@ -448,16 +473,28 @@ func (db *lockdDB) loadDocument(ctx context.Context, table, key string) (*record
 		err  error
 	)
 	if db.cfg.publicRead {
-		resp, errGet := db.client.Get(ctx, composite, lockdclient.WithGetNamespace(db.cfg.namespace))
-		if errGet != nil {
-			return nil, errGet
-		}
-		if resp != nil {
-			defer resp.Close()
-			data, err = resp.Bytes()
+		for attempt := 0; attempt < stateReadRetryAttempts; attempt++ {
+			resp, errGet := db.client.Get(ctx, composite, lockdclient.WithGetNamespace(db.cfg.namespace))
+			if errGet != nil {
+				if isStateReadRetryable(errGet) && attempt+1 < stateReadRetryAttempts {
+					if waitErr := waitStateReadRetry(ctx, attempt); waitErr != nil {
+						db.logReadError("get_public_retry_wait", composite, waitErr)
+						return nil, waitErr
+					}
+					continue
+				}
+				db.logReadError("get_public", composite, errGet)
+				return nil, errGet
+			}
+			if resp != nil {
+				data, err = resp.Bytes()
+				resp.Close()
+			}
+			break
 		}
 		if err == nil && len(data) > 0 {
 			if errAttach := db.maybeReadAttachments(ctx, composite, nil); errAttach != nil {
+				db.logReadError("attach_public", composite, errAttach)
 				return nil, errAttach
 			}
 		}
@@ -465,6 +502,7 @@ func (db *lockdDB) loadDocument(ctx context.Context, table, key string) (*record
 		owner := db.ownerFromContext(ctx)
 		lease, acquireErr := db.acquire(ctx, table, key, owner)
 		if acquireErr != nil {
+			db.logReadError("acquire_private", composite, acquireErr)
 			return nil, acquireErr
 		}
 		resp, errGet := db.client.Get(ctx, composite,
@@ -478,12 +516,14 @@ func (db *lockdDB) loadDocument(ctx context.Context, table, key string) (*record
 		}
 		if err == nil && len(data) > 0 {
 			if errAttach := db.maybeReadAttachments(ctx, composite, lease); errAttach != nil {
+				db.logReadError("attach_private", composite, errAttach)
 				_ = lease.Release(ctx)
 				return nil, errAttach
 			}
 		}
 		relErr := lease.Release(ctx)
 		if errGet != nil {
+			db.logReadError("get_private", composite, errGet)
 			return nil, errGet
 		}
 		if err == nil && relErr != nil {
@@ -491,10 +531,13 @@ func (db *lockdDB) loadDocument(ctx context.Context, table, key string) (*record
 		}
 	}
 	if err != nil {
+		db.logReadError("state_bytes", composite, err)
 		return nil, err
 	}
 	if len(data) == 0 {
-		return nil, fmt.Errorf("lockd ycsb: key %s not found", composite)
+		missErr := fmt.Errorf("lockd ycsb: key %s not found", composite)
+		db.logReadError("state_empty", composite, missErr)
+		return nil, missErr
 	}
 	var doc recordDocument
 	if err := json.Unmarshal(data, &doc); err != nil {
@@ -502,6 +545,16 @@ func (db *lockdDB) loadDocument(ctx context.Context, table, key string) (*record
 	}
 	doc.normalize()
 	return &doc, nil
+}
+
+func (db *lockdDB) logReadError(stage, key string, err error) {
+	if !readErrorDebugEnabled || db == nil || err == nil {
+		return
+	}
+	if db.readLogs.Add(1) > readErrorLogLimit {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "lockd-ycsb: read-error stage=%s key=%s err=%T %v\n", stage, key, err, err)
 }
 
 func (db *lockdDB) ownerFromContext(ctx context.Context) string {
@@ -588,12 +641,35 @@ func (db *lockdDB) maybeReadAttachments(ctx context.Context, key string, lease *
 	}
 	if lease != nil {
 		list, err := lease.ListAttachments(ctx)
-		if err != nil || list == nil || len(list.Attachments) == 0 {
+		if err != nil {
+			if isAttachmentNotFoundError(err) {
+				return nil
+			}
 			return err
+		}
+		if list == nil || len(list.Attachments) == 0 {
+			return nil
 		}
 		info := list.Attachments[0]
 		att, err := lease.RetrieveAttachment(ctx, lockdclient.AttachmentSelector{ID: info.ID, Name: info.Name})
+		if isAttachmentNotFoundError(err) {
+			list, err = lease.ListAttachments(ctx)
+			if err != nil {
+				if isAttachmentNotFoundError(err) {
+					return nil
+				}
+				return err
+			}
+			if list == nil || len(list.Attachments) == 0 {
+				return nil
+			}
+			info = list.Attachments[0]
+			att, err = lease.RetrieveAttachment(ctx, lockdclient.AttachmentSelector{ID: info.ID, Name: info.Name})
+		}
 		if err != nil {
+			if isAttachmentNotFoundError(err) {
+				return nil
+			}
 			return err
 		}
 		defer att.Close()
@@ -605,8 +681,14 @@ func (db *lockdDB) maybeReadAttachments(ctx context.Context, key string, lease *
 		Key:       key,
 		Public:    true,
 	})
-	if err != nil || list == nil || len(list.Attachments) == 0 {
+	if err != nil {
+		if isAttachmentNotFoundError(err) {
+			return nil
+		}
 		return err
+	}
+	if list == nil || len(list.Attachments) == 0 {
+		return nil
 	}
 	info := list.Attachments[0]
 	att, err := db.client.GetAttachment(ctx, lockdclient.GetAttachmentRequest{
@@ -615,12 +697,96 @@ func (db *lockdDB) maybeReadAttachments(ctx context.Context, key string, lease *
 		Public:    true,
 		Selector:  lockdclient.AttachmentSelector{ID: info.ID, Name: info.Name},
 	})
+	if isAttachmentNotFoundError(err) {
+		list, err = db.client.ListAttachments(ctx, lockdclient.ListAttachmentsRequest{
+			Namespace: db.cfg.namespace,
+			Key:       key,
+			Public:    true,
+		})
+		if err != nil {
+			if isAttachmentNotFoundError(err) {
+				return nil
+			}
+			return err
+		}
+		if list == nil || len(list.Attachments) == 0 {
+			return nil
+		}
+		info = list.Attachments[0]
+		att, err = db.client.GetAttachment(ctx, lockdclient.GetAttachmentRequest{
+			Namespace: db.cfg.namespace,
+			Key:       key,
+			Public:    true,
+			Selector:  lockdclient.AttachmentSelector{ID: info.ID, Name: info.Name},
+		})
+	}
 	if err != nil {
+		if isAttachmentNotFoundError(err) {
+			return nil
+		}
 		return err
 	}
 	defer att.Close()
 	_, err = io.Copy(io.Discard, att)
 	return err
+}
+
+func isAttachmentNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr *lockdclient.APIError
+	if !errors.As(err, &apiErr) || apiErr == nil {
+		return false
+	}
+	if apiErr.Status == http.StatusNotFound {
+		return true
+	}
+	code := strings.TrimSpace(strings.ToLower(apiErr.Response.ErrorCode))
+	return code == "not_found" || code == "attachment_not_found"
+}
+
+func isStateNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if isAttachmentNotFoundError(err) {
+		return true
+	}
+	var apiErr *lockdclient.APIError
+	if errors.As(err, &apiErr) && apiErr != nil {
+		if apiErr.Status == http.StatusNotFound {
+			return true
+		}
+		code := strings.TrimSpace(strings.ToLower(apiErr.Response.ErrorCode))
+		return code == "not_found" || code == "key_not_found"
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(msg, "not found")
+}
+
+func isStateReadRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr *lockdclient.APIError
+	if !errors.As(err, &apiErr) || apiErr == nil {
+		return false
+	}
+	code := strings.TrimSpace(strings.ToLower(apiErr.Response.ErrorCode))
+	return code == "staged_state_missing"
+}
+
+func waitStateReadRetry(ctx context.Context, attempt int) error {
+	delay := time.Duration(attempt+1) * stateReadRetryStep
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func loadClientMaterial(path string) (*tls.Certificate, *x509.CertPool, error) {

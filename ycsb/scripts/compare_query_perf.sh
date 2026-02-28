@@ -51,11 +51,13 @@ awk '
     return out
   }
   function emit() {
-    if (capture && total_ops == "" && component_ops_sum > 0) {
+    if (capture && has_error == 0 && total_ops == "" && component_ops_sum > 0) {
       total_ops = sprintf("%.1f", component_ops_sum)
     }
-    if (capture && engine != "") {
+    if (capture && has_error == 0 && engine != "" && scan_ops != "") {
       printf "%s|%s|%s|%s\n", ts, engine, total_ops, scan_ops
+    } else if (capture && has_error == 1) {
+      skipped_error++
     }
   }
   BEGIN {
@@ -65,6 +67,8 @@ awk '
     total_ops = ""
     scan_ops = ""
     component_ops_sum = 0
+    has_error = 0
+    skipped_error = 0
   }
   /^## / {
     emit()
@@ -74,6 +78,7 @@ awk '
     total_ops = ""
     scan_ops = ""
     component_ops_sum = 0
+    has_error = 0
     next
   }
   /^backend=/ {
@@ -82,6 +87,7 @@ awk '
     total_ops = ""
     scan_ops = ""
     component_ops_sum = 0
+    has_error = 0
     if ($0 ~ /backend=lockd/ && $0 ~ /phase=run/ && $0 ~ /query_engine=/) {
       if (match($0, /query_engine=[^ ]+/)) {
         engine = substr($0, RSTART + length("query_engine="), RLENGTH - length("query_engine="))
@@ -92,7 +98,10 @@ awk '
   }
   capture && /^[A-Z_]+[[:space:]]+- Takes\(s\):/ {
     op = $1
-    sub(/_ERROR$/, "", op)
+    if (op ~ /_ERROR$/) {
+      has_error = 1
+      next
+    }
     ops = parse_ops($0)
     if (op == "TOTAL") {
       total_ops = ops
@@ -111,10 +120,14 @@ awk '
     total_ops = ""
     scan_ops = ""
     component_ops_sum = 0
+    has_error = 0
     next
   }
   END {
     emit()
+    if (skipped_error > 0) {
+      print "skipped_error_entries=" skipped_error > "/dev/stderr"
+    }
   }
 ' "$PERF_LOG" > "$entries_tmp"
 

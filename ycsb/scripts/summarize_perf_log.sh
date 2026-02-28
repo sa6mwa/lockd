@@ -65,6 +65,7 @@ function clear_entry() {
   update_ops=""
   insert_ops=""
   scan_ops=""
+  has_error_metrics=0
 }
 
 function parse_metadata(line,    n, parts, i, kv, k, v) {
@@ -107,6 +108,10 @@ function to_num(s) {
 
 function emit_entry(    key, cur_row, base_row, delta) {
   if (backend == "") {
+    return
+  }
+  if (has_error_metrics == 1) {
+    skipped_error_entries++
     return
   }
   if (total_ops == "") {
@@ -159,6 +164,7 @@ function emit_entry(    key, cur_row, base_row, delta) {
 
 BEGIN {
   clear_entry()
+  skipped_error_entries = 0
 }
 
 /^## / {
@@ -175,7 +181,10 @@ BEGIN {
 
 /^[A-Z_]+[[:space:]]+- Takes\(s\):/ {
   op = $1
-  sub(/_ERROR$/, "", op)
+  if (op ~ /_ERROR$/) {
+    has_error_metrics = 1
+    next
+  }
   parse_ops($0, op)
   next
 }
@@ -201,6 +210,9 @@ END {
     print "- Baseline series: `" baseline_series "`"
   } else {
     print "- Baseline series: `(none)`"
+  }
+  if (skipped_error_entries > 0) {
+    print "- Skipped entries with error metrics: `" skipped_error_entries "`"
   }
   print ""
   print "| Backend | Phase | Scenario | Workload | Query Engine | Query Return | Timestamp | Run ID | TOTAL ops/s | READ ops/s | UPDATE ops/s | INSERT ops/s | SCAN ops/s | Baseline TOTAL | Delta vs Baseline |"

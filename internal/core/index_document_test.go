@@ -32,10 +32,23 @@ func TestBuildDocumentFromJSONAddsTrigramPostings(t *testing.T) {
 	}
 }
 
-func TestBuildDocumentFromJSONAddsTokenizedPostings(t *testing.T) {
+func TestBuildDocumentFromJSONSkipsTokenizedPostingsByDefault(t *testing.T) {
 	doc, err := buildDocumentFromJSON("k1", strings.NewReader(`{"message":"Timeout while syncing node-7"}`))
 	if err != nil {
 		t.Fatalf("buildDocumentFromJSON: %v", err)
+	}
+	tokenField := "__tok__:/message"
+	tokens := doc.Fields[tokenField]
+	if len(tokens) != 0 {
+		t.Fatalf("expected no tokenized postings on %q by default, got %+v", tokenField, tokens)
+	}
+}
+
+func TestBuildDocumentFromJSONWithPolicyBothAddsTokenizedPostings(t *testing.T) {
+	policy := indexer.DefaultTextIndexPolicy()
+	doc, err := buildDocumentFromJSONWithPolicy("k1", strings.NewReader(`{"message":"Timeout while syncing node-7"}`), policy)
+	if err != nil {
+		t.Fatalf("buildDocumentFromJSONWithPolicy: %v", err)
 	}
 	tokenField := "__tok__:/message"
 	tokens := doc.Fields[tokenField]

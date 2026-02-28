@@ -1028,17 +1028,22 @@ func (s *Service) applyTxnDecisionForMeta(ctx context.Context, namespace, key, t
 			return
 		}
 		plan.AddFinalizer(func() error {
-			stateRes, err := s.store.ReadState(storage.ContextWithCommitGroup(ctx, nil), namespace, key)
-			if err != nil {
-				return nil
-			}
-			defer stateRes.Reader.Close()
-			if doc, derr := buildDocumentFromJSON(key, stateRes.Reader); derr == nil {
-				if docMeta := buildIndexDocumentMeta(meta); docMeta != nil {
+			docMeta := buildIndexDocumentMeta(meta)
+			s.scheduleIndexAsync(func() {
+				stateRes, err := s.store.ReadState(storage.ContextWithCommitGroup(ctx, nil), namespace, key)
+				if err != nil {
+					return
+				}
+				defer stateRes.Reader.Close()
+				doc, derr := buildDocumentFromJSON(key, stateRes.Reader)
+				if derr != nil {
+					return
+				}
+				if docMeta != nil {
 					doc.Meta = docMeta
 				}
 				_ = s.indexManager.Insert(namespace, doc)
-			}
+			})
 			return nil
 		})
 	}
@@ -1048,11 +1053,13 @@ func (s *Service) applyTxnDecisionForMeta(ctx context.Context, namespace, key, t
 		}
 		visible := meta.PublishedVersion > 0 && !meta.QueryExcluded()
 		plan.AddFinalizer(func() error {
-			if err := s.indexManager.UpdateVisibility(namespace, key, visible); err != nil {
-				if s.logger != nil {
-					s.logger.Warn("index.visibility.update_failed", "namespace", namespace, "key", key, "error", err)
+			s.scheduleIndexAsync(func() {
+				if err := s.indexManager.UpdateVisibility(namespace, key, visible); err != nil {
+					if s.logger != nil {
+						s.logger.Warn("index.visibility.update_failed", "namespace", namespace, "key", key, "error", err)
+					}
 				}
-			}
+			})
 			return nil
 		})
 	}

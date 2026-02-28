@@ -19,21 +19,38 @@ func tokenizedField(field string) string {
 
 func normalizedTrigrams(value string) []string {
 	normalized := normalizeTermValue(value)
+	if normalized == "" {
+		return nil
+	}
+	if isASCII(normalized) {
+		if len(normalized) < 3 {
+			return nil
+		}
+		out := make([]string, 0, len(normalized)-2)
+		for i := 0; i+3 <= len(normalized); i++ {
+			// Substring views avoid per-gram allocations for ASCII inputs.
+			out = append(out, normalized[i:i+3])
+		}
+		return out
+	}
 	runes := []rune(normalized)
 	if len(runes) < 3 {
 		return nil
 	}
 	out := make([]string, 0, len(runes)-2)
-	seen := make(map[string]struct{}, len(runes)-2)
 	for i := 0; i+3 <= len(runes); i++ {
-		gram := string(runes[i : i+3])
-		if _, ok := seen[gram]; ok {
-			continue
-		}
-		seen[gram] = struct{}{}
-		out = append(out, gram)
+		out = append(out, string(runes[i:i+3]))
 	}
 	return out
+}
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
 }
 
 // TextFieldMode controls how a string field is indexed for query evaluation.

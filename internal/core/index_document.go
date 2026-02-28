@@ -12,7 +12,11 @@ import (
 )
 
 func buildDocumentFromJSON(key string, reader io.Reader) (indexer.Document, error) {
-	return buildDocumentFromJSONWithPolicy(key, reader, indexer.DefaultTextIndexPolicy())
+	policy := indexer.DefaultTextIndexPolicy()
+	// Runtime default keeps raw + trigram postings; tokenized postings are opt-in
+	// via explicit policy to avoid heavy write-path amplification.
+	policy.DefaultMode = indexer.TextFieldModeRaw
+	return buildDocumentFromJSONWithPolicy(key, reader, policy)
 }
 
 func buildDocumentFromJSONWithPolicy(key string, reader io.Reader, policy indexer.TextIndexPolicy) (indexer.Document, error) {

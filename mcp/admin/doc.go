@@ -5,4 +5,3 @@
 // can manage bootstrap state, issuer configuration, and confidential clients
 // through one cohesive interface.
 package admin
-

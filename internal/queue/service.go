@@ -729,6 +729,32 @@ func (s *Service) NextCandidate(ctx context.Context, namespace, queue string, st
 	return MessageCandidateResult{Descriptor: desc, NextCursor: ""}, nil
 }
 
+// PeekCandidate returns the next visible message without consuming it.
+func (s *Service) PeekCandidate(ctx context.Context, namespace, queue string, startAfter string, pageSize int) (MessageCandidateResult, error) {
+	name, err := sanitizeQueueName(queue)
+	if err != nil {
+		return MessageCandidateResult{}, err
+	}
+	ns, err := sanitizeNamespace(namespace)
+	if err != nil {
+		return MessageCandidateResult{}, err
+	}
+	cache := s.readyCacheForQueue(ns, name)
+	if startAfter != "" {
+		cache.resetWithCursor(startAfter)
+	}
+	now := s.clk.Now().UTC()
+	desc, err := cache.peek(ctx, pageSize, now)
+	if err != nil {
+		return MessageCandidateResult{}, err
+	}
+	if desc == nil {
+		return MessageCandidateResult{}, storage.ErrNotFound
+	}
+	desc.Namespace = ns
+	return MessageCandidateResult{Descriptor: desc, NextCursor: ""}, nil
+}
+
 // RefreshReadyCache syncs the ready cache for the provided queue immediately.
 func (s *Service) RefreshReadyCache(ctx context.Context, namespace, queue string) error {
 	name, err := sanitizeQueueName(queue)

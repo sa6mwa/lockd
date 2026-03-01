@@ -112,4 +112,3 @@ func TestServiceClientLifecycle(t *testing.T) {
 		t.Fatalf("expected error for removed client")
 	}
 }
-

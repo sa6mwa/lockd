@@ -311,6 +311,33 @@ func RunPagination(t *testing.T, factory ServerFactory) {
 		}
 		expected := []string{"batch-00", "batch-01", "batch-02", "batch-03"}
 		querydata.ExpectKeySet(t, collected, expected)
+
+		// Regression guard: when total matches == limit, scan must not emit a cursor.
+		exactNS := "pagination-exact-" + xid.New().String()
+		querydata.SeedState(ctx, t, ts.Client, exactNS, "exact-00", map[string]any{"status": "open"})
+		querydata.SeedState(ctx, t, ts.Client, exactNS, "exact-01", map[string]any{"status": "open"})
+		querydata.SeedState(ctx, t, ts.Client, exactNS, "exact-02", map[string]any{"status": "closed"})
+		flushNamespaces(ctx, t, ts.Client, exactNS)
+
+		exactSelector, err := lql.ParseSelectorString(`eq{field=/status,value=open}`)
+		if err != nil || exactSelector.IsEmpty() {
+			t.Fatalf("parse selector: %v", err)
+		}
+		exact, scanOK := doQueryWithParamsAllowEngineUnavailable(t, httpClient, ts.URL(), api.QueryRequest{
+			Namespace: exactNS,
+			Selector:  exactSelector,
+			Limit:     2,
+		}, url.Values{"engine": []string{"scan"}})
+		if !scanOK {
+			t.Log("scan engine unavailable for namespace; skipping scan-specific exact-limit cursor assertion")
+			return
+		}
+		if len(exact.Keys) != 2 {
+			t.Fatalf("expected 2 keys in exact-limit page, got %d (%v)", len(exact.Keys), exact.Keys)
+		}
+		if exact.Cursor != "" {
+			t.Fatalf("expected empty cursor when no additional matches, got %q", exact.Cursor)
+		}
 	})
 }
 
@@ -412,6 +439,42 @@ func RunDocumentStreaming(t *testing.T, factory ServerFactory) {
 		}
 		if doc["region"] != "emea" {
 			t.Fatalf("unexpected document: %+v", doc)
+		}
+
+		// Regression guard: setup failures must return structured HTTP errors in documents mode.
+		status, apiErr := doQueryErrorWithParams(t, httpClient, ts.URL(), api.QueryRequest{
+			Namespace: namespaces.Default,
+			Selector:  sel,
+			Cursor:    "invalid",
+			Return:    api.QueryReturnDocuments,
+		}, url.Values{"return": []string{string(api.QueryReturnDocuments)}})
+		if status != http.StatusBadRequest {
+			t.Fatalf("expected status 400 for invalid cursor, got %d (%+v)", status, apiErr)
+		}
+		if apiErr.ErrorCode != "invalid_cursor" {
+			t.Fatalf("expected invalid_cursor, got %q", apiErr.ErrorCode)
+		}
+
+		// Regression guard: when total matches == limit, documents mode scan must not emit cursor trailer.
+		exactNS := "doc-stream-exact-" + xid.New().String()
+		querydata.SeedState(ctx, t, ts.Client, exactNS, "exact-doc-1", map[string]any{"status": "staged"})
+		querydata.SeedState(ctx, t, ts.Client, exactNS, "exact-doc-2", map[string]any{"status": "staged"})
+		querydata.SeedState(ctx, t, ts.Client, exactNS, "exact-doc-3", map[string]any{"status": "draft"})
+		flushNamespaces(ctx, t, ts.Client, exactNS)
+		exactRows, scanOK := doQueryDocumentsWithParamsAllowEngineUnavailable(t, httpClient, ts.URL(), api.QueryRequest{
+			Namespace: exactNS,
+			Selector:  sel,
+			Limit:     2,
+		}, url.Values{"engine": []string{"scan"}})
+		if !scanOK {
+			t.Log("scan engine unavailable for namespace; skipping scan-specific document cursor assertion")
+			return
+		}
+		if len(exactRows.Rows) != 2 {
+			t.Fatalf("expected 2 streamed documents, got %d", len(exactRows.Rows))
+		}
+		if exactRows.Cursor != "" {
+			t.Fatalf("expected empty cursor trailer when no additional matches, got %q", exactRows.Cursor)
 		}
 	})
 }
@@ -1565,12 +1628,20 @@ func newHTTPClient(t testing.TB, ts *lockd.TestServer) *http.Client {
 }
 
 func doQuery(t testing.TB, httpClient *http.Client, baseURL string, req api.QueryRequest) api.QueryResponse {
+	return doQueryWithParams(t, httpClient, baseURL, req, nil)
+}
+
+func doQueryWithParams(t testing.TB, httpClient *http.Client, baseURL string, req api.QueryRequest, params url.Values) api.QueryResponse {
 	t.Helper()
 	body, err := json.Marshal(req)
 	if err != nil {
 		t.Fatalf("marshal query request: %v", err)
 	}
-	httpReq, err := http.NewRequest(http.MethodPost, baseURL+"/v1/query", bytes.NewReader(body))
+	endpoint := baseURL + "/v1/query"
+	if len(params) > 0 {
+		endpoint += "?" + params.Encode()
+	}
+	httpReq, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("prepare http request: %v", err)
 	}
@@ -1591,6 +1662,44 @@ func doQuery(t testing.TB, httpClient *http.Client, baseURL string, req api.Quer
 	return out
 }
 
+func doQueryWithParamsAllowEngineUnavailable(t testing.TB, httpClient *http.Client, baseURL string, req api.QueryRequest, params url.Values) (api.QueryResponse, bool) {
+	t.Helper()
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal query request: %v", err)
+	}
+	endpoint := baseURL + "/v1/query"
+	if len(params) > 0 {
+		endpoint += "?" + params.Encode()
+	}
+	httpReq, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("prepare http request: %v", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient.Do(httpReq)
+	if err != nil {
+		t.Fatalf("query request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusOK {
+		var out api.QueryResponse
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		return out, true
+	}
+	var apiErr api.ErrorResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiErr); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if resp.StatusCode == http.StatusBadRequest && apiErr.ErrorCode == "query_engine_unavailable" {
+		return api.QueryResponse{}, false
+	}
+	t.Fatalf("unexpected status %d: %+v", resp.StatusCode, apiErr)
+	return api.QueryResponse{}, false
+}
+
 type documentRow struct {
 	Namespace string          `json:"ns"`
 	Key       string          `json:"key"`
@@ -1599,13 +1708,29 @@ type documentRow struct {
 }
 
 func doQueryDocuments(t testing.TB, httpClient *http.Client, baseURL string, req api.QueryRequest) []documentRow {
+	return doQueryDocumentsWithParams(t, httpClient, baseURL, req, nil).Rows
+}
+
+type documentStreamResponse struct {
+	Rows     []documentRow
+	Cursor   string
+	IndexSeq string
+	Metadata string
+}
+
+func doQueryDocumentsWithParams(t testing.TB, httpClient *http.Client, baseURL string, req api.QueryRequest, params url.Values) documentStreamResponse {
 	t.Helper()
 	req.Return = api.QueryReturnDocuments
 	body, err := json.Marshal(req)
 	if err != nil {
 		t.Fatalf("marshal query request: %v", err)
 	}
-	endpoint := fmt.Sprintf("%s/v1/query?return=%s", baseURL, api.QueryReturnDocuments)
+	query := make(url.Values)
+	query.Set("return", string(api.QueryReturnDocuments))
+	for key, values := range params {
+		query[key] = append([]string(nil), values...)
+	}
+	endpoint := fmt.Sprintf("%s/v1/query?%s", baseURL, query.Encode())
 	httpReq, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("prepare http request: %v", err)
@@ -1636,7 +1761,97 @@ func doQueryDocuments(t testing.TB, httpClient *http.Client, baseURL string, req
 	if err := scanner.Err(); err != nil {
 		t.Fatalf("scan documents: %v", err)
 	}
-	return rows
+	return documentStreamResponse{
+		Rows:     rows,
+		Cursor:   strings.TrimSpace(resp.Trailer.Get("X-Lockd-Query-Cursor")),
+		IndexSeq: strings.TrimSpace(resp.Trailer.Get("X-Lockd-Query-Index-Seq")),
+		Metadata: strings.TrimSpace(resp.Trailer.Get("X-Lockd-Query-Metadata")),
+	}
+}
+
+func doQueryDocumentsWithParamsAllowEngineUnavailable(t testing.TB, httpClient *http.Client, baseURL string, req api.QueryRequest, params url.Values) (documentStreamResponse, bool) {
+	t.Helper()
+	req.Return = api.QueryReturnDocuments
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal query request: %v", err)
+	}
+	query := make(url.Values)
+	query.Set("return", string(api.QueryReturnDocuments))
+	for key, values := range params {
+		query[key] = append([]string(nil), values...)
+	}
+	endpoint := fmt.Sprintf("%s/v1/query?%s", baseURL, query.Encode())
+	httpReq, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("prepare http request: %v", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient.Do(httpReq)
+	if err != nil {
+		t.Fatalf("query request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusOK {
+		scanner := bufio.NewScanner(resp.Body)
+		rows := make([]documentRow, 0)
+		for scanner.Scan() {
+			line := bytes.TrimSpace(scanner.Bytes())
+			if len(line) == 0 {
+				continue
+			}
+			var row documentRow
+			if err := json.Unmarshal(line, &row); err != nil {
+				t.Fatalf("decode document row: %v", err)
+			}
+			rows = append(rows, row)
+		}
+		if err := scanner.Err(); err != nil {
+			t.Fatalf("scan documents: %v", err)
+		}
+		return documentStreamResponse{
+			Rows:     rows,
+			Cursor:   strings.TrimSpace(resp.Trailer.Get("X-Lockd-Query-Cursor")),
+			IndexSeq: strings.TrimSpace(resp.Trailer.Get("X-Lockd-Query-Index-Seq")),
+			Metadata: strings.TrimSpace(resp.Trailer.Get("X-Lockd-Query-Metadata")),
+		}, true
+	}
+	var apiErr api.ErrorResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiErr); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if resp.StatusCode == http.StatusBadRequest && apiErr.ErrorCode == "query_engine_unavailable" {
+		return documentStreamResponse{}, false
+	}
+	t.Fatalf("unexpected status %d: %+v", resp.StatusCode, apiErr)
+	return documentStreamResponse{}, false
+}
+
+func doQueryErrorWithParams(t testing.TB, httpClient *http.Client, baseURL string, req api.QueryRequest, params url.Values) (int, api.ErrorResponse) {
+	t.Helper()
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal query request: %v", err)
+	}
+	endpoint := baseURL + "/v1/query"
+	if len(params) > 0 {
+		endpoint += "?" + params.Encode()
+	}
+	httpReq, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("prepare http request: %v", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient.Do(httpReq)
+	if err != nil {
+		t.Fatalf("query request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	var out api.ErrorResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	return resp.StatusCode, out
 }
 
 func flushNamespaces(ctx context.Context, t testing.TB, cli *lockdclient.Client, namespaces ...string) {

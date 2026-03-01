@@ -2424,7 +2424,7 @@ func (h *Handler) handleQueueStats(w http.ResponseWriter, r *http.Request) error
 		HasActiveWatcher:  h.queueDisp.HasActiveWatcher(resolvedNamespace, queueName),
 		CorrelationID:     correlation.ID(ctx),
 	}
-	candidate, err := qsvc.NextCandidate(ctx, resolvedNamespace, queueName, "", 1)
+	candidate, err := qsvc.PeekCandidate(ctx, resolvedNamespace, queueName, "", 1)
 	switch {
 	case err == nil && candidate.Descriptor != nil:
 		head := candidate.Descriptor.Document
@@ -2930,7 +2930,7 @@ func (h *Handler) handleQueueWatch(w http.ResponseWriter, r *http.Request) error
 	}
 
 	snapshot := func(callCtx context.Context) (queueWatchSnapshot, error) {
-		res, err := qsvc.NextCandidate(callCtx, resolvedNamespace, queueName, "", 1)
+		res, err := qsvc.PeekCandidate(callCtx, resolvedNamespace, queueName, "", 1)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
 				return queueWatchSnapshot{}, nil

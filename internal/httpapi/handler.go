@@ -1027,9 +1027,9 @@ func (h *Handler) wrap(operation string, fn handlerFunc) http.Handler {
 					attribute.Int64("lockd.duration_ms", duration),
 				))
 			}
-			}()
+		}()
 
-			if err := fn(w, r); err != nil {
+		if err := fn(w, r); err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				result = "context"
 				status = codes.Error
@@ -1094,21 +1094,26 @@ func (h *Handler) writeQueryKeysResponse(w http.ResponseWriter, resp api.QueryRe
 
 func (h *Handler) writeQueryDocumentsCore(ctx context.Context, w http.ResponseWriter, cmd core.QueryCommand) error {
 	headers := w.Header()
-	headers.Set("Content-Type", contentTypeNDJSON)
 	headers.Set(headerQueryReturn, string(api.QueryReturnDocuments))
 	declareQueryDocumentTrailers(headers)
-	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
 	logger := pslog.LoggerFromContext(ctx)
 	if logger == nil {
 		logger = h.logger
+	}
+	streamWriter := &deferredHeaderWriter{
+		ResponseWriter: w,
+		commit: func() {
+			headers.Set("Content-Type", contentTypeNDJSON)
+			w.WriteHeader(http.StatusOK)
+		},
 	}
 	copyBuf := takeQueryStreamCopyBuf()
 	defer putQueryStreamCopyBuf(copyBuf)
 	rowBuf := takeQueryStreamRowBuf()
 	defer putQueryStreamRowBuf(rowBuf)
 	sink := &ndjsonSink{
-		writer:     w,
+		writer:     streamWriter,
 		flusher:    flusher,
 		logger:     logger,
 		stream:     h.streamDocumentRow,
@@ -1118,11 +1123,54 @@ func (h *Handler) writeQueryDocumentsCore(ctx context.Context, w http.ResponseWr
 		flushEvery: queryStreamFlushEvery,
 	}
 	result, err := h.core.QueryDocuments(ctx, cmd, sink)
-	sink.Flush()
 	if result != nil {
 		applyQueryDocumentTrailers(headers, result.Cursor, result.IndexSeq, result.Metadata)
 	}
-	return err
+	if err != nil {
+		if streamWriter.Committed() {
+			sink.Flush()
+			if logger != nil {
+				logger.Warn("http.query.documents.stream.error", "namespace", cmd.Namespace, "error", err)
+			}
+			return nil
+		}
+		return convertCoreError(err)
+	}
+	if !streamWriter.Committed() {
+		if err := streamWriter.Commit(); err != nil {
+			return convertCoreError(err)
+		}
+	}
+	sink.Flush()
+	return nil
+}
+
+type deferredHeaderWriter struct {
+	http.ResponseWriter
+	commit    func()
+	committed bool
+}
+
+func (w *deferredHeaderWriter) Commit() error {
+	if w == nil || w.committed {
+		return nil
+	}
+	if w.commit != nil {
+		w.commit()
+	}
+	w.committed = true
+	return nil
+}
+
+func (w *deferredHeaderWriter) Committed() bool {
+	return w != nil && w.committed
+}
+
+func (w *deferredHeaderWriter) Write(p []byte) (int, error) {
+	if err := w.Commit(); err != nil {
+		return 0, err
+	}
+	return w.ResponseWriter.Write(p)
 }
 
 const (

@@ -719,6 +719,50 @@ func TestQueryReturnDocuments(t *testing.T) {
 	}
 }
 
+func TestQueryReturnDocumentsInvalidCursor(t *testing.T) {
+	store := memory.New()
+	scanAdapter, err := scanadapter.New(scanadapter.Config{Backend: store, MaxDocumentBytes: 1 << 20})
+	if err != nil {
+		t.Fatalf("new scan adapter: %v", err)
+	}
+	defaultCfg := scanNamespaceConfig()
+	configStore := namespaces.NewConfigStore(store, nil, nil, defaultCfg)
+	handler := New(Config{
+		Store:                  store,
+		Logger:                 pslog.NoopLogger(),
+		Clock:                  newStubClock(time.Unix(1_700_000_000, 0)),
+		SearchAdapter:          scanAdapter,
+		NamespaceConfigs:       configStore,
+		DefaultNamespaceConfig: defaultCfg,
+		JSONMaxBytes:           1 << 20,
+	})
+	mux := http.NewServeMux()
+	handler.Register(mux)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	resp, err := http.Post(
+		server.URL+"/v1/query?namespace=default&return=documents",
+		"application/json",
+		strings.NewReader(`{"cursor":"invalid"}`),
+	)
+	if err != nil {
+		t.Fatalf("query request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		data, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 400, got %d: %s", resp.StatusCode, data)
+	}
+	var errResp api.ErrorResponse
+	if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if errResp.ErrorCode != "invalid_cursor" {
+		t.Fatalf("expected invalid_cursor, got %s", errResp.ErrorCode)
+	}
+}
+
 func TestQueryReturnDocumentsIncludesStreamCounters(t *testing.T) {
 	store := memory.New()
 	scanAdapter, err := scanadapter.New(scanadapter.Config{Backend: store, MaxDocumentBytes: 1 << 20})

@@ -88,7 +88,6 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 		limit = 0
 	}
 	matches := make([]string, 0, limit)
-	var lastMatch string
 	more := false
 	nextStartAfter := startAfter
 	scanReq := storage.ScanMetaSummariesRequest{
@@ -123,8 +122,7 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 				}
 			}
 			matches = append(matches, key)
-			lastMatch = key
-			if limit > 0 && len(matches) >= limit {
+			if limit > 0 && len(matches) > limit {
 				return errScanLimitReached
 			}
 			return nil
@@ -141,9 +139,12 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 		}
 		nextStartAfter = page.NextStartAfter
 	}
+	if limit > 0 && len(matches) > limit {
+		matches = matches[:limit]
+	}
 	result := search.Result{Keys: matches}
-	if limit > 0 && len(matches) == limit && more && lastMatch != "" {
-		result.Cursor = encodeCursor(lastMatch)
+	if limit > 0 && len(matches) == limit && more {
+		result.Cursor = encodeCursor(matches[len(matches)-1])
 	}
 	return result, nil
 }
@@ -197,6 +198,25 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 			if !matchAll && meta.StateETag == "" {
 				return nil
 			}
+			if limit > 0 && len(matches) >= limit {
+				if matchAll {
+					more = true
+					return errScanLimitReached
+				}
+				matched, matchErr := a.matchesSelector(ctx, req.Namespace, key, meta, plan)
+				if matchErr != nil {
+					if shouldSkipReadError(matchErr) {
+						a.logDebug("search.scan.load_state", "namespace", req.Namespace, "key", key, "error", matchErr)
+						return nil
+					}
+					return fmt.Errorf("scan: load state %s: %w", key, matchErr)
+				}
+				if matched {
+					more = true
+					return errScanLimitReached
+				}
+				return nil
+			}
 			version := meta.EffectiveVersion()
 			stateCtx := storage.ContextWithStateReadHintsBorrowed(ctx, meta.StateDescriptor, meta.StatePlaintextBytes)
 			stateRes, readErr := a.backend.ReadState(stateCtx, req.Namespace, key)
@@ -217,9 +237,6 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 				matches = append(matches, key)
 				streamStats.AddCandidate(true)
 				lastMatch = key
-				if limit > 0 && len(matches) >= limit {
-					return errScanLimitReached
-				}
 				return nil
 			}
 			matched, queryResult, err := a.matchAndStreamDocument(ctx, req.Namespace, key, version, stateRes.Reader, plan, sink)
@@ -236,9 +253,6 @@ func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink s
 			if matched {
 				matches = append(matches, key)
 				lastMatch = key
-				if limit > 0 && len(matches) >= limit {
-					return errScanLimitReached
-				}
 			}
 			return nil
 		})

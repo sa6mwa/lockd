@@ -35,6 +35,11 @@ func TestAWSQueuePollingBasics(t *testing.T) {
 		queuetestutil.InstallWatchdog(t, "aws-poll-nack", 15*time.Second)
 		queuetestutil.RunQueueNackScenario(t, cli, queuetestutil.QueueName("aws-poll-nack"), []byte("aws poll nack"))
 	})
+
+	t.Run("ObservabilityReadOnly", func(t *testing.T) {
+		queuetestutil.InstallWatchdog(t, "aws-poll-observability", 20*time.Second)
+		queuetestutil.RunQueueObservabilityReadOnlyScenario(t, cli, queuetestutil.QueueName("aws-poll-observability"))
+	})
 }
 
 func TestAWSQueuePollingIdleEnqueueDoesNotPoll(t *testing.T) {

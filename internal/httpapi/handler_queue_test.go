@@ -12,8 +12,10 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"pkt.systems/lockd/api"
+	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/internal/clock"
 	"pkt.systems/lockd/internal/core"
 	"pkt.systems/lockd/internal/queue"
@@ -228,6 +230,108 @@ func TestHandleQueueStatsReturnsHeadSnapshot(t *testing.T) {
 	}
 	if out.TotalConsumers != 0 || out.WaitingConsumers != 0 {
 		t.Fatalf("unexpected consumer counters: total=%d waiting=%d", out.TotalConsumers, out.WaitingConsumers)
+	}
+}
+
+func TestHandleQueueStatsDoesNotConsumeHead(t *testing.T) {
+	store := memorystore.NewWithConfig(memorystore.Config{QueueWatch: false})
+	handler := New(Config{
+		Store:             store,
+		Logger:            pslog.NoopLogger(),
+		JSONMaxBytes:      1 << 20,
+		QueueMaxConsumers: 8,
+	})
+
+	ctx := context.Background()
+	msg, err := handler.queueSvc.Enqueue(ctx, "default", "stats-readonly", bytes.NewReader([]byte("payload")), queue.EnqueueOptions{})
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	for i := 0; i < 3; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/v1/queue/stats", bytes.NewBufferString(`{"namespace":"default","queue":"stats-readonly"}`))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		if err := handler.handleQueueStats(rec, req); err != nil {
+			t.Fatalf("handleQueueStats run %d returned error: %v", i, err)
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("unexpected status on run %d: %d", i, rec.Code)
+		}
+	}
+
+	candidate, err := handler.queueSvc.NextCandidate(ctx, "default", "stats-readonly", "", 1)
+	if err != nil {
+		t.Fatalf("next candidate after stats: %v", err)
+	}
+	if candidate.Descriptor == nil || candidate.Descriptor.Document.ID != msg.ID {
+		t.Fatalf("expected message %q after stats, got %+v", msg.ID, candidate.Descriptor)
+	}
+}
+
+func TestHandleQueueWatchDoesNotConsumeHead(t *testing.T) {
+	store := memorystore.NewWithConfig(memorystore.Config{QueueWatch: false})
+	handler := New(Config{
+		Store:             store,
+		Logger:            pslog.NoopLogger(),
+		JSONMaxBytes:      1 << 20,
+		QueueMaxConsumers: 8,
+	})
+	mux := http.NewServeMux()
+	handler.Register(mux)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	cli, err := lockdclient.New(
+		server.URL,
+		lockdclient.WithHTTPClient(server.Client()),
+		lockdclient.WithDisableMTLS(true),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	ctx := context.Background()
+	msg, err := handler.queueSvc.Enqueue(ctx, "default", "watch-readonly", bytes.NewReader([]byte("payload")), queue.EnqueueOptions{})
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		watchCtx, cancelWatch := context.WithTimeout(context.Background(), 8*time.Second)
+		gotEvent := make(chan struct{}, 1)
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- cli.WatchQueue(watchCtx, "watch-readonly", lockdclient.WatchQueueOptions{}, func(_ context.Context, ev lockdclient.QueueWatchEvent) error {
+				if ev.Available && ev.HeadMessageID == msg.ID {
+					select {
+					case gotEvent <- struct{}{}:
+					default:
+					}
+					cancelWatch()
+				}
+				return nil
+			})
+		}()
+
+		select {
+		case <-gotEvent:
+		case <-time.After(5 * time.Second):
+			cancelWatch()
+			t.Fatalf("timed out waiting for watch availability event on run %d", i)
+		}
+
+		if err := <-errCh; err != nil && err != context.Canceled && err != context.DeadlineExceeded {
+			t.Fatalf("watch queue run %d error: %v", i, err)
+		}
+	}
+
+	candidate, err := handler.queueSvc.NextCandidate(context.Background(), "default", "watch-readonly", "", 1)
+	if err != nil {
+		t.Fatalf("next candidate after watch: %v", err)
+	}
+	if candidate.Descriptor == nil || candidate.Descriptor.Document.ID != msg.ID {
+		t.Fatalf("expected message %q after watch, got %+v", msg.ID, candidate.Descriptor)
 	}
 }
 

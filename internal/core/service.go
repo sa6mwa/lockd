@@ -93,8 +93,6 @@ type Service struct {
 
 	indexRebuildMu sync.Mutex
 	indexRebuilds  map[string]*indexRebuildState
-
-	indexAsyncQueue chan func()
 }
 
 // New constructs the core Service with sane defaults.
@@ -217,7 +215,6 @@ func New(cfg Config) *Service {
 		sweeperMetrics:            newSweeperMetrics(logger),
 		tcDecider:                 cfg.TCDecider,
 	}
-	svc.startIndexAsyncWorkers()
 	if svc.haMode == "failover" && svc.haLeaseTTL > 0 {
 		svc.haNodeID = uuidv7.NewString()
 		svc.startHA()

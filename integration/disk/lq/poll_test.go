@@ -37,6 +37,11 @@ func runDiskQueuePollingBasics(t *testing.T) {
 		queuetestutil.InstallWatchdog(t, "disk-poll-nack", 10*time.Second)
 		queuetestutil.RunQueueNackScenario(t, cli, queuetestutil.QueueName("disk-poll-nack"), []byte("poll nack payload"))
 	})
+
+	t.Run("ObservabilityReadOnly", func(t *testing.T) {
+		queuetestutil.InstallWatchdog(t, "disk-poll-observability", 15*time.Second)
+		queuetestutil.RunQueueObservabilityReadOnlyScenario(t, cli, queuetestutil.QueueName("disk-poll-observability"))
+	})
 }
 
 func runDiskQueuePollingIdleEnqueueDoesNotPoll(t *testing.T) {

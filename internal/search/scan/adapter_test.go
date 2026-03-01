@@ -234,6 +234,72 @@ func TestScanAdapterCursor(t *testing.T) {
 	}
 }
 
+func TestScanAdapterCursorExactLimitNoMoreMatches(t *testing.T) {
+	store := memory.New()
+	ctx := context.Background()
+	writeState(t, store, "default", "orders/1", map[string]any{"status": "open"})
+	writeState(t, store, "default", "orders/2", map[string]any{"status": "open"})
+	writeState(t, store, "default", "orders/3", map[string]any{"status": "closed"})
+
+	adapter, err := New(Config{Backend: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	sel, err := lql.ParseSelectorString(`eq{field=/status,value=open}`)
+	if err != nil || sel.IsEmpty() {
+		t.Fatalf("selector parse: %v", err)
+	}
+	result, err := adapter.Query(ctx, search.Request{
+		Namespace: "default",
+		Selector:  sel,
+		Limit:     2,
+	})
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(result.Keys) != 2 {
+		t.Fatalf("expected 2 keys, got %d (%v)", len(result.Keys), result.Keys)
+	}
+	if result.Cursor != "" {
+		t.Fatalf("expected empty cursor when no additional matches, got %q", result.Cursor)
+	}
+}
+
+func TestScanAdapterQueryDocumentsCursorExactLimitNoMoreMatches(t *testing.T) {
+	store := memory.New()
+	ctx := context.Background()
+	writeState(t, store, "default", "orders/1", map[string]any{"status": "open"})
+	writeState(t, store, "default", "orders/2", map[string]any{"status": "open"})
+	writeState(t, store, "default", "orders/3", map[string]any{"status": "closed"})
+
+	adapter, err := New(Config{Backend: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	sel, err := lql.ParseSelectorString(`eq{field=/status,value=open}`)
+	if err != nil || sel.IsEmpty() {
+		t.Fatalf("selector parse: %v", err)
+	}
+	sink := &capturingDocumentSink{}
+	result, err := adapter.QueryDocuments(ctx, search.Request{
+		Namespace: "default",
+		Selector:  sel,
+		Limit:     2,
+	}, sink)
+	if err != nil {
+		t.Fatalf("query documents: %v", err)
+	}
+	if len(result.Keys) != 2 {
+		t.Fatalf("expected 2 keys, got %d (%v)", len(result.Keys), result.Keys)
+	}
+	if len(sink.rows) != 2 {
+		t.Fatalf("expected 2 streamed docs, got %d", len(sink.rows))
+	}
+	if result.Cursor != "" {
+		t.Fatalf("expected empty cursor when no additional matches, got %q", result.Cursor)
+	}
+}
+
 func TestScanAdapterQueryDocumentsMatchAll(t *testing.T) {
 	store := memory.New()
 	ctx := context.Background()

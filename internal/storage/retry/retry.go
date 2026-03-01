@@ -70,6 +70,23 @@ func (b *backend) LoadMeta(ctx context.Context, namespace, key string) (storage.
 	return result, err
 }
 
+func (b *backend) LoadMetaSummary(ctx context.Context, namespace, key string) (storage.LoadMetaSummaryResult, error) {
+	var result storage.LoadMetaSummaryResult
+	err := b.withRetry(ctx, "load_meta_summary", namespace, key, func(ctx context.Context) error {
+		var err error
+		result, err = storage.LoadMetaSummary(ctx, b.inner, namespace, key)
+		return err
+	})
+	return result, err
+}
+
+func (b *backend) ScanMetaSummaries(ctx context.Context, req storage.ScanMetaSummariesRequest, visit func(storage.ScanMetaSummaryRow) error) (storage.ScanMetaSummariesResult, error) {
+	if scanner, ok := b.inner.(storage.MetaSummaryScanner); ok {
+		return scanner.ScanMetaSummaries(ctx, req, visit)
+	}
+	return storage.ScanMetaSummariesFallback(ctx, b, req, visit)
+}
+
 func (b *backend) StoreMeta(ctx context.Context, namespace, key string, meta *storage.Meta, expectedETag string) (string, error) {
 	var newETag string
 	err := b.withRetry(ctx, "store_meta", namespace, key, func(ctx context.Context) error {
@@ -97,13 +114,40 @@ func (b *backend) ListMetaKeys(ctx context.Context, namespace string) ([]string,
 }
 
 func (b *backend) ReadState(ctx context.Context, namespace, key string) (storage.ReadStateResult, error) {
-	var result storage.ReadStateResult
-	err := b.withRetry(ctx, "read_state", namespace, key, func(ctx context.Context) error {
-		var err error
-		result, err = b.inner.ReadState(ctx, namespace, key)
-		return err
-	})
-	return result, err
+	attempts := b.cfg.MaxAttempts
+	delay := b.cfg.BaseDelay
+	if attempts <= 1 {
+		return b.inner.ReadState(ctx, namespace, key)
+	}
+	for attempt := 1; attempt <= attempts; attempt++ {
+		result, err := b.inner.ReadState(ctx, namespace, key)
+		if err == nil {
+			return result, nil
+		}
+		if !storage.IsTransient(err) || attempt == attempts {
+			return storage.ReadStateResult{}, err
+		}
+		b.logger.Warn("storage transient error",
+			"operation", "read_state",
+			"namespace", namespace,
+			"key", key,
+			"attempt", attempt,
+			"max_attempts", attempts,
+			"error", err,
+		)
+		select {
+		case <-ctx.Done():
+			return storage.ReadStateResult{}, ctx.Err()
+		default:
+			b.clock.Sleep(delay)
+			next := time.Duration(float64(delay) * b.cfg.Multiplier)
+			if b.cfg.MaxDelay > 0 && next > b.cfg.MaxDelay {
+				next = b.cfg.MaxDelay
+			}
+			delay = next
+		}
+	}
+	return storage.ReadStateResult{}, nil
 }
 
 func (b *backend) WriteState(ctx context.Context, namespace, key string, body io.Reader, opts storage.PutStateOptions) (*storage.PutStateResult, error) {
@@ -205,6 +249,91 @@ func (b *backend) QueueWatchStatus() storage.QueueWatchStatus {
 		return provider.QueueWatchStatus()
 	}
 	return storage.QueueWatchStatus{Enabled: false, Mode: "unknown", Reason: "backend_does_not_report"}
+}
+
+func (b *backend) StageState(ctx context.Context, namespace, key, txnID string, body io.Reader, opts storage.PutStateOptions) (*storage.PutStateResult, error) {
+	sb := b.stagingBackend()
+	var res *storage.PutStateResult
+	err := b.withRetryBody(ctx, "stage_state", namespace, key, body, func(ctx context.Context, reader io.Reader) error {
+		var err error
+		res, err = sb.StageState(ctx, namespace, key, txnID, reader, opts)
+		return err
+	})
+	return res, err
+}
+
+func (b *backend) LoadStagedState(ctx context.Context, namespace, key, txnID string) (storage.ReadStateResult, error) {
+	sb := b.stagingBackend()
+	attempts := b.cfg.MaxAttempts
+	delay := b.cfg.BaseDelay
+	if attempts <= 1 {
+		return sb.LoadStagedState(ctx, namespace, key, txnID)
+	}
+	for attempt := 1; attempt <= attempts; attempt++ {
+		result, err := sb.LoadStagedState(ctx, namespace, key, txnID)
+		if err == nil {
+			return result, nil
+		}
+		if !storage.IsTransient(err) || attempt == attempts {
+			return storage.ReadStateResult{}, err
+		}
+		b.logger.Warn("storage transient error",
+			"operation", "load_staged_state",
+			"namespace", namespace,
+			"key", key,
+			"attempt", attempt,
+			"max_attempts", attempts,
+			"error", err,
+		)
+		select {
+		case <-ctx.Done():
+			return storage.ReadStateResult{}, ctx.Err()
+		default:
+			b.clock.Sleep(delay)
+			next := time.Duration(float64(delay) * b.cfg.Multiplier)
+			if b.cfg.MaxDelay > 0 && next > b.cfg.MaxDelay {
+				next = b.cfg.MaxDelay
+			}
+			delay = next
+		}
+	}
+	return storage.ReadStateResult{}, nil
+}
+
+func (b *backend) PromoteStagedState(ctx context.Context, namespace, key, txnID string, opts storage.PromoteStagedOptions) (*storage.PutStateResult, error) {
+	sb := b.stagingBackend()
+	var res *storage.PutStateResult
+	err := b.withRetry(ctx, "promote_staged_state", namespace, key, func(ctx context.Context) error {
+		var err error
+		res, err = sb.PromoteStagedState(ctx, namespace, key, txnID, opts)
+		return err
+	})
+	return res, err
+}
+
+func (b *backend) DiscardStagedState(ctx context.Context, namespace, key, txnID string, opts storage.DiscardStagedOptions) error {
+	sb := b.stagingBackend()
+	return b.withRetry(ctx, "discard_staged_state", namespace, key, func(ctx context.Context) error {
+		return sb.DiscardStagedState(ctx, namespace, key, txnID, opts)
+	})
+}
+
+func (b *backend) ListStagedState(ctx context.Context, namespace string, opts storage.ListStagedOptions) (*storage.ListResult, error) {
+	sb := b.stagingBackend()
+	var res *storage.ListResult
+	err := b.withRetry(ctx, "list_staged_state", namespace, opts.TxnPrefix, func(ctx context.Context) error {
+		var err error
+		res, err = sb.ListStagedState(ctx, namespace, opts)
+		return err
+	})
+	return res, err
+}
+
+func (b *backend) stagingBackend() storage.StagingBackend {
+	if sb, ok := b.inner.(storage.StagingBackend); ok && sb != nil {
+		return sb
+	}
+	return storage.NewDefaultStagingBackend(b.inner)
 }
 
 func (b *backend) withRetry(ctx context.Context, op, namespace, key string, fn func(context.Context) error) error {

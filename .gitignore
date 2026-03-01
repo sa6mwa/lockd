@@ -17,6 +17,7 @@ testdata/
 /stash
 /benchmark-logs/
 /podman.yaml
+/podman-mcp.yaml
 bin/
 \#*\#
 .vscode/
@@ -25,7 +26,9 @@ bin/
 *.swo
 *~
 *.log
-!ycsb/performance.log
+!ycsb/performance*.log
+!docs/performance/**/*benchmark*/**/*.log
+!docs/performance/**/*validation*/**/*.log
 *.test
 *.pprof
 *.out

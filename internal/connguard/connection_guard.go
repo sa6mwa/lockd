@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -239,8 +240,24 @@ func (l *guardedListener) wrapTLSConnection(conn net.Conn, remote string) (net.C
 	if err == nil {
 		return tlsConn, false, nil
 	}
-	_ = l.guard.classifyFailure(remote, "tls_handshake")
+	if shouldClassifyTLSHandshakeError(err) {
+		_ = l.guard.classifyFailure(remote, "tls_handshake")
+	}
 	return tlsConn, true, err
+}
+
+func shouldClassifyTLSHandshakeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return false
+	}
+	return true
 }
 
 func (l *guardedListener) wrapPlainConnection(conn net.Conn, remote string) (net.Conn, bool, error) {

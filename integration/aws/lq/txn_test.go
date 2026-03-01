@@ -12,7 +12,7 @@ import (
 )
 
 func TestAWSQueueTxnDecision(t *testing.T) {
-	queuetestutil.InstallWatchdog(t, "aws-txn", 60*time.Second)
+	queuetestutil.InstallWatchdog(t, "aws-txn", 2*time.Minute)
 
 	cfg := prepareAWSQueueConfig(t, awsQueueOptions{
 		PollInterval:      50 * time.Millisecond,
@@ -20,6 +20,7 @@ func TestAWSQueueTxnDecision(t *testing.T) {
 		ResilientInterval: 500 * time.Millisecond,
 	})
 	cfg.HAMode = "concurrent"
+	replayWatchdog := queuetestutil.ReplayDeadlineForStore(cfg.Store) + 15*time.Second
 	ts := startAWSQueueServer(t, cfg)
 
 	t.Run("Commit", func(t *testing.T) {
@@ -52,11 +53,11 @@ func TestAWSQueueTxnDecision(t *testing.T) {
 	})
 
 	t.Run("ReplayCommit", func(t *testing.T) {
-		queuetestutil.InstallWatchdog(t, "aws-txn-replay-commit", 25*time.Second)
+		queuetestutil.InstallWatchdog(t, "aws-txn-replay-commit", replayWatchdog)
 		queuetestutil.RunQueueTxnReplayScenario(t, cfg, startAWSQueueServerWithOptions, true)
 	})
 	t.Run("ReplayRollback", func(t *testing.T) {
-		queuetestutil.InstallWatchdog(t, "aws-txn-replay-rollback", 25*time.Second)
+		queuetestutil.InstallWatchdog(t, "aws-txn-replay-rollback", replayWatchdog)
 		queuetestutil.RunQueueTxnReplayScenario(t, cfg, startAWSQueueServerWithOptions, false)
 	})
 }

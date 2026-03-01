@@ -42,6 +42,9 @@ func (s *Store) CopyObject(ctx context.Context, namespace, srcKey, dstKey string
 		if isPreconditionFailed(err) {
 			return nil, storage.ErrCASMismatch
 		}
+		if isCopySourceAuthError(err) {
+			return s.copyObjectByStream(ctx, namespace, srcKey, dstKey, opts)
+		}
 		return nil, fmt.Errorf("azure: copy object: %w", err)
 	}
 	if resp.ETag == nil {
@@ -56,4 +59,23 @@ func (s *Store) CopyObject(ctx context.Context, namespace, srcKey, dstKey string
 		out.LastModified = *resp.LastModified
 	}
 	return out, nil
+}
+
+func (s *Store) copyObjectByStream(ctx context.Context, namespace, srcKey, dstKey string, opts storage.CopyObjectOptions) (*storage.ObjectInfo, error) {
+	src, err := s.GetObject(ctx, namespace, srcKey)
+	if err != nil {
+		return nil, err
+	}
+	defer src.Reader.Close()
+
+	putOpts := storage.PutObjectOptions{
+		ContentType:  src.Info.ContentType,
+		Descriptor:   append([]byte(nil), src.Info.Descriptor...),
+		ExpectedETag: opts.ExpectedETag,
+	}
+	if opts.ExpectedETag == "" {
+		putOpts.IfNotExists = opts.IfNotExists
+	}
+	copyCtx := storage.ContextWithObjectPlaintextSize(ctx, src.Info.Size)
+	return s.PutObject(copyCtx, namespace, dstKey, src.Reader, putOpts)
 }

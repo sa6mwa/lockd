@@ -6,15 +6,70 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"pkt.systems/lockd/api"
+	"pkt.systems/lockd/internal/jsonutil"
+	"pkt.systems/lockd/internal/search"
 	"pkt.systems/lockd/internal/search/index"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/disk"
 	"pkt.systems/lockd/internal/storage/memory"
 	"pkt.systems/pslog"
 )
+
+type delayedReadStateBackend struct {
+	storage.Backend
+	namespace string
+	key       string
+	delay     time.Duration
+	calls     int32
+}
+
+func (b *delayedReadStateBackend) ReadState(ctx context.Context, namespace, key string) (storage.ReadStateResult, error) {
+	if b != nil && namespace == b.namespace && key == b.key && b.delay > 0 {
+		atomic.AddInt32(&b.calls, 1)
+		timer := time.NewTimer(b.delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return storage.ReadStateResult{}, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return b.Backend.ReadState(ctx, namespace, key)
+}
+
+type countingReadStateBackend struct {
+	storage.Backend
+	namespace string
+	key       string
+	calls     int32
+}
+
+func (b *countingReadStateBackend) ReadState(ctx context.Context, namespace, key string) (storage.ReadStateResult, error) {
+	if b != nil && namespace == b.namespace && key == b.key {
+		atomic.AddInt32(&b.calls, 1)
+	}
+	return b.Backend.ReadState(ctx, namespace, key)
+}
+
+type countingLoadStagedBackend struct {
+	storage.StagingBackend
+	namespace string
+	key       string
+	calls     int32
+}
+
+func (b *countingLoadStagedBackend) LoadStagedState(ctx context.Context, namespace, key, txnID string) (storage.ReadStateResult, error) {
+	if b != nil && namespace == b.namespace && key == b.key {
+		atomic.AddInt32(&b.calls, 1)
+	}
+	return b.StagingBackend.LoadStagedState(ctx, namespace, key, txnID)
+}
 
 func newTestService(t testing.TB) *Service {
 	t.Helper()
@@ -164,6 +219,608 @@ func TestApplyTxnDecisionCommitIndexesState(t *testing.T) {
 	}
 	if !foundSegment {
 		t.Fatalf("expected index manifest segments")
+	}
+}
+
+func TestApplyTxnDecisionCommitIndexesStateWithoutReadState(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	ns, key := "default", "commit-indexed-single-read"
+	store := &countingReadStateBackend{
+		Backend:   mem,
+		namespace: ns,
+		key:       key,
+	}
+	indexStore := index.NewStore(store, nil)
+	indexManager := index.NewManager(indexStore, index.WriterOptions{
+		FlushDocs:     1,
+		FlushInterval: time.Second,
+		Logger:        pslog.NoopLogger(),
+	})
+	svc := New(Config{
+		Store:            store,
+		BackendHash:      "test-backend",
+		DefaultNamespace: ns,
+		IndexManager:     indexManager,
+		Logger:           pslog.NoopLogger(),
+	})
+
+	txnID := "c5v9d0sl70b3m3q8ndg1r"
+	body := bytes.NewBufferString(`{"value":"indexed"}`)
+	stageRes, err := svc.staging.StageState(ctx, ns, key, txnID, body, storage.PutStateOptions{})
+	if err != nil {
+		t.Fatalf("stage state: %v", err)
+	}
+	meta := &storage.Meta{
+		Lease: &storage.Lease{
+			ID:            "lease-1",
+			Owner:         "test",
+			ExpiresAtUnix: time.Now().Add(5 * time.Minute).Unix(),
+			TxnID:         txnID,
+		},
+		StagedTxnID:           txnID,
+		StagedStateETag:       stageRes.NewETag,
+		StagedVersion:         1,
+		StagedStateDescriptor: stageRes.Descriptor,
+	}
+	if _, err := svc.store.StoreMeta(ctx, ns, key, meta, ""); err != nil {
+		t.Fatalf("store meta: %v", err)
+	}
+
+	rec := &TxnRecord{
+		TxnID:        txnID,
+		State:        TxnStateCommit,
+		Participants: []TxnParticipant{{Namespace: ns, Key: key}},
+	}
+	if err := svc.applyTxnDecision(ctx, rec); err != nil {
+		t.Fatalf("apply decision: %v", err)
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if err := indexManager.WaitForReadable(waitCtx, ns); err != nil {
+		t.Fatalf("index wait: %v", err)
+	}
+	if got := atomic.LoadInt32(&store.calls); got != 0 {
+		t.Fatalf("expected no read-state call during staged commit indexing, got %d", got)
+	}
+}
+
+func TestReleaseUsesCachedStagedIndexDocumentFromUpdate(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	ns, key := "default", "release-cached-staged-doc"
+	indexStore := index.NewStore(mem, nil)
+	indexManager := index.NewManager(indexStore, index.WriterOptions{
+		FlushDocs:     1,
+		FlushInterval: time.Second,
+		Logger:        pslog.NoopLogger(),
+	})
+	svc := New(Config{
+		Store:            mem,
+		BackendHash:      "test-backend",
+		DefaultNamespace: ns,
+		IndexManager:     indexManager,
+		Logger:           pslog.NoopLogger(),
+	})
+
+	stagingCounter := &countingLoadStagedBackend{
+		StagingBackend: svc.staging,
+		namespace:      ns,
+		key:            key,
+	}
+	svc.staging = stagingCounter
+
+	acq, err := svc.Acquire(ctx, AcquireCommand{
+		Namespace:  ns,
+		Key:        key,
+		Owner:      "test",
+		TTLSeconds: 30,
+	})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	updateRes, err := svc.Update(ctx, UpdateCommand{
+		Namespace:     ns,
+		Key:           key,
+		LeaseID:       acq.LeaseID,
+		FencingToken:  acq.FencingToken,
+		TxnID:         acq.TxnID,
+		Body:          bytes.NewBufferString(`{"value":"cached"}`),
+		CompactWriter: jsonutil.CompactWriter,
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if _, ok := svc.stagedIndexDoc(ns, key, acq.TxnID, updateRes.NewStateETag); !ok {
+		t.Fatalf("expected staged index document cached for txn=%q", acq.TxnID)
+	}
+
+	if _, err := svc.Release(ctx, ReleaseCommand{
+		Namespace:    ns,
+		Key:          key,
+		LeaseID:      acq.LeaseID,
+		FencingToken: acq.FencingToken,
+		TxnID:        acq.TxnID,
+	}); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if err := indexManager.WaitForReadable(waitCtx, ns); err != nil {
+		t.Fatalf("index wait: %v", err)
+	}
+	if got := atomic.LoadInt32(&stagingCounter.calls); got != 0 {
+		t.Fatalf("expected cached staged document to avoid LoadStagedState, got %d calls", got)
+	}
+	if _, ok := svc.stagedIndexDoc(ns, key, acq.TxnID, updateRes.NewStateETag); ok {
+		t.Fatalf("expected staged index document cache cleared after release commit")
+	}
+
+	adapter, err := index.NewAdapter(index.AdapterConfig{Store: indexStore})
+	if err != nil {
+		t.Fatalf("new index adapter: %v", err)
+	}
+	result, err := adapter.Query(ctx, search.Request{
+		Namespace: ns,
+		Selector: api.Selector{
+			Eq: &api.Term{Field: "/value", Value: "cached"},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	})
+	if err != nil {
+		t.Fatalf("query index: %v", err)
+	}
+	if len(result.Keys) != 1 || result.Keys[0] != key {
+		t.Fatalf("expected key %q in index, got %v", key, result.Keys)
+	}
+}
+
+func TestUpdateSkipsCachingLargeStagedIndexDocument(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	ns, key := "default", "update-large-skip-cache"
+	indexStore := index.NewStore(mem, nil)
+	indexManager := index.NewManager(indexStore, index.WriterOptions{
+		FlushDocs:     1,
+		FlushInterval: time.Second,
+		Logger:        pslog.NoopLogger(),
+	})
+	svc := New(Config{
+		Store:            mem,
+		BackendHash:      "test-backend",
+		DefaultNamespace: ns,
+		IndexManager:     indexManager,
+		Logger:           pslog.NoopLogger(),
+	})
+
+	acq, err := svc.Acquire(ctx, AcquireCommand{
+		Namespace:  ns,
+		Key:        key,
+		Owner:      "test",
+		TTLSeconds: 30,
+	})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	payload := `{"value":"` + strings.Repeat("x", maxStagedIndexDocBytes) + `"}`
+	updateRes, err := svc.Update(ctx, UpdateCommand{
+		Namespace:     ns,
+		Key:           key,
+		LeaseID:       acq.LeaseID,
+		FencingToken:  acq.FencingToken,
+		TxnID:         acq.TxnID,
+		Body:          bytes.NewBufferString(payload),
+		CompactWriter: jsonutil.CompactWriter,
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if _, ok := svc.stagedIndexDoc(ns, key, acq.TxnID, updateRes.NewStateETag); ok {
+		t.Fatalf("expected large staged document to skip cache")
+	}
+}
+
+func TestApplyTxnDecisionCommitIndexesHeadOnETagMismatch(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	ns, key := "default", "commit-indexed-head-mismatch"
+	store := &countingReadStateBackend{
+		Backend:   mem,
+		namespace: ns,
+		key:       key,
+	}
+	indexStore := index.NewStore(store, nil)
+	indexManager := index.NewManager(indexStore, index.WriterOptions{
+		FlushDocs:     1,
+		FlushInterval: time.Second,
+		Logger:        pslog.NoopLogger(),
+	})
+	svc := New(Config{
+		Store:            store,
+		BackendHash:      "test-backend",
+		DefaultNamespace: ns,
+		IndexManager:     indexManager,
+		Logger:           pslog.NoopLogger(),
+	})
+
+	headRes, err := mem.WriteState(ctx, ns, key, bytes.NewBufferString(`{"value":"head"}`), storage.PutStateOptions{})
+	if err != nil {
+		t.Fatalf("write head state: %v", err)
+	}
+
+	txnID := "c5v9d0sl70b3m3q8ndg1m"
+	stageRes, err := svc.staging.StageState(ctx, ns, key, txnID, bytes.NewBufferString(`{"value":"staged"}`), storage.PutStateOptions{})
+	if err != nil {
+		t.Fatalf("stage state: %v", err)
+	}
+	meta := &storage.Meta{
+		Lease: &storage.Lease{
+			ID:            "lease-1",
+			Owner:         "test",
+			ExpiresAtUnix: time.Now().Add(5 * time.Minute).Unix(),
+			TxnID:         txnID,
+		},
+		StateETag:             "stale-etag",
+		StateDescriptor:       nil,
+		StagedTxnID:           txnID,
+		StagedStateETag:       stageRes.NewETag,
+		StagedVersion:         2,
+		StagedStateDescriptor: stageRes.Descriptor,
+	}
+	if _, err := svc.store.StoreMeta(ctx, ns, key, meta, ""); err != nil {
+		t.Fatalf("store meta: %v", err)
+	}
+
+	rec := &TxnRecord{
+		TxnID:        txnID,
+		State:        TxnStateCommit,
+		Participants: []TxnParticipant{{Namespace: ns, Key: key}},
+	}
+	if err := svc.applyTxnDecision(ctx, rec); err != nil {
+		t.Fatalf("apply decision: %v", err)
+	}
+	if got := atomic.LoadInt32(&store.calls); got != 1 {
+		t.Fatalf("expected exactly one read-state call on promote head mismatch, got %d", got)
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if err := indexManager.WaitForReadable(waitCtx, ns); err != nil {
+		t.Fatalf("index wait: %v", err)
+	}
+
+	metaRes, err := mem.LoadMeta(ctx, ns, key)
+	if err != nil {
+		t.Fatalf("load meta: %v", err)
+	}
+	if got := metaRes.Meta.StateETag; got != headRes.NewETag {
+		t.Fatalf("expected committed head etag %q, got %q", headRes.NewETag, got)
+	}
+
+	adapter, err := index.NewAdapter(index.AdapterConfig{Store: indexStore})
+	if err != nil {
+		t.Fatalf("new index adapter: %v", err)
+	}
+	headQuery, err := adapter.Query(ctx, search.Request{
+		Namespace: ns,
+		Selector: api.Selector{
+			Eq: &api.Term{Field: "/value", Value: "head"},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	})
+	if err != nil {
+		t.Fatalf("query head: %v", err)
+	}
+	if len(headQuery.Keys) != 1 || headQuery.Keys[0] != key {
+		t.Fatalf("expected head value indexed for key %q, got %v", key, headQuery.Keys)
+	}
+	stagedQuery, err := adapter.Query(ctx, search.Request{
+		Namespace: ns,
+		Selector: api.Selector{
+			Eq: &api.Term{Field: "/value", Value: "staged"},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	})
+	if err != nil {
+		t.Fatalf("query staged: %v", err)
+	}
+	if len(stagedQuery.Keys) != 0 {
+		t.Fatalf("expected staged value absent from index, got %v", stagedQuery.Keys)
+	}
+}
+
+func TestApplyTxnDecisionCommitIndexesStateAfterRequestContextCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mem := memory.New()
+	ns, key := "default", "commit-indexed-context-canceled"
+	store := &delayedReadStateBackend{
+		Backend:   mem,
+		namespace: ns,
+		key:       key,
+		delay:     200 * time.Millisecond,
+	}
+	indexStore := index.NewStore(store, nil)
+	indexManager := index.NewManager(indexStore, index.WriterOptions{
+		FlushDocs:     1,
+		FlushInterval: time.Second,
+		Logger:        pslog.NoopLogger(),
+	})
+	svc := New(Config{
+		Store:            store,
+		BackendHash:      "test-backend",
+		DefaultNamespace: ns,
+		IndexManager:     indexManager,
+		Logger:           pslog.NoopLogger(),
+	})
+
+	txnID := "c5v9d0sl70b3m3q8ndg1c"
+	body := bytes.NewBufferString(`{"value":"indexed"}`)
+	stageRes, err := svc.staging.StageState(ctx, ns, key, txnID, body, storage.PutStateOptions{})
+	if err != nil {
+		t.Fatalf("stage state: %v", err)
+	}
+	meta := &storage.Meta{
+		Lease: &storage.Lease{
+			ID:            "lease-1",
+			Owner:         "test",
+			ExpiresAtUnix: time.Now().Add(5 * time.Minute).Unix(),
+			TxnID:         txnID,
+		},
+		StagedTxnID:           txnID,
+		StagedStateETag:       stageRes.NewETag,
+		StagedVersion:         1,
+		StagedStateDescriptor: stageRes.Descriptor,
+	}
+	if _, err := svc.store.StoreMeta(ctx, ns, key, meta, ""); err != nil {
+		t.Fatalf("store meta: %v", err)
+	}
+
+	rec := &TxnRecord{
+		TxnID:        txnID,
+		State:        TxnStateCommit,
+		Participants: []TxnParticipant{{Namespace: ns, Key: key}},
+	}
+	if err := svc.applyTxnDecision(ctx, rec); err != nil {
+		t.Fatalf("apply decision: %v", err)
+	}
+
+	// Simulate request teardown immediately after the API method returns.
+	cancel()
+
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer waitCancel()
+	if err := indexManager.WaitForReadable(waitCtx, ns); err != nil {
+		t.Fatalf("index wait: %v", err)
+	}
+	manifestRes, err := indexStore.LoadManifest(context.Background(), ns)
+	if err != nil {
+		t.Fatalf("load manifest: %v", err)
+	}
+	if manifestRes.Manifest == nil {
+		t.Fatalf("expected manifest")
+	}
+	foundSegment := false
+	for _, shard := range manifestRes.Manifest.Shards {
+		if shard == nil {
+			continue
+		}
+		if len(shard.Segments) > 0 {
+			foundSegment = true
+			break
+		}
+	}
+	if !foundSegment {
+		t.Fatalf("expected index manifest segments")
+	}
+	if got := atomic.LoadInt32(&store.calls); got != 0 {
+		t.Fatalf("expected no read-state fallback when staged document is reusable, got %d calls", got)
+	}
+}
+
+func TestApplyTxnDecisionSkipsVisibilityRewriteWhenUnchanged(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	ns, key := "default", "visibility-unchanged"
+	indexStore := index.NewStore(mem, nil)
+	indexManager := index.NewManager(indexStore, index.WriterOptions{
+		FlushDocs:     1,
+		FlushInterval: time.Second,
+		Logger:        pslog.NoopLogger(),
+	})
+	svc := New(Config{
+		Store:            mem,
+		BackendHash:      "test-backend",
+		DefaultNamespace: ns,
+		IndexManager:     indexManager,
+		Logger:           pslog.NoopLogger(),
+	})
+
+	writeCommitted := func(value string) {
+		t.Helper()
+		acq, err := svc.Acquire(ctx, AcquireCommand{
+			Namespace:  ns,
+			Key:        key,
+			Owner:      "test",
+			TTLSeconds: 30,
+		})
+		if err != nil {
+			t.Fatalf("acquire %q: %v", value, err)
+		}
+		if _, err := svc.Update(ctx, UpdateCommand{
+			Namespace:     ns,
+			Key:           key,
+			LeaseID:       acq.LeaseID,
+			FencingToken:  acq.FencingToken,
+			TxnID:         acq.TxnID,
+			Body:          bytes.NewBufferString(`{"value":"` + value + `"}`),
+			CompactWriter: jsonutil.CompactWriter,
+		}); err != nil {
+			t.Fatalf("update %q: %v", value, err)
+		}
+		if _, err := svc.Release(ctx, ReleaseCommand{
+			Namespace:    ns,
+			Key:          key,
+			LeaseID:      acq.LeaseID,
+			FencingToken: acq.FencingToken,
+			TxnID:        acq.TxnID,
+		}); err != nil {
+			t.Fatalf("release %q: %v", value, err)
+		}
+		waitCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		if err := indexManager.WaitForReadable(waitCtx, ns); err != nil {
+			t.Fatalf("index wait %q: %v", value, err)
+		}
+	}
+
+	writeCommitted("one")
+
+	vis1, err := indexStore.LoadVisibilityManifest(ctx, ns)
+	if err != nil {
+		t.Fatalf("load visibility manifest #1: %v", err)
+	}
+	if vis1.Manifest == nil || len(vis1.Manifest.Segments) == 0 {
+		t.Fatalf("expected visibility segment after first commit")
+	}
+	segmentsAfterFirst := len(vis1.Manifest.Segments)
+
+	writeCommitted("two")
+
+	vis2, err := indexStore.LoadVisibilityManifest(ctx, ns)
+	if err != nil {
+		t.Fatalf("load visibility manifest #2: %v", err)
+	}
+	if vis2.Manifest == nil {
+		t.Fatalf("expected visibility manifest after second commit")
+	}
+	if got := len(vis2.Manifest.Segments); got != segmentsAfterFirst {
+		t.Fatalf("expected unchanged visibility segment count %d, got %d", segmentsAfterFirst, got)
+	}
+
+	adapter, err := index.NewAdapter(index.AdapterConfig{Store: indexStore})
+	if err != nil {
+		t.Fatalf("new index adapter: %v", err)
+	}
+	res, err := adapter.Query(ctx, search.Request{
+		Namespace: ns,
+		Selector: api.Selector{
+			Eq: &api.Term{Field: "/value", Value: "two"},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	})
+	if err != nil {
+		t.Fatalf("query index: %v", err)
+	}
+	if len(res.Keys) != 1 || res.Keys[0] != key {
+		t.Fatalf("expected updated key %q in index, got %v", key, res.Keys)
+	}
+}
+
+func TestInitialHiddenCommitWritesVisibilityOverride(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	ns, key := "default", "hidden-initial-commit"
+	indexStore := index.NewStore(mem, nil)
+	indexManager := index.NewManager(indexStore, index.WriterOptions{
+		FlushDocs:     1,
+		FlushInterval: time.Second,
+		Logger:        pslog.NoopLogger(),
+	})
+	svc := New(Config{
+		Store:            mem,
+		BackendHash:      "test-backend",
+		DefaultNamespace: ns,
+		IndexManager:     indexManager,
+		Logger:           pslog.NoopLogger(),
+	})
+
+	acq, err := svc.Acquire(ctx, AcquireCommand{
+		Namespace:  ns,
+		Key:        key,
+		Owner:      "hidden-first-commit",
+		TTLSeconds: 30,
+	})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if _, err := svc.Update(ctx, UpdateCommand{
+		Namespace:     ns,
+		Key:           key,
+		LeaseID:       acq.LeaseID,
+		FencingToken:  acq.FencingToken,
+		TxnID:         acq.TxnID,
+		Body:          bytes.NewBufferString(`{"status":"open"}`),
+		CompactWriter: jsonutil.CompactWriter,
+	}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	hidden := true
+	if _, err := svc.Metadata(ctx, MetadataCommand{
+		Namespace:    ns,
+		Key:          key,
+		LeaseID:      acq.LeaseID,
+		FencingToken: acq.FencingToken,
+		TxnID:        acq.TxnID,
+		Mutation: MetadataMutation{
+			QueryHidden: &hidden,
+		},
+	}); err != nil {
+		t.Fatalf("metadata query_hidden=true: %v", err)
+	}
+
+	if _, err := svc.Release(ctx, ReleaseCommand{
+		Namespace:    ns,
+		Key:          key,
+		LeaseID:      acq.LeaseID,
+		FencingToken: acq.FencingToken,
+		TxnID:        acq.TxnID,
+	}); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if err := indexManager.WaitForReadable(waitCtx, ns); err != nil {
+		t.Fatalf("index wait: %v", err)
+	}
+
+	visibility, _, err := indexStore.VisibilityEntries(ctx, ns)
+	if err != nil {
+		t.Fatalf("load visibility entries: %v", err)
+	}
+	visible, ok := visibility[key]
+	if !ok {
+		t.Fatalf("expected visibility override for key %q", key)
+	}
+	if visible {
+		t.Fatalf("expected hidden visibility override false, got true")
+	}
+
+	adapter, err := index.NewAdapter(index.AdapterConfig{Store: indexStore})
+	if err != nil {
+		t.Fatalf("new index adapter: %v", err)
+	}
+	res, err := adapter.Query(ctx, search.Request{
+		Namespace: ns,
+		Selector: api.Selector{
+			Eq: &api.Term{Field: "/status", Value: "open"},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	})
+	if err != nil {
+		t.Fatalf("query index: %v", err)
+	}
+	if len(res.Keys) != 0 {
+		t.Fatalf("expected hidden key to be filtered from query, got %v", res.Keys)
 	}
 }
 
@@ -349,6 +1006,60 @@ func TestApplyTxnDecisionCommitSkipsPromotionWhenHeadExists(t *testing.T) {
 
 	if _, err := svc.staging.LoadStagedState(ctx, ns, key, txnID); err == nil || !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected staged state removed, got %v", err)
+	}
+}
+
+func TestApplyTxnDecisionCommitPromoteNotFoundUsesCommittedHead(t *testing.T) {
+	ctx := context.Background()
+	svc := newTestService(t)
+
+	txnID := "c5v9d0sl70b3m3q8ndgb"
+	ns, key := "default", "commit-promote-notfound"
+
+	stageRes, err := svc.staging.StageState(ctx, ns, key, txnID, bytes.NewBufferString(`{"value":"staged"}`), storage.PutStateOptions{})
+	if err != nil {
+		t.Fatalf("stage state: %v", err)
+	}
+	headRes, err := svc.store.WriteState(ctx, ns, key, bytes.NewBufferString(`{"value":"staged"}`), storage.PutStateOptions{IfNotExists: true})
+	if err != nil {
+		t.Fatalf("write head state: %v", err)
+	}
+	meta := &storage.Meta{
+		Lease: &storage.Lease{
+			ID:            "lease-promote-notfound",
+			Owner:         "test",
+			ExpiresAtUnix: time.Now().Add(time.Minute).Unix(),
+			TxnID:         txnID,
+		},
+		StagedTxnID:               txnID,
+		StagedStateETag:           stageRes.NewETag,
+		StagedStateDescriptor:     stageRes.Descriptor,
+		StagedStatePlaintextBytes: stageRes.BytesWritten,
+		StagedVersion:             1,
+	}
+	if _, err := svc.store.StoreMeta(ctx, ns, key, meta, ""); err != nil {
+		t.Fatalf("store meta: %v", err)
+	}
+
+	svc.staging = failingPromoteStaging{base: svc.staging, err: storage.ErrNotFound}
+	rec := &TxnRecord{TxnID: txnID, State: TxnStateCommit, Participants: []TxnParticipant{{Namespace: ns, Key: key}}}
+	if err := svc.applyTxnDecision(ctx, rec); err != nil {
+		t.Fatalf("apply decision: %v", err)
+	}
+
+	updatedRes, err := svc.store.LoadMeta(ctx, ns, key)
+	if err != nil {
+		t.Fatalf("load meta: %v", err)
+	}
+	updated := updatedRes.Meta
+	if updated.StagedTxnID != "" || updated.StagedStateETag != "" {
+		t.Fatalf("expected staging cleared, got %+v", updated)
+	}
+	if updated.StateETag != headRes.NewETag {
+		t.Fatalf("expected state etag %q, got %q", headRes.NewETag, updated.StateETag)
+	}
+	if updated.Version != 1 {
+		t.Fatalf("expected version 1, got %d", updated.Version)
 	}
 }
 

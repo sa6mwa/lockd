@@ -51,7 +51,6 @@ func (b *backend) start(ctx context.Context, op string) (context.Context, trace.
 	} else if corr := correlation.ID(ctx); corr != "" {
 		logger = logger.With("cid", corr)
 	}
-	logger = logger.With("storage_op", op)
 	verbose := logger
 	if corr := correlation.ID(ctx); corr != "" {
 		span.SetAttributes(attribute.String("lockd.correlation_id", corr))
@@ -120,6 +119,78 @@ func (b *backend) LoadMeta(ctx context.Context, namespace, key string) (storage.
 		"lease_expires_at", expires,
 		"fencing", fencing,
 		"meta_etag", etag,
+		"elapsed", time.Since(begin),
+	)
+	return result, nil
+}
+
+func (b *backend) LoadMetaSummary(ctx context.Context, namespace, key string) (storage.LoadMetaSummaryResult, error) {
+	ctx, span, _, verbose, begin, finish := b.start(ctx, "load_meta_summary")
+	defer span.End()
+
+	verbose = verbose.With("namespace", namespace)
+	span.SetAttributes(attribute.String("lockd.storage.namespace", namespace))
+	verbose.Trace("storage.load_meta_summary.begin", "key", key)
+	span.SetAttributes(attribute.Bool("lockd.storage.has_key", key != ""))
+
+	result, err := storage.LoadMetaSummary(ctx, b.inner, namespace, key)
+	if err != nil {
+		finish("error", err)
+		verbose.Debug("storage.load_meta_summary.error", "key", key, "error", err, "elapsed", time.Since(begin))
+		return result, err
+	}
+	summary := result.Meta
+	version := int64(0)
+	published := int64(0)
+	stateETag := ""
+	queryExcluded := false
+	if summary != nil {
+		version = summary.Version
+		published = summary.PublishedVersion
+		stateETag = summary.StateETag
+		queryExcluded = summary.QueryExcluded
+	}
+	finish("ok", nil)
+	verbose.Debug("storage.load_meta_summary.success",
+		"key", key,
+		"version", version,
+		"published_version", published,
+		"state_etag", stateETag,
+		"query_excluded", queryExcluded,
+		"meta_etag", result.ETag,
+		"elapsed", time.Since(begin),
+	)
+	return result, nil
+}
+
+func (b *backend) ScanMetaSummaries(ctx context.Context, req storage.ScanMetaSummariesRequest, visit func(storage.ScanMetaSummaryRow) error) (storage.ScanMetaSummariesResult, error) {
+	ctx, span, _, verbose, begin, finish := b.start(ctx, "scan_meta_summaries")
+	defer span.End()
+
+	verbose = verbose.With("namespace", req.Namespace)
+	span.SetAttributes(
+		attribute.String("lockd.storage.namespace", req.Namespace),
+		attribute.Bool("lockd.storage.has_start_after", req.StartAfter != ""),
+		attribute.Int("lockd.storage.limit", req.Limit),
+	)
+	visited := 0
+	result, err := storage.ScanMetaSummaries(ctx, b.inner, req, func(row storage.ScanMetaSummaryRow) error {
+		visited++
+		if visit == nil {
+			return nil
+		}
+		return visit(row)
+	})
+	if err != nil {
+		finish("error", err)
+		verbose.Debug("storage.scan_meta_summaries.error", "error", err, "visited", visited, "elapsed", time.Since(begin))
+		return result, err
+	}
+	finish("ok", nil)
+	verbose.Debug("storage.scan_meta_summaries.success",
+		"visited", visited,
+		"truncated", result.Truncated,
+		"next_start_after", result.NextStartAfter,
 		"elapsed", time.Since(begin),
 	)
 	return result, nil
@@ -246,7 +317,6 @@ func (b *backend) ReadState(ctx context.Context, namespace, key string) (storage
 	ctx, span, _, verbose, begin, finish := b.start(ctx, "read_state")
 	defer span.End()
 
-	verbose = verbose.With("namespace", namespace)
 	span.SetAttributes(
 		attribute.String("lockd.storage.namespace", namespace),
 		attribute.Bool("lockd.storage.has_key", key != ""),

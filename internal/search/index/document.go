@@ -1,5 +1,7 @@
 package index
 
+import "strings"
+
 // Document captures normalized postings for a single key.
 type Document struct {
 	Key    string
@@ -28,4 +30,56 @@ func (d *Document) AddTerm(field, term string) {
 		d.Fields = make(map[string][]string)
 	}
 	d.Fields[field] = append(d.Fields[field], term)
+}
+
+// AddString indexes a string value for exact/prefix clauses and contains-like
+// selectors via trigram postings.
+func (d *Document) AddString(field, value string) {
+	lower := strings.ToLower(value)
+	if lower == "" {
+		return
+	}
+	if field == "" {
+		field = "_"
+	}
+	if d.Fields == nil {
+		d.Fields = make(map[string][]string)
+	}
+	d.Fields[field] = append(d.Fields[field], lower)
+	trimmed := strings.TrimSpace(lower)
+	if trimmed == "" {
+		return
+	}
+	gramField := containsGramField(field)
+	d.Fields[gramField] = append(d.Fields[gramField], normalizedTrigramsNormalized(trimmed)...)
+}
+
+// AddStringWithPolicy indexes a string value according to text indexing policy.
+func (d *Document) AddStringWithPolicy(field, value string, policy TextIndexPolicy) {
+	policy = policy.normalized()
+	switch policy.modeForField(field) {
+	case TextFieldModeRaw:
+		d.AddString(field, value)
+	case TextFieldModeTokenized:
+		d.addTokenizedTerms(field, value, policy)
+	case TextFieldModeBoth:
+		d.AddString(field, value)
+		d.addTokenizedTerms(field, value, policy)
+	default:
+		d.AddString(field, value)
+	}
+}
+
+func (d *Document) addTokenizedTerms(field, value string, policy TextIndexPolicy) {
+	tokens := policy.Analyzer.Tokens(value)
+	if len(tokens) == 0 {
+		return
+	}
+	tokenField := tokenizedField(field)
+	for _, token := range tokens {
+		d.AddTerm(tokenField, token)
+		if policy.EnableAllText {
+			d.AddTerm(tokenAllTextField, token)
+		}
+	}
 }

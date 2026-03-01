@@ -84,3 +84,38 @@ func TestReleaseHARetriesCASMismatch(t *testing.T) {
 		t.Fatalf("expected release to expire immediately; got %d", metaRes.Meta.Lease.ExpiresAtUnix)
 	}
 }
+
+func TestHANodeIDUsesConfiguredIdentity(t *testing.T) {
+	store := memory.New()
+	t.Cleanup(func() { _ = store.Close() })
+
+	svc := New(Config{
+		Store:      store,
+		HAMode:     "failover",
+		HALeaseTTL: time.Second,
+		HANodeID:   "node-a",
+		Logger:     pslog.NoopLogger(),
+	})
+	t.Cleanup(svc.StopHA)
+
+	if svc.haNodeID != "node-a" {
+		t.Fatalf("expected configured ha node id, got %q", svc.haNodeID)
+	}
+}
+
+func TestHANodeIDFallsBackToGeneratedIdentity(t *testing.T) {
+	store := memory.New()
+	t.Cleanup(func() { _ = store.Close() })
+
+	svc := New(Config{
+		Store:      store,
+		HAMode:     "failover",
+		HALeaseTTL: time.Second,
+		Logger:     pslog.NoopLogger(),
+	})
+	t.Cleanup(svc.StopHA)
+
+	if svc.haNodeID == "" {
+		t.Fatal("expected generated ha node id")
+	}
+}

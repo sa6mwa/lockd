@@ -8,13 +8,18 @@ services:
     environment:
       LOCKD_CONFIG_DIR: /config
       LOCKD_STORE: disk:///storage
-      LOCKD_OTLP_ENDPOINT: otel-collector:4317
+      LOCKD_OTLP_ENDPOINT: ""
       LOCKD_METRICS_LISTEN: 0.0.0.0:9464
       LOCKD_ENABLE_PROFILING_METRICS: "true"
       LOCKD_PPROF_LISTEN: 0.0.0.0:6060
+      GOMEMLIMIT: ${LOCKD_DEV_GOMEMLIMIT:-}
+      GOGC: ${LOCKD_DEV_GOGC:-}
     ports:
       - "9341:9341"
       - "6060:6060"
+    mem_limit: ${LOCKD_DEV_MEM_LIMIT:-6g}
+    cpus: ${LOCKD_DEV_CPUS:-4}
+    pids_limit: 1024
     expose:
       - "9464"                         # Prometheus scrape (internal only)
     volumes:
@@ -39,6 +44,9 @@ services:
       - --initial-cluster-state=new
     ports:
       - "2379:2379"
+    mem_limit: ${ETCD_DEV_MEM_LIMIT:-2g}
+    cpus: ${ETCD_DEV_CPUS:-2}
+    pids_limit: 512
     volumes:
       - ./volumes/etcd-data:/etcd-data
     healthcheck:

@@ -4,7 +4,6 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -15,7 +14,6 @@ import (
 
 	"pkt.systems/lockd"
 	"pkt.systems/lockd/internal/cryptoutil"
-	"pkt.systems/lockd/internal/nsauth"
 	"pkt.systems/lockd/internal/uuidv7"
 	"pkt.systems/lockd/tlsutil"
 )
@@ -70,15 +68,14 @@ func newAuthNewCACommand() *cobra.Command {
 				}
 				out = path
 			}
-			ca, err := tlsutil.GenerateCA(cn, validity)
-			if err != nil {
-				return err
-			}
-			data, err := tlsutil.EncodeCABundle(ca.CertPEM, ca.KeyPEM)
-			if err != nil {
-				return err
-			}
-			if err := writeFile(out, data, force); err != nil {
+			if err := lockd.CreateCABundleFile(lockd.CreateCABundleFileRequest{
+				Path:  out,
+				Force: force,
+				CreateCABundleRequest: lockd.CreateCABundleRequest{
+					CommonName: cn,
+					ValidFor:   validity,
+				},
+			}); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "ca bundle written to %s\n", out)
@@ -95,7 +92,7 @@ func newAuthNewCACommand() *cobra.Command {
 func newAuthNewServerCommand() *cobra.Command {
 	var out string
 	var cn string
-	var hosts string
+	var hosts []string
 	var validity time.Duration
 	var force bool
 	var caIn string
@@ -122,9 +119,12 @@ func newAuthNewServerCommand() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("load ca: %w (run 'lockd auth new ca' first)", err)
 			}
-			material, err := cryptoutil.EnsureCAMetadataMaterial(caIn, ca.CertPEM)
-			if err != nil {
+			if _, err := cryptoutil.EnsureCAMetadataMaterial(caIn, ca.CertPEM); err != nil {
 				return err
+			}
+			caBundlePEM, err := os.ReadFile(caIn)
+			if err != nil {
+				return fmt.Errorf("load ca bundle bytes: %w", err)
 			}
 
 			if !force && !cmd.Flags().Changed("out") {
@@ -135,7 +135,7 @@ func newAuthNewServerCommand() *cobra.Command {
 				out = deduped
 			}
 
-			hostList := strings.Split(hosts, ",")
+			hostList := collectServerSANHosts(hosts)
 			nodeID := ""
 			if info, err := os.Stat(out); err == nil && !info.IsDir() {
 				if existing, ok := serverNodeIDFromBundle(out); ok {
@@ -145,32 +145,17 @@ func newAuthNewServerCommand() *cobra.Command {
 			if nodeID == "" {
 				nodeID = uuidv7.NewString()
 			}
-			spiffeURI, err := lockd.SPIFFEURIForServer(nodeID)
-			if err != nil {
-				return fmt.Errorf("spiffe uri: %w", err)
-			}
-			allClaim, err := nsauth.ClaimURI("ALL", nsauth.PermissionReadWrite)
-			if err != nil {
-				return fmt.Errorf("all namespace claim: %w", err)
-			}
-			issued, err := ca.IssueServerWithRequest(tlsutil.ServerCertRequest{
-				CommonName: cn,
-				Validity:   validity,
-				Hosts:      hostList,
-				URIs:       []*url.URL{spiffeURI, allClaim},
-			})
-			if err != nil {
-				return err
-			}
-			bundleBytes, err := tlsutil.EncodeServerBundle(ca.CertPEM, nil, issued.CertPEM, issued.KeyPEM, nil)
-			if err != nil {
-				return err
-			}
-			augmented, err := cryptoutil.ApplyMetadataMaterial(bundleBytes, material)
-			if err != nil {
-				return err
-			}
-			if err := writeFile(out, augmented, force); err != nil {
+			if err := lockd.CreateServerBundleFile(lockd.CreateServerBundleFileRequest{
+				Path:  out,
+				Force: force,
+				CreateServerBundleRequest: lockd.CreateServerBundleRequest{
+					CABundlePEM: caBundlePEM,
+					CommonName:  cn,
+					ValidFor:    validity,
+					Hosts:       hostList,
+					NodeID:      nodeID,
+				},
+			}); err != nil {
 				return err
 			}
 
@@ -182,11 +167,44 @@ func newAuthNewServerCommand() *cobra.Command {
 
 	cmd.Flags().StringVar(&out, "out", "", "output bundle path (default $HOME/.lockd/server.pem)")
 	cmd.Flags().StringVar(&cn, "cn", "lockd-server", "server certificate common name")
-	cmd.Flags().StringVar(&hosts, "hosts", "*", "comma-separated hosts/IPs for server certificate")
+	cmd.Flags().StringSliceVar(&hosts, "hosts", nil, "server SAN DNS/IP entries; repeat flag and/or csv (example: --hosts lockd.example.com --hosts 127.0.0.1)")
 	cmd.Flags().DurationVar(&validity, "valid-for", 365*24*time.Hour, "certificate validity period")
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite existing bundle if present")
 	cmd.Flags().StringVar(&caIn, "ca-in", "", "path to CA bundle (default $HOME/.lockd/ca.pem)")
 	return cmd
+}
+
+func collectServerSANHosts(hosts []string) []string {
+	entries := make([]string, 0, len(hosts))
+	for _, raw := range hosts {
+		entries = append(entries, splitAndTrimCSV(raw)...)
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(entries))
+	result := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if _, ok := seen[entry]; ok {
+			continue
+		}
+		seen[entry] = struct{}{}
+		result = append(result, entry)
+	}
+	return result
+}
+
+func splitAndTrimCSV(raw string) []string {
+	parts := strings.Split(raw, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		result = append(result, trimmed)
+	}
+	return result
 }
 
 func serverNodeIDFromBundle(path string) (string, bool) {
@@ -243,8 +261,11 @@ func newAuthNewClientCommand() *cobra.Command {
 				caBundle = path
 			}
 
-			ca, err := tlsutil.LoadCA(caBundle)
+			caBundlePEM, err := os.ReadFile(caBundle)
 			if err != nil {
+				return fmt.Errorf("load ca: %w (run 'lockd auth new ca' first)", err)
+			}
+			if _, err := tlsutil.LoadCAFromBytes(caBundlePEM); err != nil {
 				return fmt.Errorf("load ca: %w (run 'lockd auth new ca' first)", err)
 			}
 
@@ -268,37 +289,19 @@ func newAuthNewClientCommand() *cobra.Command {
 			if effectiveCN == "" {
 				effectiveCN = "lockd-client"
 			}
-			spiffeURI, err := lockd.SPIFFEURIForRole(lockd.ClientBundleRoleSDK, effectiveCN)
-			if err != nil {
-				return err
-			}
-			namespacePerms, hasExplicit, err := parseNamespacePermissions(namespaceInputs, readAll, writeAll, rwAll)
-			if err != nil {
-				return err
-			}
-			if !hasExplicit {
-				mergeNamespacePermission(namespacePerms, lockd.DefaultNamespace, nsauth.PermissionReadWrite)
-			}
-			namespaceClaims, err := namespacePermissionsToURIs(namespacePerms)
-			if err != nil {
-				return err
-			}
-			uris := []*url.URL{spiffeURI}
-			uris = append(uris, namespaceClaims...)
-			issued, err := ca.IssueClient(tlsutil.ClientCertRequest{
-				CommonName: effectiveCN,
-				Validity:   validity,
-				URIs:       uris,
-			})
-			if err != nil {
-				return err
-			}
-
-			clientPEM, err := tlsutil.EncodeClientBundle(ca.CertPEM, issued.CertPEM, issued.KeyPEM)
-			if err != nil {
-				return err
-			}
-			if err := writeFile(out, clientPEM, force); err != nil {
+			if err := lockd.CreateClientBundleFile(lockd.CreateClientBundleFileRequest{
+				Path:  out,
+				Force: force,
+				CreateClientBundleRequest: lockd.CreateClientBundleRequest{
+					CABundlePEM:     caBundlePEM,
+					CommonName:      effectiveCN,
+					ValidFor:        validity,
+					NamespaceClaims: namespaceInputs,
+					ReadAll:         readAll,
+					WriteAll:        writeAll,
+					ReadWriteAll:    rwAll,
+				},
+			}); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "client certificate written to %s\n", out)
@@ -336,8 +339,11 @@ func newAuthNewTCClientCommand() *cobra.Command {
 				caBundle = path
 			}
 
-			ca, err := tlsutil.LoadCA(caBundle)
+			caBundlePEM, err := os.ReadFile(caBundle)
 			if err != nil {
+				return fmt.Errorf("load ca: %w (run 'lockd auth new ca' first)", err)
+			}
+			if _, err := tlsutil.LoadCAFromBytes(caBundlePEM); err != nil {
 				return fmt.Errorf("load ca: %w (run 'lockd auth new ca' first)", err)
 			}
 
@@ -361,28 +367,15 @@ func newAuthNewTCClientCommand() *cobra.Command {
 			if effectiveCN == "" {
 				effectiveCN = "lockd-tc-client"
 			}
-			spiffeURI, err := lockd.SPIFFEURIForRole(lockd.ClientBundleRoleTC, effectiveCN)
-			if err != nil {
-				return err
-			}
-			allClaim, err := nsauth.ClaimURI("ALL", nsauth.PermissionReadWrite)
-			if err != nil {
-				return err
-			}
-			issued, err := ca.IssueClient(tlsutil.ClientCertRequest{
-				CommonName: effectiveCN,
-				Validity:   validity,
-				URIs:       []*url.URL{spiffeURI, allClaim},
-			})
-			if err != nil {
-				return err
-			}
-
-			clientPEM, err := tlsutil.EncodeClientBundle(ca.CertPEM, issued.CertPEM, issued.KeyPEM)
-			if err != nil {
-				return err
-			}
-			if err := writeFile(out, clientPEM, force); err != nil {
+			if err := lockd.CreateTCClientBundleFile(lockd.CreateTCClientBundleFileRequest{
+				Path:  out,
+				Force: force,
+				CreateTCClientBundleRequest: lockd.CreateTCClientBundleRequest{
+					CABundlePEM: caBundlePEM,
+					CommonName:  effectiveCN,
+					ValidFor:    validity,
+				},
+			}); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "tc client certificate written to %s\n", out)

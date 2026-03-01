@@ -194,6 +194,20 @@ func (c *readyCache) popReady(now time.Time) *MessageDescriptor {
 	return &desc
 }
 
+func (c *readyCache) peekReady(now time.Time) *MessageDescriptor {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.items.Len() == 0 {
+		return nil
+	}
+	entry := c.items[0]
+	if entry.due.After(now) {
+		return nil
+	}
+	desc := entry.descriptor
+	return &desc
+}
+
 func (c *readyCache) inflightExpiry(desc MessageDescriptor, now time.Time) time.Time {
 	ttl := time.Duration(desc.Document.VisibilityTimeout) * time.Second
 	if ttl <= 0 {
@@ -356,6 +370,28 @@ func (c *readyCache) next(ctx context.Context, pageSize int, now time.Time) (*Me
 			earliest.Format(time.RFC3339Nano),
 			now.Format(time.RFC3339Nano),
 		)
+	}
+	return nil, nil
+}
+
+func (c *readyCache) peek(ctx context.Context, pageSize int, now time.Time) (*MessageDescriptor, error) {
+	if pageSize <= 0 {
+		pageSize = defaultQueuePageSize
+	}
+	if desc := c.peekReady(now); desc != nil {
+		return desc, nil
+	}
+	if _, err := c.refresh(ctx, pageSize, now, false); err != nil {
+		return nil, err
+	}
+	if desc := c.peekReady(now); desc != nil {
+		return desc, nil
+	}
+	if _, err := c.refresh(ctx, pageSize, now, true); err != nil {
+		return nil, err
+	}
+	if desc := c.peekReady(now); desc != nil {
+		return desc, nil
 	}
 	return nil, nil
 }

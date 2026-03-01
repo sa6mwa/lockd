@@ -23,6 +23,7 @@ type Config struct {
 	Crypto                 *storage.Crypto
 	HAMode                 string
 	HALeaseTTL             time.Duration
+	HANodeID               string
 	QueueService           QueueProvider
 	QueueDispatcher        QueueDispatcher
 	SearchAdapter          search.Adapter

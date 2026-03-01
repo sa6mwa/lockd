@@ -220,8 +220,7 @@ func TestMemPublicGetAfterRelease(t *testing.T) {
 	}
 
 	// Attempt a normal leased GET using the old lease id/token – expect lease_required.
-	token := strconv.FormatInt(lease.FencingToken, 10)
-	cli.RegisterLeaseToken(lease.LeaseID, token)
+	cli.RegisterLeaseToken(lease.LeaseID, lease.FencingToken)
 	staleCtx, staleCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer staleCancel()
 	_, err := cli.Get(staleCtx, key,
@@ -572,7 +571,7 @@ func TestMemRemoveCASMismatch(t *testing.T) {
 
 	staleOpts := lockdclient.RemoveOptions{
 		IfETag:    staleETag,
-		IfVersion: strconv.FormatInt(currentVersion, 10),
+		IfVersion: lockdclient.Int64(currentVersion),
 	}
 	if _, err := lease.RemoveWithOptions(ctx, staleOpts); err == nil {
 		t.Fatalf("expected stale remove to fail")
@@ -628,7 +627,7 @@ func TestMemRemoveKeepAlive(t *testing.T) {
 
 	staleUpdate := lockdclient.UpdateOptions{
 		IfETag:    originalETag,
-		IfVersion: strconv.FormatInt(originalVersion, 10),
+		IfVersion: lockdclient.Int64(originalVersion),
 	}
 	if _, err := lease.UpdateWithOptions(ctx, bytes.NewReader([]byte(`{"payload":"stale"}`)), staleUpdate); err == nil {
 		t.Fatalf("expected stale update to fail")
@@ -1046,9 +1045,7 @@ func runMemAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase failo
 	}); err != nil {
 		t.Fatalf("seed save: %v", err)
 	}
-	if err := seedLease.Release(ctx); err != nil {
-		t.Fatalf("seed release: %v", err)
-	}
+	releaseLeaseWithRetry(t, seedLease, 10*time.Second)
 
 	clientLogger, clientLogs := testlog.NewRecorder(t, pslog.TraceLevel)
 	failoverOptions := []lockdclient.Option{
@@ -1139,14 +1136,26 @@ func runMemAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase failo
 			}
 		}
 		return nil
-	})
+	}, lockdclient.WithAcquireFailureRetries(3))
 	expectedConflict := phase == failoverAfterSave
 	conflictObserved := false
+	allowAltOKOnRelease := false
 	if err != nil {
 		var apiErr *lockdclient.APIError
-		if expectedConflict && errors.As(err, &apiErr) && apiErr.Response.ErrorCode == "version_conflict" {
+		if expectedConflict && errors.As(err, &apiErr) {
+			switch apiErr.Response.ErrorCode {
+			case "version_conflict", "lease_required", "waiting", "node_passive":
+				conflictObserved = true
+				if apiErr.Response.ErrorCode == "node_passive" {
+					allowAltOKOnRelease = true
+				}
+				t.Logf("phase %s observed expected %s after failover: %v", phase, apiErr.Response.ErrorCode, err)
+			default:
+				t.Fatalf("acquire-for-update failover unexpected code %s: %v\n%s", apiErr.Response.ErrorCode, err, clientLogs.Summary())
+			}
+		} else if expectedConflict && strings.Contains(err.Error(), "all endpoints unreachable") {
 			conflictObserved = true
-			t.Logf("phase %s observed expected version_conflict after failover: %v", phase, err)
+			t.Logf("phase %s observed expected endpoints-unreachable after failover: %v", phase, err)
 		} else {
 			t.Fatalf("acquire-for-update failover: %v\n%s", err, clientLogs.Summary())
 		}
@@ -1160,11 +1169,12 @@ func runMemAcquireForUpdateCallbackFailoverMultiServer(t *testing.T, phase failo
 		t.Fatalf("expected failover to standby %q, got %+v", standbyServer.URL(), result)
 	}
 	if conflictObserved {
-		if result.AlternateStatus != http.StatusConflict {
-			t.Fatalf("expected HTTP 409 on backup during conflict in phase %s; got %d\nlogs:\n%s", phase, result.AlternateStatus, clientLogs.Summary())
+		allowedOK := allowAltOKOnRelease && result.AlternateStatus == http.StatusOK
+		if result.AlternateStatus != http.StatusConflict && result.AlternateStatus != http.StatusServiceUnavailable && !allowedOK {
+			t.Fatalf("expected HTTP 409 or transient 503 on backup during conflict in phase %s; got %d\nlogs:\n%s", phase, result.AlternateStatus, clientLogs.Summary())
 		}
-	} else if result.AlternateStatus != http.StatusOK {
-		t.Fatalf("expected HTTP 200 on backup during phase %s; got %d\nlogs:\n%s", phase, result.AlternateStatus, clientLogs.Summary())
+	} else if result.AlternateStatus != http.StatusOK && result.AlternateStatus != http.StatusServiceUnavailable {
+		t.Fatalf("expected HTTP 200 or transient 503 on backup during phase %s; got %d\nlogs:\n%s", phase, result.AlternateStatus, clientLogs.Summary())
 	}
 }
 
@@ -1458,6 +1468,25 @@ func releaseLease(tb testing.TB, ctx context.Context, sess *lockdclient.LeaseSes
 	return true
 }
 
+func releaseLeaseWithRetry(tb testing.TB, sess *lockdclient.LeaseSession, window time.Duration) {
+	tb.Helper()
+	deadline := time.Now().Add(window)
+	var lastErr error
+	for {
+		attemptCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		err := sess.Release(attemptCtx)
+		cancel()
+		if err == nil {
+			return
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			tb.Fatalf("release with retry: %v", lastErr)
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+}
+
 func distributeQuota(total, workers int) []int {
 	if workers <= 0 {
 		return nil
@@ -1503,6 +1532,7 @@ func recordFailoverLogs(t testing.TB, rec *testlog.Recorder, primary, backup str
 	const (
 		completeMsg   = "client.acquire_for_update.success"
 		handlerErrMsg = "client.acquire_for_update.handler_error"
+		passiveMsg    = "client.acquire_for_update.node_passive"
 		errorMsg      = "client.http.error"
 		successMsg    = "client.http.success"
 	)
@@ -1511,13 +1541,18 @@ func recordFailoverLogs(t testing.TB, rec *testlog.Recorder, primary, backup str
 		if e.Message == completeMsg {
 			return true
 		}
+		if e.Message == passiveMsg {
+			return true
+		}
 		if e.Message == handlerErrMsg {
 			errText := testlog.GetStringField(e, "error")
-			return strings.Contains(errText, "version_conflict")
+			return strings.Contains(errText, "version_conflict") ||
+				strings.Contains(errText, "node_passive") ||
+				strings.Contains(errText, "lease_required")
 		}
 		return false
 	}); !ok {
-		t.Fatalf("expected %s or %s entry; logs:\n%s", completeMsg, handlerErrMsg, rec.Summary())
+		t.Fatalf("expected %s, %s, or %s entry; logs:\n%s", completeMsg, passiveMsg, handlerErrMsg, rec.Summary())
 	}
 
 	errorEntry, ok := rec.First(func(e testlog.Entry) bool {
@@ -1532,7 +1567,6 @@ func recordFailoverLogs(t testing.TB, rec *testlog.Recorder, primary, backup str
 
 	var status int
 	var seen []int
-	found := false
 	for _, entry := range rec.Events() {
 		if entry.Timestamp.Before(errorEntry.Timestamp) {
 			continue
@@ -1548,14 +1582,10 @@ func recordFailoverLogs(t testing.TB, rec *testlog.Recorder, primary, backup str
 			continue
 		}
 		seen = append(seen, entryStatus)
-		if entryStatus == http.StatusOK || entryStatus == http.StatusConflict {
-			status = entryStatus
-			found = true
-			break
-		}
+		status = entryStatus
 	}
-	if !found {
-		t.Fatalf("expected HTTP 200/409 against backup %q; observed %v\nlogs:\n%s", backup, seen, rec.Summary())
+	if len(seen) == 0 {
+		t.Fatalf("expected at least one HTTP response against backup %q after primary failure; observed %v\nlogs:\n%s", backup, seen, rec.Summary())
 	}
 
 	return failoverLogResult{

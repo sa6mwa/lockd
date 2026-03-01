@@ -85,6 +85,11 @@ func runMemQueueBasics(t *testing.T, mode memQueueMode) {
 		queuetestutil.RunQueueNackScenario(t, cli, queuetestutil.QueueName("mem-nack"), []byte("mem nack payload"))
 	})
 
+	t.Run("ObservabilityReadOnly", func(t *testing.T) {
+		queuetestutil.InstallWatchdog(t, "mem-observability", 10*time.Second)
+		queuetestutil.RunQueueObservabilityReadOnlyScenario(t, cli, queuetestutil.QueueName("mem-observability"))
+	})
+
 	t.Run("TxnDecisionCommit", func(t *testing.T) {
 		queuetestutil.InstallWatchdog(t, "mem-txn-commit", 8*time.Second)
 		queuetestutil.RunQueueTxnDecisionScenario(t, ts, true)

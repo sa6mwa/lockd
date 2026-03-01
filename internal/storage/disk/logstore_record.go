@@ -1,11 +1,9 @@
 package disk
 
 import (
-	"bytes"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
-	"io"
 
 	"github.com/google/uuid"
 )
@@ -173,181 +171,83 @@ func metaSize(recType logRecordType, meta recordMeta) (int, int, error) {
 }
 
 func decodeMeta(recType logRecordType, data []byte) (recordMeta, error) {
-	reader := bytes.NewReader(data)
-	readUint64 := func() (uint64, error) {
-		var buf [8]byte
-		if _, err := io.ReadFull(reader, buf[:]); err != nil {
-			return 0, err
-		}
-		return binary.LittleEndian.Uint64(buf[:]), nil
-	}
 	switch recType {
 	case logRecordMetaPut:
-		gen, err := readUint64()
-		if err != nil {
-			return recordMeta{}, err
+		if len(data) < 32 {
+			return recordMeta{}, fmt.Errorf("disk: logstore meta payload short")
 		}
-		modified, err := readUint64()
-		if err != nil {
-			return recordMeta{}, err
-		}
-		etagBytes := make([]byte, 16)
-		if _, err := io.ReadFull(reader, etagBytes); err != nil {
-			return recordMeta{}, err
-		}
-		id, err := uuid.FromBytes(etagBytes)
-		if err != nil {
-			return recordMeta{}, err
-		}
+		gen := binary.LittleEndian.Uint64(data[0:8])
+		modified := binary.LittleEndian.Uint64(data[8:16])
+		var id uuid.UUID
+		copy(id[:], data[16:32])
 		return recordMeta{gen: gen, modifiedAt: int64(modified), etag: id.String()}, nil
 	case logRecordMetaDelete:
-		gen, err := readUint64()
-		if err != nil {
-			return recordMeta{}, err
+		if len(data) < 16 {
+			return recordMeta{}, fmt.Errorf("disk: logstore meta payload short")
 		}
-		modified, err := readUint64()
-		if err != nil {
-			return recordMeta{}, err
-		}
+		gen := binary.LittleEndian.Uint64(data[0:8])
+		modified := binary.LittleEndian.Uint64(data[8:16])
 		return recordMeta{gen: gen, modifiedAt: int64(modified)}, nil
-	case logRecordStatePut:
-		gen, err := readUint64()
-		if err != nil {
-			return recordMeta{}, err
+	case logRecordStatePut, logRecordStateLink:
+		const stateMetaPrefix = 8 + 8 + 8 + 8 + 32 + 4
+		if len(data) < stateMetaPrefix {
+			return recordMeta{}, fmt.Errorf("disk: logstore state meta payload short")
 		}
-		modified, err := readUint64()
-		if err != nil {
-			return recordMeta{}, err
+		gen := binary.LittleEndian.Uint64(data[0:8])
+		modified := binary.LittleEndian.Uint64(data[8:16])
+		plain := binary.LittleEndian.Uint64(data[16:24])
+		cipher := binary.LittleEndian.Uint64(data[24:32])
+		descLen := int(binary.LittleEndian.Uint32(data[64:68]))
+		if len(data) < stateMetaPrefix+descLen {
+			return recordMeta{}, fmt.Errorf("disk: logstore state meta payload truncated")
 		}
-		plain, err := readUint64()
-		if err != nil {
-			return recordMeta{}, err
-		}
-		cipher, err := readUint64()
-		if err != nil {
-			return recordMeta{}, err
-		}
-		etagBytes := make([]byte, 32)
-		if _, err := io.ReadFull(reader, etagBytes); err != nil {
-			return recordMeta{}, err
-		}
-		var lenBuf [4]byte
-		if _, err := io.ReadFull(reader, lenBuf[:]); err != nil {
-			return recordMeta{}, err
-		}
-		descLen := binary.LittleEndian.Uint32(lenBuf[:])
 		descriptor := make([]byte, descLen)
-		if _, err := io.ReadFull(reader, descriptor); err != nil {
-			return recordMeta{}, err
-		}
+		copy(descriptor, data[stateMetaPrefix:stateMetaPrefix+descLen])
 		return recordMeta{
 			gen:           gen,
 			modifiedAt:    int64(modified),
-			etag:          hex.EncodeToString(etagBytes),
-			plaintextSize: int64(plain),
-			cipherSize:    int64(cipher),
-			descriptor:    descriptor,
-		}, nil
-	case logRecordStateLink:
-		gen, err := readUint64()
-		if err != nil {
-			return recordMeta{}, err
-		}
-		modified, err := readUint64()
-		if err != nil {
-			return recordMeta{}, err
-		}
-		plain, err := readUint64()
-		if err != nil {
-			return recordMeta{}, err
-		}
-		cipher, err := readUint64()
-		if err != nil {
-			return recordMeta{}, err
-		}
-		etagBytes := make([]byte, 32)
-		if _, err := io.ReadFull(reader, etagBytes); err != nil {
-			return recordMeta{}, err
-		}
-		var lenBuf [4]byte
-		if _, err := io.ReadFull(reader, lenBuf[:]); err != nil {
-			return recordMeta{}, err
-		}
-		descLen := binary.LittleEndian.Uint32(lenBuf[:])
-		descriptor := make([]byte, descLen)
-		if _, err := io.ReadFull(reader, descriptor); err != nil {
-			return recordMeta{}, err
-		}
-		return recordMeta{
-			gen:           gen,
-			modifiedAt:    int64(modified),
-			etag:          hex.EncodeToString(etagBytes),
+			etag:          hex.EncodeToString(data[32:64]),
 			plaintextSize: int64(plain),
 			cipherSize:    int64(cipher),
 			descriptor:    descriptor,
 		}, nil
 	case logRecordStateDelete:
-		gen, err := readUint64()
-		if err != nil {
-			return recordMeta{}, err
+		if len(data) < 16 {
+			return recordMeta{}, fmt.Errorf("disk: logstore state meta payload short")
 		}
-		modified, err := readUint64()
-		if err != nil {
-			return recordMeta{}, err
-		}
+		gen := binary.LittleEndian.Uint64(data[0:8])
+		modified := binary.LittleEndian.Uint64(data[8:16])
 		return recordMeta{gen: gen, modifiedAt: int64(modified)}, nil
 	case logRecordObjectPut:
-		gen, err := readUint64()
-		if err != nil {
-			return recordMeta{}, err
+		const objectMetaPrefix = 8 + 8 + 8 + 32 + 2 + 4
+		if len(data) < objectMetaPrefix {
+			return recordMeta{}, fmt.Errorf("disk: logstore object meta payload short")
 		}
-		modified, err := readUint64()
-		if err != nil {
-			return recordMeta{}, err
+		gen := binary.LittleEndian.Uint64(data[0:8])
+		modified := binary.LittleEndian.Uint64(data[8:16])
+		size := binary.LittleEndian.Uint64(data[16:24])
+		ctLen := int(binary.LittleEndian.Uint16(data[56:58]))
+		descLen := int(binary.LittleEndian.Uint32(data[58:62]))
+		if len(data) < objectMetaPrefix+ctLen+descLen {
+			return recordMeta{}, fmt.Errorf("disk: logstore object meta payload truncated")
 		}
-		size, err := readUint64()
-		if err != nil {
-			return recordMeta{}, err
-		}
-		etagBytes := make([]byte, 32)
-		if _, err := io.ReadFull(reader, etagBytes); err != nil {
-			return recordMeta{}, err
-		}
-		var lenBuf [4]byte
-		var lenBuf2 [2]byte
-		if _, err := io.ReadFull(reader, lenBuf2[:]); err != nil {
-			return recordMeta{}, err
-		}
-		ctLen := binary.LittleEndian.Uint16(lenBuf2[:])
-		if _, err := io.ReadFull(reader, lenBuf[:]); err != nil {
-			return recordMeta{}, err
-		}
-		descLen := binary.LittleEndian.Uint32(lenBuf[:])
-		contentType := make([]byte, ctLen)
-		if _, err := io.ReadFull(reader, contentType); err != nil {
-			return recordMeta{}, err
-		}
+		contentType := string(data[objectMetaPrefix : objectMetaPrefix+ctLen])
 		descriptor := make([]byte, descLen)
-		if _, err := io.ReadFull(reader, descriptor); err != nil {
-			return recordMeta{}, err
-		}
+		copy(descriptor, data[objectMetaPrefix+ctLen:objectMetaPrefix+ctLen+descLen])
 		return recordMeta{
 			gen:           gen,
 			modifiedAt:    int64(modified),
-			etag:          hex.EncodeToString(etagBytes),
+			etag:          hex.EncodeToString(data[24:56]),
 			plaintextSize: int64(size),
-			contentType:   string(contentType),
+			contentType:   contentType,
 			descriptor:    descriptor,
 		}, nil
 	case logRecordObjectDelete:
-		gen, err := readUint64()
-		if err != nil {
-			return recordMeta{}, err
+		if len(data) < 16 {
+			return recordMeta{}, fmt.Errorf("disk: logstore object meta payload short")
 		}
-		modified, err := readUint64()
-		if err != nil {
-			return recordMeta{}, err
-		}
+		gen := binary.LittleEndian.Uint64(data[0:8])
+		modified := binary.LittleEndian.Uint64(data[8:16])
 		return recordMeta{gen: gen, modifiedAt: int64(modified)}, nil
 	default:
 		return recordMeta{}, fmt.Errorf("disk: logstore unknown record type %d", recType)

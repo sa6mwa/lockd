@@ -1,11 +1,19 @@
 package httpapi
 
 import (
+	"crypto/x509"
 	"fmt"
 	"net/http"
 
 	"pkt.systems/lockd/internal/nsauth"
 )
+
+type cachedNamespaceClaims struct {
+	claims nsauth.Claims
+	err    error
+}
+
+var namespaceClaimsCache = newLRUCache[certCacheKey, cachedNamespaceClaims](defaultNamespaceClaimsCacheLimit)
 
 func (h *Handler) authorizeNamespace(r *http.Request, namespace string, access nsauth.Access) error {
 	if h == nil || !h.enforceClientIdentity {
@@ -52,7 +60,7 @@ func (h *Handler) requestNamespaceClaims(r *http.Request) (nsauth.Claims, error)
 			Detail: "client certificate required for namespace authorization",
 		}
 	}
-	claims, err := nsauth.ParseCertificate(cert)
+	claims, err := parseNamespaceClaimsCached(cert)
 	if err != nil {
 		return nsauth.Claims{}, httpError{
 			Status: http.StatusForbidden,
@@ -75,6 +83,23 @@ func (h *Handler) requestNamespaceClaims(r *http.Request) (nsauth.Claims, error)
 		}
 	}
 	return claims, nil
+}
+
+func parseNamespaceClaimsCached(cert *x509.Certificate) (nsauth.Claims, error) {
+	if cert == nil {
+		return nsauth.Claims{}, fmt.Errorf("certificate required")
+	}
+	key, ok := certificateCacheKey(cert)
+	if !ok {
+		return nsauth.Claims{}, fmt.Errorf("certificate required")
+	}
+	if cached, ok := namespaceClaimsCache.get(key); ok {
+		return cached.claims, cached.err
+	}
+	claims, err := nsauth.ParseCertificate(cert)
+	entry := cachedNamespaceClaims{claims: claims, err: err}
+	namespaceClaimsCache.put(key, entry)
+	return claims, err
 }
 
 func accessLabel(access nsauth.Access) string {

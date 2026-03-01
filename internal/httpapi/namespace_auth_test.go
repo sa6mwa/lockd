@@ -260,3 +260,109 @@ func TestNamespaceAuthIgnoresHostSpoofClaims(t *testing.T) {
 		t.Fatalf("expected no-claims detail, got %q", httpErr.Detail)
 	}
 }
+
+func resetNamespaceClaimsCacheForTest() {
+	namespaceClaimsCache.clear()
+}
+
+func namespaceClaimsCacheCountForTest() int {
+	return namespaceClaimsCache.len()
+}
+
+func TestNamespaceAuthCachesParsedClaimsByCertificateFingerprint(t *testing.T) {
+	resetNamespaceClaimsCacheForTest()
+	t.Cleanup(resetNamespaceClaimsCacheForTest)
+
+	h := newNamespaceAuthHandler(t)
+	cert := certWithURIs(
+		mustParseURL(t, "spiffe://lockd/sdk/test-client"),
+		mustClaimURI(t, "default", nsauth.PermissionReadWrite),
+	)
+	req := requestWithCert(http.MethodPost, "/v1/acquire", `{"key":"orders","owner":"worker","ttl_seconds":5}`, cert)
+
+	for i := 0; i < 2; i++ {
+		claims, err := h.requestNamespaceClaims(req)
+		if err != nil {
+			t.Fatalf("request namespace claims: %v", err)
+		}
+		if !claims.HasSPIFFEID || !claims.HasNamespaceClaims() {
+			t.Fatalf("unexpected claims: %+v", claims)
+		}
+	}
+
+	if got := namespaceClaimsCacheCountForTest(); got != 1 {
+		t.Fatalf("expected one cached cert claims entry, got %d", got)
+	}
+}
+
+func TestNamespaceAuthCachesClaimParseErrors(t *testing.T) {
+	resetNamespaceClaimsCacheForTest()
+	t.Cleanup(resetNamespaceClaimsCacheForTest)
+
+	h := newNamespaceAuthHandler(t)
+	cert := certWithURIs(
+		mustParseURL(t, "spiffe://lockd/sdk/test-client"),
+		mustParseURL(t, "lockd://ns/default?perm=r&perm=rw"),
+	)
+
+	for i := 0; i < 2; i++ {
+		req := requestWithCert(http.MethodPost, "/v1/acquire", `{"key":"orders","owner":"worker","ttl_seconds":5}`, cert)
+		err := h.handleAcquire(httptest.NewRecorder(), req)
+		requireHTTPErrorCode(t, err, "invalid_namespace_claims")
+	}
+
+	if got := namespaceClaimsCacheCountForTest(); got != 1 {
+		t.Fatalf("expected one cached parse-error entry, got %d", got)
+	}
+}
+
+func TestNamespaceAuthCacheDedupesEquivalentCertificates(t *testing.T) {
+	resetNamespaceClaimsCacheForTest()
+	t.Cleanup(resetNamespaceClaimsCacheForTest)
+
+	certA := certWithURIs(
+		mustParseURL(t, "spiffe://lockd/sdk/test-client"),
+		mustClaimURI(t, "default", nsauth.PermissionReadWrite),
+	)
+	certB := certWithURIs(
+		mustParseURL(t, "spiffe://lockd/sdk/test-client"),
+		mustClaimURI(t, "default", nsauth.PermissionReadWrite),
+	)
+
+	claimsA, err := parseNamespaceClaimsCached(certA)
+	if err != nil {
+		t.Fatalf("parse claims A: %v", err)
+	}
+	claimsB, err := parseNamespaceClaimsCached(certB)
+	if err != nil {
+		t.Fatalf("parse claims B: %v", err)
+	}
+	if !claimsA.HasNamespaceClaims() || !claimsB.HasNamespaceClaims() {
+		t.Fatalf("expected namespace claims for equivalent certs: A=%+v B=%+v", claimsA, claimsB)
+	}
+	if got := namespaceClaimsCacheCountForTest(); got != 1 {
+		t.Fatalf("expected one cache entry for equivalent certs, got %d", got)
+	}
+}
+
+func TestNamespaceAuthCacheRespectsBound(t *testing.T) {
+	original := namespaceClaimsCache
+	namespaceClaimsCache = newLRUCache[certCacheKey, cachedNamespaceClaims](2)
+	t.Cleanup(func() {
+		namespaceClaimsCache = original
+		resetNamespaceClaimsCacheForTest()
+	})
+
+	for i := 0; i < 3; i++ {
+		cert := certWithURIs(
+			mustParseURL(t, "spiffe://lockd/sdk/test-client"),
+			mustClaimURI(t, "ns-"+xid.New().String(), nsauth.PermissionReadWrite),
+		)
+		if _, err := parseNamespaceClaimsCached(cert); err != nil {
+			t.Fatalf("parse cached claims #%d: %v", i, err)
+		}
+	}
+	if got := namespaceClaimsCacheCountForTest(); got != 2 {
+		t.Fatalf("expected bounded namespace cache size=2, got %d", got)
+	}
+}

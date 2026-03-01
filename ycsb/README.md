@@ -18,7 +18,7 @@ go build ./cmd/lockd-ycsb
 This produces a `lockd-ycsb` binary with all upstream workloads plus the lockd driver. You can pass the same flags as `go-ycsb`; for example:
 
 ```bash
-./lockd-ycsb load lockd -P workloads/workloada.properties -p lockd.endpoints=https://127.0.0.1:9341 -p lockd.bundle=$HOME/.config/lockd/client.pem
+./lockd-ycsb load lockd -P workloads/workloada.properties -p lockd.endpoints=https://127.0.0.1:9341 -p lockd.bundle=$HOME/.config/lockd/bench-client.pem
 ./lockd-ycsb run lockd -P workloads/workloada.properties -p recordcount=10000 -p operationcount=100000
 ```
 
@@ -33,11 +33,16 @@ make lockd-load
 make lockd-run
 make etcd-load
 make etcd-run
+make lockd-load-query
+make lockd-run-query-pair
+make full-rerun PERF_SERIES=2026-02-26-full-rerun-v2 PERF_BASELINE_REF=2026-01-27-baseline PERF_RUN_ID=20260226-r2
 ```
 
 Each `make *-load` / `make *-run` appends a summary to `performance.log` with the final YCSB stats.
 Disable logging by setting `PERF_LOG=` (empty) or run the binary with `--perf-log=`.
 For baseline runs, we also store a snapshot under `docs/performance/` so results are tracked alongside other perf notes.
+Each log entry now includes structured metadata fields for deterministic comparison:
+`series`, `baseline_ref`, `run_id`, `scenario`, `query_engine`, and `query_return`.
 
 Benchmark methodology, caveats, and results live in [BENCHMARKS.md](BENCHMARKS.md).
 
@@ -45,6 +50,25 @@ Override the workload mix or scale as needed:
 
 ```bash
 make lockd-run WORKLOAD=workloadb RECORDCOUNT=50000 OPERATIONCOUNT=500000 THREADS=16
+```
+
+For scan-heavy query comparisons (index engine vs scan engine), use:
+
+```bash
+make lockd-load-query
+make lockd-run-query-index
+make lockd-run-query-scan
+make lockd-compare-query
+make perf-summary PERF_SERIES=2026-02-26-full-rerun-v2
+```
+
+To run and archive the full benchmark matrix in one step:
+
+```bash
+make full-rerun \
+  PERF_SERIES=2026-02-26-full-rerun-v2 \
+  PERF_BASELINE_REF=2026-01-27-baseline \
+  PERF_RUN_ID=20260226-r2
 ```
 
 > **Note**: The standard `go-ycsb` binary can also exercise the lockd driver; just `go build` it from this module so the `_ "github.com/sa6mwa/lockd/ycsb/db/lockd"` import is included.
@@ -124,7 +148,7 @@ readallfields=true
 requestdistribution=zipfian
 threadcount=16
 lockd.endpoints=https://127.0.0.1:9341
-lockd.bundle=/etc/lockd/client.pem
+lockd.bundle=/etc/lockd/bench-client.pem
 lockd.public_read=true
 lockd.query.engine=index
 ```

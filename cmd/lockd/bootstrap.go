@@ -26,6 +26,10 @@ const (
 )
 
 func bootstrapConfigDir(dir string, logger pslog.Logger) error {
+	return bootstrapConfigDirWithConfigPath(dir, "", logger)
+}
+
+func bootstrapConfigDirWithConfigPath(dir, configPath string, logger pslog.Logger) error {
 	if strings.TrimSpace(dir) == "" {
 		return fmt.Errorf("bootstrap: directory required")
 	}
@@ -37,12 +41,20 @@ func bootstrapConfigDir(dir string, logger pslog.Logger) error {
 		return fmt.Errorf("bootstrap: create %s: %w", abs, err)
 	}
 
+	configTarget := filepath.Join(abs, lockd.DefaultConfigFileName)
+	if strings.TrimSpace(configPath) != "" {
+		configTarget, err = filepath.Abs(configPath)
+		if err != nil {
+			return fmt.Errorf("bootstrap: resolve config path %s: %w", configPath, err)
+		}
+	}
+
 	paths := map[string]string{
 		"ca":       filepath.Join(abs, "ca.pem"),
 		"server":   filepath.Join(abs, "server.pem"),
 		"client":   filepath.Join(abs, "client.pem"),
 		"tcclient": filepath.Join(abs, "tc-client.pem"),
-		"config":   filepath.Join(abs, lockd.DefaultConfigFileName),
+		"config":   configTarget,
 		"denylist": filepath.Join(abs, "server.denylist"),
 	}
 

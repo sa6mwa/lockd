@@ -45,6 +45,8 @@ func (s *Store) lockStateKeys(namespace string, keys []string) ([]lockedStateKey
 	}
 	sort.Strings(ordered)
 	locks := make([]lockedStateKey, 0, len(ordered))
+	lockedGlobals := make(map[*sync.Mutex]struct{}, len(ordered))
+	lockedLocals := make(map[*sync.Mutex]struct{}, len(ordered))
 	unlock := func() error {
 		var unlockErr error
 		for i := len(locks) - 1; i >= 0; i-- {
@@ -65,9 +67,19 @@ func (s *Store) lockStateKeys(namespace string, keys []string) ([]lockedStateKey
 	}
 	for _, key := range ordered {
 		g := globalKeyMutex(namespace, key)
-		g.Lock()
+		if _, seen := lockedGlobals[g]; !seen {
+			g.Lock()
+			lockedGlobals[g] = struct{}{}
+		} else {
+			g = nil
+		}
 		l := s.keyLock(namespace, key)
-		l.Lock()
+		if _, seen := lockedLocals[l]; !seen {
+			l.Lock()
+			lockedLocals[l] = struct{}{}
+		} else {
+			l = nil
+		}
 		f, err := s.acquireFileLock(namespace, key)
 		if err != nil {
 			_ = unlock()

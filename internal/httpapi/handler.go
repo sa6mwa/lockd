@@ -45,19 +45,29 @@ import (
 
 const defaultPayloadSpoolMemoryThreshold = 4 << 20 // 4 MiB in-memory, then spill to disk
 const (
-	headerFencingToken        = "X-Fencing-Token"
-	headerMetadataQueryHidden = "X-Lockd-Meta-Query-Hidden"
-	headerQueryCursor         = "X-Lockd-Query-Cursor"
-	headerQueryIndexSeq       = "X-Lockd-Query-Index-Seq"
-	headerQueryMetadata       = "X-Lockd-Query-Metadata"
-	headerQueryReturn         = "X-Lockd-Query-Return"
-	headerTCReplica           = "X-Lockd-TC-Replicate"
-	headerTCLeaveFanout       = "X-Lockd-TC-Leave-Fanout"
-	headerAttachmentID        = "X-Attachment-ID"
-	headerAttachmentName      = "X-Attachment-Name"
-	headerAttachmentSize      = "X-Attachment-Size"
-	headerAttachmentCreatedAt = "X-Attachment-Created-At"
-	headerAttachmentUpdatedAt = "X-Attachment-Updated-At"
+	headerFencingToken            = "X-Fencing-Token"
+	headerMetadataQueryHidden     = "X-Lockd-Meta-Query-Hidden"
+	headerQueryCursor             = "X-Lockd-Query-Cursor"
+	headerQueryIndexSeq           = "X-Lockd-Query-Index-Seq"
+	headerQueryMetadata           = "X-Lockd-Query-Metadata"
+	headerQueryReturn             = "X-Lockd-Query-Return"
+	headerMutateCandidatesSeen    = "X-Lockd-Mutate-Candidates-Seen"
+	headerMutateCandidatesWritten = "X-Lockd-Mutate-Candidates-Written"
+	headerMutateBytesRead         = "X-Lockd-Mutate-Bytes-Read"
+	headerMutateBytesWritten      = "X-Lockd-Mutate-Bytes-Written"
+	headerMutateBytesCaptured     = "X-Lockd-Mutate-Bytes-Captured"
+	headerMutateSpillCount        = "X-Lockd-Mutate-Spill-Count"
+	headerMutateSpillBytes        = "X-Lockd-Mutate-Spill-Bytes"
+	headerTCReplica               = "X-Lockd-TC-Replicate"
+	headerTCLeaveFanout           = "X-Lockd-TC-Leave-Fanout"
+	headerAttachmentID            = "X-Attachment-ID"
+	headerAttachmentName          = "X-Attachment-Name"
+	headerAttachmentSize          = "X-Attachment-Size"
+	headerAttachmentCreatedAt     = "X-Attachment-Created-At"
+	headerAttachmentUpdatedAt     = "X-Attachment-Updated-At"
+	headerAttachmentSHA256        = "X-Attachment-SHA256"
+	headerExpectedSHA256          = "X-Expected-SHA256"
+	headerExpectedBytes           = "X-Expected-Bytes"
 )
 const headerCorrelationID = "X-Correlation-Id"
 const headerShutdownImminent = "Shutdown-Imminent"
@@ -669,6 +679,7 @@ func New(cfg Config) *Handler {
 		Crypto:                    crypto,
 		HAMode:                    cfg.HAMode,
 		HALeaseTTL:                cfg.HALeaseTTL,
+		HANodeID:                  strings.TrimSpace(cfg.SelfEndpoint),
 		QueueService:              queueSvc,
 		QueueDispatcher:           queueDisp,
 		SearchAdapter:             cfg.SearchAdapter,
@@ -849,6 +860,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle("/v1/attachments", h.wrap("attachments", h.handleAttachments))
 	mux.Handle("/v1/attachment", h.wrap("attachment", h.handleAttachment))
 	mux.Handle("/v1/query", h.wrap("query", h.handleQuery))
+	mux.Handle("/v1/mutate", h.wrap("mutate", h.handleMutate))
 	mux.Handle("/v1/update", h.wrap("update", h.handleUpdate))
 	mux.Handle("/v1/metadata", h.wrap("update_metadata", h.handleMetadata))
 	mux.Handle("/v1/remove", h.wrap("remove", h.handleRemove))
@@ -856,8 +868,10 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle("/v1/index/flush", h.wrap("index.flush", h.handleIndexFlush))
 	mux.Handle("/v1/namespace", h.wrap("namespace", h.handleNamespaceConfig))
 	mux.Handle("/v1/queue/enqueue", h.wrap("queue.enqueue", h.handleQueueEnqueue))
+	mux.Handle("/v1/queue/stats", h.wrap("queue.stats", h.handleQueueStats))
 	mux.Handle("/v1/queue/dequeue", h.wrap("queue.dequeue", h.handleQueueDequeue))
 	mux.Handle("/v1/queue/dequeueWithState", h.wrap("queue.dequeue_with_state", h.handleQueueDequeueWithState))
+	mux.Handle("/v1/queue/watch", h.wrap("queue.watch", h.handleQueueWatch))
 	mux.Handle("/v1/queue/subscribe", h.wrap("queue.subscribe", h.handleQueueSubscribe))
 	mux.Handle("/v1/queue/subscribeWithState", h.wrap("queue.subscribe_with_state", h.handleQueueSubscribeWithState))
 	mux.Handle("/v1/queue/ack", h.wrap("queue.ack", h.handleQueueAck))
@@ -930,6 +944,7 @@ func (h *Handler) wrap(operation string, fn handlerFunc) http.Handler {
 	sys := routerSys(operation)
 	httpSpanName := "lockd.http." + operation
 	txSpanName := "lockd.tx." + operation
+	opLogger := svcfields.WithSubsystem(h.logger, sys)
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -937,7 +952,6 @@ func (h *Handler) wrap(operation string, fn handlerFunc) http.Handler {
 		if h.activityHook != nil {
 			h.activityHook()
 		}
-		reqID := uuidv7.NewString()
 		instrument := h.httpTracingEnabled
 		var span trace.Span
 		if instrument {
@@ -957,27 +971,6 @@ func (h *Handler) wrap(operation string, fn handlerFunc) http.Handler {
 		}
 
 		ctx = correlation.Ensure(ctx)
-
-		logger := svcfields.WithSubsystem(h.logger, sys).With(
-			"req_id", reqID,
-			"method", r.Method,
-			"path", r.URL.Path,
-		)
-		ctx = pslog.ContextWithLogger(ctx, logger)
-
-		if h.enforceClientIdentity {
-			if id := clientIdentityFromRequest(r); id != "" {
-				ctx = WithClientIdentity(ctx, id)
-				logger = logger.With("client_identity", id)
-				ctx = pslog.ContextWithLogger(ctx, logger)
-				if instrument {
-					span.SetAttributes(attribute.Bool("lockd.has_client_identity", true))
-				}
-			} else if instrument {
-				span.SetAttributes(attribute.Bool("lockd.has_client_identity", false))
-			}
-		}
-
 		if corr := strings.TrimSpace(r.Header.Get(headerCorrelationID)); corr != "" {
 			if normalized, ok := correlation.Normalize(corr); ok {
 				ctx = correlation.Set(ctx, normalized)
@@ -986,12 +979,24 @@ func (h *Handler) wrap(operation string, fn handlerFunc) http.Handler {
 		if !correlation.Has(ctx) {
 			ctx = correlation.Set(ctx, correlation.Generate())
 		}
+		logger := opLogger
+
+		if h.enforceClientIdentity {
+			if id := clientIdentityFromRequest(r); id != "" {
+				ctx = WithClientIdentity(ctx, id)
+				logger = withLoggerFields(logger, "client_identity", id)
+				if instrument {
+					span.SetAttributes(attribute.Bool("lockd.has_client_identity", true))
+				}
+			} else if instrument {
+				span.SetAttributes(attribute.Bool("lockd.has_client_identity", false))
+			}
+		}
+
 		ctx, logger = applyCorrelation(ctx, logger, span)
-		verboseLogger := logger
+		ctx = pslog.ContextWithLogger(ctx, logger)
 
 		r = r.WithContext(ctx)
-
-		verboseLogger.Trace("http.request.start", "remote_addr", r.RemoteAddr)
 
 		state := h.currentShutdownState()
 		if state.Draining && state.Notify {
@@ -1021,7 +1026,6 @@ func (h *Handler) wrap(operation string, fn handlerFunc) http.Handler {
 			}
 		}()
 
-		r = r.WithContext(ctx)
 		if err := fn(w, r); err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				result = "context"
@@ -1030,7 +1034,7 @@ func (h *Handler) wrap(operation string, fn handlerFunc) http.Handler {
 				if instrument {
 					span.SetAttributes(attribute.String("lockd.error_code", "context"))
 				}
-				verboseLogger.Trace("http.request.canceled", "elapsed", time.Since(start))
+				logger.Trace("http.request.canceled", "elapsed", time.Since(start))
 				// Always emit a structured response so clients don't see an empty 200.
 				h.handleError(ctx, w, httpError{
 					Status:     http.StatusConflict,
@@ -1061,7 +1065,7 @@ func (h *Handler) wrap(operation string, fn handlerFunc) http.Handler {
 			if corr := correlation.ID(ctx); corr != "" {
 				w.Header().Set(headerCorrelationID, corr)
 			}
-			verboseLogger.Debug("http.request.error", "elapsed", time.Since(start), "error", err)
+			logger.Debug("http.request.error", "elapsed", time.Since(start), "error", err)
 			h.handleError(ctx, w, err)
 			return
 		}
@@ -1069,7 +1073,6 @@ func (h *Handler) wrap(operation string, fn handlerFunc) http.Handler {
 		if corr := correlation.ID(ctx); corr != "" {
 			w.Header().Set(headerCorrelationID, corr)
 		}
-		verboseLogger.Trace("http.request.complete", "elapsed", time.Since(start))
 	})
 
 	if !h.httpTracingEnabled {
@@ -1086,50 +1089,151 @@ func (h *Handler) writeQueryKeysResponse(w http.ResponseWriter, resp api.QueryRe
 }
 
 func (h *Handler) writeQueryDocumentsCore(ctx context.Context, w http.ResponseWriter, cmd core.QueryCommand) error {
-	result, err := h.core.QueryDocuments(ctx, cmd, nil)
-	if err != nil {
-		return convertCoreError(err)
-	}
-
-	headers := makeQueryResponseHeaders(result.Cursor, result.IndexSeq, result.Metadata, api.QueryReturnDocuments)
-	for k, v := range headers {
-		w.Header().Set(k, v)
-	}
-	w.Header().Set("Content-Type", contentTypeNDJSON)
-	w.WriteHeader(http.StatusOK)
+	headers := w.Header()
+	headers.Set(headerQueryReturn, string(api.QueryReturnDocuments))
+	declareQueryDocumentTrailers(headers)
 	flusher, _ := w.(http.Flusher)
 	logger := pslog.LoggerFromContext(ctx)
 	if logger == nil {
 		logger = h.logger
 	}
+	streamWriter := &deferredHeaderWriter{
+		ResponseWriter: w,
+		commit: func() {
+			headers.Set("Content-Type", contentTypeNDJSON)
+			w.WriteHeader(http.StatusOK)
+		},
+	}
+	copyBuf := takeQueryStreamCopyBuf()
+	defer putQueryStreamCopyBuf(copyBuf)
+	rowBuf := takeQueryStreamRowBuf()
+	defer putQueryStreamRowBuf(rowBuf)
 	sink := &ndjsonSink{
-		writer:     w,
+		writer:     streamWriter,
 		flusher:    flusher,
 		logger:     logger,
 		stream:     h.streamDocumentRow,
 		ns:         cmd.Namespace,
-		copyBuf:    make([]byte, queryStreamCopyBufSize),
-		rowBuf:     make([]byte, 0, queryStreamRowBufSize),
+		copyBuf:    copyBuf,
+		rowBuf:     rowBuf,
 		flushEvery: queryStreamFlushEvery,
 	}
-	_, err = h.core.QueryDocuments(ctx, cmd, sink)
+	result, err := h.core.QueryDocuments(ctx, cmd, sink)
+	if result != nil {
+		applyQueryDocumentTrailers(headers, result.Cursor, result.IndexSeq, result.Metadata)
+	}
+	if err != nil {
+		if streamWriter.Committed() {
+			sink.Flush()
+			if logger != nil {
+				logger.Warn("http.query.documents.stream.error", "namespace", cmd.Namespace, "error", err)
+			}
+			return nil
+		}
+		return convertCoreError(err)
+	}
+	if !streamWriter.Committed() {
+		if err := streamWriter.Commit(); err != nil {
+			return convertCoreError(err)
+		}
+	}
 	sink.Flush()
-	return err
+	return nil
+}
+
+type deferredHeaderWriter struct {
+	http.ResponseWriter
+	commit    func()
+	committed bool
+}
+
+func (w *deferredHeaderWriter) Commit() error {
+	if w == nil || w.committed {
+		return nil
+	}
+	if w.commit != nil {
+		w.commit()
+	}
+	w.committed = true
+	return nil
+}
+
+func (w *deferredHeaderWriter) Committed() bool {
+	return w != nil && w.committed
+}
+
+func (w *deferredHeaderWriter) Write(p []byte) (int, error) {
+	if err := w.Commit(); err != nil {
+		return 0, err
+	}
+	return w.ResponseWriter.Write(p)
 }
 
 const (
-	queryStreamCopyBufSize = 32 * 1024
+	queryStreamCopyBufSize = 8 * 1024
 	queryStreamRowBufSize  = 256
 	queryStreamFlushEvery  = 16
 )
+
+var queryStreamCopyBufPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, queryStreamCopyBufSize)
+		return &buf
+	},
+}
+
+var queryStreamRowBufPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 0, queryStreamRowBufSize)
+		return &buf
+	},
+}
+
+func takeQueryStreamCopyBuf() []byte {
+	if pooled, ok := queryStreamCopyBufPool.Get().(*[]byte); ok && pooled != nil {
+		buf := *pooled
+		if cap(buf) < queryStreamCopyBufSize {
+			buf = make([]byte, queryStreamCopyBufSize)
+		}
+		return buf[:queryStreamCopyBufSize]
+	}
+	return make([]byte, queryStreamCopyBufSize)
+}
+
+func putQueryStreamCopyBuf(buf []byte) {
+	if cap(buf) < queryStreamCopyBufSize {
+		return
+	}
+	buf = buf[:queryStreamCopyBufSize]
+	queryStreamCopyBufPool.Put(&buf)
+}
+
+func takeQueryStreamRowBuf() []byte {
+	if pooled, ok := queryStreamRowBufPool.Get().(*[]byte); ok && pooled != nil {
+		buf := *pooled
+		if cap(buf) < queryStreamRowBufSize {
+			buf = make([]byte, 0, queryStreamRowBufSize)
+		}
+		return buf[:0]
+	}
+	return make([]byte, 0, queryStreamRowBufSize)
+}
+
+func putQueryStreamRowBuf(buf []byte) {
+	if cap(buf) < queryStreamRowBufSize {
+		return
+	}
+	buf = buf[:0]
+	queryStreamRowBufPool.Put(&buf)
+}
 
 func (h *Handler) streamDocumentRow(w io.Writer, namespace, key string, version int64, doc io.Reader, copyBuf []byte, rowBuf []byte) ([]byte, error) {
 	buf := rowBuf[:0]
 	buf = append(buf, '{')
 	buf = append(buf, `"ns":`...)
-	buf = strconv.AppendQuote(buf, namespace)
+	buf = appendJSONQuoted(buf, namespace)
 	buf = append(buf, `,"key":`...)
-	buf = strconv.AppendQuote(buf, key)
+	buf = appendJSONQuoted(buf, key)
 	if version != 0 {
 		buf = append(buf, `,"ver":`...)
 		buf = strconv.AppendInt(buf, version, 10)
@@ -1138,18 +1242,38 @@ func (h *Handler) streamDocumentRow(w io.Writer, namespace, key string, version 
 	if _, err := w.Write(buf); err != nil {
 		return rowBuf, err
 	}
-	lw := &limitedWriter{Writer: w, limit: h.jsonMaxBytes}
+	lw := limitedWriter{Writer: w, limit: h.jsonMaxBytes}
 	if len(copyBuf) == 0 {
-		if _, err := io.Copy(lw, doc); err != nil {
+		if _, err := io.Copy(&lw, doc); err != nil {
 			return rowBuf, err
 		}
-	} else if _, err := io.CopyBuffer(lw, doc, copyBuf); err != nil {
+	} else if _, err := io.CopyBuffer(&lw, doc, copyBuf); err != nil {
 		return rowBuf, err
 	}
 	if _, err := io.WriteString(w, "}\n"); err != nil {
 		return rowBuf, err
 	}
 	return buf[:0], nil
+}
+
+func appendJSONQuoted(dst []byte, value string) []byte {
+	if !requiresJSONEscape(value) {
+		dst = append(dst, '"')
+		dst = append(dst, value...)
+		dst = append(dst, '"')
+		return dst
+	}
+	return strconv.AppendQuote(dst, value)
+}
+
+func requiresJSONEscape(value string) bool {
+	for i := 0; i < len(value); i++ {
+		ch := value[i]
+		if ch < 0x20 || ch == '"' || ch == '\\' {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Handler) selectQueryEngine(ctx context.Context, namespace string, hint search.EngineHint) (search.EngineHint, error) {
@@ -1177,16 +1301,6 @@ func (h *Handler) selectQueryEngine(ctx context.Context, namespace string, hint 
 		}
 	}
 	return engine, nil
-}
-
-func (h *Handler) waitForIndexReadable(ctx context.Context, namespace string) error {
-	if h == nil || h.indexControl == nil {
-		return nil
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	return h.indexControl.WaitForReadable(ctx, namespace)
 }
 
 func (h *Handler) writeJSON(w http.ResponseWriter, status int, payload any, headers map[string]string) {

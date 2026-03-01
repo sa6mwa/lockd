@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"path"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"pkt.systems/kryptograf"
 	"pkt.systems/lockd/internal/storage"
@@ -100,6 +102,60 @@ func TestDiskPromoteStagedStatePreservesPayloadLarge(t *testing.T) {
 	}
 	if !bytes.Equal(body, payload) {
 		t.Fatalf("payload mismatch")
+	}
+}
+
+func TestDiskLockStateKeysStripeCollisionNoDeadlock(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "store")
+	crypto := mustNewDiskTestCrypto(t)
+	store, err := New(Config{Root: root, Crypto: crypto})
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	var (
+		keyA string
+		keyB string
+	)
+	byStripe := map[uint64]string{}
+	for i := 0; i < 1_000_000; i++ {
+		candidate := fmt.Sprintf("collision/%d", i)
+		stripe := lockStripeIndex(testNamespace, candidate) & lockStripeMask
+		if prev, ok := byStripe[stripe]; ok && prev != candidate {
+			keyA = prev
+			keyB = candidate
+			break
+		}
+		byStripe[stripe] = candidate
+	}
+	if keyA == "" || keyB == "" {
+		t.Fatalf("failed to find key lock stripe collision")
+	}
+
+	done := make(chan struct{})
+	errCh := make(chan error, 1)
+	go func() {
+		_, unlock, lockErr := store.lockStateKeys(testNamespace, []string{keyA, keyB})
+		if lockErr != nil {
+			errCh <- lockErr
+			close(done)
+			return
+		}
+		if unlockErr := unlock(); unlockErr != nil {
+			errCh <- unlockErr
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+		select {
+		case lockErr := <-errCh:
+			t.Fatalf("lock/unlock state keys: %v", lockErr)
+		default:
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatalf("lockStateKeys timed out on lock stripe collision")
 	}
 }
 

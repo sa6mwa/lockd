@@ -3,9 +3,7 @@ package core
 import (
 	"encoding/json"
 	"io"
-	"sort"
 	"strconv"
-	"strings"
 
 	"pkt.systems/lockd/internal/jsonpointer"
 	indexer "pkt.systems/lockd/internal/search/index"
@@ -13,6 +11,14 @@ import (
 )
 
 func buildDocumentFromJSON(key string, reader io.Reader) (indexer.Document, error) {
+	policy := indexer.DefaultTextIndexPolicy()
+	// Runtime default keeps raw + trigram postings; tokenized postings are opt-in
+	// via explicit policy to avoid heavy write-path amplification.
+	policy.DefaultMode = indexer.TextFieldModeRaw
+	return buildDocumentFromJSONWithPolicy(key, reader, policy)
+}
+
+func buildDocumentFromJSONWithPolicy(key string, reader io.Reader, policy indexer.TextIndexPolicy) (indexer.Document, error) {
 	doc := indexer.Document{Key: key}
 	dec := json.NewDecoder(reader)
 	dec.UseNumber()
@@ -20,7 +26,7 @@ func buildDocumentFromJSON(key string, reader io.Reader) (indexer.Document, erro
 	if err := dec.Decode(&raw); err != nil {
 		return doc, err
 	}
-	recursiveIndex("", raw, &doc)
+	recursiveIndex("", raw, &doc, policy)
 	return doc, nil
 }
 
@@ -37,32 +43,24 @@ func buildIndexDocumentMeta(meta *storage.Meta) *indexer.DocumentMetadata {
 		StatePlaintextBytes: meta.StatePlaintextBytes,
 		PublishedVersion:    publishedVersion,
 		QueryExcluded:       meta.QueryExcluded(),
-	}
-	if len(meta.StateDescriptor) > 0 {
-		out.StateDescriptor = append([]byte(nil), meta.StateDescriptor...)
+		StateDescriptor:     meta.StateDescriptor,
 	}
 	return out
 }
 
-func recursiveIndex(path string, value any, doc *indexer.Document) {
+func recursiveIndex(path string, value any, doc *indexer.Document, policy indexer.TextIndexPolicy) {
 	switch v := value.(type) {
 	case map[string]any:
-		keys := make([]string, 0, len(v))
-		for k := range v {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			child := v[k]
+		for k, child := range v {
 			childPath := joinPath(path, k)
-			recursiveIndex(childPath, child, doc)
+			recursiveIndex(childPath, child, doc, policy)
 		}
 	case []any:
 		for _, elem := range v {
-			recursiveIndex(path, elem, doc)
+			recursiveIndex(path, elem, doc, policy)
 		}
 	case string:
-		doc.AddTerm(path, strings.ToLower(v))
+		doc.AddStringWithPolicy(path, v, policy)
 	case json.Number:
 		doc.AddTerm(path, v.String())
 	case bool:

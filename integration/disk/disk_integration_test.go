@@ -69,6 +69,22 @@ func (p failoverPhase) String() string {
 	}
 }
 
+func retryableAcquireForUpdateError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if strings.Contains(err.Error(), "all endpoints unreachable") {
+		return true
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) || strings.Contains(err.Error(), "unexpected EOF") {
+		return true
+	}
+	return false
+}
+
 func ensureDiskRootEnv(tb testing.TB) {
 	tb.Helper()
 	if env := os.Getenv("LOCKD_DISK_ROOT"); env != "" {
@@ -705,7 +721,7 @@ func TestDiskRemoveCASMismatch(t *testing.T) {
 
 	staleOpts := lockdclient.RemoveOptions{
 		IfETag:    staleETag,
-		IfVersion: strconv.FormatInt(currentVersion, 10),
+		IfVersion: lockdclient.Int64(currentVersion),
 	}
 	if _, err := lease.RemoveWithOptions(ctx, staleOpts); err == nil {
 		t.Fatalf("expected stale remove to fail")
@@ -771,7 +787,7 @@ func TestDiskRemoveKeepAlive(t *testing.T) {
 
 	staleUpdate := lockdclient.UpdateOptions{
 		IfETag:    originalETag,
-		IfVersion: strconv.FormatInt(originalVersion, 10),
+		IfVersion: lockdclient.Int64(originalVersion),
 	}
 	if _, err := lease.UpdateWithOptions(ctx, bytes.NewReader([]byte(`{"payload":"stale"}`)), staleUpdate); err == nil {
 		t.Fatalf("expected stale update to fail")
@@ -1224,13 +1240,63 @@ func TestDiskAcquireForUpdateCallbackSingleServer(t *testing.T) {
 		if v, ok := snapshot["count"].(float64); ok {
 			count = v
 		}
+		targetOwner := "reader"
+		targetCount := count + 1
 		updated := map[string]any{
 			"payload": "disk-single",
-			"count":   count + 1,
-			"owner":   "reader",
+			"count":   targetCount,
+			"owner":   targetOwner,
 		}
-		return af.Save(handlerCtx, updated)
-	})
+		refreshProgress := func() (float64, bool, error) {
+			var latest map[string]any
+			if err := af.Load(handlerCtx, &latest); err != nil {
+				return 0, false, err
+			}
+			snapshot = latest
+			current := 0.0
+			if v, ok := latest["count"].(float64); ok {
+				current = v
+			}
+			owner := fmt.Sprint(latest["owner"])
+			achieved := owner == targetOwner && current >= targetCount
+			return current, achieved, nil
+		}
+
+		var saveErr error
+		for attempt := 0; attempt < 4; attempt++ {
+			if saveErr = af.Save(handlerCtx, updated); saveErr == nil {
+				return nil
+			}
+
+			var apiErr *lockdclient.APIError
+			if errors.As(saveErr, &apiErr) && apiErr.Response.ErrorCode == "version_conflict" {
+				if current, achieved, loadErr := refreshProgress(); loadErr == nil {
+					if achieved {
+						return nil
+					}
+					updated["count"] = current + 1
+					targetCount = current + 1
+					continue
+				} else {
+					return fmt.Errorf("save state: %w (refresh: %v)", saveErr, loadErr)
+				}
+			}
+
+			if !retryableAcquireForUpdateError(saveErr) {
+				return fmt.Errorf("save state: %w", saveErr)
+			}
+
+			if current, achieved, loadErr := refreshProgress(); loadErr == nil {
+				if achieved {
+					return nil
+				}
+				updated["count"] = current + 1
+				targetCount = current + 1
+			}
+			time.Sleep(50 * time.Millisecond * time.Duration(attempt+1))
+		}
+		return fmt.Errorf("save state: %w", saveErr)
+	}, lockdclient.WithAcquireFailureRetries(3))
 	watchdog.Stop()
 	if err != nil {
 		t.Fatalf("acquire-for-update callback: %v", err)
@@ -2416,7 +2482,7 @@ func diskTestLoggerOption(tb testing.TB) lockd.TestServerOption {
 	}
 	tb.Cleanup(func() { _ = file.Close() })
 
-	logger := svcfields.WithSubsystem(pslog.NewStructured(file), "bench.disk")
+	logger := svcfields.WithSubsystem(pslog.NewStructured(context.Background(), file), "bench.disk")
 	if level, ok := pslog.ParseLevel(levelStr); ok {
 		logger = logger.LogLevel(level)
 	} else {

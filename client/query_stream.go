@@ -2,21 +2,52 @@ package client
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"strconv"
+	"sync"
 	"unicode/utf16"
+	"unicode/utf8"
 )
 
 type queryStream struct {
-	body   io.ReadCloser
-	reader *bufio.Reader
-	closed bool
+	body    io.ReadCloser
+	reader  *bufio.Reader
+	closed  bool
+	onClose func()
 }
 
-func newQueryStream(body io.ReadCloser) *queryStream {
-	return &queryStream{body: body, reader: bufio.NewReader(body)}
+var queryStreamReaderPool = sync.Pool{
+	New: func() any {
+		return &bufio.Reader{}
+	},
+}
+
+func takeQueryStreamReader(body io.Reader) *bufio.Reader {
+	pooled, _ := queryStreamReaderPool.Get().(*bufio.Reader)
+	if pooled == nil {
+		pooled = &bufio.Reader{}
+	}
+	pooled.Reset(body)
+	return pooled
+}
+
+func putQueryStreamReader(reader *bufio.Reader) {
+	if reader == nil {
+		return
+	}
+	reader.Reset(nil)
+	queryStreamReaderPool.Put(reader)
+}
+
+func newQueryStream(body io.ReadCloser, onClose ...func()) *queryStream {
+	var closeFn func()
+	if len(onClose) > 0 {
+		closeFn = onClose[0]
+	}
+	return &queryStream{body: body, reader: takeQueryStreamReader(body), onClose: closeFn}
 }
 
 func (qs *queryStream) Close() error {
@@ -24,6 +55,11 @@ func (qs *queryStream) Close() error {
 		return nil
 	}
 	qs.closed = true
+	if qs.onClose != nil {
+		qs.onClose()
+	}
+	putQueryStreamReader(qs.reader)
+	qs.reader = nil
 	if qs.body != nil {
 		return qs.body.Close()
 	}
@@ -160,50 +196,89 @@ func readJSONString(r *bufio.Reader) (string, error) {
 	if quote != '"' {
 		return "", fmt.Errorf("lockd: expected string literal, got %q", quote)
 	}
-	var out []rune
+
+	var raw []byte
 	for {
-		b, err := r.ReadByte()
-		if err != nil {
-			return "", err
+		fragment, readErr := r.ReadSlice('"')
+		if readErr == nil {
+			chunk := fragment[:len(fragment)-1]
+			if len(raw) == 0 && bytes.IndexByte(chunk, '\\') < 0 {
+				return string(chunk), nil
+			}
+			raw = append(raw, chunk...)
+			if trailingBackslashes(chunk)%2 == 0 {
+				return unescapeJSONString(raw)
+			}
+			// Escaped quote inside the string literal.
+			raw = append(raw, '"')
+			continue
 		}
-		if b == '"' {
-			return string(out), nil
+		if readErr == bufio.ErrBufferFull {
+			raw = append(raw, fragment...)
+			continue
 		}
-		if b == '\\' {
-			esc, err := r.ReadByte()
+		return "", readErr
+	}
+}
+
+func trailingBackslashes(chunk []byte) int {
+	count := 0
+	for i := len(chunk) - 1; i >= 0; i-- {
+		if chunk[i] != '\\' {
+			break
+		}
+		count++
+	}
+	return count
+}
+
+func unescapeJSONString(raw []byte) (string, error) {
+	if len(raw) == 0 {
+		return "", nil
+	}
+	if bytes.IndexByte(raw, '\\') < 0 {
+		return string(raw), nil
+	}
+	out := make([]byte, 0, len(raw))
+	for i := 0; i < len(raw); i++ {
+		b := raw[i]
+		if b != '\\' {
+			out = append(out, b)
+			continue
+		}
+		i++
+		if i >= len(raw) {
+			return "", io.ErrUnexpectedEOF
+		}
+		esc := raw[i]
+		switch esc {
+		case '"', '\\', '/':
+			out = append(out, esc)
+		case 'b':
+			out = append(out, byte('\b'))
+		case 'f':
+			out = append(out, byte('\f'))
+		case 'n':
+			out = append(out, byte('\n'))
+		case 'r':
+			out = append(out, byte('\r'))
+		case 't':
+			out = append(out, byte('\t'))
+		case 'u':
+			if i+4 >= len(raw) {
+				return "", io.ErrUnexpectedEOF
+			}
+			rn, err := decodeHexRune(raw[i+1 : i+5])
 			if err != nil {
 				return "", err
 			}
-			switch esc {
-			case '"', '\\', '/':
-				out = append(out, rune(esc))
-			case 'b':
-				out = append(out, '\b')
-			case 'f':
-				out = append(out, '\f')
-			case 'n':
-				out = append(out, '\n')
-			case 'r':
-				out = append(out, '\r')
-			case 't':
-				out = append(out, '\t')
-			case 'u':
-				var hexChars [4]byte
-				if _, err := io.ReadFull(r, hexChars[:]); err != nil {
-					return "", err
-				}
-				rn, err := decodeHexRune(hexChars[:])
-				if err != nil {
-					return "", err
-				}
-				out = append(out, rn)
-			default:
-				return "", fmt.Errorf("lockd: invalid escape %q", esc)
-			}
-			continue
+			out = utf8.AppendRune(out, rn)
+			i += 4
+		default:
+			return "", fmt.Errorf("lockd: invalid escape %q", esc)
 		}
-		out = append(out, rune(b))
 	}
+	return string(out), nil
 }
 
 func decodeHexRune(b []byte) (rune, error) {
@@ -435,37 +510,63 @@ func newJSONValueReader(r *bufio.Reader) (*jsonValueReader, error) {
 }
 
 func (jr *jsonValueReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	n := 0
 	if len(jr.buf) > 0 {
-		n := copy(p, jr.buf)
-		jr.buf = jr.buf[n:]
+		copied := copy(p, jr.buf)
+		n += copied
+		jr.buf = jr.buf[copied:]
+		if n == len(p) {
+			return n, nil
+		}
+	}
+	if jr.done {
+		if n > 0 {
+			return n, nil
+		}
+		return 0, io.EOF
+	}
+	for n < len(p) && !jr.done {
+		b, err := jr.r.ReadByte()
+		if err != nil {
+			if err == io.EOF && n > 0 {
+				return n, nil
+			}
+			return n, err
+		}
+		emit, err := jr.consumeByte(b)
+		if err != nil {
+			return n, err
+		}
+		if !emit {
+			continue
+		}
+		p[n] = b
+		n++
+	}
+	if n > 0 {
 		return n, nil
 	}
 	if jr.done {
 		return 0, io.EOF
 	}
-	b, err := jr.r.ReadByte()
-	if err != nil {
-		return 0, err
-	}
-	if err := jr.consume(b); err != nil {
-		return 0, err
-	}
-	p[0] = b
-	return 1, nil
+	return 0, nil
 }
 
-func (jr *jsonValueReader) consume(b byte) error {
+func (jr *jsonValueReader) consumeByte(b byte) (bool, error) {
 	if jr.done {
-		return nil
+		return false, nil
 	}
 	if jr.inString {
 		if jr.escape {
 			jr.escape = false
-			return nil
+			return true, nil
 		}
 		if b == '\\' {
 			jr.escape = true
-			return nil
+			return true, nil
 		}
 		if b == '"' {
 			jr.inString = false
@@ -473,14 +574,14 @@ func (jr *jsonValueReader) consume(b byte) error {
 				jr.done = true
 			}
 		}
-		return nil
+		return true, nil
 	}
 	if jr.simple {
 		if isLiteralChar(b) {
-			return nil
+			return true, nil
 		}
 		jr.done = true
-		return jr.r.UnreadByte()
+		return false, jr.r.UnreadByte()
 	}
 	switch b {
 	case '{', '[':
@@ -493,7 +594,7 @@ func (jr *jsonValueReader) consume(b byte) error {
 	case '"':
 		jr.inString = true
 	}
-	return nil
+	return true, nil
 }
 
 func (jr *jsonValueReader) Close() error {

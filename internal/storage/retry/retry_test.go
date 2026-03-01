@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"pkt.systems/lockd/internal/storage"
+	"pkt.systems/lockd/internal/storage/memory"
 	"pkt.systems/lockd/internal/storage/retry"
 	"pkt.systems/lockd/namespaces"
 	"pkt.systems/pslog"
@@ -483,5 +484,87 @@ func TestReplayContractTableDriven(t *testing.T) {
 				t.Fatalf("unknown op type %q", tc.op)
 			}
 		})
+	}
+}
+
+func TestWrapExposesStagingBackendAndPromoteFlow(t *testing.T) {
+	t.Parallel()
+
+	inner := memory.New()
+	wrapped := retry.Wrap(inner, pslog.NoopLogger(), &fakeClock{}, retry.Config{
+		MaxAttempts: 3,
+		BaseDelay:   5 * time.Millisecond,
+	})
+	staging, ok := wrapped.(storage.StagingBackend)
+	if !ok {
+		t.Fatalf("wrapped backend must implement staging backend")
+	}
+
+	const (
+		namespace = namespaces.Default
+		key       = "stage-key"
+		txnID     = "txn-1"
+		payload   = `{"v":1}`
+	)
+	stageRes, err := staging.StageState(context.Background(), namespace, key, txnID, bytes.NewReader([]byte(payload)), storage.PutStateOptions{})
+	if err != nil {
+		t.Fatalf("stage state: %v", err)
+	}
+	if stageRes == nil || stageRes.NewETag == "" {
+		t.Fatalf("expected stage result with etag, got %#v", stageRes)
+	}
+
+	promoteRes, err := staging.PromoteStagedState(context.Background(), namespace, key, txnID, storage.PromoteStagedOptions{})
+	if err != nil {
+		t.Fatalf("promote staged state: %v", err)
+	}
+	if promoteRes == nil || promoteRes.NewETag == "" {
+		t.Fatalf("expected promote result with etag, got %#v", promoteRes)
+	}
+
+	state, err := wrapped.ReadState(context.Background(), namespace, key)
+	if err != nil {
+		t.Fatalf("read state: %v", err)
+	}
+	defer state.Reader.Close()
+	data, err := io.ReadAll(state.Reader)
+	if err != nil {
+		t.Fatalf("read state body: %v", err)
+	}
+	if string(data) != payload {
+		t.Fatalf("unexpected promoted payload %q", string(data))
+	}
+}
+
+func TestStageStateRetriesWithDefaultStagingFallback(t *testing.T) {
+	t.Parallel()
+
+	back := &stubBackend{
+		writeStateErrs: []error{
+			storage.NewTransientError(errors.New("temporary")),
+			nil,
+		},
+	}
+	fc := &fakeClock{}
+	wrapped := retry.Wrap(back, pslog.NoopLogger(), fc, retry.Config{
+		MaxAttempts: 3,
+		BaseDelay:   5 * time.Millisecond,
+		Multiplier:  2,
+		MaxDelay:    10 * time.Millisecond,
+	})
+	staging, ok := wrapped.(storage.StagingBackend)
+	if !ok {
+		t.Fatalf("wrapped backend must implement staging backend")
+	}
+
+	_, err := staging.StageState(context.Background(), namespaces.Default, "key", "txn-fallback", bytes.NewReader([]byte(`{"v":1}`)), storage.PutStateOptions{})
+	if err != nil {
+		t.Fatalf("stage state returned error: %v", err)
+	}
+	if back.writeStateCalls != 2 {
+		t.Fatalf("expected 2 stage attempts, got %d", back.writeStateCalls)
+	}
+	if len(back.writeStateBodies) != 2 || back.writeStateBodies[0] != `{"v":1}` || back.writeStateBodies[1] != `{"v":1}` {
+		t.Fatalf("unexpected staged payloads: %#v", back.writeStateBodies)
 	}
 }

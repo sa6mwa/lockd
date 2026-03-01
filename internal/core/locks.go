@@ -111,7 +111,7 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (res *Acquire
 		}
 	}
 
-	logger.Info("lease.acquire.begin",
+	logger.Debug("lease.acquire.begin",
 		"namespace", namespace,
 		"key", key,
 		"owner", cmd.Owner,
@@ -186,7 +186,7 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (res *Acquire
 				if s.leaseMetrics != nil {
 					s.leaseMetrics.addActive(kindLabel, 1)
 				}
-				logger.Info("lease.acquire.success",
+				logger.Debug("lease.acquire.success",
 					"namespace", namespace,
 					"key", key,
 					"owner", cmd.Owner,
@@ -329,7 +329,7 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (res *Acquire
 		if s.leaseMetrics != nil {
 			s.leaseMetrics.addActive(kindLabel, 1)
 		}
-		logger.Info("lease.acquire.success",
+		logger.Debug("lease.acquire.success",
 			"namespace", namespace,
 			"key", key,
 			"owner", cmd.Owner,
@@ -390,11 +390,13 @@ func (s *Service) KeepAlive(ctx context.Context, cmd KeepAliveCommand) (res *Kee
 	}
 
 	requestTxn := strings.TrimSpace(cmd.TxnID)
+	knownMeta := cmd.KnownMeta
+	knownMetaETag := cmd.KnownMetaETag
 	for {
 		plan := s.newWritePlan(ctx)
 		commitCtx := plan.Context()
 		now := s.clock.Now()
-		meta, metaETag, err := s.loadMetaMaybeCached(commitCtx, namespace, storageKey, cmd.KnownMeta, cmd.KnownMetaETag)
+		meta, metaETag, err := s.loadMetaMaybeCached(commitCtx, namespace, storageKey, knownMeta, knownMetaETag)
 		if err != nil {
 			return nil, plan.Wait(err)
 		}
@@ -405,6 +407,8 @@ func (s *Service) KeepAlive(ctx context.Context, cmd KeepAliveCommand) (res *Kee
 					if waitErr := plan.Wait(nil); waitErr != nil {
 						return nil, waitErr
 					}
+					knownMeta = nil
+					knownMetaETag = ""
 					continue
 				}
 				return nil, plan.Wait(err)
@@ -428,6 +432,8 @@ func (s *Service) KeepAlive(ctx context.Context, cmd KeepAliveCommand) (res *Kee
 				if waitErr := plan.Wait(nil); waitErr != nil {
 					return nil, waitErr
 				}
+				knownMeta = nil
+				knownMetaETag = ""
 				continue
 			}
 			return nil, plan.Wait(fmt.Errorf("store meta: %w", err))
@@ -494,12 +500,14 @@ func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (res *Release
 	}
 	keyComponent := relativeKey(namespace, storageKey)
 	kindLabel = leaseKindLabel(keyComponent)
+	knownMeta := cmd.KnownMeta
+	knownMetaETag := cmd.KnownMetaETag
 
 	for {
 		plan := s.newWritePlan(ctx)
 		commitCtx := plan.Context()
 		now := s.clock.Now()
-		meta, metaETag, err := s.loadMetaMaybeCached(commitCtx, namespace, storageKey, cmd.KnownMeta, cmd.KnownMetaETag)
+		meta, metaETag, err := s.loadMetaMaybeCached(commitCtx, namespace, storageKey, knownMeta, knownMetaETag)
 		if err != nil {
 			return nil, plan.Wait(err)
 		}
@@ -509,6 +517,8 @@ func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (res *Release
 					if waitErr := plan.Wait(nil); waitErr != nil {
 						return nil, waitErr
 					}
+					knownMeta = nil
+					knownMetaETag = ""
 					continue
 				}
 				return nil, plan.Wait(err)
@@ -543,14 +553,58 @@ func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (res *Release
 			}
 		}
 
+		noStagedChanges := meta.StagedTxnID == "" &&
+			meta.StagedStateETag == "" &&
+			!meta.StagedRemove &&
+			len(meta.StagedAttributes) == 0 &&
+			len(meta.StagedAttachments) == 0 &&
+			len(meta.StagedAttachmentDeletes) == 0 &&
+			!meta.StagedAttachmentsClear
 		commit := !cmd.Rollback
-		if meta.StagedTxnID == "" && meta.StagedStateETag == "" && !meta.StagedRemove && len(meta.StagedAttributes) == 0 && len(meta.StagedAttachments) == 0 && len(meta.StagedAttachmentDeletes) == 0 && !meta.StagedAttachmentsClear {
+		if noStagedChanges {
 			commit = false // nothing staged; just clear lease
 		}
 
 		decision := TxnStateCommit
 		if !commit {
 			decision = TxnStateRollback
+		}
+		if !txnExplicit(meta) && noStagedChanges {
+			// Hot path for normal release: no staged mutation, no explicit txn semantics.
+			// Avoid full txn decision machinery and only clear the lease.
+			oldExpires := int64(0)
+			if meta.Lease != nil {
+				oldExpires = meta.Lease.ExpiresAtUnix
+			}
+			meta.Lease = nil
+			meta.UpdatedAtUnix = now.Unix()
+			if _, err := s.store.StoreMeta(commitCtx, namespace, keyComponent, meta, metaETag); err != nil {
+				if errors.Is(err, storage.ErrCASMismatch) {
+					if waitErr := plan.Wait(nil); waitErr != nil {
+						return nil, waitErr
+					}
+					knownMeta = nil
+					knownMetaETag = ""
+					continue
+				}
+				if errors.Is(err, storage.ErrNotFound) {
+					if waitErr := plan.Wait(nil); waitErr != nil {
+						return nil, waitErr
+					}
+					return &ReleaseResult{Released: true, MetaCleared: true}, nil
+				}
+				return nil, plan.Wait(err)
+			}
+			if err := s.updateLeaseIndex(commitCtx, namespace, keyComponent, oldExpires, 0); err != nil && s.logger != nil {
+				s.logger.Warn("lease.index.update_failed", "namespace", namespace, "key", keyComponent, "error", err)
+			}
+			if s.leaseMetrics != nil {
+				s.leaseMetrics.addActive(kindLabel, -1)
+			}
+			if waitErr := plan.Wait(nil); waitErr != nil {
+				return nil, waitErr
+			}
+			return &ReleaseResult{Released: true, MetaCleared: true}, nil
 		}
 		if !txnExplicit(meta) {
 			if err := s.applyTxnDecisionForMeta(commitCtx, namespace, keyComponent, cmd.TxnID, decision == TxnStateCommit, meta, metaETag); err != nil {

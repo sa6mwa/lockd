@@ -66,9 +66,128 @@ Query sync overlay (index visibility):
 - `LOCKD_EXTRA_PROPS="workloads/lockd.querysync.properties"` on any lockd target
   to require index refresh before returning writes/queries.
 
+Query engine A/B workflow (scan-heavy workload):
+- `make lockd-load-query`
+- `make lockd-run-query-index`
+- `make lockd-run-query-scan`
+- `make lockd-compare-query` (parses `performance.log` and reports latest index vs scan SCAN ops/s)
+
 Etcd comparison (no attachments/explicit XA):
 - `make etcd-load`
 - `make etcd-run`
+
+## Historical full rerun snapshot (2026-02-26, tainted)
+
+Latest validated full matrix series:
+- Series: `2026-02-26-full-rerun-v2`
+- Run ID: `20260226-r2`
+- Artifacts: `docs/performance/2026-02-26-full-rerun-v2/`
+- Summary table: `docs/performance/2026-02-26-full-rerun-v2/summary.md`
+- Query comparison: `docs/performance/2026-02-26-full-rerun-v2/query-compare.md`
+
+Commands used:
+
+```bash
+cd ycsb
+make full-rerun \
+  PERF_SERIES=2026-02-26-full-rerun-v2 \
+  PERF_BASELINE_REF=2026-01-27-baseline \
+  PERF_RUN_ID=20260226-r2
+```
+
+Important:
+- This snapshot includes tainted rows where YCSB emitted only `*_ERROR` metrics.
+- Treat this table as historical context only; do not use it as a baseline.
+
+Key throughput comparison (ops/s):
+
+| Scenario | Baseline (2026-01-27) | Current (2026-02-26) | Delta |
+| --- | ---: | ---: | ---: |
+| lockd load workloada | 1980.0 | 17218.6 | +769.63% |
+| lockd run workloada | 2803.6 | 21017.2 | +649.65% |
+| etcd load workloada | 2411.9 | 10174.3 | +321.84% |
+| etcd run workloada | 6517.7 | 13897.1 | +113.22% |
+| lockd run workloadb | 12597.2 | 23942.3 | +90.06% |
+| lockd run workloadc | 15170.4 | 24720.6 | +62.95% |
+| lockd run workloadd | 11105.3 | 23933.5 | +115.51% |
+| etcd run workloadb | 20067.6 | 18233.3 | -9.14% |
+| etcd run workloadc | 24380.1 | 31252.3 | +28.19% |
+| etcd run workloadd | 17391.2 | 19917.1 | +14.52% |
+
+Query path comparison (scan-heavy `workloade`, SCAN ops/s):
+
+| Engine | Historical reference | Current | Delta |
+| --- | ---: | ---: | ---: |
+| index | 814.4 | 16607.0 | +1939.17% |
+| scan | 422.5 | 16166.5 | +3726.39% |
+
+Notes:
+- Query references are from the historical lockd-bench section below (`query-index` / `query-scan`), so they are directionally useful but not strictly identical workloads.
+- Current index-vs-scan delta on the same 2026-02-26 series: index is `+2.72%` higher SCAN ops/s than scan.
+
+## Query iteration log (2026-02-27)
+
+Context:
+- Clean disk-backed dev env redeploy (`nerdctl compose -f devenv/docker-compose.yaml up --build -d`) with storage reset.
+- Workload: `workloade` (scan-heavy), `recordcount=10000`, `operationcount=100000`, `threadcount=8`.
+- Query return mode: `documents`.
+- Index run uses `lockd.query.refresh=wait_for`.
+
+Commands:
+
+```bash
+cd ycsb
+make lockd-load-query
+make lockd-run-query-index
+make lockd-run-query-scan
+make lockd-compare-query
+```
+
+Latest sequential pair (UTC):
+- Index run (`2026-02-27T00:22:21Z`): `SCAN ops/s = 15551.4`
+- Scan run (`2026-02-27T00:22:49Z`): `SCAN ops/s = 14956.9`
+- Index advantage in-pair: `+3.97%`
+
+Delta vs prior trustworthy pair from the same day (`index=15315.5`, `scan=15178.2`):
+- Index: `+1.54%`
+- Scan: `-1.46%`
+
+Lockd-bench query-only cross-commit check (same day, disk backend, `ha=failover`, `qrf-disabled`, `ops=20000`, `concurrency=8`, `query-return=documents`, `query-seed=false`, `query-flush=false`):
+- Reference (`f726321`): `10481.4 ops/s` (`query avg=394.53us`)
+- Current: `10826.0 ops/s` (`query avg=382.16us`)
+- Delta: `+3.29%`
+
+Historical reference (`b77723e`) with the same query-only flags:
+- Reference (`b77723e`): `9576.6 ops/s`
+- Current: `10826.0 ops/s`
+- Delta: `+13.05%`
+
+Additional slice check (`a07ba64` -> current), same flags:
+- Reference (`a07ba64`): `10899.2 ops/s` (`query avg=375.99us`)
+- Current: `11294.4 ops/s` (`query avg=365.17us`)
+- Delta: `+3.63%`
+
+Additional slice check (`f53f597` -> current), same flags:
+- Reference (`f53f597`): `11093.5 ops/s` (`query avg=376.58us`)
+- Current: `12193.3 ops/s` (`query avg=361.64us`)
+- Delta: `+9.91%`
+
+Additional slice check (`801d46e` -> current), same flags:
+- Reference (`801d46e`): `12328.4 ops/s` (`query avg=359.91us`)
+- Current: `13517.3 ops/s` (`query avg=328.39us`)
+- Delta: `+9.65%`
+
+Indexer range-query optimization slice (`2026-02-27`):
+- Change: precompute numeric term postings per field at compile-time and evaluate range bounds via binary search instead of per-query `ParseFloat` scans.
+- New benchmark: `BenchmarkAdapterQueryYCSBTableSeqRange` (`internal/search/index/adapter_benchmark_test.go`), selector shape `Eq(/_table=usertable) AND Range(/_seq>=X)`, `limit=100`.
+- Before optimization (3 runs): `723200`, `637597`, `607784 ns/op` (median `637597 ns/op`), `555k-561k B/op`, `60-63 allocs/op`.
+- After optimization (5 runs): `349337`, `328397`, `319902`, `311691`, `378421 ns/op` (median `328397 ns/op`), `509k-523k B/op`, `54-56 allocs/op`.
+- Median delta on the synthetic benchmark: `-48.49% ns/op` (faster).
+
+Latest fair YCSB pair after this slice (with `make lockd-load-query` before runs):
+- Index run (`2026-02-27T07:43:38Z`): `SCAN ops/s = 15177.7`
+- Scan run (`2026-02-27T07:44:02Z`): `SCAN ops/s = 15001.1`
+- Index advantage in-pair: `+1.18%`
 
 ## Performance & comparison (2026-01-27 baseline)
 
@@ -181,3 +300,103 @@ Lockd query benchmarks (lockd-bench, embedded disk backend, ha=failover):
     p99.9: 31.634 ms; min: 9.544 ms; max: 36.776 ms
 
 Full logs for these runs live under `docs/performance/2026-01-27-ycsb-load/`.
+
+## Benchmark update (2026-02-28, corrected clean rerun)
+
+Data-quality corrections for this section:
+- Benchmark summaries now exclude any run block containing `*_ERROR` counters.
+- Query compare tooling now only uses entries that include real `SCAN` metrics.
+- Previous high-throughput rows from `2026-02-26-full-rerun-v2` are tainted (`*_ERROR`) and are not used for comparison.
+
+Clean rerun artifacts:
+- Core: `docs/performance/2026-02-28-benchmark-update/clean-rerun/ycsb-core-clean.log`
+- Attach: `docs/performance/2026-02-28-benchmark-update/clean-rerun/ycsb-attach-clean.log` and `docs/performance/2026-02-28-benchmark-update/clean-rerun/ycsb-attach-debug2.log`
+- Txn: `docs/performance/2026-02-28-benchmark-update/clean-rerun/ycsb-txn-clean.log`
+
+Baseline source notes:
+- Core and attach baselines come from `docs/performance/2026-01-27-ycsb-load/README.md`, `docs/performance/2026-01-27-ycsb-load/run-summary.md`, and `docs/performance/2026-01-27-ycsb-load/attach-summary.md`.
+- Txn baseline values remain from this document's legacy baseline block (`2111.2` / `3117.9`) because `2026-01-27-ycsb-load` does not include an explicit txn series.
+
+| Scenario | Baseline ops/s | Current clean ops/s | Delta |
+| --- | ---: | ---: | ---: |
+| lockd load workloada | 408.9 | 2066.8 | +405.46% |
+| lockd run workloada | 1641.1 | 3495.8 | +113.01% |
+| lockd load workloada-attach | 1053.8 | 1603.7 | +52.18% |
+| lockd run workloada-attach | 1642.0 | 2525.9 | +53.83% |
+| lockd load workloada-txn | 2111.2 | 2142.9 | +1.50% |
+| lockd run workloada-txn | 3117.9 | 3187.1 | +2.22% |
+
+## Core parity profile (2026-03-04)
+
+Latest profile artifact:
+- `docs/performance/2026-03-04-ycsb-parity-profile/summary.md`
+
+Profile settings used for parity confirmation:
+- `indexer-flush-docs: 2000` (override)
+- `logstore-commit-max-ops: 2048` (override)
+- `logstore-segment-size: 64MB` (default-equivalent)
+- `sweeper-interval: 5s` (default)
+- `txn-replay-interval: 5s` (default)
+- `qrf-disabled: true`
+
+Passing entries from `ycsb/performance.log`:
+- `2026-03-04T12:17:54Z` load: `2085.6 ops/s` (target `>=2066.8`)
+- `2026-03-04T12:20:40Z` run: `3723.0 ops/s` (target `>=3495.8`)
+
+Important:
+- Same-profile run variance was observed in nearby attempts (`3162.3 ops/s` on `2026-03-04T12:19:14Z`).
+- Keep this as a benchmark profile until repeated-run stability is verified across the broader matrix.
+
+Lockd query benchmarks (lockd-bench, embedded disk backend, ha=failover, isolated rerun):
+- **query-index** (ops=2000, concurrency=8, warmup=0): 10215.7 ops/s
+  - Avg: 0.780 ms; p50: 0.563 ms; p90: 1.247 ms; p95: 1.527 ms; p99: 2.794 ms;
+    p99.9: 8.551 ms; min: 0.248 ms; max: 8.646 ms; index_flush: 0.197 s
+- **query-scan** (ops=2000, concurrency=8, warmup=0): 3063.6 ops/s
+  - Avg: 2.607 ms; p50: 2.476 ms; p90: 4.092 ms; p95: 4.856 ms; p99: 6.713 ms;
+    p99.9: 9.847 ms; min: 0.453 ms; max: 10.171 ms
+
+How this lockd-bench query block was run (exact contract):
+- Backend/protocol: embedded disk backend via lockd-bench in-process server (`unix://` socket), `ha=failover`.
+- Run model: `-runs 3 -warmup 0`; reported value is the `bench summary` median from each log.
+- Query return mode: `documents` (`-query-return documents`).
+- QRF: default enabled (not `-qrf-disabled`).
+- Connection guard: not exercised in this path (UDS/in-process benchmark path, not TCP endpoint mode).
+
+Repro commands for this block:
+
+```bash
+go run ./cmd/lockd-bench \
+  -workload query-index \
+  -backend disk \
+  --ha failover \
+  --log-level error \
+  -ops 2000 \
+  -concurrency 8 \
+  -warmup 0 \
+  -runs 3 \
+  -query-return documents \
+  | tee docs/performance/2026-02-28-benchmark-update/lockd-bench-query/query-index.log
+
+go run ./cmd/lockd-bench \
+  -workload query-scan \
+  -backend disk \
+  --ha failover \
+  --log-level error \
+  -ops 2000 \
+  -concurrency 8 \
+  -warmup 0 \
+  -runs 3 \
+  -query-return documents \
+  | tee docs/performance/2026-02-28-benchmark-update/lockd-bench-query/query-scan.log
+```
+
+Lockd query benchmark comparison vs historical block above:
+- query-index throughput: `814.4 -> 10215.7 ops/s` (`+1154.38%`)
+- query-scan throughput: `422.5 -> 3063.6 ops/s` (`+625.11%`)
+- query-index average latency: `9.811 ms -> 0.780 ms` (`-92.05%`)
+- query-scan average latency: `18.915 ms -> 2.607 ms` (`-86.22%`)
+- index/scan throughput ratio: `1.93x -> 3.33x`
+
+Lockd-bench artifacts for this refresh:
+- `docs/performance/2026-02-28-benchmark-update/lockd-bench-query/query-index.log`
+- `docs/performance/2026-02-28-benchmark-update/lockd-bench-query/query-scan.log`

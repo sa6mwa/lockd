@@ -1,6 +1,8 @@
 package queue
 
 import (
+	"bytes"
+	"context"
 	"testing"
 	"time"
 
@@ -48,5 +50,42 @@ func TestUpdateReadyCacheSeedsDescriptor(t *testing.T) {
 	}
 	if !entry.due.Equal(doc.NotVisibleUntil) {
 		t.Fatalf("expected due %s, got %s", doc.NotVisibleUntil, entry.due)
+	}
+}
+
+func TestPeekCandidateDoesNotConsume(t *testing.T) {
+	store := memory.NewWithConfig(memory.Config{QueueWatch: false})
+	svc, err := New(store, clock.Real{}, Config{})
+	if err != nil {
+		t.Fatalf("queue.New: %v", err)
+	}
+	ctx := context.Background()
+	msg, err := svc.Enqueue(ctx, "default", "jobs", bytes.NewReader([]byte("payload")), EnqueueOptions{})
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	peek1, err := svc.PeekCandidate(ctx, "default", "jobs", "", 1)
+	if err != nil {
+		t.Fatalf("peek candidate: %v", err)
+	}
+	if peek1.Descriptor == nil || peek1.Descriptor.Document.ID != msg.ID {
+		t.Fatalf("unexpected first peek result: %+v", peek1.Descriptor)
+	}
+
+	peek2, err := svc.PeekCandidate(ctx, "default", "jobs", "", 1)
+	if err != nil {
+		t.Fatalf("peek candidate second call: %v", err)
+	}
+	if peek2.Descriptor == nil || peek2.Descriptor.Document.ID != msg.ID {
+		t.Fatalf("unexpected second peek result: %+v", peek2.Descriptor)
+	}
+
+	next, err := svc.NextCandidate(ctx, "default", "jobs", "", 1)
+	if err != nil {
+		t.Fatalf("next candidate after peek: %v", err)
+	}
+	if next.Descriptor == nil || next.Descriptor.Document.ID != msg.ID {
+		t.Fatalf("expected next candidate %q, got %+v", msg.ID, next.Descriptor)
 	}
 }

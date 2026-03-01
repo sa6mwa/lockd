@@ -78,7 +78,7 @@ func routerSys(operation string) string {
 func applyCorrelation(ctx context.Context, logger pslog.Logger, span trace.Span) (context.Context, pslog.Logger) {
 	if id := correlation.ID(ctx); id != "" {
 		if ctx.Value(correlationAppliedKey{}) == nil {
-			logger = logger.With("cid", id)
+			logger = withLoggerFields(logger, "cid", id)
 			ctx = context.WithValue(ctx, correlationAppliedKey{}, struct{}{})
 		} else if existing := pslog.LoggerFromContext(ctx); existing != nil {
 			logger = existing
@@ -92,15 +92,32 @@ func applyCorrelation(ctx context.Context, logger pslog.Logger, span trace.Span)
 }
 
 func clientIdentityFromRequest(r *http.Request) string {
-	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+	if r == nil || r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
 		return ""
 	}
-	cert := r.TLS.PeerCertificates[0]
+	return clientIdentityFromCertificate(r.TLS.PeerCertificates[0])
+}
+
+var clientIdentityCache = newLRUCache[certCacheKey, string](defaultClientIdentityCacheLimit)
+
+func clientIdentityFromCertificate(cert *x509.Certificate) string {
+	if cert == nil {
+		return ""
+	}
+	key, ok := certificateCacheKey(cert)
+	if !ok {
+		return ""
+	}
+	if cached, ok := clientIdentityCache.get(key); ok {
+		return cached
+	}
 	serial := ""
 	if cert.SerialNumber != nil {
 		serial = cert.SerialNumber.Text(16)
 	}
-	return fmt.Sprintf("%s#%s", cert.Subject.String(), serial)
+	id := cert.Subject.String() + "#" + serial
+	clientIdentityCache.put(key, id)
+	return id
 }
 
 func peerCertificate(r *http.Request) *x509.Certificate {
@@ -238,12 +255,33 @@ func normalizeSelectorFields(sel *api.Selector) error {
 		}
 		sel.Eq.Field = normalized
 	}
+	if sel.Contains != nil {
+		normalized, err := jsonpointer.Normalize(sel.Contains.Field)
+		if err != nil {
+			return fmt.Errorf("contains.field: %w", err)
+		}
+		sel.Contains.Field = normalized
+	}
+	if sel.IContains != nil {
+		normalized, err := jsonpointer.Normalize(sel.IContains.Field)
+		if err != nil {
+			return fmt.Errorf("icontains.field: %w", err)
+		}
+		sel.IContains.Field = normalized
+	}
 	if sel.Prefix != nil {
 		normalized, err := jsonpointer.Normalize(sel.Prefix.Field)
 		if err != nil {
 			return fmt.Errorf("prefix.field: %w", err)
 		}
 		sel.Prefix.Field = normalized
+	}
+	if sel.IPrefix != nil {
+		normalized, err := jsonpointer.Normalize(sel.IPrefix.Field)
+		if err != nil {
+			return fmt.Errorf("iprefix.field: %w", err)
+		}
+		sel.IPrefix.Field = normalized
 	}
 	if sel.Range != nil {
 		normalized, err := jsonpointer.Normalize(sel.Range.Field)

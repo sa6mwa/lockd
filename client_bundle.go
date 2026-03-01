@@ -80,6 +80,16 @@ func SPIFFEURIForServer(nodeID string) (*url.URL, error) {
 // ResolveClientBundlePath resolves or validates the client bundle path for a role.
 // When explicitPath is empty, it auto-discovers bundle files under the default config dir.
 func ResolveClientBundlePath(role ClientBundleRole, explicitPath string) (string, error) {
+	return resolveClientBundlePath(role, explicitPath, "")
+}
+
+// ResolveClientBundlePathWithHint resolves or validates the client bundle path for a role.
+// This variant allows callers to override the CLI hint shown in error messages.
+func ResolveClientBundlePathWithHint(role ClientBundleRole, explicitPath, hint string) (string, error) {
+	return resolveClientBundlePath(role, explicitPath, hint)
+}
+
+func resolveClientBundlePath(role ClientBundleRole, explicitPath, hint string) (string, error) {
 	if strings.TrimSpace(explicitPath) != "" {
 		return validateClientBundlePath(role, explicitPath)
 	}
@@ -91,7 +101,7 @@ func ResolveClientBundlePath(role ClientBundleRole, explicitPath string) (string
 	if err != nil {
 		return "", err
 	}
-	return selectClientBundleCandidate(role, candidates)
+	return selectClientBundleCandidate(role, candidates, hint)
 }
 
 func listClientBundleCandidates(dir string, role ClientBundleRole) ([]string, error) {
@@ -126,9 +136,9 @@ func listClientBundleCandidates(dir string, role ClientBundleRole) ([]string, er
 	return targets, nil
 }
 
-func selectClientBundleCandidate(role ClientBundleRole, candidates []string) (string, error) {
+func selectClientBundleCandidate(role ClientBundleRole, candidates []string, hint string) (string, error) {
 	if len(candidates) == 0 {
-		return "", missingClientBundleError(role, nil)
+		return "", missingClientBundleError(role, nil, hint)
 	}
 	var (
 		matches   []string
@@ -154,17 +164,17 @@ func selectClientBundleCandidate(role ClientBundleRole, candidates []string) (st
 		return matches[0], nil
 	}
 	if len(matches) > 1 {
-		return "", multipleClientBundleError(role, matches)
+		return "", multipleClientBundleError(role, matches, hint)
 	}
 	if role == ClientBundleRoleSDK {
 		if len(legacy) == 1 {
 			return legacy[0], nil
 		}
 		if len(legacy) > 1 {
-			return "", multipleClientBundleError(role, legacy)
+			return "", multipleClientBundleError(role, legacy, hint)
 		}
 	}
-	return "", missingClientBundleError(role, parseErrs)
+	return "", missingClientBundleError(role, parseErrs, hint)
 }
 
 func validateClientBundlePath(role ClientBundleRole, path string) (string, error) {
@@ -214,21 +224,26 @@ func spiffePrefix(role ClientBundleRole) string {
 	return SPIFFESDKPrefix
 }
 
-func missingClientBundleError(role ClientBundleRole, parseErrs []string) error {
-	hint := "--bundle"
-	if role == ClientBundleRoleTC {
-		hint = "--tc-client-bundle"
-	}
+func missingClientBundleError(role ClientBundleRole, parseErrs []string, hint string) error {
+	hint = clientBundleHint(role, hint)
 	if len(parseErrs) == 0 {
 		return fmt.Errorf("no %s bundle found; provide %s", role, hint)
 	}
 	return fmt.Errorf("no %s bundle found; provide %s (parse errors: %s)", role, hint, strings.Join(parseErrs, "; "))
 }
 
-func multipleClientBundleError(role ClientBundleRole, paths []string) error {
-	hint := "--bundle"
-	if role == ClientBundleRoleTC {
-		hint = "--tc-client-bundle"
-	}
+func multipleClientBundleError(role ClientBundleRole, paths []string, hint string) error {
+	hint = clientBundleHint(role, hint)
 	return fmt.Errorf("multiple %s bundles found (%s); specify %s", role, strings.Join(paths, ", "), hint)
+}
+
+func clientBundleHint(role ClientBundleRole, override string) string {
+	override = strings.TrimSpace(override)
+	if override != "" {
+		return override
+	}
+	if role == ClientBundleRoleTC {
+		return "--tc-client-bundle"
+	}
+	return "--bundle"
 }

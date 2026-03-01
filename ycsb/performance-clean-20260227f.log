@@ -1,0 +1,14 @@
+## 2026-02-27T08:58:51Z
+backend=lockd phase=run scenario=workloade-run-query-index series=2026-02-27-proper-query baseline_ref= run_id=20260227-proper-f workload=core recordcount=1000 operationcount=1000 threads=8 target=0 endpoints=https://127.0.0.1:9341 wal_fsync_interval= wal_commit_max_ops= wal_commit_single_wait= query_engine=index query_return=documents attach_enabled= attach_read= attach_bytes= txn_explicit= public_read=true
+Run finished, takes 1.429609489s
+INSERT - Takes(s): 1.4, Count: 100, OPS: 71.0, Avg(us): 9509, Min(us): 4800, Max(us): 25231, 50th(us): 8263, 90th(us): 14887, 95th(us): 22463, 99th(us): 25231, 99.9th(us): 25231, 99.99th(us): 25231
+SCAN   - Takes(s): 0.6, Count: 1900, OPS: 2994.3, Avg(us): 10919, Min(us): 338, Max(us): 1019903, 50th(us): 1576, 90th(us): 3343, 95th(us): 4659, 99th(us): 52863, 99.9th(us): 996351, 99.99th(us): 1019903
+TOTAL  - Takes(s): 1.4, Count: 2000, OPS: 1418.8, Avg(us): 10849, Min(us): 338, Max(us): 1019903, 50th(us): 1632, 90th(us): 4627, 95th(us): 10199, 99th(us): 52415, 99.9th(us): 996351, 99.99th(us): 1019903
+
+## 2026-02-27T08:59:10Z
+backend=lockd phase=run scenario=workloade-run-query-scan series=2026-02-27-proper-query baseline_ref= run_id=20260227-proper-f workload=core recordcount=1000 operationcount=1000 threads=8 target=0 endpoints=https://127.0.0.1:9341 wal_fsync_interval= wal_commit_max_ops= wal_commit_single_wait= query_engine=scan query_return=documents attach_enabled= attach_read= attach_bytes= txn_explicit= public_read=true
+Run finished, takes 11.637547806s
+INSERT - Takes(s): 11.6, Count: 94, OPS: 8.1, Avg(us): 15292, Min(us): 7192, Max(us): 35071, 50th(us): 14447, 90th(us): 22959, 95th(us): 24383, 99th(us): 35039, 99.9th(us): 35071, 99.99th(us): 35071
+SCAN   - Takes(s): 11.6, Count: 1906, OPS: 164.3, Avg(us): 93526, Min(us): 1233, Max(us): 398335, 50th(us): 62111, 90th(us): 276223, 95th(us): 334591, 99th(us): 374783, 99.9th(us): 383487, 99.99th(us): 398335
+TOTAL  - Takes(s): 11.6, Count: 2000, OPS: 172.4, Avg(us): 89849, Min(us): 1233, Max(us): 398335, 50th(us): 58719, 90th(us): 272383, 95th(us): 329983, 99th(us): 374783, 99.9th(us): 383487, 99.99th(us): 398335
+

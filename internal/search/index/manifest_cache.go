@@ -60,6 +60,7 @@ func cloneManifest(manifest *Manifest) *Manifest {
 	clone := NewManifest()
 	clone.Seq = manifest.Seq
 	clone.UpdatedAt = manifest.UpdatedAt
+	clone.Format = manifest.Format
 	if len(manifest.Shards) == 0 {
 		return clone
 	}

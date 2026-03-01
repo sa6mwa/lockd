@@ -31,6 +31,11 @@ func runNFSQueuePollingBasics(t *testing.T) {
 		queuetestutil.InstallWatchdog(t, "nfs-poll-nack", 10*time.Second)
 		queuetestutil.RunQueueNackScenario(t, cli, queuetestutil.QueueName("nfs-poll-nack"), []byte("nfs nack payload"))
 	})
+
+	t.Run("ObservabilityReadOnly", func(t *testing.T) {
+		queuetestutil.InstallWatchdog(t, "nfs-poll-observability", 15*time.Second)
+		queuetestutil.RunQueueObservabilityReadOnlyScenario(t, cli, queuetestutil.QueueName("nfs-poll-observability"))
+	})
 }
 
 func runNFSQueuePollingIdleEnqueueDoesNotPoll(t *testing.T) {

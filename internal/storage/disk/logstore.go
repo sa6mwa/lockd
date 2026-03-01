@@ -128,6 +128,7 @@ type logNamespace struct {
 	stateIndex  map[string]*recordRef
 	objectIndex map[string]*recordRef
 
+	sortedMeta    []string
 	sortedObjects []string
 
 	batcher *fsyncBatcher
@@ -144,9 +145,6 @@ type logNamespace struct {
 	prefixBuf            []byte
 	appendGroupSet       map[*storage.CommitGroup]struct{}
 	appendGroupNeedsSync map[*storage.CommitGroup]struct{}
-	refSlab              []recordRef
-	refSlabIdx           int
-	refSlabs             [][]recordRef
 
 	pendingCounts map[*storage.CommitGroup]int
 	committed     map[*storage.CommitGroup]struct{}
@@ -207,6 +205,7 @@ type recordRef struct {
 	payloadLen    int64
 	link          *recordLink
 	cachedMeta    *storage.Meta
+	cachedSummary *storage.MetaSummary
 }
 
 type recordLink struct {
@@ -827,27 +826,41 @@ func (n *logNamespace) readSegmentLocked(seg *logSegment) error {
 		return fmt.Errorf("disk: logstore seek segment: %w", err)
 	}
 	reader := bufio.NewReader(file)
+	var (
+		headerBuf [logHeaderSize]byte
+		keyBuf    []byte
+		metaBuf   []byte
+		linkBuf   []byte
+		crcBuf    = make([]byte, 32<<10)
+	)
 	offset := seg.readOffset
 	for {
-		headerBuf := make([]byte, logHeaderSize)
-		if _, err := io.ReadFull(reader, headerBuf); err != nil {
+		if _, err := io.ReadFull(reader, headerBuf[:]); err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 				break
 			}
 			return fmt.Errorf("disk: logstore read header: %w", err)
 		}
-		hdr, err := decodeHeader(headerBuf)
+		hdr, err := decodeHeader(headerBuf[:])
 		if err != nil {
 			return nil
 		}
 		recordStart := offset
 		offset += int64(logHeaderSize)
-		keyBytes := make([]byte, hdr.keyLen)
+		keyLen := int(hdr.keyLen)
+		if cap(keyBuf) < keyLen {
+			keyBuf = make([]byte, keyLen)
+		}
+		keyBytes := keyBuf[:keyLen]
 		if _, err := io.ReadFull(reader, keyBytes); err != nil {
 			break
 		}
 		offset += int64(hdr.keyLen)
-		metaBytes := make([]byte, hdr.metaLen)
+		metaLen := int(hdr.metaLen)
+		if cap(metaBuf) < metaLen {
+			metaBuf = make([]byte, metaLen)
+		}
+		metaBytes := metaBuf[:metaLen]
 		if _, err := io.ReadFull(reader, metaBytes); err != nil {
 			break
 		}
@@ -857,15 +870,19 @@ func (n *logNamespace) readSegmentLocked(seg *logSegment) error {
 		var crc uint32
 		var link *recordLink
 		if payloadLen > 0 {
-			crcReader := crc32.NewIEEE()
 			if hdr.recType == logRecordStateLink {
-				linkPayload := make([]byte, payloadLen)
+				if payloadLen > int64(int(^uint(0)>>1)) {
+					break
+				}
+				linkLen := int(payloadLen)
+				if cap(linkBuf) < linkLen {
+					linkBuf = make([]byte, linkLen)
+				}
+				linkPayload := linkBuf[:linkLen]
 				if _, err := io.ReadFull(reader, linkPayload); err != nil {
 					break
 				}
-				if _, err := crcReader.Write(linkPayload); err != nil {
-					break
-				}
+				crc = crc32.ChecksumIEEE(linkPayload)
 				decoded, derr := decodeStateLinkPayload(linkPayload)
 				if derr != nil {
 					break
@@ -875,12 +892,23 @@ func (n *logNamespace) readSegmentLocked(seg *logSegment) error {
 					offset: decoded.offset,
 					length: decoded.length,
 				}
-				crc = crcReader.Sum32()
 			} else {
-				if _, err := io.CopyN(io.MultiWriter(io.Discard, crcReader), reader, payloadLen); err != nil {
+				crc = 0
+				remaining := payloadLen
+				for remaining > 0 {
+					chunk := len(crcBuf)
+					if int64(chunk) > remaining {
+						chunk = int(remaining)
+					}
+					if _, err := io.ReadFull(reader, crcBuf[:chunk]); err != nil {
+						break
+					}
+					crc = crc32.Update(crc, crc32.IEEETable, crcBuf[:chunk])
+					remaining -= int64(chunk)
+				}
+				if remaining > 0 {
 					break
 				}
-				crc = crcReader.Sum32()
 			}
 		}
 		offset += payloadLen
@@ -915,10 +943,16 @@ func (n *logNamespace) applyRecordLocked(ref *recordRef) {
 	case logRecordMetaPut:
 		current := n.metaIndex[ref.key]
 		if current == nil || ref.meta.gen >= current.meta.gen {
+			if current == nil {
+				n.insertMetaKeyLocked(ref.key)
+			}
 			n.metaIndex[ref.key] = ref
 		}
 	case logRecordMetaDelete:
 		if current := n.metaIndex[ref.key]; current == nil || ref.meta.gen >= current.meta.gen {
+			if current != nil {
+				n.removeMetaKeyLocked(ref.key)
+			}
 			delete(n.metaIndex, ref.key)
 		}
 	case logRecordStatePut:
@@ -950,6 +984,23 @@ func (n *logNamespace) applyRecordLocked(ref *recordRef) {
 			}
 			delete(n.objectIndex, ref.key)
 		}
+	}
+}
+
+func (n *logNamespace) insertMetaKeyLocked(key string) {
+	idx := sort.SearchStrings(n.sortedMeta, key)
+	if idx < len(n.sortedMeta) && n.sortedMeta[idx] == key {
+		return
+	}
+	n.sortedMeta = append(n.sortedMeta, "")
+	copy(n.sortedMeta[idx+1:], n.sortedMeta[idx:])
+	n.sortedMeta[idx] = key
+}
+
+func (n *logNamespace) removeMetaKeyLocked(key string) {
+	idx := sort.SearchStrings(n.sortedMeta, key)
+	if idx < len(n.sortedMeta) && n.sortedMeta[idx] == key {
+		n.sortedMeta = append(n.sortedMeta[:idx], n.sortedMeta[idx+1:]...)
 	}
 }
 
@@ -1519,16 +1570,10 @@ func (n *logNamespace) appendBatchMaxOps() int {
 }
 
 func (n *logNamespace) allocRef() *recordRef {
-	if n.refSlabIdx >= len(n.refSlab) {
-		slab := make([]recordRef, recordRefSlabSize)
-		n.refSlabs = append(n.refSlabs, slab)
-		n.refSlab = slab
-		n.refSlabIdx = 0
-	}
-	ref := &n.refSlab[n.refSlabIdx]
-	n.refSlabIdx++
-	*ref = recordRef{}
-	return ref
+	// Refs must not be retained in append-order slabs because workloads with
+	// repeated updates to the same keys would otherwise grow resident memory
+	// with total operations instead of current key cardinality.
+	return &recordRef{}
 }
 
 func (n *logNamespace) flushAppends(batch []*appendRequest) {
@@ -2146,6 +2191,11 @@ func (n *logNamespace) resolvePayloadSpan(ref *recordRef, file *os.File) (string
 	}
 	if ref.segment == nil {
 		return "", 0, 0, fmt.Errorf("disk: logstore missing segment")
+	}
+	// Fast-path for refs created by append/replay paths where payload offsets
+	// are already known and validated.
+	if ref.payloadOffset > 0 {
+		return ref.segment.path, ref.payloadOffset, ref.payloadLen, nil
 	}
 	if file == nil {
 		return "", 0, 0, fmt.Errorf("disk: logstore missing segment file")

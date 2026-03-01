@@ -17,7 +17,7 @@ func validateLease(meta *storage.Meta, leaseID string, fencingToken int64, txnID
 			ETag:       meta.StateETag,
 		}
 	}
-	if meta.Lease.ExpiresAtUnix < now.Unix() {
+	if meta.Lease.ExpiresAtUnix <= now.Unix() {
 		return Failure{
 			HTTPStatus: http.StatusForbidden,
 			Code:       "lease_expired",

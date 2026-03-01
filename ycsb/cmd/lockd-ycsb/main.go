@@ -156,12 +156,14 @@ func main() {
 		newShellCommand(),
 		newLoadCommand(),
 		newRunCommand(),
+		newProbeCommand(),
 	)
 
 	cobra.EnablePrefixMatching = true
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Println(rootCmd.UsageString())
+		os.Exit(1)
 	}
 
 	globalCancel()

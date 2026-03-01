@@ -2,8 +2,9 @@
 
 `lockd` is a single-binary coordination plane that fuses **exclusive leases**,
 **atomic JSON state + attachments**, **indexed document search with streaming
-queries**, and an **at-least-once queue** into one API—so you don’t need a lock
-service, a document store, and a message broker just to run reliable workflows.
+queries**, an **at-least-once queue**, and an **MCP facade for agent workflows**
+into one API—so you don’t need a lock service, a document store, a message
+broker, and a separate agent memory/sync facade just to run reliable workflows.
 It runs its own TC leader election and implicit XA, so multi-key updates and
 queue acknowledgements commit safely across nodes and even across backend
 _"islands"_ without external consensus systems. The same storage abstraction
@@ -78,6 +79,7 @@ internals (e.g. `.txns` stores transaction decisions) and are rejected.
 - **Simple HTTP/JSON API** (no gRPC) with optional mTLS. All endpoints support correlation IDs, structured errors, and fencing tokens.
 - **Go SDK (`client`)** with retries, structured `APIError`, acquire-for-update, streaming query helpers, document helpers (`client.Document`), and attachment helpers.
 - **Cobra/Viper CLI** that mirrors the SDK (leases, attachments, queue operations, `lockd client query`, `lockd client namespace`, etc.) and is covered by unit tests.
+- **MCP facade server (`lockd mcp`, package `pkt.systems/lockd/mcp`)** for agent workflows with lock/state/queue/query/attachment tools, LQL query+mutate support, and large-payload stream capabilities (`docs/MCP.md`).
 
 ### Storage backends
 
@@ -426,8 +428,8 @@ use the same endpoint and response envelope (`api.MetadataUpdateResponse`).
 
 `POST /v1/query` still returns `{namespace, keys, cursor}` JSON by default, but
 you can now request document streams by passing `return=documents`. In document
-mode the server replies with `Content-Type: application/x-ndjson`, sets the
-cursor/index metadata via headers, and streams rows shaped like:
+mode the server replies with `Content-Type: application/x-ndjson`, streams rows
+immediately, and emits cursor/index/metadata as HTTP trailers at end-of-stream:
 
 ```
 {"ns":"default","key":"orders/123","ver":42,"doc":{"status":"ready"}}
@@ -439,10 +441,9 @@ The Go SDK exposes `client.WithQueryReturnDocuments()` plus a revamped
 streaming mode each row exposes `row.DocumentReader()` (close it when you’re
 done) or the convenience `row.DocumentInto(...)` / `row.Document()` helpers. If
 you only need the identifiers, call `Keys()` to drain the stream without
-materialising any documents. Response headers mirror the cursor and index
-sequence (`X-Lockd-Query-Cursor`, `X-Lockd-Query-Index-Seq`), and the metadata
-map is available both in headers and on the JSON response for the keys-only
-mode.
+materialising any documents. In `return=documents`, query metadata is trailer-only:
+`X-Lockd-Query-Cursor`, `X-Lockd-Query-Index-Seq`, `X-Lockd-Query-Metadata`.
+For keys-only mode, metadata remains in the JSON body plus response headers.
 
 #### Queue dispatcher tuning
 
@@ -990,7 +991,10 @@ offline when possible; only the CA certificate is bundled with each server.
 lockd auth new ca --cn lockd-root
 
 # Issue a server certificate signed by the CA
-lockd auth new server --ca-in $HOME/.lockd/ca.pem --hosts "lockd.example.com,127.0.0.1"
+lockd auth new server --ca-in $HOME/.lockd/ca.pem --hosts lockd.example.com --hosts 127.0.0.1
+
+# Explicit wildcard SAN (equivalent to default behavior when --hosts is omitted)
+lockd auth new server --ca-in $HOME/.lockd/ca.pem --hosts '*'
 
 # Issue a new client certificate signed by the bundle CA
 lockd auth new client --ca-in $HOME/.lockd/ca.pem --cn worker-1
@@ -1014,6 +1018,10 @@ The commands default to `$HOME/.lockd/`, creating the directory with 0700 and
 files with 0600 permissions. Use `--out`/`--ca-in`/`--force` to override file
 locations. `ca.pem` contains the trust anchor + private key and is intended to
 be stored in a secure location separate from the server runtime bundle.
+
+`lockd auth new server` treats `--hosts` as SAN DNS/IP values and accepts both
+repeatable flags and CSV input. If `--hosts` is omitted, lockd issues a
+wildcard (`*`) SAN by default.
 
 When `lockd auth new server` writes to the default location and `server.pem`
 already exists, the CLI automatically picks the next available name
@@ -1153,11 +1161,11 @@ lockd client get --key orders -o - \
   | lockd client update --key orders
 lockd client remove --key orders
 
-# Atomic JSON mutations (mutate using an existing lease)
-lockd client set --key orders /progress/step=fetch /progress/count++ time:/progress/updated=NOW
+# Atomic JSON mutations (streaming server-side mutate under the active lease)
+lockd client mutate --key orders /progress/step=fetch /progress/count++ time:/progress/updated=NOW
 
 # Rich mutations with brace/quoted syntax (LQL)
-lockd client set --key ledger \
+lockd client mutate --key ledger \
   '/data{/hello key="mars traveler",/count++}' \
   /meta/previous=world \
   time:/meta/processed=NOW
@@ -1246,14 +1254,16 @@ tools without buffering in memory.
 
 The CLI auto-discovers `client*.pem` bundles under `$HOME/.lockd/` (or use
 `--bundle`) and performs the same host-agnostic mTLS verification as the SDK.
-`set` and `edit` consume the shared LQL mutation DSL. Paths now use JSON Pointer
+`mutate`, `set`, and `edit` consume the shared LQL mutation DSL. `mutate` is
+the streaming server-side path (`/v1/mutate`), while `set` remains available for
+local read-modify-write flows. Paths now use JSON Pointer
 syntax ([RFC 6901](https://datatracker.ietf.org/doc/html/rfc6901))
 (`/progress/counter++`), so literal dots, spaces, or Unicode in
 keys are handled transparently (only `/` and `~` are escaped as `~1`/`~0`). The
 mutator also supports brace blocks that fan out to nested fields
 (`/data{/hello key="mars traveler",/count++}`), increments (`=+3`/`--`),
 removals (`rm:`/`delete:`), and `time:` prefixes for RFC3339 timestamps.
-Commas and newlines can be mixed freely, e.g. `lockd client set --key ledger
+Commas and newlines can be mixed freely, e.g. `lockd client mutate --key ledger
 'meta{/owner="alice",/previous="world"}'`.
 
 Timeout knobs mirror the Go client: `--timeout` (HTTP dial+request),

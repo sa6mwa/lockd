@@ -22,7 +22,7 @@ import (
 )
 
 func submain(ctx context.Context) int {
-	baseLogger := pslog.LoggerFromEnv(
+	baseLogger := pslog.LoggerFromEnv(context.Background(),
 		pslog.WithEnvPrefix("LOCKD_LOG_"),
 		pslog.WithEnvOptions(pslog.Options{Mode: pslog.ModeStructured, MinLevel: pslog.InfoLevel}),
 		pslog.WithEnvWriter(os.Stderr),
@@ -135,6 +135,18 @@ func humanizeBytes(n int64) string {
 	return strings.ReplaceAll(humanize.Bytes(uint64(n)), " ", "")
 }
 
+func applyGlobalLogLevel(logger pslog.Logger) pslog.Logger {
+	logLevel := strings.TrimSpace(viper.GetString("log-level"))
+	if logLevel == "" {
+		logLevel = "info"
+	}
+	level, ok := pslog.ParseLevel(logLevel)
+	if !ok {
+		return logger
+	}
+	return logger.LogLevel(level)
+}
+
 func loadConfigFile() (string, error) {
 	cfgPath := strings.TrimSpace(viper.GetString("config"))
 	explicit := cfgPath != ""
@@ -200,6 +212,7 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 	var cfg lockd.Config
 	var bootstrapDir string
 	var bootstrapRan bool
+	var loadedConfigFile string
 	runBootstrap := func(baseLogger pslog.Logger) error {
 		if bootstrapDir == "" || bootstrapRan {
 			return nil
@@ -214,14 +227,33 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 				return fmt.Errorf("set LOCKD_CONFIG_DIR: %w", err)
 			}
 		}
+		configPath := strings.TrimSpace(viper.GetString("config"))
+		if configPath != "" {
+			expanded, err := expandPath(configPath)
+			if err != nil {
+				return fmt.Errorf("expand config path %q: %w", configPath, err)
+			}
+			configPath = expanded
+		}
 		logger := svcfields.WithSubsystem(baseLogger, "cli.bootstrap")
-		return bootstrapConfigDir(abs, logger)
+		return bootstrapConfigDirWithConfigPath(abs, configPath, logger)
 	}
 
 	cmd := &cobra.Command{
 		Use:           "lockd",
 		Short:         "lockd is a single-binary coordination service with exclusive leases, atomic JSON state, and an at-least-once queue",
 		SilenceErrors: true,
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			if err := runBootstrap(baseLogger); err != nil {
+				return err
+			}
+			path, err := loadConfigFile()
+			if err != nil {
+				return err
+			}
+			loadedConfigFile = path
+			return nil
+		},
 		Example: `
   # AWS S3 backend (expects AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY)
   LOCKD_STORE=aws://my-bucket/prefix LOCKD_AWS_REGION=us-west-2 lockd
@@ -250,16 +282,8 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 				"uid", os.Getuid(),
 				"gid", os.Getgid(),
 			)
-			if err := runBootstrap(baseLogger); err != nil {
-				return err
-			}
-
-			configFile, err := loadConfigFile()
-			if err != nil {
-				return err
-			}
-			if configFile != "" {
-				cliLogger.Info("loaded config file", "path", configFile)
+			if loadedConfigFile != "" {
+				cliLogger.Info("loaded config file", "path", loadedConfigFile)
 			}
 
 			if err := bindConfig(&cfg); err != nil {
@@ -277,16 +301,8 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 			}
 			cfg.IndexerFlushDocsSet = flagChanged("indexer-flush-docs") || viper.InConfig("indexer-flush-docs") || envSet("LOCKD_INDEXER_FLUSH_DOCS")
 			cfg.IndexerFlushIntervalSet = flagChanged("indexer-flush-interval") || viper.InConfig("indexer-flush-interval") || envSet("LOCKD_INDEXER_FLUSH_INTERVAL")
-			logLevel := strings.TrimSpace(viper.GetString("log-level"))
-			if logLevel == "" {
-				logLevel = "info"
-			}
-
-			level, ok := pslog.ParseLevel(logLevel)
-			if ok {
-				logger = logger.LogLevel(level)
-				cliLogger = svcfields.WithSubsystem(logger, "cli.root")
-			}
+			logger = applyGlobalLogLevel(logger)
+			cliLogger = svcfields.WithSubsystem(logger, "cli.root")
 
 			server, err := lockd.NewServer(cfg, lockd.WithLogger(logger))
 			if err != nil {
@@ -404,7 +420,7 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 	flags.Int("indexer-flush-docs", lockd.DefaultIndexerFlushDocs, "flush index segments after this many documents")
 	flags.Duration("indexer-flush-interval", lockd.DefaultIndexerFlushInterval, "maximum duration to buffer index postings before flushing")
 	flags.Int("query-doc-prefetch", lockd.DefaultQueryDocPrefetch, "prefetch depth for query return=documents (1 disables parallelism)")
-	flags.Bool("connguard-enabled", true, "enable listener-level connection guarding")
+	flags.Bool("connguard-enabled", true, "enable listener-level connection guarding (tcp/tls only; unsupported for listen-proto=unix)")
 	flags.Int("connguard-failure-threshold", lockd.DefaultConnguardFailureThreshold, "number of suspicious connection failures before hard-blocking an IP")
 	flags.Duration("connguard-failure-window", lockd.DefaultConnguardFailureWindow, "window used to count suspicious connection failures")
 	flags.Duration("connguard-block-duration", lockd.DefaultConnguardBlockDuration, "time to block an IP after reaching failure threshold")
@@ -497,6 +513,12 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 	cmd.AddCommand(newVersionCommand())
 	cmd.AddCommand(newTxnRootCommand(clientCfg))
 	cmd.AddCommand(newTCCommand())
+	cmd.AddCommand(newMCPCommand(
+		baseLogger,
+		cmd.PersistentFlags().Lookup("server"),
+		cmd.PersistentFlags().Lookup("bundle"),
+		cmd.PersistentFlags().Lookup("disable-mtls"),
+	))
 
 	return cmd
 }

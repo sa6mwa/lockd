@@ -126,6 +126,7 @@ linters:
 - Single source of truth. CLI commands must exercise real SDK calls; unit tests (e.g. `cmd/lockd/client_cli_test.go`) ensure Cobra wiring doesn’t drift.
 - Query ergonomics. Selector syntax is RFC 6901 + shorthand (`/field>=10`, braces, etc.). Update README + CLI help when syntax/extensions change.
 - Streaming. `client.Query` + `QueryResponse` must keep streaming semantics zero-copy; CLI `--documents` streams NDJSON (no buffering).
+- Hard rule: `io.ReadAll` (or equivalent full-buffer reads) is prohibited on document/state payload paths (query return=documents, update bodies, mutate streams, attachment/state reads). Use streaming readers/writers plus spool thresholds instead. Exceptions are limited to small control-plane JSON envelopes and tests explicitly designed for bounded fixtures.
 
 ### Integration Suite Coverage
 

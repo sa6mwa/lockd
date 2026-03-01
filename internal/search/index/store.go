@@ -88,6 +88,16 @@ func (s *Store) WarmNamespace(ctx context.Context, namespace string) error {
 
 // LoadManifest returns the index manifest and ETag for the namespace, defaulting to an empty manifest when missing.
 func (s *Store) LoadManifest(ctx context.Context, namespace string) (ManifestLoadResult, error) {
+	return s.loadManifest(ctx, namespace, true)
+}
+
+// LoadManifestReadOnly returns the namespace manifest for read-only callers.
+// Callers must treat the returned manifest as immutable.
+func (s *Store) LoadManifestReadOnly(ctx context.Context, namespace string) (ManifestLoadResult, error) {
+	return s.loadManifest(ctx, namespace, false)
+}
+
+func (s *Store) loadManifest(ctx context.Context, namespace string, cloneCached bool) (ManifestLoadResult, error) {
 	if s == nil || s.backend == nil {
 		return ManifestLoadResult{Manifest: NewManifest()}, nil
 	}
@@ -101,7 +111,10 @@ func (s *Store) LoadManifest(ctx context.Context, namespace string) (ManifestLoa
 			if logger != nil {
 				logger.Trace("index.store.load_manifest.cache_hit", "namespace", namespace, "object", manifestObject, "elapsed", time.Since(start))
 			}
-			return ManifestLoadResult{Manifest: cloneManifest(cached.manifest), ETag: cached.etag}, nil
+			if cloneCached {
+				return ManifestLoadResult{Manifest: cloneManifest(cached.manifest), ETag: cached.etag}, nil
+			}
+			return ManifestLoadResult{Manifest: cached.manifest, ETag: cached.etag}, nil
 		}
 	}
 	obj, err := s.backend.GetObject(ctx, namespace, manifestObject)
@@ -164,7 +177,7 @@ func (s *Store) SaveManifest(ctx context.Context, namespace string, manifest *Ma
 		return "", fmt.Errorf("index store unavailable")
 	}
 	if manifest != nil && manifest.Format == 0 {
-		manifest.Format = IndexFormatVersionV3
+		manifest.Format = IndexFormatVersionV4
 	}
 	if err := manifest.Validate(); err != nil {
 		return "", err
@@ -222,9 +235,12 @@ func (s *Store) WriteSegment(ctx context.Context, namespace string, segment *Seg
 	}); err != nil {
 		return "", 0, err
 	}
-	if s.cache != nil {
-		s.cache.put(cacheKey(namespace, segment.ID), segment)
-	}
+	// Do not warm the in-memory segment cache on writes.
+	//
+	// Write-heavy workloads (for example benchmark loads) can flush many large
+	// segments without any read traffic. Caching on write retains those segment
+	// structures in heap and causes monotonic resident growth. Read-path loads
+	// still populate the cache via LoadSegment.
 	return object, int64(len(payload)), nil
 }
 

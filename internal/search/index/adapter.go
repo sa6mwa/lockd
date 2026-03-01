@@ -1,25 +1,68 @@
 package index
 
 import (
-	"container/heap"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"pkt.systems/lockd/api"
+	"pkt.systems/lockd/internal/jsonpointer"
 	"pkt.systems/lockd/internal/search"
 	"pkt.systems/lockd/internal/storage"
+	"pkt.systems/lql"
 	"pkt.systems/pslog"
 )
 
 const indexCursorPrefix = "indexv1:"
+const queryStreamPayloadSpoolMemoryBytes = 256 * 1024
+
+var docIDScratchPool = sync.Pool{
+	New: func() any {
+		buf := make(docIDSet, 0, 256)
+		return &buf
+	},
+}
+
+var docIDAccumulatorPool = sync.Pool{
+	New: func() any {
+		return &docIDAccumulator{
+			current: make(docIDSet, 0, 256),
+			scratch: make(docIDSet, 0, 256),
+		}
+	},
+}
+
+var keyPresencePool = sync.Pool{
+	New: func() any {
+		buf := make([]bool, 0, 256)
+		return &buf
+	},
+}
+
+var querySegmentReaderPool = sync.Pool{
+	New: func() any {
+		return &segmentReader{}
+	},
+}
+
+func releaseQuerySegmentReader(reader *segmentReader) {
+	if reader == nil || !reader.immutable {
+		return
+	}
+	*reader = segmentReader{}
+	querySegmentReaderPool.Put(reader)
+}
 
 // AdapterConfig configures the index query adapter.
 type AdapterConfig struct {
@@ -29,8 +72,12 @@ type AdapterConfig struct {
 
 // Adapter executes queries against immutable index segments.
 type Adapter struct {
-	store  *Store
-	logger pslog.Logger
+	store   *Store
+	logger  pslog.Logger
+	plans   *selectorPlanCache
+	readers *preparedReaderCache
+	sorted  *sortedKeysCache
+	now     func() time.Time
 
 	docMetaHits    atomic.Uint64
 	docMetaMisses  atomic.Uint64
@@ -44,8 +91,12 @@ func NewAdapter(cfg AdapterConfig) (*Adapter, error) {
 		return nil, fmt.Errorf("index adapter: store required")
 	}
 	return &Adapter{
-		store:  cfg.Store,
-		logger: cfg.Logger,
+		store:   cfg.Store,
+		logger:  cfg.Logger,
+		plans:   newSelectorPlanCache(defaultSelectorPlanCacheLimit),
+		readers: newPreparedReaderCache(defaultPreparedReaderCacheLimit),
+		sorted:  newSortedKeysCache(defaultSortedKeysCacheLimit),
+		now:     time.Now,
 	}, nil
 }
 
@@ -57,6 +108,123 @@ func (a *Adapter) Capabilities(context.Context, string) (search.Capabilities, er
 	return search.Capabilities{Index: true}, nil
 }
 
+func (a *Adapter) prepareSelectorExecutionPlan(sel api.Selector) (selectorExecutionPlan, error) {
+	if sel.IsEmpty() {
+		return selectorExecutionPlan{selector: api.Selector{}, useLegacyFilter: true}, nil
+	}
+	needsNormalization, err := selectorNeedsNormalization(sel)
+	if err != nil {
+		return selectorExecutionPlan{}, fmt.Errorf("normalize selector: %w", err)
+	}
+	normalized := sel
+	if needsNormalization {
+		normalized = cloneSelector(sel)
+		if normalizeErr := normalizeSelectorFieldsForLQL(&normalized); normalizeErr != nil {
+			return selectorExecutionPlan{}, fmt.Errorf("normalize selector: %w", normalizeErr)
+		}
+	}
+	cacheKey := ""
+	if shouldCacheSelectorPlan(normalized) {
+		keyPayload, err := json.Marshal(normalized)
+		if err != nil {
+			return selectorExecutionPlan{}, fmt.Errorf("marshal selector cache key: %w", err)
+		}
+		cacheKey = string(keyPayload)
+		if a != nil && a.plans != nil && cacheKey != "" {
+			if cached, ok := a.plans.get(cacheKey); ok {
+				return cached, nil
+			}
+		}
+	}
+	useLegacy := selectorSupportsLegacyIndexFilter(sel)
+	out := selectorExecutionPlan{
+		cacheKey:                 cacheKey,
+		selector:                 normalized,
+		useLegacyFilter:          useLegacy,
+		hasRelativeDateSinceTerm: selectorHasRelativeDateSinceMacro(normalized),
+	}
+	if !useLegacy {
+		compiled, compileErr := lql.NewQueryStreamPlan(normalized)
+		if compileErr != nil {
+			return selectorExecutionPlan{}, fmt.Errorf("compile selector: %w", compileErr)
+		}
+		out.requirePostEval = true
+		out.postFilterPlan = compiled
+	}
+	if a != nil && a.plans != nil && cacheKey != "" {
+		a.plans.put(cacheKey, out)
+	}
+	return out, nil
+}
+
+func (a *Adapter) queryReader(ctx context.Context, namespace string, manifest *Manifest, manifestETag string) (*segmentReader, error) {
+	if manifest == nil {
+		manifest = NewManifest()
+	}
+	if a == nil || a.store == nil || a.readers == nil {
+		var store *Store
+		var logger pslog.Logger
+		if a != nil {
+			store = a.store
+			logger = a.logger
+		}
+		return newSegmentReader(namespace, manifest, store, logger), nil
+	}
+	key := preparedReaderCacheKey(namespace, manifest, manifestETag)
+	if template, ok := a.readers.get(key); ok && template != nil {
+		return template.cloneForQuery(manifest), nil
+	}
+	template := newSegmentReader(namespace, manifest, a.store, a.logger)
+	if err := template.prime(ctx); err != nil {
+		return nil, err
+	}
+	a.readers.put(key, template)
+	return template.cloneForQuery(manifest), nil
+}
+
+func (a *Adapter) sortedMatchedKeys(ctx context.Context, reader *segmentReader, manifestETag string, format uint32, plan selectorExecutionPlan) ([]string, error) {
+	cacheKey := ""
+	if manifestETag != "" && !plan.hasRelativeDateSinceTerm {
+		cacheKey = manifestETag + "|" + plan.cacheKey
+	}
+	if cacheKey != "" && a != nil && a.sorted != nil {
+		if cached, ok := a.sorted.get(cacheKey); ok {
+			return cached, nil
+		}
+	}
+	selector := plan.selector
+	useLegacyFilter := plan.useLegacyFilter
+	var (
+		matches docIDSet
+		err     error
+	)
+	if selector.IsEmpty() || !useLegacyFilter {
+		matches, err = reader.allDocIDs(ctx)
+	} else {
+		eval := selectorEvaluator{
+			reader:        reader,
+			containsNgram: format >= IndexFormatVersionV4,
+			now:           a.nowTime(),
+		}
+		matches, err = eval.evaluate(ctx, selector)
+	}
+	if err != nil {
+		return nil, err
+	}
+	sortedKeys := reader.sortedKeysForDocIDs(matches)
+	if cacheKey != "" && a != nil && a.sorted != nil {
+		a.sorted.put(cacheKey, sortedKeys)
+	}
+	return sortedKeys, nil
+}
+
+func (a *Adapter) nowTime() time.Time {
+	if a != nil && a.now != nil {
+		return a.now()
+	}
+	return time.Now()
+}
+
 // Query evaluates the selector via the index and returns matching keys.
 func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result, error) {
 	if a == nil || a.store == nil {
@@ -65,7 +233,7 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 	if req.Namespace == "" {
 		return search.Result{}, fmt.Errorf("index adapter: namespace required")
 	}
-	manifestRes, err := a.store.LoadManifest(ctx, req.Namespace)
+	manifestRes, err := a.store.LoadManifestReadOnly(ctx, req.Namespace)
 	if err != nil {
 		return search.Result{}, fmt.Errorf("load manifest: %w", err)
 	}
@@ -73,25 +241,23 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 	if manifest == nil {
 		manifest = NewManifest()
 	}
-	reader := newSegmentReader(req.Namespace, manifest, a.store, a.logger)
+	reader, err := a.queryReader(ctx, req.Namespace, manifest, manifestRes.ETag)
+	if err != nil {
+		return search.Result{}, err
+	}
+	defer releaseQuerySegmentReader(reader)
 	visibility, err := a.visibilityMap(ctx, req.Namespace)
 	if err != nil {
 		return search.Result{}, err
 	}
-	if term, ok := simpleEq(req.Selector); ok {
-		return a.queryEq(ctx, req, term, reader, manifest, visibility)
-	}
-	var matches keySet
-	if zeroSelector(req.Selector) {
-		matches, err = reader.allKeys(ctx)
-	} else {
-		eval := selectorEvaluator{reader: reader}
-		matches, err = eval.evaluate(ctx, req.Selector)
-	}
+	execPlan, err := a.prepareSelectorExecutionPlan(req.Selector)
 	if err != nil {
 		return search.Result{}, err
 	}
-	sortedKeys := matches.sorted()
+	sortedKeys, err := a.sortedMatchedKeys(ctx, reader, manifestRes.ETag, manifest.Format, execPlan)
+	if err != nil {
+		return search.Result{}, err
+	}
 	startIdx, err := startIndexFromCursor(req.Cursor, sortedKeys)
 	if err != nil {
 		return search.Result{}, fmt.Errorf("%w: %v", search.ErrInvalidCursor, err)
@@ -109,22 +275,11 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 	if limit <= 0 {
 		return search.Result{IndexSeq: manifest.Seq, Format: manifest.Format}, nil
 	}
-	visible := make([]string, 0, min(limit, len(sortedKeys)-startIdx))
-	canUseDocMeta := manifest.Format >= IndexFormatVersionV3
-	var docMeta map[string]DocumentMetadata
-	docMetaReady := false
-	getDocMeta := func() (map[string]DocumentMetadata, error) {
-		if docMetaReady {
-			return docMeta, nil
-		}
-		docMetaReady = true
-		metaMap, err := reader.docMetaMap(ctx)
-		if err != nil {
-			return nil, err
-		}
-		docMeta = metaMap
-		return docMeta, nil
+	docMeta, err := reader.docMetaMap(ctx)
+	if err != nil {
+		return search.Result{}, err
 	}
+	visible := make([]string, 0, min(limit, len(sortedKeys)-startIdx))
 	nextIndex := len(sortedKeys)
 	var lastReturned string
 	for i := startIdx; i < len(sortedKeys); i++ {
@@ -143,41 +298,27 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 		if ok && !visibleKey {
 			continue
 		}
-		if !ok {
-			if canUseDocMeta {
-				metaMap, err := getDocMeta()
-				if err != nil {
-					return search.Result{}, err
-				}
-				if meta, ok := metaMap[key]; ok {
-					if meta.PublishedVersion == 0 || meta.QueryExcluded {
-						continue
-					}
-				} else {
-					metaRes, metaErr := a.store.backend.LoadMeta(ctx, req.Namespace, key)
-					if metaErr != nil {
-						if errors.Is(metaErr, storage.ErrNotFound) {
-							continue
-						}
-						return search.Result{}, fmt.Errorf("load meta %s: %w", key, metaErr)
-					}
-					meta := metaRes.Meta
-					if meta == nil || meta.PublishedVersion == 0 || meta.QueryExcluded() {
-						continue
-					}
-				}
-			} else {
-				metaRes, metaErr := a.store.backend.LoadMeta(ctx, req.Namespace, key)
-				if metaErr != nil {
-					if errors.Is(metaErr, storage.ErrNotFound) {
-						continue
-					}
-					return search.Result{}, fmt.Errorf("load meta %s: %w", key, metaErr)
-				}
-				meta := metaRes.Meta
-				if meta == nil || meta.PublishedVersion == 0 || meta.QueryExcluded() {
+		docInfo, hasDocMeta := docMeta[key]
+		if !ok && hasDocMeta {
+			if docInfo.PublishedVersion == 0 || docInfo.QueryExcluded {
+				continue
+			}
+		}
+		if execPlan.requirePostEval {
+			var stateMeta *DocumentMetadata
+			if hasDocMeta {
+				docInfoCopy := docInfo
+				if docInfoCopy.StateETag == "" {
 					continue
 				}
+				stateMeta = &docInfoCopy
+			}
+			matched, matchErr := a.matchesSelector(ctx, req.Namespace, key, stateMeta, execPlan.postFilterPlan)
+			if matchErr != nil {
+				return search.Result{}, fmt.Errorf("evaluate selector %s: %w", key, matchErr)
+			}
+			if !matched {
+				continue
 			}
 		}
 		visible = append(visible, key)
@@ -208,145 +349,1044 @@ func (a *Adapter) Query(ctx context.Context, req search.Request) (search.Result,
 	return result, nil
 }
 
-func simpleEq(sel api.Selector) (*api.Term, bool) {
-	if sel.Eq == nil {
-		return nil, false
+// QueryDocuments evaluates the selector via the index and streams matching
+// documents directly to sink.
+func (a *Adapter) QueryDocuments(ctx context.Context, req search.Request, sink search.DocumentSink) (search.Result, error) {
+	if a == nil || a.store == nil {
+		return search.Result{}, fmt.Errorf("index adapter unavailable")
 	}
-	if sel.Prefix != nil || sel.Range != nil || sel.In != nil || sel.Exists != "" {
-		return nil, false
+	if req.Namespace == "" {
+		return search.Result{}, fmt.Errorf("index adapter: namespace required")
 	}
-	if sel.Not != nil && !sel.Not.IsEmpty() {
-		return nil, false
+	if sink == nil {
+		return search.Result{}, fmt.Errorf("index adapter: document sink required")
 	}
-	if len(sel.And) > 0 || len(sel.Or) > 0 {
-		return nil, false
+	manifestRes, err := a.store.LoadManifestReadOnly(ctx, req.Namespace)
+	if err != nil {
+		return search.Result{}, fmt.Errorf("load manifest: %w", err)
 	}
-	return sel.Eq, true
+	manifest := manifestRes.Manifest
+	if manifest == nil {
+		manifest = NewManifest()
+	}
+	reader, err := a.queryReader(ctx, req.Namespace, manifest, manifestRes.ETag)
+	if err != nil {
+		return search.Result{}, err
+	}
+	defer releaseQuerySegmentReader(reader)
+	visibility, err := a.visibilityMap(ctx, req.Namespace)
+	if err != nil {
+		return search.Result{}, err
+	}
+	execPlan, err := a.prepareSelectorExecutionPlan(req.Selector)
+	if err != nil {
+		return search.Result{}, err
+	}
+	sortedKeys, err := a.sortedMatchedKeys(ctx, reader, manifestRes.ETag, manifest.Format, execPlan)
+	if err != nil {
+		return search.Result{}, err
+	}
+	startIdx, err := startIndexFromCursor(req.Cursor, sortedKeys)
+	if err != nil {
+		return search.Result{}, fmt.Errorf("%w: %v", search.ErrInvalidCursor, err)
+	}
+	if startIdx >= len(sortedKeys) {
+		return search.Result{IndexSeq: manifest.Seq, Format: manifest.Format}, nil
+	}
+	limit := req.Limit
+	if limit <= 0 {
+		limit = len(sortedKeys) - startIdx
+	}
+	if limit > len(sortedKeys)-startIdx {
+		limit = len(sortedKeys) - startIdx
+	}
+	if limit <= 0 {
+		return search.Result{IndexSeq: manifest.Seq, Format: manifest.Format}, nil
+	}
+	docMeta, err := reader.docMetaMap(ctx)
+	if err != nil {
+		return search.Result{}, err
+	}
+	streamed := make([]string, 0, min(limit, len(sortedKeys)-startIdx))
+	var streamStats search.StreamStats
+	nextIndex := len(sortedKeys)
+	var lastReturned string
+	prefetch := req.DocPrefetch
+	if prefetch <= 1 || execPlan.requirePostEval {
+		for i := startIdx; i < len(sortedKeys); i++ {
+			if len(streamed) >= limit {
+				nextIndex = i
+				break
+			}
+			if err := ctx.Err(); err != nil {
+				return search.Result{}, err
+			}
+			key := sortedKeys[i]
+			visibleKey, ok, err := a.visibleFromLedger(ctx, req.Namespace, key, visibility)
+			if err != nil {
+				return search.Result{}, err
+			}
+			if ok && !visibleKey {
+				continue
+			}
+			docInfo, hasDocMeta := docMeta[key]
+			var stateMeta *DocumentMetadata
+			var version int64
+			if hasDocMeta {
+				if docInfo.PublishedVersion == 0 || docInfo.QueryExcluded {
+					continue
+				}
+				docInfoCopy := docInfo
+				stateMeta = &docInfoCopy
+				version = docInfoCopy.PublishedVersion
+			}
+			if !execPlan.requirePostEval {
+				if err := a.streamDocument(ctx, req.Namespace, key, version, stateMeta, sink); err != nil {
+					if errors.Is(err, storage.ErrNotFound) || storage.IsTransient(err) {
+						continue
+					}
+					return search.Result{}, fmt.Errorf("stream document %s: %w", key, err)
+				}
+				streamed = append(streamed, key)
+				streamStats.AddCandidate(true)
+				lastReturned = key
+				nextIndex = i + 1
+				continue
+			}
+			if stateMeta != nil && stateMeta.StateETag == "" {
+				continue
+			}
+			matched, queryResult, err := a.matchAndStreamDocument(ctx, req.Namespace, key, version, stateMeta, execPlan.postFilterPlan, sink)
+			if err != nil {
+				if errors.Is(err, storage.ErrNotFound) || storage.IsTransient(err) {
+					continue
+				}
+				return search.Result{}, fmt.Errorf("evaluate+stream selector %s: %w", key, err)
+			}
+			streamStats.Add(
+				queryResult.CandidatesSeen,
+				queryResult.CandidatesMatched,
+				queryResult.BytesCaptured,
+				queryResult.SpillCount,
+				queryResult.SpillBytes,
+			)
+			if !matched {
+				continue
+			}
+			streamed = append(streamed, key)
+			lastReturned = key
+			nextIndex = i + 1
+		}
+	} else {
+		maxBatch := prefetch * 4
+		if maxBatch < 1 {
+			maxBatch = 1
+		}
+		for i := startIdx; i < len(sortedKeys); {
+			if len(streamed) >= limit {
+				nextIndex = i
+				break
+			}
+			if err := ctx.Err(); err != nil {
+				return search.Result{}, err
+			}
+			remaining := limit - len(streamed)
+			batchSize := remaining
+			if batchSize > maxBatch {
+				batchSize = maxBatch
+			}
+			candidates := make([]documentStreamCandidate, 0, batchSize)
+			for ; i < len(sortedKeys) && len(candidates) < batchSize; i++ {
+				key := sortedKeys[i]
+				visibleKey, ok, err := a.visibleFromLedger(ctx, req.Namespace, key, visibility)
+				if err != nil {
+					return search.Result{}, err
+				}
+				if ok && !visibleKey {
+					continue
+				}
+				docInfo, hasDocMeta := docMeta[key]
+				var stateMeta *DocumentMetadata
+				var version int64
+				if hasDocMeta {
+					if docInfo.PublishedVersion == 0 || docInfo.QueryExcluded {
+						continue
+					}
+					docInfoCopy := docInfo
+					stateMeta = &docInfoCopy
+					version = docInfoCopy.PublishedVersion
+				}
+				candidates = append(candidates, documentStreamCandidate{
+					key:     key,
+					version: version,
+					meta:    stateMeta,
+				})
+			}
+			if len(candidates) == 0 {
+				nextIndex = i
+				continue
+			}
+			batchStreamed, err := a.streamDocumentBatch(ctx, req.Namespace, candidates, sink, prefetch)
+			if err != nil {
+				return search.Result{}, err
+			}
+			for _, key := range batchStreamed {
+				streamed = append(streamed, key)
+				streamStats.AddCandidate(true)
+				lastReturned = key
+				nextIndex = i
+				if len(streamed) >= limit {
+					break
+				}
+			}
+		}
+	}
+	result := search.Result{
+		Keys:     streamed,
+		IndexSeq: manifest.Seq,
+		Format:   manifest.Format,
+	}
+	if manifest.UpdatedAt.Unix() > 0 {
+		if result.Metadata == nil {
+			result.Metadata = make(map[string]string)
+		}
+		result.Metadata["index_updated_at"] = manifest.UpdatedAt.UTC().Format(time.RFC3339)
+	}
+	result.Metadata = streamStats.ApplyMetadata(result.Metadata)
+	if len(streamed) == limit && nextIndex < len(sortedKeys) && lastReturned != "" {
+		result.Cursor = encodeCursor(lastReturned)
+	}
+	return result, nil
+}
+
+func (a *Adapter) matchesSelector(ctx context.Context, namespace, key string, meta *DocumentMetadata, plan lql.QueryStreamPlan) (bool, error) {
+	stateCtx := ctx
+	if meta != nil {
+		stateCtx = storage.ContextWithStateReadHintsBorrowed(stateCtx, meta.StateDescriptor, meta.StatePlaintextBytes)
+	}
+	stateRes, err := a.store.backend.ReadState(stateCtx, namespace, key)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) || storage.IsTransient(err) {
+			return true, nil
+		}
+		return false, err
+	}
+	defer stateRes.Reader.Close()
+
+	matched := false
+	_, err = lql.QueryStreamWithResult(lql.QueryStreamRequest{
+		Ctx:               stateCtx,
+		Reader:            stateRes.Reader,
+		Plan:              plan,
+		Mode:              lql.QueryDecisionOnly,
+		MaxMatches:        1,
+		MaxCandidateBytes: 100 * 1024 * 1024,
+		OnDecision: func(d lql.QueryStreamDecision) error {
+			if !d.Matched {
+				return nil
+			}
+			matched = true
+			return lql.ErrStreamStop
+		},
+	})
+	if err != nil {
+		return false, err
+	}
+	return matched, nil
+}
+
+func (a *Adapter) streamDocument(ctx context.Context, namespace, key string, version int64, meta *DocumentMetadata, sink search.DocumentSink) error {
+	reader, err := a.openDocumentReader(ctx, namespace, key, meta)
+	if err != nil {
+		return err
+	}
+	if reader == nil {
+		return nil
+	}
+	defer reader.Close()
+	return sink.OnDocument(ctx, namespace, key, version, reader)
+}
+
+func (a *Adapter) openDocumentReader(ctx context.Context, namespace, key string, meta *DocumentMetadata) (io.ReadCloser, error) {
+	stateCtx := ctx
+	if meta != nil {
+		stateCtx = storage.ContextWithStateReadHintsBorrowed(stateCtx, meta.StateDescriptor, meta.StatePlaintextBytes)
+	}
+	stateRes, err := a.store.backend.ReadState(stateCtx, namespace, key)
+	if err != nil {
+		return nil, err
+	}
+	if stateRes.Reader == nil {
+		return nil, nil
+	}
+	return stateRes.Reader, nil
+}
+
+type documentStreamCandidate struct {
+	key     string
+	version int64
+	meta    *DocumentMetadata
+}
+
+type documentStreamBatchResult struct {
+	index   int
+	key     string
+	version int64
+	reader  io.ReadCloser
+	err     error
+}
+
+func (a *Adapter) streamDocumentBatch(ctx context.Context, namespace string, candidates []documentStreamCandidate, sink search.DocumentSink, prefetch int) ([]string, error) {
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	if prefetch <= 1 || len(candidates) == 1 {
+		streamed := make([]string, 0, len(candidates))
+		for _, candidate := range candidates {
+			if err := a.streamDocument(ctx, namespace, candidate.key, candidate.version, candidate.meta, sink); err != nil {
+				if errors.Is(err, storage.ErrNotFound) || storage.IsTransient(err) {
+					continue
+				}
+				return nil, fmt.Errorf("stream document %s: %w", candidate.key, err)
+			}
+			streamed = append(streamed, candidate.key)
+		}
+		return streamed, nil
+	}
+	if prefetch > len(candidates) {
+		prefetch = len(candidates)
+	}
+	jobs := make(chan int)
+	results := make(chan documentStreamBatchResult, len(candidates))
+	var wg sync.WaitGroup
+	worker := func() {
+		defer wg.Done()
+		for idx := range jobs {
+			candidate := candidates[idx]
+			reader, err := a.openDocumentReader(ctx, namespace, candidate.key, candidate.meta)
+			results <- documentStreamBatchResult{
+				index:   idx,
+				key:     candidate.key,
+				version: candidate.version,
+				reader:  reader,
+				err:     err,
+			}
+		}
+	}
+	wg.Add(prefetch)
+	for i := 0; i < prefetch; i++ {
+		go worker()
+	}
+	go func() {
+		defer close(jobs)
+		for idx := range len(candidates) {
+			select {
+			case <-ctx.Done():
+				return
+			case jobs <- idx:
+			}
+		}
+	}()
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+	ordered := make([]documentStreamBatchResult, len(candidates))
+	for res := range results {
+		ordered[res.index] = res
+	}
+	streamed := make([]string, 0, len(candidates))
+	for _, res := range ordered {
+		if res.err != nil {
+			if errors.Is(res.err, storage.ErrNotFound) || storage.IsTransient(res.err) {
+				continue
+			}
+			for _, pending := range ordered {
+				if pending.reader != nil {
+					_ = pending.reader.Close()
+				}
+			}
+			return nil, fmt.Errorf("stream document %s: %w", res.key, res.err)
+		}
+		if res.reader == nil {
+			continue
+		}
+		if err := sink.OnDocument(ctx, namespace, res.key, res.version, res.reader); err != nil {
+			_ = res.reader.Close()
+			for _, pending := range ordered {
+				if pending.reader != nil {
+					_ = pending.reader.Close()
+				}
+			}
+			return nil, err
+		}
+		_ = res.reader.Close()
+		streamed = append(streamed, res.key)
+	}
+	return streamed, nil
+}
+
+func (a *Adapter) matchAndStreamDocument(
+	ctx context.Context,
+	namespace string,
+	key string,
+	version int64,
+	meta *DocumentMetadata,
+	plan lql.QueryStreamPlan,
+	sink search.DocumentSink,
+) (bool, lql.QueryStreamResult, error) {
+	stateCtx := ctx
+	if meta != nil {
+		stateCtx = storage.ContextWithStateReadHintsBorrowed(stateCtx, meta.StateDescriptor, meta.StatePlaintextBytes)
+	}
+	stateRes, err := a.store.backend.ReadState(stateCtx, namespace, key)
+	if err != nil {
+		return false, lql.QueryStreamResult{}, err
+	}
+	if stateRes.Reader == nil {
+		return false, lql.QueryStreamResult{}, nil
+	}
+	defer stateRes.Reader.Close()
+
+	matched := false
+	result, err := lql.QueryStreamWithResult(lql.QueryStreamRequest{
+		Ctx:               stateCtx,
+		Reader:            stateRes.Reader,
+		Plan:              plan,
+		Mode:              lql.QueryDecisionPlusValue,
+		MatchedOnly:       true,
+		SpoolMemoryBytes:  queryStreamPayloadSpoolMemoryBytes,
+		MaxCandidateBytes: 100 * 1024 * 1024,
+		MaxMatches:        1,
+		CapturePolicy:     lql.QueryCaptureMatchesOnlyBestEffort,
+		OnValue: func(v lql.QueryStreamValue) error {
+			if !v.Matched {
+				return nil
+			}
+			docReader, openErr := v.OpenJSON()
+			if openErr != nil {
+				return openErr
+			}
+			defer docReader.Close()
+			if err := sink.OnDocument(ctx, namespace, key, version, docReader); err != nil {
+				return err
+			}
+			matched = true
+			return nil
+		},
+	})
+	if err != nil {
+		return false, lql.QueryStreamResult{}, err
+	}
+	if !matched {
+		return false, result, nil
+	}
+	return true, result, nil
 }
 
 type segmentReader struct {
-	namespace string
-	manifest  *Manifest
-	store     *Store
-	logger    pslog.Logger
-	cache     map[string]*Segment
+	namespace             string
+	manifest              *Manifest
+	store                 *Store
+	logger                pslog.Logger
+	cache                 map[string]*Segment
+	compiled              map[string]*compiledSegment
+	singleCompiled        *compiledSegment
+	singleCompiledReady   bool
+	keyIDs                map[string]uint32
+	keys                  []string
+	fieldIDs              map[string]uint32
+	fields                []string
+	fieldList             []string
+	fieldListReady        bool
+	fieldSegments         map[string][]string
+	fieldResolutionCached map[string][]string
+	sharedFieldResolution *fieldResolutionCache
+	fieldTrie             *fieldPathTrie
+	docMeta               map[string]DocumentMetadata
+	docMetaReady          bool
+	keyOrderByName        []uint32
+	keyOrderByNameReady   bool
+	immutable             bool
 }
 
 func newSegmentReader(namespace string, manifest *Manifest, store *Store, logger pslog.Logger) *segmentReader {
 	return &segmentReader{
-		namespace: namespace,
-		manifest:  manifest,
-		store:     store,
-		logger:    logger,
-		cache:     make(map[string]*Segment),
+		namespace:             namespace,
+		manifest:              manifest,
+		store:                 store,
+		logger:                logger,
+		cache:                 make(map[string]*Segment),
+		compiled:              make(map[string]*compiledSegment),
+		keyIDs:                make(map[string]uint32),
+		fieldIDs:              make(map[string]uint32),
+		fieldSegments:         make(map[string][]string),
+		sharedFieldResolution: newFieldResolutionCache(),
 	}
 }
 
-func (r *segmentReader) allKeys(ctx context.Context) (keySet, error) {
-	result := make(keySet)
-	err := r.forEachSegment(ctx, func(seg *Segment) error {
-		for _, block := range seg.Fields {
-			for _, keys := range block.Postings {
-				for _, key := range keys {
-					result[key] = struct{}{}
-				}
+func (r *segmentReader) allDocIDs(ctx context.Context) (docIDSet, error) {
+	out := borrowDocIDScratch()
+	defer releaseDocIDScratch(out)
+	decoded := borrowDocIDScratch()
+	defer releaseDocIDScratch(decoded)
+	err := r.forEachCompiledSegment(ctx, func(seg *compiledSegment) error {
+		for _, fieldID := range seg.fieldIDs {
+			block, ok := seg.fieldsByID[fieldID]
+			if !ok {
+				continue
+			}
+			for _, posting := range block.postingsByID {
+				docIDs := posting.decodeInto((*decoded)[:0])
+				*decoded = docIDs
+				*out = append(*out, docIDs...)
 			}
 		}
 		return nil
 	})
-	return result, err
+	if err != nil {
+		return nil, err
+	}
+	return sortUniqueDocIDs(append(docIDSet(nil), (*out)...)), nil
 }
 
-func (r *segmentReader) keysForEq(ctx context.Context, term *api.Term) (keySet, error) {
-	field := normalizeField(term)
-	if field == "" {
-		return make(keySet), nil
+func (r *segmentReader) resolveSelectorFieldIDs(ctx context.Context, field string) ([]uint32, error) {
+	resolved, err := r.resolveSelectorFields(ctx, field)
+	if err != nil {
+		return nil, err
 	}
-	value := normalizeTermValue(term.Value)
-	result := make(keySet)
-	err := r.forEachSegment(ctx, func(seg *Segment) error {
-		block, ok := seg.Fields[field]
+	if len(resolved) == 0 {
+		return nil, nil
+	}
+	ids := make([]uint32, 0, len(resolved))
+	for _, name := range resolved {
+		id, ok := r.fieldID(name)
 		if !ok {
-			return nil
+			continue
 		}
-		keys := block.Postings[value]
-		for _, key := range keys {
-			result[key] = struct{}{}
-		}
-		return nil
-	})
-	return result, err
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	return ids, nil
 }
 
-func (r *segmentReader) keysForPrefix(ctx context.Context, term *api.Term) (keySet, error) {
-	field := normalizeField(term)
-	if field == "" {
-		return make(keySet), nil
+func (r *segmentReader) docIDsForEq(ctx context.Context, term *api.Term) (docIDSet, error) {
+	fieldIDs, err := r.resolveSelectorFieldIDs(ctx, normalizeField(term))
+	if err != nil {
+		return nil, err
 	}
-	prefix := normalizeTermValue(term.Value)
-	result := make(keySet)
-	err := r.forEachPosting(ctx, field, func(termValue string, keys []string) error {
-		if strings.HasPrefix(termValue, prefix) {
-			for _, key := range keys {
-				result[key] = struct{}{}
-			}
-		}
-		return nil
-	})
-	return result, err
-}
-
-func (r *segmentReader) keysForRange(ctx context.Context, term *api.RangeTerm) (keySet, error) {
-	field := normalizeRangeField(term)
-	if field == "" {
-		return make(keySet), nil
+	if len(fieldIDs) == 0 {
+		return nil, nil
 	}
-	result := make(keySet)
-	err := r.forEachPosting(ctx, field, func(termValue string, keys []string) error {
-		num, err := strconv.ParseFloat(termValue, 64)
-		if err != nil || math.IsNaN(num) {
-			return nil
-		}
-		if !rangeMatches(term, num) {
-			return nil
-		}
-		for _, key := range keys {
-			result[key] = struct{}{}
-		}
-		return nil
-	})
-	return result, err
-}
-
-func (r *segmentReader) keysForExists(ctx context.Context, field string) (keySet, error) {
-	field = strings.TrimSpace(field)
-	if field == "" {
-		return make(keySet), nil
-	}
-	result := make(keySet)
-	err := r.forEachPosting(ctx, field, func(_ string, keys []string) error {
-		for _, key := range keys {
-			result[key] = struct{}{}
-		}
-		return nil
-	})
-	return result, err
-}
-
-func (r *segmentReader) keysForIn(ctx context.Context, term *api.InTerm) (keySet, error) {
-	field := strings.TrimSpace(term.Field)
-	if field == "" || len(term.Any) == 0 {
-		return make(keySet), nil
-	}
-	unionSet := make(keySet)
-	for _, candidate := range term.Any {
-		eqSet, err := r.keysForEq(ctx, &api.Term{Field: field, Value: candidate})
+	normalizedTerm := normalizeTermValue(term.Value)
+	acc := borrowDocIDAccumulator()
+	defer releaseDocIDAccumulator(acc)
+	for _, fieldID := range fieldIDs {
+		set, err := r.docIDsForTermID(ctx, fieldID, normalizedTerm)
 		if err != nil {
 			return nil, err
 		}
-		unionSet = union(unionSet, eqSet)
+		acc.union(set)
 	}
-	return unionSet, nil
+	return acc.result(), nil
+}
+
+func (r *segmentReader) docIDsForTermID(ctx context.Context, fieldID uint32, term string) (docIDSet, error) {
+	if strings.TrimSpace(term) == "" {
+		return nil, nil
+	}
+	out := borrowDocIDScratch()
+	defer releaseDocIDScratch(out)
+	if err := r.fillDocIDsForTermID(ctx, fieldID, term, out); err != nil {
+		return nil, err
+	}
+	if len(*out) == 0 {
+		return nil, nil
+	}
+	return append(docIDSet(nil), (*out)...), nil
+}
+
+func (r *segmentReader) fillDocIDsForTermID(ctx context.Context, fieldID uint32, term string, out *docIDSet) error {
+	if out == nil {
+		return nil
+	}
+	*out = (*out)[:0]
+	if strings.TrimSpace(term) == "" {
+		return nil
+	}
+	if single, ok, err := r.singleCompiledSegment(ctx); err != nil {
+		return err
+	} else if ok {
+		block, present := single.fieldsByID[fieldID]
+		if !present {
+			return nil
+		}
+		*out = block.docIDsForTermInto(term, (*out)[:0])
+		return nil
+	}
+	decoded := borrowDocIDScratch()
+	defer releaseDocIDScratch(decoded)
+	segmentsWithDocs := 0
+	if err := r.forEachCompiledSegment(ctx, func(seg *compiledSegment) error {
+		block, ok := seg.fieldsByID[fieldID]
+		if !ok {
+			return nil
+		}
+		docIDs := block.docIDsForTermInto(term, (*decoded)[:0])
+		*decoded = docIDs
+		if len(docIDs) == 0 {
+			return nil
+		}
+		segmentsWithDocs++
+		*out = append(*out, docIDs...)
+		return nil
+	}); err != nil {
+		return err
+	}
+	if segmentsWithDocs > 1 {
+		*out = sortUniqueDocIDs(*out)
+	}
+	return nil
+}
+
+func (r *segmentReader) docIDsForPrefix(ctx context.Context, term *api.Term) (docIDSet, error) {
+	fieldIDs, err := r.resolveSelectorFieldIDs(ctx, normalizeField(term))
+	if err != nil {
+		return nil, err
+	}
+	if len(fieldIDs) == 0 {
+		return nil, nil
+	}
+	prefix := normalizeTermValue(term.Value)
+	out := borrowDocIDScratch()
+	defer releaseDocIDScratch(out)
+	for _, fieldID := range fieldIDs {
+		if err := r.forEachPostingDocIDsByFieldID(ctx, fieldID, func(termValue string, docIDs []uint32) error {
+			if strings.HasPrefix(termValue, prefix) {
+				*out = append(*out, docIDs...)
+			}
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+	}
+	return sortUniqueDocIDs(append(docIDSet(nil), (*out)...)), nil
+}
+
+func (r *segmentReader) docIDsForContains(ctx context.Context, term *api.Term, useTrigramIndex bool) (docIDSet, error) {
+	fields, err := r.resolveSelectorFields(ctx, normalizeField(term))
+	if err != nil {
+		return nil, err
+	}
+	if len(fields) == 0 {
+		return nil, nil
+	}
+	needle := normalizeTermValue(term.Value)
+	if needle == "" {
+		return r.docIDsForExists(ctx, normalizeField(term))
+	}
+	var grams []string
+	if useTrigramIndex {
+		grams = normalizedTrigrams(needle)
+	}
+	out := borrowDocIDScratch()
+	defer releaseDocIDScratch(out)
+	for _, field := range fields {
+		fieldID, ok := r.fieldID(field)
+		if !ok {
+			continue
+		}
+		set, err := r.docIDsForContainsField(ctx, field, fieldID, needle, useTrigramIndex, grams, nil)
+		if err != nil {
+			return nil, err
+		}
+		if len(set) == 0 {
+			continue
+		}
+		*out = append(*out, set...)
+	}
+	return sortUniqueDocIDs(append(docIDSet(nil), (*out)...)), nil
+}
+
+func (r *segmentReader) docIDsForIContains(ctx context.Context, term *api.Term, useTrigramIndex bool) (docIDSet, error) {
+	normalizedField := normalizeField(term)
+	fields, err := r.resolveSelectorFields(ctx, normalizedField)
+	if err != nil {
+		return nil, err
+	}
+	needle := normalizeTermValue(term.Value)
+	if needle == "" {
+		return r.docIDsForExists(ctx, normalizedField)
+	}
+	tokens := simpleTextAnalyzer{}.Tokens(needle)
+	useAllText := strings.TrimSpace(normalizedField) == "/..."
+	var grams []string
+	if useTrigramIndex {
+		grams = normalizedTrigrams(needle)
+	}
+	if len(fields) == 0 {
+		prefilter, hasTokenIndex, err := r.tokenPrefilterForField(ctx, normalizedField, tokens, useAllText)
+		if err != nil {
+			return nil, err
+		}
+		if hasTokenIndex {
+			return prefilter, nil
+		}
+		return nil, nil
+	}
+	out := borrowDocIDScratch()
+	defer releaseDocIDScratch(out)
+	for _, field := range fields {
+		prefilter, hasTokenIndex, err := r.tokenPrefilterForField(ctx, field, tokens, useAllText)
+		if err != nil {
+			return nil, err
+		}
+		if hasTokenIndex && len(prefilter) == 0 {
+			continue
+		}
+		if hasTokenIndex {
+			rawExists, err := r.docIDsForExists(ctx, field)
+			if err != nil {
+				return nil, err
+			}
+			if len(rawExists) == 0 {
+				if len(prefilter) > 0 {
+					*out = append(*out, prefilter...)
+				}
+				continue
+			}
+		}
+		fieldID, ok := r.fieldID(field)
+		if !ok {
+			continue
+		}
+		set, err := r.docIDsForContainsField(ctx, field, fieldID, needle, useTrigramIndex, grams, prefilter)
+		if err != nil {
+			return nil, err
+		}
+		if len(set) == 0 {
+			continue
+		}
+		*out = append(*out, set...)
+	}
+	return sortUniqueDocIDs(append(docIDSet(nil), (*out)...)), nil
+}
+
+func (r *segmentReader) tokenPrefilterForField(ctx context.Context, field string, tokens []string, useAllText bool) (docIDSet, bool, error) {
+	if len(tokens) == 0 {
+		return nil, false, nil
+	}
+	tokenField := tokenizedField(field)
+	if useAllText {
+		tokenField = tokenAllTextField
+	}
+	tokenExists, err := r.docIDsForExists(ctx, tokenField)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(tokenExists) == 0 {
+		return nil, false, nil
+	}
+	tokenFieldID, ok := r.fieldID(tokenField)
+	if !ok {
+		return nil, false, nil
+	}
+	acc := borrowDocIDAccumulator()
+	defer releaseDocIDAccumulator(acc)
+	termSet := borrowDocIDScratch()
+	defer releaseDocIDScratch(termSet)
+	for _, token := range tokens {
+		if err := r.fillDocIDsForTermID(ctx, tokenFieldID, token, termSet); err != nil {
+			return nil, false, err
+		}
+		acc.intersect(*termSet)
+		if acc.initialized && len(acc.current) == 0 {
+			break
+		}
+	}
+	if !acc.initialized {
+		return nil, true, nil
+	}
+	return acc.result(), true, nil
+}
+
+func (r *segmentReader) docIDsForContainsField(
+	ctx context.Context,
+	field string,
+	fieldID uint32,
+	needle string,
+	useTrigramIndex bool,
+	grams []string,
+	prefilter docIDSet,
+) (docIDSet, error) {
+	candidateFilter := prefilter
+	if useTrigramIndex {
+		if len(grams) > 0 {
+			sawGramPosting := false
+			acc := borrowDocIDAccumulator()
+			defer releaseDocIDAccumulator(acc)
+			gramSet := borrowDocIDScratch()
+			defer releaseDocIDScratch(gramSet)
+			gramFieldID, ok := r.fieldID(containsGramField(field))
+			if !ok {
+				gramFieldID = 0
+			}
+			for _, gram := range grams {
+				if gramFieldID == 0 {
+					break
+				}
+				if err := r.fillDocIDsForTermID(ctx, gramFieldID, gram, gramSet); err != nil {
+					return nil, err
+				}
+				if len(*gramSet) > 0 {
+					sawGramPosting = true
+				}
+				acc.intersect(*gramSet)
+				if acc.initialized && len(acc.current) == 0 {
+					break
+				}
+			}
+			candidate := acc.result()
+			if len(candidateFilter) > 0 && len(candidate) > 0 {
+				candidate = intersectDocIDs(candidateFilter, candidate)
+			} else if len(candidateFilter) > 0 && len(candidate) == 0 {
+				candidate = candidateFilter
+			}
+			if len(candidate) > 0 {
+				candidateFilter = candidate
+			} else if acc.initialized && sawGramPosting {
+				return nil, nil
+			}
+		}
+	}
+	out := borrowDocIDScratch()
+	defer releaseDocIDScratch(out)
+	decoded := borrowDocIDScratch()
+	defer releaseDocIDScratch(decoded)
+	contributingPostings := 0
+	if single, ok, err := r.singleCompiledSegment(ctx); err != nil {
+		return nil, err
+	} else if ok {
+		block, present := single.fieldsByID[fieldID]
+		if !present {
+			return nil, nil
+		}
+		for termID, termValue := range block.terms {
+			if !strings.Contains(termValue, needle) {
+				continue
+			}
+			posting := block.postingsByID[termID]
+			before := len(*out)
+			if len(candidateFilter) > 0 {
+				*out = posting.appendIntersectInto(*out, candidateFilter)
+			} else {
+				docIDs := posting.decodeInto((*decoded)[:0])
+				*decoded = docIDs
+				*out = append(*out, docIDs...)
+			}
+			if len(*out) > before {
+				contributingPostings++
+			}
+		}
+		if len(*out) == 0 {
+			return nil, nil
+		}
+		if contributingPostings <= 1 {
+			return append(docIDSet(nil), (*out)...), nil
+		}
+		return sortUniqueDocIDs(append(docIDSet(nil), (*out)...)), nil
+	}
+	if err := r.forEachCompiledSegment(ctx, func(seg *compiledSegment) error {
+		block, ok := seg.fieldsByID[fieldID]
+		if !ok {
+			return nil
+		}
+		for termID, termValue := range block.terms {
+			if !strings.Contains(termValue, needle) {
+				continue
+			}
+			posting := block.postingsByID[termID]
+			before := len(*out)
+			if len(candidateFilter) > 0 {
+				*out = posting.appendIntersectInto(*out, candidateFilter)
+			} else {
+				docIDs := posting.decodeInto((*decoded)[:0])
+				*decoded = docIDs
+				*out = append(*out, docIDs...)
+			}
+			if len(*out) > before {
+				contributingPostings++
+			}
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	if len(*out) == 0 {
+		return nil, nil
+	}
+	if contributingPostings <= 1 {
+		return append(docIDSet(nil), (*out)...), nil
+	}
+	return sortUniqueDocIDs(append(docIDSet(nil), (*out)...)), nil
+}
+
+func (r *segmentReader) docIDsForRange(ctx context.Context, term *api.RangeTerm) (docIDSet, error) {
+	fieldIDs, err := r.resolveSelectorFieldIDs(ctx, normalizeRangeField(term))
+	if err != nil {
+		return nil, err
+	}
+	if len(fieldIDs) == 0 {
+		return nil, nil
+	}
+	mode := determineRangeMode(term)
+	if mode == rangeModeInvalid {
+		return nil, nil
+	}
+	numericBounds, numericOK := compileNumericRangeBounds(term)
+	temporalBounds, temporalOK := compileTemporalRangeBounds(term)
+	switch mode {
+	case rangeModeNumeric:
+		if !numericOK {
+			return nil, nil
+		}
+	case rangeModeTemporal:
+		if !temporalOK {
+			return nil, nil
+		}
+	default:
+		return nil, nil
+	}
+	out := borrowDocIDScratch()
+	defer releaseDocIDScratch(out)
+	decoded := borrowDocIDScratch()
+	defer releaseDocIDScratch(decoded)
+	if single, ok, err := r.singleCompiledSegment(ctx); err != nil {
+		return nil, err
+	} else if ok {
+		for _, fieldID := range fieldIDs {
+			block, present := single.fieldsByID[fieldID]
+			if !present {
+				continue
+			}
+			switch mode {
+			case rangeModeNumeric:
+				*out = block.appendDocIDsForNumericRangeInto(numericBounds, *out, decoded)
+			case rangeModeTemporal:
+				*out = block.appendDocIDsForTemporalRangeInto(temporalBounds, *out, decoded)
+			}
+		}
+		return sortUniqueDocIDs(append(docIDSet(nil), (*out)...)), nil
+	}
+	if err := r.forEachCompiledSegment(ctx, func(seg *compiledSegment) error {
+		for _, fieldID := range fieldIDs {
+			block, ok := seg.fieldsByID[fieldID]
+			if !ok {
+				continue
+			}
+			switch mode {
+			case rangeModeNumeric:
+				*out = block.appendDocIDsForNumericRangeInto(numericBounds, *out, decoded)
+			case rangeModeTemporal:
+				*out = block.appendDocIDsForTemporalRangeInto(temporalBounds, *out, decoded)
+			}
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return sortUniqueDocIDs(append(docIDSet(nil), (*out)...)), nil
+}
+
+func (r *segmentReader) docIDsForDate(ctx context.Context, term *api.DateTerm, now time.Time) (docIDSet, error) {
+	if term == nil {
+		return nil, nil
+	}
+	fieldIDs, err := r.resolveSelectorFieldIDs(ctx, normalizeDateField(term))
+	if err != nil {
+		return nil, err
+	}
+	if len(fieldIDs) == 0 {
+		return nil, nil
+	}
+	compiled, ok := compileDateTerm(term, now)
+	if !ok {
+		return nil, nil
+	}
+	out := borrowDocIDScratch()
+	defer releaseDocIDScratch(out)
+	decoded := borrowDocIDScratch()
+	defer releaseDocIDScratch(decoded)
+	if single, isSingle, err := r.singleCompiledSegment(ctx); err != nil {
+		return nil, err
+	} else if isSingle {
+		for _, fieldID := range fieldIDs {
+			block, present := single.fieldsByID[fieldID]
+			if !present {
+				continue
+			}
+			*out = block.appendDocIDsForDateInto(compiled, *out, decoded)
+		}
+		return sortUniqueDocIDs(append(docIDSet(nil), (*out)...)), nil
+	}
+	if err := r.forEachCompiledSegment(ctx, func(seg *compiledSegment) error {
+		for _, fieldID := range fieldIDs {
+			block, present := seg.fieldsByID[fieldID]
+			if !present {
+				continue
+			}
+			*out = block.appendDocIDsForDateInto(compiled, *out, decoded)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return sortUniqueDocIDs(append(docIDSet(nil), (*out)...)), nil
+}
+
+func (r *segmentReader) docIDsForExists(ctx context.Context, field string) (docIDSet, error) {
+	fieldIDs, err := r.resolveSelectorFieldIDs(ctx, strings.TrimSpace(field))
+	if err != nil {
+		return nil, err
+	}
+	if len(fieldIDs) == 0 {
+		return nil, nil
+	}
+	out := borrowDocIDScratch()
+	defer releaseDocIDScratch(out)
+	for _, fieldID := range fieldIDs {
+		if err := r.forEachPostingDocIDsByFieldID(ctx, fieldID, func(_ string, docIDs []uint32) error {
+			*out = append(*out, docIDs...)
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+	}
+	return sortUniqueDocIDs(append(docIDSet(nil), (*out)...)), nil
+}
+
+func (r *segmentReader) docIDsForIn(ctx context.Context, term *api.InTerm) (docIDSet, error) {
+	fieldIDs, err := r.resolveSelectorFieldIDs(ctx, strings.TrimSpace(term.Field))
+	if err != nil {
+		return nil, err
+	}
+	if len(fieldIDs) == 0 || len(term.Any) == 0 {
+		return nil, nil
+	}
+	acc := borrowDocIDAccumulator()
+	defer releaseDocIDAccumulator(acc)
+	for _, fieldID := range fieldIDs {
+		for _, candidate := range term.Any {
+			eqSet, err := r.docIDsForTermID(ctx, fieldID, normalizeTermValue(candidate))
+			if err != nil {
+				return nil, err
+			}
+			acc.union(eqSet)
+		}
+	}
+	return acc.result(), nil
 }
 
 func (r *segmentReader) forEachSegment(ctx context.Context, fn func(*Segment) error) error {
@@ -376,14 +1416,99 @@ func (r *segmentReader) forEachSegment(ctx context.Context, fn func(*Segment) er
 	return nil
 }
 
-func (r *segmentReader) forEachPosting(ctx context.Context, field string, fn func(term string, keys []string) error) error {
-	return r.forEachSegment(ctx, func(seg *Segment) error {
-		block, ok := seg.Fields[field]
+func (r *segmentReader) forEachCompiledSegment(ctx context.Context, fn func(*compiledSegment) error) error {
+	if r.manifest == nil || len(r.manifest.Shards) == 0 {
+		return nil
+	}
+	for _, shard := range r.manifest.Shards {
+		if shard == nil {
+			continue
+		}
+		for _, ref := range shard.Segments {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			segment, err := r.loadCompiledSegment(ctx, ref.ID)
+			if err != nil {
+				return err
+			}
+			if segment == nil {
+				continue
+			}
+			if err := fn(segment); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (r *segmentReader) singleCompiledSegment(ctx context.Context) (*compiledSegment, bool, error) {
+	if r == nil {
+		return nil, false, nil
+	}
+	if r.singleCompiledReady {
+		return r.singleCompiled, r.singleCompiled != nil, nil
+	}
+	r.singleCompiledReady = true
+	if r.manifest == nil || len(r.manifest.Shards) == 0 {
+		return nil, false, nil
+	}
+	var segmentID string
+	count := 0
+	for _, shard := range r.manifest.Shards {
+		if shard == nil {
+			continue
+		}
+		for _, ref := range shard.Segments {
+			count++
+			if count > 1 {
+				return nil, false, nil
+			}
+			segmentID = ref.ID
+		}
+	}
+	if count != 1 || segmentID == "" {
+		return nil, false, nil
+	}
+	seg, err := r.loadCompiledSegment(ctx, segmentID)
+	if err != nil {
+		return nil, false, err
+	}
+	r.singleCompiled = seg
+	return seg, seg != nil, nil
+}
+
+func (r *segmentReader) forEachPostingDocIDsByFieldID(ctx context.Context, fieldID uint32, fn func(term string, docIDs []uint32) error) error {
+	if single, ok, err := r.singleCompiledSegment(ctx); err != nil {
+		return err
+	} else if ok {
+		block, present := single.fieldsByID[fieldID]
+		if !present {
+			return nil
+		}
+		decoded := borrowDocIDScratch()
+		defer releaseDocIDScratch(decoded)
+		for termID, termValue := range block.terms {
+			docIDs := block.postingsByID[termID].decodeInto((*decoded)[:0])
+			*decoded = docIDs
+			if err := fn(termValue, docIDs); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	decoded := borrowDocIDScratch()
+	defer releaseDocIDScratch(decoded)
+	return r.forEachCompiledSegment(ctx, func(seg *compiledSegment) error {
+		block, ok := seg.fieldsByID[fieldID]
 		if !ok {
 			return nil
 		}
-		for term, keys := range block.Postings {
-			if err := fn(term, keys); err != nil {
+		for termID, termValue := range block.terms {
+			docIDs := block.postingsByID[termID].decodeInto((*decoded)[:0])
+			*decoded = docIDs
+			if err := fn(termValue, docIDs); err != nil {
 				return err
 			}
 		}
@@ -395,6 +1520,9 @@ func (r *segmentReader) loadSegment(ctx context.Context, id string) (*Segment, e
 	if seg, ok := r.cache[id]; ok {
 		return seg, nil
 	}
+	if r.immutable {
+		return nil, fmt.Errorf("index reader immutable cache miss for segment %s", id)
+	}
 	segment, err := r.store.LoadSegment(ctx, r.namespace, id)
 	if err != nil {
 		return nil, err
@@ -403,9 +1531,359 @@ func (r *segmentReader) loadSegment(ctx context.Context, id string) (*Segment, e
 	return segment, nil
 }
 
+func (r *segmentReader) loadCompiledSegment(ctx context.Context, id string) (*compiledSegment, error) {
+	if seg, ok := r.compiled[id]; ok {
+		return seg, nil
+	}
+	if r.immutable {
+		return nil, fmt.Errorf("index reader immutable cache miss for compiled segment %s", id)
+	}
+	raw, err := r.loadSegment(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	compiled := r.compileSegment(raw)
+	r.compiled[id] = compiled
+	return compiled, nil
+}
+
+func (r *segmentReader) compileSegment(seg *Segment) *compiledSegment {
+	if seg == nil {
+		return &compiledSegment{fieldsByID: make(map[uint32]compiledField)}
+	}
+	out := &compiledSegment{
+		fieldsByID: make(map[uint32]compiledField, len(seg.Fields)),
+		fieldIDs:   make([]uint32, 0, len(seg.Fields)),
+	}
+	for field, block := range seg.Fields {
+		fieldID := r.internField(field)
+		compiledBlock := compiledField{
+			terms:        make([]string, 0, len(block.Postings)),
+			postingsByID: make([]adaptivePosting, 0, len(block.Postings)),
+		}
+		terms := make([]string, 0, len(block.Postings))
+		for term := range block.Postings {
+			terms = append(terms, term)
+		}
+		sort.Strings(terms)
+		if len(terms) > 8 {
+			compiledBlock.termIDs = make(map[string]uint32, len(terms))
+		}
+		for _, term := range terms {
+			keys := block.Postings[term]
+			docIDs := make([]uint32, 0, len(keys))
+			for _, key := range keys {
+				docIDs = append(docIDs, r.internKey(key))
+			}
+			termID := uint32(len(compiledBlock.terms))
+			if compiledBlock.termIDs != nil {
+				compiledBlock.termIDs[term] = termID
+			}
+			num, parseErr := strconv.ParseFloat(term, 64)
+			isNumeric := parseErr == nil && !math.IsNaN(num)
+			temporal, isTemporal := parseTemporalLiteral(term)
+			compiledBlock.terms = append(compiledBlock.terms, term)
+			if isNumeric {
+				compiledBlock.numericPostings = append(compiledBlock.numericPostings, numericPostingRef{
+					value:  num,
+					termID: termID,
+				})
+			}
+			if isTemporal {
+				compiledBlock.temporalPostings = append(compiledBlock.temporalPostings, temporalPostingRef{
+					value:  temporal,
+					termID: termID,
+				})
+			}
+			compiledBlock.postingsByID = append(compiledBlock.postingsByID, newAdaptivePosting(docIDs))
+		}
+		if len(compiledBlock.numericPostings) > 1 {
+			sort.Slice(compiledBlock.numericPostings, func(i, j int) bool {
+				if compiledBlock.numericPostings[i].value == compiledBlock.numericPostings[j].value {
+					return compiledBlock.numericPostings[i].termID < compiledBlock.numericPostings[j].termID
+				}
+				return compiledBlock.numericPostings[i].value < compiledBlock.numericPostings[j].value
+			})
+		}
+		if len(compiledBlock.temporalPostings) > 1 {
+			sort.Slice(compiledBlock.temporalPostings, func(i, j int) bool {
+				cmp := temporalCompare(compiledBlock.temporalPostings[i].value, compiledBlock.temporalPostings[j].value)
+				if cmp == 0 {
+					return compiledBlock.temporalPostings[i].termID < compiledBlock.temporalPostings[j].termID
+				}
+				return cmp < 0
+			})
+		}
+		out.fieldIDs = append(out.fieldIDs, fieldID)
+		out.fieldsByID[fieldID] = compiledBlock
+	}
+	sort.Slice(out.fieldIDs, func(i, j int) bool { return out.fieldIDs[i] < out.fieldIDs[j] })
+	return out
+}
+
+func (r *segmentReader) internKey(key string) uint32 {
+	if id, ok := r.keyIDs[key]; ok {
+		return id
+	}
+	id := uint32(len(r.keys))
+	r.keys = append(r.keys, key)
+	r.keyIDs[key] = id
+	return id
+}
+
+func (r *segmentReader) internField(field string) uint32 {
+	if id, ok := r.fieldIDs[field]; ok {
+		return id
+	}
+	id := uint32(len(r.fields))
+	r.fields = append(r.fields, field)
+	r.fieldIDs[field] = id
+	return id
+}
+
+func (r *segmentReader) keyByDocID(id uint32) string {
+	if int(id) >= len(r.keys) {
+		return ""
+	}
+	return r.keys[id]
+}
+
+func (r *segmentReader) prime(ctx context.Context) error {
+	if r == nil {
+		return nil
+	}
+	if err := r.forEachCompiledSegment(ctx, func(*compiledSegment) error {
+		return nil
+	}); err != nil {
+		return err
+	}
+	if _, err := r.allIndexFields(ctx); err != nil {
+		return err
+	}
+	if _, err := r.docMetaMap(ctx); err != nil {
+		return err
+	}
+	r.ensureKeyOrderByName()
+	return nil
+}
+
+func (r *segmentReader) cloneForQuery(manifest *Manifest) *segmentReader {
+	if r == nil {
+		return nil
+	}
+	if manifest == nil {
+		manifest = r.manifest
+	}
+	clone := querySegmentReaderPool.Get().(*segmentReader)
+	*clone = segmentReader{
+		namespace:             r.namespace,
+		manifest:              manifest,
+		store:                 r.store,
+		logger:                r.logger,
+		cache:                 r.cache,
+		compiled:              r.compiled,
+		singleCompiled:        r.singleCompiled,
+		singleCompiledReady:   r.singleCompiledReady,
+		keyIDs:                r.keyIDs,
+		keys:                  r.keys,
+		fieldIDs:              r.fieldIDs,
+		fields:                r.fields,
+		fieldList:             r.fieldList,
+		fieldListReady:        r.fieldListReady,
+		fieldSegments:         r.fieldSegments,
+		fieldResolutionCached: nil,
+		sharedFieldResolution: r.sharedFieldResolution,
+		fieldTrie:             r.fieldTrie,
+		docMeta:               r.docMeta,
+		docMetaReady:          r.docMetaReady,
+		keyOrderByName:        r.keyOrderByName,
+		keyOrderByNameReady:   r.keyOrderByNameReady,
+		immutable:             true,
+	}
+	return clone
+}
+
+func (r *segmentReader) fieldID(field string) (uint32, bool) {
+	if r == nil {
+		return 0, false
+	}
+	if id, ok := r.fieldIDs[field]; ok {
+		return id, true
+	}
+	if r.immutable {
+		return 0, false
+	}
+	return r.internField(field), true
+}
+
+type compiledSegment struct {
+	fieldIDs   []uint32
+	fieldsByID map[uint32]compiledField
+}
+
+type compiledField struct {
+	termIDs          map[string]uint32
+	terms            []string
+	postingsByID     []adaptivePosting
+	numericPostings  []numericPostingRef
+	temporalPostings []temporalPostingRef
+}
+
+type numericPostingRef struct {
+	value  float64
+	termID uint32
+}
+
+type temporalPostingRef struct {
+	value  temporalValue
+	termID uint32
+}
+
+func (f compiledField) docIDsForTermInto(term string, dst docIDSet) docIDSet {
+	if len(f.terms) <= 8 || len(f.termIDs) == 0 {
+		for termID, candidate := range f.terms {
+			if candidate != term {
+				continue
+			}
+			if termID >= len(f.postingsByID) {
+				return dst[:0]
+			}
+			return f.postingsByID[termID].decodeInto(dst)
+		}
+		return dst[:0]
+	}
+	termID, ok := f.termIDs[term]
+	if !ok {
+		return dst[:0]
+	}
+	if int(termID) >= len(f.postingsByID) {
+		return dst[:0]
+	}
+	return f.postingsByID[termID].decodeInto(dst)
+}
+
+func (f compiledField) appendDocIDsForNumericRangeInto(bounds compiledNumericRange, dst docIDSet, decoded *docIDSet) docIDSet {
+	if decoded == nil {
+		return dst
+	}
+	if len(f.numericPostings) == 0 {
+		return dst
+	}
+	start := 0
+	end := len(f.numericPostings)
+	if bounds.hasGT {
+		start = sort.Search(len(f.numericPostings), func(i int) bool {
+			return f.numericPostings[i].value > bounds.gt
+		})
+	}
+	if bounds.hasGTE {
+		gteStart := sort.Search(len(f.numericPostings), func(i int) bool {
+			return f.numericPostings[i].value >= bounds.gte
+		})
+		if gteStart > start {
+			start = gteStart
+		}
+	}
+	if bounds.hasLT {
+		end = min(end, sort.Search(len(f.numericPostings), func(i int) bool {
+			return f.numericPostings[i].value >= bounds.lt
+		}))
+	}
+	if bounds.hasLTE {
+		end = min(end, sort.Search(len(f.numericPostings), func(i int) bool {
+			return f.numericPostings[i].value > bounds.lte
+		}))
+	}
+	if start >= end {
+		return dst
+	}
+	for i := start; i < end; i++ {
+		postingRef := f.numericPostings[i]
+		if int(postingRef.termID) >= len(f.postingsByID) {
+			continue
+		}
+		docIDs := f.postingsByID[postingRef.termID].decodeInto((*decoded)[:0])
+		*decoded = docIDs
+		dst = append(dst, docIDs...)
+	}
+	return dst
+}
+
+func (f compiledField) appendDocIDsForTemporalRangeInto(bounds compiledTemporalRange, dst docIDSet, decoded *docIDSet) docIDSet {
+	if decoded == nil {
+		return dst
+	}
+	if len(f.temporalPostings) == 0 {
+		return dst
+	}
+	start := 0
+	end := len(f.temporalPostings)
+	if bounds.hasGT {
+		start = sort.Search(len(f.temporalPostings), func(i int) bool {
+			return temporalCompare(f.temporalPostings[i].value, bounds.gt) > 0
+		})
+	}
+	if bounds.hasGTE {
+		gteStart := sort.Search(len(f.temporalPostings), func(i int) bool {
+			return temporalCompare(f.temporalPostings[i].value, bounds.gte) >= 0
+		})
+		if gteStart > start {
+			start = gteStart
+		}
+	}
+	if bounds.hasLT {
+		end = min(end, sort.Search(len(f.temporalPostings), func(i int) bool {
+			return temporalCompare(f.temporalPostings[i].value, bounds.lt) >= 0
+		}))
+	}
+	if bounds.hasLTE {
+		end = min(end, sort.Search(len(f.temporalPostings), func(i int) bool {
+			return temporalCompare(f.temporalPostings[i].value, bounds.lte) > 0
+		}))
+	}
+	if start >= end {
+		return dst
+	}
+	for i := start; i < end; i++ {
+		postingRef := f.temporalPostings[i]
+		if int(postingRef.termID) >= len(f.postingsByID) {
+			continue
+		}
+		docIDs := f.postingsByID[postingRef.termID].decodeInto((*decoded)[:0])
+		*decoded = docIDs
+		dst = append(dst, docIDs...)
+	}
+	return dst
+}
+
+func (f compiledField) appendDocIDsForDateInto(compiled compiledDateTerm, dst docIDSet, decoded *docIDSet) docIDSet {
+	if decoded == nil {
+		return dst
+	}
+	if len(f.temporalPostings) == 0 {
+		return dst
+	}
+	for i := 0; i < len(f.temporalPostings); i++ {
+		postingRef := f.temporalPostings[i]
+		if !dateTermMatches(compiled, postingRef.value) {
+			continue
+		}
+		if int(postingRef.termID) >= len(f.postingsByID) {
+			continue
+		}
+		docIDs := f.postingsByID[postingRef.termID].decodeInto((*decoded)[:0])
+		*decoded = docIDs
+		dst = append(dst, docIDs...)
+	}
+	return dst
+}
+
 func (r *segmentReader) docMetaMap(ctx context.Context) (map[string]DocumentMetadata, error) {
 	if r == nil {
 		return nil, nil
+	}
+	if r.docMetaReady {
+		return r.docMeta, nil
 	}
 	out := make(map[string]DocumentMetadata)
 	err := r.forEachSegment(ctx, func(seg *Segment) error {
@@ -426,195 +1904,126 @@ func (r *segmentReader) docMetaMap(ctx context.Context) (map[string]DocumentMeta
 	if err != nil {
 		return nil, err
 	}
+	r.docMeta = out
+	r.docMetaReady = true
 	return out, nil
 }
 
 type selectorEvaluator struct {
-	reader *segmentReader
+	reader        *segmentReader
+	containsNgram bool
+	now           time.Time
 }
 
-type postingCursor struct {
-	key  string
-	keys []string
-	idx  int
+type selectorClauseResolver struct {
+	family  string
+	resolve func(ctx context.Context, e selectorEvaluator, sel api.Selector) (docIDSet, bool, error)
 }
 
-type postingHeap []*postingCursor
-
-func (h postingHeap) Len() int           { return len(h) }
-func (h postingHeap) Less(i, j int) bool { return h[i].key < h[j].key }
-func (h postingHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-
-func (h *postingHeap) Push(x any) {
-	*h = append(*h, x.(*postingCursor))
-}
-
-func (h *postingHeap) Pop() any {
-	old := *h
-	n := len(old)
-	item := old[n-1]
-	*h = old[:n-1]
-	return item
-}
-
-func (a *Adapter) queryEq(ctx context.Context, req search.Request, term *api.Term, reader *segmentReader, manifest *Manifest, visibility map[string]bool) (search.Result, error) {
-	field := normalizeField(term)
-	if field == "" {
-		return search.Result{IndexSeq: manifest.Seq, Format: manifest.Format}, nil
-	}
-	value := normalizeTermValue(term.Value)
-	cursorValue := ""
-	if req.Cursor != "" {
-		decoded, err := decodeCursor(req.Cursor)
-		if err != nil {
-			return search.Result{}, fmt.Errorf("%w: %v", search.ErrInvalidCursor, err)
-		}
-		cursorValue = decoded
-	}
-	var lists [][]string
-	err := reader.forEachSegment(ctx, func(seg *Segment) error {
-		block, ok := seg.Fields[field]
-		if !ok {
-			return nil
-		}
-		keys := block.Postings[value]
-		if len(keys) == 0 {
-			return nil
-		}
-		lists = append(lists, keys)
-		return nil
-	})
-	if err != nil {
-		return search.Result{}, err
-	}
-	if len(lists) == 0 {
-		return search.Result{IndexSeq: manifest.Seq, Format: manifest.Format}, nil
-	}
-	limit := req.Limit
-	if limit < 0 {
-		limit = 0
-	}
-	h := make(postingHeap, 0, len(lists))
-	for _, keys := range lists {
-		start := 0
-		if cursorValue != "" {
-			start = sort.SearchStrings(keys, cursorValue)
-			if start < len(keys) && keys[start] == cursorValue {
-				start++
+var selectorClauseResolvers = []selectorClauseResolver{
+	{
+		family: "eq",
+		resolve: func(ctx context.Context, e selectorEvaluator, sel api.Selector) (docIDSet, bool, error) {
+			if sel.Eq == nil {
+				return nil, false, nil
 			}
-		}
-		if start >= len(keys) {
-			continue
-		}
-		h = append(h, &postingCursor{key: keys[start], keys: keys, idx: start})
-	}
-	if len(h) == 0 {
-		return search.Result{IndexSeq: manifest.Seq, Format: manifest.Format}, nil
-	}
-	heap.Init(&h)
-	visible := make([]string, 0, min(limit, 64))
-	canUseDocMeta := manifest.Format >= IndexFormatVersionV3
-	var docMeta map[string]DocumentMetadata
-	docMetaReady := false
-	getDocMeta := func() (map[string]DocumentMetadata, error) {
-		if docMetaReady {
-			return docMeta, nil
-		}
-		docMetaReady = true
-		metaMap, err := reader.docMetaMap(ctx)
-		if err != nil {
-			return nil, err
-		}
-		docMeta = metaMap
-		return docMeta, nil
-	}
-	lastKey := ""
-	for h.Len() > 0 {
-		if err := ctx.Err(); err != nil {
-			return search.Result{}, err
-		}
-		cursor := heap.Pop(&h).(*postingCursor)
-		key := cursor.key
-		cursor.idx++
-		if cursor.idx < len(cursor.keys) {
-			cursor.key = cursor.keys[cursor.idx]
-			heap.Push(&h, cursor)
-		}
-		if key == lastKey {
-			continue
-		}
-		lastKey = key
-		ledgerVisible, ok, err := a.visibleFromLedger(ctx, req.Namespace, key, visibility)
-		if err != nil {
-			return search.Result{}, err
-		}
-		if ok && !ledgerVisible {
-			continue
-		}
-		if !ok {
-			if canUseDocMeta {
-				metaMap, err := getDocMeta()
-				if err != nil {
-					return search.Result{}, err
-				}
-				if meta, ok := metaMap[key]; ok {
-					if meta.PublishedVersion == 0 || meta.QueryExcluded {
-						continue
-					}
-				} else {
-					metaRes, metaErr := a.store.backend.LoadMeta(ctx, req.Namespace, key)
-					if metaErr != nil {
-						if errors.Is(metaErr, storage.ErrNotFound) {
-							continue
-						}
-						return search.Result{}, fmt.Errorf("load meta %s: %w", key, metaErr)
-					}
-					meta := metaRes.Meta
-					if meta == nil || meta.PublishedVersion == 0 || meta.QueryExcluded() {
-						continue
-					}
-				}
-			} else {
-				metaRes, metaErr := a.store.backend.LoadMeta(ctx, req.Namespace, key)
-				if metaErr != nil {
-					if errors.Is(metaErr, storage.ErrNotFound) {
-						continue
-					}
-					return search.Result{}, fmt.Errorf("load meta %s: %w", key, metaErr)
-				}
-				meta := metaRes.Meta
-				if meta == nil || meta.PublishedVersion == 0 || meta.QueryExcluded() {
-					continue
-				}
+			set, err := e.reader.docIDsForEq(ctx, sel.Eq)
+			return set, true, err
+		},
+	},
+	{
+		family: "prefix",
+		resolve: func(ctx context.Context, e selectorEvaluator, sel api.Selector) (docIDSet, bool, error) {
+			if sel.Prefix == nil {
+				return nil, false, nil
 			}
-		}
-		visible = append(visible, key)
-		if limit > 0 && len(visible) >= limit {
-			break
-		}
-	}
-	result := search.Result{
-		Keys:     visible,
-		IndexSeq: manifest.Seq,
-		Format:   manifest.Format,
-	}
-	if req.IncludeDocMeta && len(visible) > 0 {
-		meta, err := a.collectDocMeta(ctx, visible, reader)
-		if err != nil {
-			return search.Result{}, err
-		}
-		result.DocMeta = meta
-	}
-	if manifest.UpdatedAt.Unix() > 0 {
-		result.Metadata = map[string]string{
-			"index_updated_at": manifest.UpdatedAt.UTC().Format(time.RFC3339),
-		}
-	}
-	if limit > 0 && len(visible) == limit && lastKey != "" && h.Len() > 0 {
-		result.Cursor = encodeCursor(lastKey)
-	}
-	return result, nil
+			set, err := e.reader.docIDsForPrefix(ctx, sel.Prefix)
+			return set, true, err
+		},
+	},
+	{
+		family: "iprefix",
+		resolve: func(ctx context.Context, e selectorEvaluator, sel api.Selector) (docIDSet, bool, error) {
+			if sel.IPrefix == nil {
+				return nil, false, nil
+			}
+			set, err := e.reader.docIDsForPrefix(ctx, sel.IPrefix)
+			return set, true, err
+		},
+	},
+	{
+		family: "contains",
+		resolve: func(ctx context.Context, e selectorEvaluator, sel api.Selector) (docIDSet, bool, error) {
+			if sel.Contains == nil {
+				return nil, false, nil
+			}
+			set, err := e.reader.docIDsForContains(ctx, sel.Contains, e.containsNgram)
+			return set, true, err
+		},
+	},
+	{
+		family: "icontains",
+		resolve: func(ctx context.Context, e selectorEvaluator, sel api.Selector) (docIDSet, bool, error) {
+			if sel.IContains == nil {
+				return nil, false, nil
+			}
+			set, err := e.reader.docIDsForIContains(ctx, sel.IContains, e.containsNgram)
+			return set, true, err
+		},
+	},
+	{
+		family: "range",
+		resolve: func(ctx context.Context, e selectorEvaluator, sel api.Selector) (docIDSet, bool, error) {
+			if sel.Range == nil {
+				return nil, false, nil
+			}
+			set, err := e.reader.docIDsForRange(ctx, sel.Range)
+			return set, true, err
+		},
+	},
+	{
+		family: "date",
+		resolve: func(ctx context.Context, e selectorEvaluator, sel api.Selector) (docIDSet, bool, error) {
+			if sel.Date == nil {
+				return nil, false, nil
+			}
+			set, err := e.reader.docIDsForDate(ctx, sel.Date, e.now)
+			return set, true, err
+		},
+	},
+	{
+		family: "in",
+		resolve: func(ctx context.Context, e selectorEvaluator, sel api.Selector) (docIDSet, bool, error) {
+			if sel.In == nil {
+				return nil, false, nil
+			}
+			set, err := e.reader.docIDsForIn(ctx, sel.In)
+			return set, true, err
+		},
+	},
+	{
+		family: "exists",
+		resolve: func(ctx context.Context, e selectorEvaluator, sel api.Selector) (docIDSet, bool, error) {
+			if sel.Exists == "" {
+				return nil, false, nil
+			}
+			set, err := e.reader.docIDsForExists(ctx, sel.Exists)
+			return set, true, err
+		},
+	},
 }
+
+var selectorSupportedFamilies = func() map[string]struct{} {
+	out := map[string]struct{}{
+		"and": {},
+		"or":  {},
+		"not": {},
+	}
+	for _, resolver := range selectorClauseResolvers {
+		out[resolver.family] = struct{}{}
+	}
+	return out
+}()
 
 var errDocMetaComplete = errors.New("doc meta complete")
 
@@ -713,76 +2122,52 @@ func (a *Adapter) recordDocMetaStats(found, missing, invalid int) {
 	)
 }
 
-func (e selectorEvaluator) evaluate(ctx context.Context, sel api.Selector) (keySet, error) {
+func (e selectorEvaluator) evaluate(ctx context.Context, sel api.Selector) (docIDSet, error) {
 	baseSet, initialized, err := e.evaluateBase(ctx, sel)
 	if err != nil {
 		return nil, err
 	}
 	if len(sel.Or) == 0 {
 		if !initialized {
-			return e.reader.allKeys(ctx)
+			return e.reader.allDocIDs(ctx)
 		}
 		return baseSet, nil
 	}
-	unionSet := make(keySet)
+	acc := borrowDocIDAccumulator()
+	defer releaseDocIDAccumulator(acc)
 	for _, branch := range sel.Or {
 		branchSet, err := e.evaluate(ctx, branch)
 		if err != nil {
 			return nil, err
 		}
-		unionSet = union(unionSet, branchSet)
+		acc.union(branchSet)
 	}
+	unionSet := acc.result()
 	if !initialized {
 		return unionSet, nil
 	}
-	return intersect(baseSet, unionSet), nil
+	return intersectDocIDs(baseSet, unionSet), nil
 }
 
-func (e selectorEvaluator) evaluateBase(ctx context.Context, sel api.Selector) (keySet, bool, error) {
-	var (
-		result      keySet
-		initialized bool
-	)
-	intersectWith := func(set keySet) {
+func (e selectorEvaluator) evaluateBase(ctx context.Context, sel api.Selector) (docIDSet, bool, error) {
+	acc := borrowDocIDAccumulator()
+	defer releaseDocIDAccumulator(acc)
+	initialized := false
+	intersectWith := func(set docIDSet) {
 		if !initialized {
-			result = set.clone()
+			acc.set(set)
 			initialized = true
 			return
 		}
-		result = intersect(result, set)
+		acc.intersect(set)
 	}
-	if sel.Eq != nil {
-		set, err := e.reader.keysForEq(ctx, sel.Eq)
+	for _, resolver := range selectorClauseResolvers {
+		set, present, err := resolver.resolve(ctx, e, sel)
 		if err != nil {
 			return nil, false, err
 		}
-		intersectWith(set)
-	}
-	if sel.Prefix != nil {
-		set, err := e.reader.keysForPrefix(ctx, sel.Prefix)
-		if err != nil {
-			return nil, false, err
-		}
-		intersectWith(set)
-	}
-	if sel.Range != nil {
-		set, err := e.reader.keysForRange(ctx, sel.Range)
-		if err != nil {
-			return nil, false, err
-		}
-		intersectWith(set)
-	}
-	if sel.In != nil {
-		set, err := e.reader.keysForIn(ctx, sel.In)
-		if err != nil {
-			return nil, false, err
-		}
-		intersectWith(set)
-	}
-	if sel.Exists != "" {
-		set, err := e.reader.keysForExists(ctx, sel.Exists)
-		if err != nil {
-			return nil, false, err
+		if !present {
+			continue
 		}
 		intersectWith(set)
 	}
@@ -800,18 +2185,19 @@ func (e selectorEvaluator) evaluateBase(ctx context.Context, sel api.Selector) (
 		}
 		if len(notSet) > 0 {
 			if !initialized {
-				all, err := e.reader.allKeys(ctx)
+				all, err := e.reader.allDocIDs(ctx)
 				if err != nil {
 					return nil, false, err
 				}
-				result = subtract(all, notSet)
+				acc.set(all)
+				acc.subtract(notSet)
 				initialized = true
 			} else {
-				result = subtract(result, notSet)
+				acc.subtract(notSet)
 			}
 		}
 	}
-	return result, initialized, nil
+	return acc.result(), initialized, nil
 }
 
 func (a *Adapter) visibilityMap(ctx context.Context, namespace string) (map[string]bool, error) {
@@ -833,85 +2219,584 @@ func (a *Adapter) visibleFromLedger(ctx context.Context, namespace, key string, 
 	return visible, ok, nil
 }
 
-type keySet map[string]struct{}
+type docIDSet []uint32
 
-func (s keySet) clone() keySet {
-	if len(s) == 0 {
-		return make(keySet)
+type docIDAccumulator struct {
+	current     docIDSet
+	scratch     docIDSet
+	initialized bool
+}
+
+func borrowDocIDScratch() *docIDSet {
+	buf := docIDScratchPool.Get().(*docIDSet)
+	*buf = (*buf)[:0]
+	return buf
+}
+
+func releaseDocIDScratch(buf *docIDSet) {
+	if buf == nil {
+		return
 	}
-	out := make(keySet, len(s))
-	for key := range s {
-		out[key] = struct{}{}
+	if cap(*buf) > 1<<20 {
+		*buf = make(docIDSet, 0, 256)
+	} else {
+		*buf = (*buf)[:0]
 	}
+	docIDScratchPool.Put(buf)
+}
+
+func borrowKeyPresence(size int) *[]bool {
+	buf := keyPresencePool.Get().(*[]bool)
+	if cap(*buf) < size {
+		*buf = make([]bool, size)
+	} else {
+		*buf = (*buf)[:size]
+	}
+	return buf
+}
+
+func releaseKeyPresence(buf *[]bool) {
+	if buf == nil {
+		return
+	}
+	if cap(*buf) > 1<<20 {
+		*buf = make([]bool, 0, 256)
+	} else {
+		*buf = (*buf)[:0]
+	}
+	keyPresencePool.Put(buf)
+}
+
+func borrowDocIDAccumulator() *docIDAccumulator {
+	acc := docIDAccumulatorPool.Get().(*docIDAccumulator)
+	acc.current = acc.current[:0]
+	acc.scratch = acc.scratch[:0]
+	acc.initialized = false
+	return acc
+}
+
+func releaseDocIDAccumulator(acc *docIDAccumulator) {
+	if acc == nil {
+		return
+	}
+	const maxScratchCap = 1 << 20
+	if cap(acc.current) > maxScratchCap {
+		acc.current = make(docIDSet, 0, 256)
+	} else {
+		acc.current = acc.current[:0]
+	}
+	if cap(acc.scratch) > maxScratchCap {
+		acc.scratch = make(docIDSet, 0, 256)
+	} else {
+		acc.scratch = acc.scratch[:0]
+	}
+	acc.initialized = false
+	docIDAccumulatorPool.Put(acc)
+}
+
+func (a *docIDAccumulator) set(in docIDSet) {
+	a.current = append(a.current[:0], in...)
+	a.initialized = true
+}
+
+func (a *docIDAccumulator) union(in docIDSet) {
+	if len(in) == 0 {
+		return
+	}
+	if !a.initialized {
+		a.set(in)
+		return
+	}
+	a.scratch = unionDocIDsInto(a.scratch[:0], a.current, in)
+	a.current, a.scratch = a.scratch, a.current[:0]
+}
+
+func (a *docIDAccumulator) intersect(in docIDSet) {
+	if !a.initialized {
+		a.set(in)
+		return
+	}
+	a.scratch = intersectDocIDsInto(a.scratch[:0], a.current, in)
+	a.current, a.scratch = a.scratch, a.current[:0]
+}
+
+func (a *docIDAccumulator) subtract(in docIDSet) {
+	if !a.initialized || len(in) == 0 {
+		return
+	}
+	a.scratch = subtractDocIDsInto(a.scratch[:0], a.current, in)
+	a.current, a.scratch = a.scratch, a.current[:0]
+}
+
+func (a *docIDAccumulator) result() docIDSet {
+	if !a.initialized || len(a.current) == 0 {
+		return nil
+	}
+	return cloneDocIDs(a.current)
+}
+
+func cloneDocIDs(in docIDSet) docIDSet {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(docIDSet, len(in))
+	copy(out, in)
 	return out
 }
 
-func (s keySet) sorted() []string {
-	if len(s) == 0 {
+func sortUniqueDocIDs(in docIDSet) docIDSet {
+	if len(in) == 0 {
 		return nil
 	}
-	keys := make([]string, 0, len(s))
-	for key := range s {
-		keys = append(keys, key)
+	slices.Sort(in)
+	w := 1
+	for i := 1; i < len(in); i++ {
+		if in[i] == in[w-1] {
+			continue
+		}
+		in[w] = in[i]
+		w++
 	}
-	sort.Strings(keys)
+	return in[:w]
+}
+
+func unionDocIDsInto(dst, a, b docIDSet) docIDSet {
+	dst = dst[:0]
+	i, j := 0, 0
+	for i < len(a) && j < len(b) {
+		av := a[i]
+		bv := b[j]
+		if av == bv {
+			dst = append(dst, av)
+			i++
+			j++
+			continue
+		}
+		if av < bv {
+			dst = append(dst, av)
+			i++
+			continue
+		}
+		dst = append(dst, bv)
+		j++
+	}
+	if i < len(a) {
+		dst = append(dst, a[i:]...)
+	}
+	if j < len(b) {
+		dst = append(dst, b[j:]...)
+	}
+	return dst
+}
+
+func intersectDocIDs(a, b docIDSet) docIDSet {
+	if len(a) == 0 || len(b) == 0 {
+		return nil
+	}
+	out := make(docIDSet, 0, min(len(a), len(b)))
+	return intersectDocIDsInto(out, a, b)
+}
+
+func intersectDocIDsInto(dst, a, b docIDSet) docIDSet {
+	dst = dst[:0]
+	i, j := 0, 0
+	for i < len(a) && j < len(b) {
+		av := a[i]
+		bv := b[j]
+		if av == bv {
+			dst = append(dst, av)
+			i++
+			j++
+			continue
+		}
+		if av < bv {
+			i++
+			continue
+		}
+		j++
+	}
+	return dst
+}
+
+func subtractDocIDsInto(dst, a, b docIDSet) docIDSet {
+	dst = dst[:0]
+	i, j := 0, 0
+	for i < len(a) {
+		if j >= len(b) {
+			dst = append(dst, a[i:]...)
+			break
+		}
+		av := a[i]
+		bv := b[j]
+		if av == bv {
+			i++
+			j++
+			continue
+		}
+		if av < bv {
+			dst = append(dst, av)
+			i++
+			continue
+		}
+		j++
+	}
+	return dst
+}
+
+func (r *segmentReader) sortedKeysForDocIDs(ids docIDSet) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	r.ensureKeyOrderByName()
+	presentBuf := borrowKeyPresence(len(r.keys))
+	defer releaseKeyPresence(presentBuf)
+	present := *presentBuf
+	touched := borrowDocIDScratch()
+	defer releaseDocIDScratch(touched)
+	touchedIDs := (*touched)[:0]
+	var prev uint32
+	first := true
+	for _, id := range ids {
+		if !first && id == prev {
+			continue
+		}
+		first = false
+		prev = id
+		if int(id) >= len(r.keys) {
+			continue
+		}
+		if present[id] {
+			continue
+		}
+		present[id] = true
+		touchedIDs = append(touchedIDs, id)
+	}
+	keys := make([]string, 0, len(ids))
+	for _, id := range r.keyOrderByName {
+		if int(id) >= len(present) || !present[id] {
+			continue
+		}
+		keys = append(keys, r.keys[id])
+	}
+	for _, id := range touchedIDs {
+		present[id] = false
+	}
+	*touched = touchedIDs[:0]
+	*presentBuf = present
 	return keys
 }
 
-func union(a, b keySet) keySet {
-	if len(a) == 0 && len(b) == 0 {
-		return make(keySet)
+func (r *segmentReader) ensureKeyOrderByName() {
+	if r == nil || r.keyOrderByNameReady {
+		return
 	}
-	if len(a) == 0 {
-		return b.clone()
+	n := len(r.keys)
+	if n == 0 {
+		r.keyOrderByName = nil
+		r.keyOrderByNameReady = true
+		return
 	}
-	if len(b) == 0 {
-		return a.clone()
+	ids := make([]uint32, n)
+	for i := 0; i < n; i++ {
+		ids[i] = uint32(i)
 	}
-	out := make(keySet, len(a)+len(b))
-	for key := range a {
-		out[key] = struct{}{}
-	}
-	for key := range b {
-		out[key] = struct{}{}
-	}
-	return out
+	sort.Slice(ids, func(i, j int) bool {
+		return r.keys[ids[i]] < r.keys[ids[j]]
+	})
+	r.keyOrderByName = ids
+	r.keyOrderByNameReady = true
 }
 
-func intersect(a, b keySet) keySet {
-	if len(a) == 0 || len(b) == 0 {
-		return make(keySet)
+func selectorSupportsLegacyIndexFilter(sel api.Selector) bool {
+	if selectorRequiresPostEvalStringTermIntent(sel) {
+		return false
 	}
-	var smaller, larger keySet
-	if len(a) <= len(b) {
-		smaller, larger = a, b
-	} else {
-		smaller, larger = b, a
+	if selectorRequiresPostEvalTemporalValidation(sel) {
+		return false
 	}
-	out := make(keySet)
-	for key := range smaller {
-		if _, ok := larger[key]; ok {
-			out[key] = struct{}{}
+	if sel.IsEmpty() {
+		return true
+	}
+	caps := lql.InspectSelectorCapabilities(sel)
+	families := caps.Families()
+	if len(families) == 0 {
+		return false
+	}
+	for _, family := range families {
+		if _, ok := selectorSupportedFamilies[family]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func selectorRequiresPostEvalTemporalValidation(sel api.Selector) bool {
+	if sel.Range != nil {
+		if determineRangeMode(sel.Range) == rangeModeInvalid {
+			return true
+		}
+	}
+	if sel.Date != nil {
+		if _, ok := compileDateTerm(sel.Date, time.Now()); !ok {
+			return true
+		}
+	}
+	for i := range sel.And {
+		if selectorRequiresPostEvalTemporalValidation(sel.And[i]) {
+			return true
+		}
+	}
+	for i := range sel.Or {
+		if selectorRequiresPostEvalTemporalValidation(sel.Or[i]) {
+			return true
+		}
+	}
+	if sel.Not != nil {
+		return selectorRequiresPostEvalTemporalValidation(*sel.Not)
+	}
+	return false
+}
+
+func selectorRequiresPostEvalStringTermIntent(sel api.Selector) bool {
+	if stringTermHasExplicitEmptyValue(sel.Contains) ||
+		stringTermHasExplicitEmptyValue(sel.IContains) ||
+		stringTermHasExplicitEmptyValue(sel.Prefix) ||
+		stringTermHasExplicitEmptyValue(sel.IPrefix) {
+		return true
+	}
+	for i := range sel.And {
+		if selectorRequiresPostEvalStringTermIntent(sel.And[i]) {
+			return true
+		}
+	}
+	for i := range sel.Or {
+		if selectorRequiresPostEvalStringTermIntent(sel.Or[i]) {
+			return true
+		}
+	}
+	if sel.Not != nil {
+		return selectorRequiresPostEvalStringTermIntent(*sel.Not)
+	}
+	return false
+}
+
+func stringTermHasExplicitEmptyValue(term *api.Term) bool {
+	if term == nil {
+		return false
+	}
+	if strings.TrimSpace(term.Value) != "" {
+		return false
+	}
+	encoded, err := json.Marshal(term)
+	if err != nil {
+		// Preserve correctness when we cannot prove selector intent.
+		return true
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		return true
+	}
+	_, hasValue := payload["value"]
+	return hasValue
+}
+
+func cloneSelector(sel api.Selector) api.Selector {
+	out := sel
+	if sel.Eq != nil {
+		eq := *sel.Eq
+		out.Eq = &eq
+	}
+	if sel.Contains != nil {
+		contains := *sel.Contains
+		out.Contains = &contains
+	}
+	if sel.IContains != nil {
+		icontains := *sel.IContains
+		out.IContains = &icontains
+	}
+	if sel.Prefix != nil {
+		prefix := *sel.Prefix
+		out.Prefix = &prefix
+	}
+	if sel.IPrefix != nil {
+		iprefix := *sel.IPrefix
+		out.IPrefix = &iprefix
+	}
+	if sel.Range != nil {
+		rng := *sel.Range
+		out.Range = &rng
+	}
+	if sel.Date != nil {
+		date := *sel.Date
+		out.Date = &date
+	}
+	if sel.In != nil {
+		in := *sel.In
+		if len(sel.In.Any) > 0 {
+			in.Any = append([]string(nil), sel.In.Any...)
+		}
+		out.In = &in
+	}
+	if sel.Not != nil {
+		notSel := cloneSelector(*sel.Not)
+		out.Not = &notSel
+	}
+	if len(sel.And) > 0 {
+		out.And = make([]api.Selector, len(sel.And))
+		for i := range sel.And {
+			out.And[i] = cloneSelector(sel.And[i])
+		}
+	}
+	if len(sel.Or) > 0 {
+		out.Or = make([]api.Selector, len(sel.Or))
+		for i := range sel.Or {
+			out.Or[i] = cloneSelector(sel.Or[i])
 		}
 	}
 	return out
 }
 
-func subtract(a, b keySet) keySet {
-	if len(a) == 0 {
-		return make(keySet)
+func shouldCacheSelectorPlan(sel api.Selector) bool {
+	return !sel.IsEmpty()
+}
+
+func selectorHasRelativeDateSinceMacro(sel api.Selector) bool {
+	if sel.Date != nil && dateSinceUsesRelativeMacro(sel.Date.Since) {
+		return true
 	}
-	if len(b) == 0 {
-		return a.clone()
-	}
-	out := make(keySet, len(a))
-	for key := range a {
-		if _, hidden := b[key]; hidden {
-			continue
+	for i := range sel.And {
+		if selectorHasRelativeDateSinceMacro(sel.And[i]) {
+			return true
 		}
-		out[key] = struct{}{}
 	}
-	return out
+	for i := range sel.Or {
+		if selectorHasRelativeDateSinceMacro(sel.Or[i]) {
+			return true
+		}
+	}
+	if sel.Not != nil {
+		return selectorHasRelativeDateSinceMacro(*sel.Not)
+	}
+	return false
+}
+
+func dateSinceUsesRelativeMacro(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "now", "today", "yesterday":
+		return true
+	default:
+		return false
+	}
+}
+
+func selectorNeedsNormalization(sel api.Selector) (bool, error) {
+	needs := false
+	checkField := func(field string) error {
+		changed, err := pointerNeedsNormalization(field)
+		if err != nil {
+			return err
+		}
+		if changed {
+			needs = true
+		}
+		return nil
+	}
+	if sel.Eq != nil {
+		if err := checkField(sel.Eq.Field); err != nil {
+			return false, fmt.Errorf("eq.field: %w", err)
+		}
+	}
+	if sel.Contains != nil {
+		if err := checkField(sel.Contains.Field); err != nil {
+			return false, fmt.Errorf("contains.field: %w", err)
+		}
+	}
+	if sel.IContains != nil {
+		if err := checkField(sel.IContains.Field); err != nil {
+			return false, fmt.Errorf("icontains.field: %w", err)
+		}
+	}
+	if sel.Prefix != nil {
+		if err := checkField(sel.Prefix.Field); err != nil {
+			return false, fmt.Errorf("prefix.field: %w", err)
+		}
+	}
+	if sel.IPrefix != nil {
+		if err := checkField(sel.IPrefix.Field); err != nil {
+			return false, fmt.Errorf("iprefix.field: %w", err)
+		}
+	}
+	if sel.Range != nil {
+		if err := checkField(sel.Range.Field); err != nil {
+			return false, fmt.Errorf("range.field: %w", err)
+		}
+	}
+	if sel.Date != nil {
+		if err := checkField(sel.Date.Field); err != nil {
+			return false, fmt.Errorf("date.field: %w", err)
+		}
+	}
+	if sel.In != nil {
+		if err := checkField(sel.In.Field); err != nil {
+			return false, fmt.Errorf("in.field: %w", err)
+		}
+	}
+	if sel.Exists != "" {
+		if err := checkField(sel.Exists); err != nil {
+			return false, fmt.Errorf("exists.field: %w", err)
+		}
+	}
+	for i := range sel.And {
+		childNeeds, err := selectorNeedsNormalization(sel.And[i])
+		if err != nil {
+			return false, err
+		}
+		if childNeeds {
+			needs = true
+		}
+	}
+	for i := range sel.Or {
+		childNeeds, err := selectorNeedsNormalization(sel.Or[i])
+		if err != nil {
+			return false, err
+		}
+		if childNeeds {
+			needs = true
+		}
+	}
+	if sel.Not != nil {
+		childNeeds, err := selectorNeedsNormalization(*sel.Not)
+		if err != nil {
+			return false, err
+		}
+		if childNeeds {
+			needs = true
+		}
+	}
+	return needs, nil
+}
+
+func pointerNeedsNormalization(field string) (bool, error) {
+	trimmed := strings.TrimSpace(field)
+	if trimmed != field {
+		normalized, err := normalizePointerLenient(field)
+		if err != nil {
+			return false, err
+		}
+		return normalized != field, nil
+	}
+	switch trimmed {
+	case "", "/":
+		return trimmed == "/", nil
+	}
+	if strings.HasPrefix(trimmed, "/") && !strings.Contains(trimmed, "~") {
+		return false, nil
+	}
+	normalized, err := normalizePointerLenient(field)
+	if err != nil {
+		return false, err
+	}
+	return normalized != field, nil
 }
 
 func normalizeField(term *api.Term) string {
@@ -928,38 +2813,108 @@ func normalizeRangeField(term *api.RangeTerm) string {
 	return strings.TrimSpace(term.Field)
 }
 
+func normalizeDateField(term *api.DateTerm) string {
+	if term == nil {
+		return ""
+	}
+	return strings.TrimSpace(term.Field)
+}
+
 func normalizeTermValue(value string) string {
 	return strings.ToLower(strings.TrimSpace(value))
 }
 
-func rangeMatches(term *api.RangeTerm, value float64) bool {
-	if term == nil {
-		return false
+func normalizeSelectorFieldsForLQL(sel *api.Selector) error {
+	if sel == nil {
+		return nil
 	}
-	if term.GTE != nil && value < *term.GTE {
-		return false
+	if sel.Eq != nil {
+		normalized, err := normalizePointerLenient(sel.Eq.Field)
+		if err != nil {
+			return fmt.Errorf("eq.field: %w", err)
+		}
+		sel.Eq.Field = normalized
 	}
-	if term.GT != nil && value <= *term.GT {
-		return false
+	if sel.Contains != nil {
+		normalized, err := normalizePointerLenient(sel.Contains.Field)
+		if err != nil {
+			return fmt.Errorf("contains.field: %w", err)
+		}
+		sel.Contains.Field = normalized
 	}
-	if term.LTE != nil && value > *term.LTE {
-		return false
+	if sel.IContains != nil {
+		normalized, err := normalizePointerLenient(sel.IContains.Field)
+		if err != nil {
+			return fmt.Errorf("icontains.field: %w", err)
+		}
+		sel.IContains.Field = normalized
 	}
-	if term.LT != nil && value >= *term.LT {
-		return false
+	if sel.Prefix != nil {
+		normalized, err := normalizePointerLenient(sel.Prefix.Field)
+		if err != nil {
+			return fmt.Errorf("prefix.field: %w", err)
+		}
+		sel.Prefix.Field = normalized
 	}
-	return true
+	if sel.IPrefix != nil {
+		normalized, err := normalizePointerLenient(sel.IPrefix.Field)
+		if err != nil {
+			return fmt.Errorf("iprefix.field: %w", err)
+		}
+		sel.IPrefix.Field = normalized
+	}
+	if sel.Range != nil {
+		normalized, err := normalizePointerLenient(sel.Range.Field)
+		if err != nil {
+			return fmt.Errorf("range.field: %w", err)
+		}
+		sel.Range.Field = normalized
+	}
+	if sel.Date != nil {
+		normalized, err := normalizePointerLenient(sel.Date.Field)
+		if err != nil {
+			return fmt.Errorf("date.field: %w", err)
+		}
+		sel.Date.Field = normalized
+	}
+	if sel.In != nil {
+		normalized, err := normalizePointerLenient(sel.In.Field)
+		if err != nil {
+			return fmt.Errorf("in.field: %w", err)
+		}
+		sel.In.Field = normalized
+	}
+	if sel.Exists != "" {
+		normalized, err := normalizePointerLenient(sel.Exists)
+		if err != nil {
+			return fmt.Errorf("exists.field: %w", err)
+		}
+		sel.Exists = normalized
+	}
+	for i := range sel.And {
+		if err := normalizeSelectorFieldsForLQL(&sel.And[i]); err != nil {
+			return err
+		}
+	}
+	for i := range sel.Or {
+		if err := normalizeSelectorFieldsForLQL(&sel.Or[i]); err != nil {
+			return err
+		}
+	}
+	if sel.Not != nil {
+		if err := normalizeSelectorFieldsForLQL(sel.Not); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-func zeroSelector(sel api.Selector) bool {
-	return len(sel.And) == 0 &&
-		len(sel.Or) == 0 &&
-		sel.Not == nil &&
-		sel.Eq == nil &&
-		sel.Prefix == nil &&
-		sel.Range == nil &&
-		sel.In == nil &&
-		sel.Exists == ""
+func normalizePointerLenient(field string) (string, error) {
+	field = strings.TrimSpace(field)
+	if field == "" || field == "/" {
+		return "", nil
+	}
+	return jsonpointer.Normalize(field)
 }
 
 func encodeCursor(key string) string {

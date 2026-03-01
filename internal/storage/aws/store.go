@@ -229,10 +229,6 @@ func (s *Store) Config() Config {
 
 func (s *Store) loggers(ctx context.Context) (pslog.Logger, pslog.Logger) {
 	logger := pslog.LoggerFromContext(ctx)
-	logger = logger.With("storage_backend", "aws", "bucket", s.cfg.Bucket)
-	if s.cfg.Prefix != "" {
-		logger = logger.With("prefix", s.cfg.Prefix)
-	}
 	return logger, logger
 }
 
@@ -314,6 +310,11 @@ func (s *Store) LoadMeta(ctx context.Context, namespace, key string) (storage.Lo
 		"elapsed", time.Since(start),
 	)
 	return storage.LoadMetaResult{Meta: meta, ETag: etag}, nil
+}
+
+// ScanMetaSummaries enumerates key+summary rows for the namespace.
+func (s *Store) ScanMetaSummaries(ctx context.Context, req storage.ScanMetaSummariesRequest, visit func(storage.ScanMetaSummaryRow) error) (storage.ScanMetaSummariesResult, error) {
+	return storage.ScanMetaSummariesFallback(ctx, s, req, visit)
 }
 
 // StoreMeta uploads the metadata protobuf, applying conditional copy semantics via expectedETag.
@@ -431,8 +432,7 @@ func (s *Store) ListMetaKeys(ctx context.Context, namespace string) ([]string, e
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
 	start := time.Now()
-	prefixPath := path.Join(namespace, "meta") + "/"
-	fullPrefix := s.withPrefix(prefixPath)
+	fullPrefix := s.withPrefix(path.Join(namespace, "meta")) + "/"
 	verbose.Trace("aws.list_meta_keys.begin", "namespace", namespace, "prefix", fullPrefix)
 	var keys []string
 	var token *string
@@ -457,7 +457,7 @@ func (s *Store) ListMetaKeys(ctx context.Context, namespace string) ([]string, e
 			if !strings.HasSuffix(rel, ".pb") {
 				continue
 			}
-			entry := strings.TrimSuffix(rel, ".pb")
+			entry := strings.TrimPrefix(strings.TrimSuffix(rel, ".pb"), "/")
 			if entry == "" {
 				continue
 			}
@@ -1271,6 +1271,19 @@ func classifyPutObjectError(err error, hasExpectedETag bool) error {
 		return storage.ErrCASMismatch
 	}
 	if hasExpectedETag && isNotFound(err) {
+		return storage.ErrNotFound
+	}
+	return nil
+}
+
+func classifyCopyObjectError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if isPreconditionFailed(err) {
+		return storage.ErrCASMismatch
+	}
+	if isNotFound(err) {
 		return storage.ErrNotFound
 	}
 	return nil

@@ -235,10 +235,6 @@ func (s *Store) Config() Config {
 
 func (s *Store) loggers(ctx context.Context) (pslog.Logger, pslog.Logger) {
 	logger := pslog.LoggerFromContext(ctx)
-	logger = logger.With("storage_backend", "s3", "bucket", s.cfg.Bucket)
-	if s.cfg.Prefix != "" {
-		logger = logger.With("prefix", s.cfg.Prefix)
-	}
 	return logger, logger
 }
 
@@ -314,6 +310,11 @@ func (s *Store) LoadMeta(ctx context.Context, namespace, key string) (storage.Lo
 		"elapsed", time.Since(start),
 	)
 	return storage.LoadMetaResult{Meta: meta, ETag: etag}, nil
+}
+
+// ScanMetaSummaries enumerates key+summary rows for the namespace.
+func (s *Store) ScanMetaSummaries(ctx context.Context, req storage.ScanMetaSummariesRequest, visit func(storage.ScanMetaSummaryRow) error) (storage.ScanMetaSummariesResult, error) {
+	return storage.ScanMetaSummariesFallback(ctx, s, req, visit)
 }
 
 // StoreMeta uploads the metadata protobuf, applying conditional copy semantics via expectedETag.
@@ -413,8 +414,7 @@ func (s *Store) DeleteMeta(ctx context.Context, namespace, key string, expectedE
 func (s *Store) ListMetaKeys(ctx context.Context, namespace string) ([]string, error) {
 	logger, verbose := s.loggers(ctx)
 	start := time.Now()
-	prefixPath := path.Join(namespace, "meta") + "/"
-	fullPrefix := s.withPrefix(prefixPath)
+	fullPrefix := s.withPrefix(path.Join(namespace, "meta")) + "/"
 	verbose.Trace("s3.list_meta_keys.begin", "namespace", namespace, "prefix", fullPrefix)
 	opts := minio.ListObjectsOptions{Prefix: fullPrefix, Recursive: true}
 	var keys []string
@@ -433,7 +433,7 @@ func (s *Store) ListMetaKeys(ctx context.Context, namespace string) ([]string, e
 		if !strings.HasSuffix(rel, ".pb") {
 			continue
 		}
-		entry := strings.TrimSuffix(rel, ".pb")
+		entry := strings.TrimPrefix(strings.TrimSuffix(rel, ".pb"), "/")
 		if entry == "" {
 			continue
 		}

@@ -2577,24 +2577,38 @@ func ReadMessagePayload(t testing.TB, msg *lockdclient.QueueMessage) []byte {
 // EnsureQueueEmpty asserts the queue has no immediately available messages.
 func EnsureQueueEmpty(t testing.TB, cli *lockdclient.Client, queue string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	msg, err := cli.Dequeue(ctx, queue, lockdclient.DequeueOptions{
-		Owner:        QueueOwner("probe"),
-		BlockSeconds: lockdclient.BlockNoWait,
-	})
-	cancel()
-	if err != nil {
-		var apiErr *lockdclient.APIError
-		if errors.As(err, &apiErr) && apiErr.Response.ErrorCode == "waiting" {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		msg, err := cli.Dequeue(ctx, queue, lockdclient.DequeueOptions{
+			Owner:        QueueOwner("probe"),
+			BlockSeconds: lockdclient.BlockNoWait,
+		})
+		cancel()
+		if err != nil {
+			var apiErr *lockdclient.APIError
+			if errors.As(err, &apiErr) {
+				switch apiErr.Response.ErrorCode {
+				case "waiting":
+					return
+				case "node_passive":
+					if time.Now().Before(deadline) {
+						time.Sleep(100 * time.Millisecond)
+						continue
+					}
+				}
+			} else if time.Now().Before(deadline) {
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			t.Fatalf("probe dequeue %s: %v", queue, err)
+		}
+		if msg == nil || msg.MessageID() == "" {
 			return
 		}
-		t.Fatalf("probe dequeue %s: %v", queue, err)
+		_ = msg.Nack(context.Background(), 0, map[string]any{"cleanup": true})
+		t.Fatalf("expected queue %s empty, found message %s", queue, msg.MessageID())
 	}
-	if msg == nil || msg.MessageID() == "" {
-		return
-	}
-	_ = msg.Nack(context.Background(), 0, map[string]any{"cleanup": true})
-	t.Fatalf("expected queue %s empty, found message %s", queue, msg.MessageID())
 }
 
 // RunQueueAckScenario enqueues, dequeues, validates, and acks a message.
@@ -2649,6 +2663,101 @@ func RunQueueNackScenario(t *testing.T, cli *lockdclient.Client, queue string, p
 	if err := msg2.Ack(ctx2); err != nil {
 		t.Fatalf("ack after nack %s: %v", msg2.MessageID(), err)
 	}
+	EnsureQueueEmpty(t, cli, queue)
+}
+
+// RunQueueObservabilityReadOnlyScenario verifies queue observability APIs
+// (stats + watch) do not consume or hide the head candidate.
+func RunQueueObservabilityReadOnlyScenario(t *testing.T, cli *lockdclient.Client, queue string) {
+	t.Helper()
+	if cli == nil {
+		t.Fatalf("client required")
+	}
+
+	firstPayload := []byte("observability-stats")
+	first := MustEnqueueBytes(t, cli, queue, firstPayload)
+
+	for i := 0; i < 3; i++ {
+		statsCtx, statsCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		stats, err := cli.QueueStats(statsCtx, queue, lockdclient.QueueStatsOptions{})
+		statsCancel()
+		if err != nil {
+			t.Fatalf("queue stats run %d: %v", i, err)
+		}
+		if stats == nil || !stats.Available {
+			t.Fatalf("expected queue stats availability on run %d, got %+v", i, stats)
+		}
+		if strings.TrimSpace(stats.HeadMessageID) != first.MessageID {
+			t.Fatalf("expected stats head %q on run %d, got %q", first.MessageID, i, strings.TrimSpace(stats.HeadMessageID))
+		}
+	}
+
+	msg := MustDequeueMessage(t, cli, queue, QueueOwner("observability-stats"), 5, 12*time.Second)
+	if got := msg.MessageID(); got != first.MessageID {
+		t.Fatalf("expected dequeued message %q after stats, got %q", first.MessageID, got)
+	}
+	body := ReadMessagePayload(t, msg)
+	if !bytes.Equal(body, firstPayload) {
+		t.Fatalf("unexpected payload after stats: got %q want %q", string(body), string(firstPayload))
+	}
+	ackCtx, ackCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := msg.Ack(ackCtx); err != nil {
+		ackCancel()
+		t.Fatalf("ack after stats dequeue: %v", err)
+	}
+	ackCancel()
+
+	secondPayload := []byte("observability-watch")
+	second := MustEnqueueBytes(t, cli, queue, secondPayload)
+
+	for i := 0; i < 2; i++ {
+		watchCtx, cancelWatch := context.WithTimeout(context.Background(), 15*time.Second)
+		seenHead := make(chan struct{}, 1)
+		watchErr := make(chan error, 1)
+		go func() {
+			watchErr <- cli.WatchQueue(watchCtx, queue, lockdclient.WatchQueueOptions{}, func(_ context.Context, ev lockdclient.QueueWatchEvent) error {
+				if !ev.Available {
+					return nil
+				}
+				if strings.TrimSpace(ev.HeadMessageID) != second.MessageID {
+					return nil
+				}
+				select {
+				case seenHead <- struct{}{}:
+				default:
+				}
+				cancelWatch()
+				return nil
+			})
+		}()
+
+		select {
+		case <-seenHead:
+		case <-time.After(10 * time.Second):
+			cancelWatch()
+			t.Fatalf("timed out waiting for watch head event on run %d", i)
+		}
+
+		if err := <-watchErr; err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("watch queue run %d: %v", i, err)
+		}
+	}
+
+	msg2 := MustDequeueMessage(t, cli, queue, QueueOwner("observability-watch"), 5, 12*time.Second)
+	if got := msg2.MessageID(); got != second.MessageID {
+		t.Fatalf("expected dequeued message %q after watch, got %q", second.MessageID, got)
+	}
+	body2 := ReadMessagePayload(t, msg2)
+	if !bytes.Equal(body2, secondPayload) {
+		t.Fatalf("unexpected payload after watch: got %q want %q", string(body2), string(secondPayload))
+	}
+	ackCtx2, ackCancel2 := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := msg2.Ack(ackCtx2); err != nil {
+		ackCancel2()
+		t.Fatalf("ack after watch dequeue: %v", err)
+	}
+	ackCancel2()
+
 	EnsureQueueEmpty(t, cli, queue)
 }
 
@@ -2796,7 +2905,7 @@ func (c *LogCapture) Logger() pslog.Logger {
 	if level == 0 {
 		level = pslog.TraceLevel
 	}
-	logger := pslog.NewStructured(c)
+	logger := pslog.NewStructured(context.Background(), c)
 	return logger.LogLevel(level)
 }
 

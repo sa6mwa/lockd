@@ -69,6 +69,9 @@ func (s *Store) PromoteStagedState(ctx context.Context, namespace, key, txnID st
 	applySSEToCopy(input, s.cfg.ServerSideEnc, s.cfg.KMSKeyID)
 	out, err := s.client.CopyObject(ctx, input)
 	if err != nil {
+		if classified := classifyCopyObjectError(err); classified != nil {
+			return nil, classified
+		}
 		logger.Debug("aws.promote_staged.copy_error", "namespace", namespace, "key", key, "staged", stagedKey, "object", dstObject, "error", err)
 		return nil, s.wrapError(err, "aws: promote staged copy")
 	}

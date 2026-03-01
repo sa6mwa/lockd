@@ -2,6 +2,7 @@ package storage
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 
 	"google.golang.org/protobuf/proto"
@@ -85,6 +86,44 @@ func UnmarshalMetaRecord(payload []byte, crypto *Crypto) (MetaRecord, error) {
 		return MetaRecord{}, fmt.Errorf("storage: decode meta record protobuf: %w", err)
 	}
 	return MetaRecord{ETag: record.GetEtag(), Meta: metaFromProto(record.GetMeta())}, nil
+}
+
+// UnmarshalMetaRecordSummary decodes only the query-relevant metadata fields.
+func UnmarshalMetaRecordSummary(payload []byte, crypto *Crypto) (LoadMetaSummaryResult, error) {
+	var err error
+	if crypto != nil && crypto.Enabled() {
+		payload, err = crypto.DecryptMetadata(payload)
+		if err != nil {
+			return LoadMetaSummaryResult{}, err
+		}
+	}
+	var record lockdproto.MetaRecord
+	if err := proto.Unmarshal(payload, &record); err != nil {
+		return LoadMetaSummaryResult{}, fmt.Errorf("storage: decode meta record protobuf: %w", err)
+	}
+	pm := record.GetMeta()
+	summary := &MetaSummary{}
+	if pm != nil {
+		summary.Version = pm.GetVersion()
+		summary.PublishedVersion = pm.GetPublishedVersion()
+		summary.StateETag = pm.GetStateEtag()
+		summary.StatePlaintextBytes = pm.GetStatePlaintextBytes()
+		if desc := pm.GetStateDescriptor(); len(desc) > 0 {
+			summary.StateDescriptor = append([]byte(nil), desc...)
+		}
+		if attrs := pm.GetAttributes(); attrs != nil {
+			if value, ok := attrs.Fields[MetaAttributeQueryExclude]; ok {
+				switch strings.ToLower(value.GetStringValue()) {
+				case "true", "1", "yes", "y", "on":
+					summary.QueryExcluded = true
+				}
+			}
+		}
+	}
+	return LoadMetaSummaryResult{
+		Meta: summary,
+		ETag: record.GetEtag(),
+	}, nil
 }
 
 var lockMetaPool = sync.Pool{
@@ -173,14 +212,15 @@ func fillLockMeta(meta *Meta, pm *lockdproto.LockMeta) {
 		pm.Attachments = make([]*lockdproto.Attachment, 0, len(meta.Attachments))
 		for _, att := range meta.Attachments {
 			pm.Attachments = append(pm.Attachments, &lockdproto.Attachment{
-				Id:             att.ID,
-				Name:           att.Name,
-				Size:           att.Size,
-				PlaintextBytes: att.PlaintextBytes,
-				ContentType:    att.ContentType,
-				Descriptor_:    append([]byte(nil), att.Descriptor...),
-				CreatedAtUnix:  att.CreatedAtUnix,
-				UpdatedAtUnix:  att.UpdatedAtUnix,
+				Id:              att.ID,
+				Name:            att.Name,
+				Size:            att.Size,
+				PlaintextBytes:  att.PlaintextBytes,
+				PlaintextSha256: att.PlaintextSHA256,
+				ContentType:     att.ContentType,
+				Descriptor_:     append([]byte(nil), att.Descriptor...),
+				CreatedAtUnix:   att.CreatedAtUnix,
+				UpdatedAtUnix:   att.UpdatedAtUnix,
 			})
 		}
 	}
@@ -192,6 +232,7 @@ func fillLockMeta(meta *Meta, pm *lockdproto.LockMeta) {
 				Name:             att.Name,
 				Size:             att.Size,
 				PlaintextBytes:   att.PlaintextBytes,
+				PlaintextSha256:  att.PlaintextSHA256,
 				ContentType:      att.ContentType,
 				StagedDescriptor: append([]byte(nil), att.StagedDescriptor...),
 				CreatedAtUnix:    att.CreatedAtUnix,
@@ -261,14 +302,15 @@ func metaFromProto(pm *lockdproto.LockMeta) *Meta {
 				plaintextBytes = att.GetSize()
 			}
 			meta.Attachments = append(meta.Attachments, Attachment{
-				ID:             att.GetId(),
-				Name:           att.GetName(),
-				Size:           att.GetSize(),
-				PlaintextBytes: plaintextBytes,
-				ContentType:    att.GetContentType(),
-				Descriptor:     append([]byte(nil), att.GetDescriptor_()...),
-				CreatedAtUnix:  att.GetCreatedAtUnix(),
-				UpdatedAtUnix:  att.GetUpdatedAtUnix(),
+				ID:              att.GetId(),
+				Name:            att.GetName(),
+				Size:            att.GetSize(),
+				PlaintextBytes:  plaintextBytes,
+				PlaintextSHA256: att.GetPlaintextSha256(),
+				ContentType:     att.GetContentType(),
+				Descriptor:      append([]byte(nil), att.GetDescriptor_()...),
+				CreatedAtUnix:   att.GetCreatedAtUnix(),
+				UpdatedAtUnix:   att.GetUpdatedAtUnix(),
 			})
 		}
 	}
@@ -287,6 +329,7 @@ func metaFromProto(pm *lockdproto.LockMeta) *Meta {
 				Name:             att.GetName(),
 				Size:             att.GetSize(),
 				PlaintextBytes:   plaintextBytes,
+				PlaintextSHA256:  att.GetPlaintextSha256(),
 				ContentType:      att.GetContentType(),
 				StagedDescriptor: append([]byte(nil), att.GetStagedDescriptor()...),
 				CreatedAtUnix:    att.GetCreatedAtUnix(),

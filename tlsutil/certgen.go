@@ -264,6 +264,15 @@ func LoadCA(path string) (*CA, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read ca bundle: %w", err)
 	}
+	ca, err := LoadCAFromBytes(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse ca bundle %s: %w", path, err)
+	}
+	return ca, nil
+}
+
+// LoadCAFromBytes parses a CA certificate + private key PEM from bytes.
+func LoadCAFromBytes(data []byte) (*CA, error) {
 	var cert *x509.Certificate
 	var certPEM []byte
 	var keyPEM []byte
@@ -299,13 +308,13 @@ func LoadCA(path string) (*CA, error) {
 		}
 	}
 	if cert == nil {
-		return nil, fmt.Errorf("ca certificate not found in %s", path)
+		return nil, fmt.Errorf("ca certificate not found in bundle")
 	}
 	if key == nil {
-		return nil, fmt.Errorf("ca private key not found in %s", path)
+		return nil, fmt.Errorf("ca private key not found in bundle")
 	}
 	if !cert.IsCA {
-		return nil, fmt.Errorf("certificate in %s is not a CA", path)
+		return nil, fmt.Errorf("certificate in bundle is not a CA")
 	}
 	return &CA{
 		Cert:    cert,

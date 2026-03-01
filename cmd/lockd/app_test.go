@@ -4,14 +4,16 @@ import (
 	"context"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/spf13/viper"
 	"pkt.systems/pslog"
 )
 
 func TestInvocationTargetsRootCommand(t *testing.T) {
-	root := newRootCommand(pslog.NewStructured(io.Discard))
+	root := newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
 	cases := []struct {
 		name string
 		args []string
@@ -56,7 +58,7 @@ func TestSubmainInvalidFlagLikeTokenBeforeSubcommand(t *testing.T) {
 }
 
 func TestRootHasGlobalClientShorthands(t *testing.T) {
-	root := newRootCommand(pslog.NewStructured(io.Discard))
+	root := newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
 	if flag := root.PersistentFlags().ShorthandLookup("v"); flag == nil || flag.Name != "verbose" {
 		t.Fatalf("expected global -v shorthand for --verbose, got %#v", flag)
 	}
@@ -69,12 +71,87 @@ func TestRootHasGlobalClientShorthands(t *testing.T) {
 }
 
 func TestBootstrapFlagIsRootOnly(t *testing.T) {
-	root := newRootCommand(pslog.NewStructured(io.Discard))
+	root := newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
 	if flag := root.Flags().Lookup("bootstrap"); flag == nil {
 		t.Fatalf("expected --bootstrap on root local flags")
 	}
 	if flag := root.PersistentFlags().Lookup("bootstrap"); flag != nil {
 		t.Fatalf("expected --bootstrap to not be persistent, got %#v", flag)
+	}
+}
+
+func TestRootMissingConfigFailsWithoutBootstrap(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	t.Setenv("LOCKD_CONFIG_DIR", t.TempDir())
+
+	root := newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	root.SetArgs([]string{
+		"--config", cfgPath,
+		"--store", "invalid://store",
+	})
+	err := root.Execute()
+	if err == nil {
+		t.Fatalf("expected missing config to fail without bootstrap")
+	}
+	if !strings.Contains(err.Error(), "config file") || !strings.Contains(err.Error(), "no such file or directory") {
+		t.Fatalf("expected missing config error, got %v", err)
+	}
+}
+
+func TestRootBootstrapCreatesMissingConfigForExplicitConfigPath(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	t.Setenv("LOCKD_CONFIG_DIR", t.TempDir())
+
+	root := newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
+	configDir := t.TempDir()
+	bootstrapDir := t.TempDir()
+	cfgPath := filepath.Join(configDir, "config.yaml")
+	root.SetArgs([]string{
+		"--config", cfgPath,
+		"--bootstrap", bootstrapDir,
+		"--store", "invalid://store",
+	})
+	err := root.Execute()
+	if err == nil {
+		t.Fatalf("expected invalid store error after bootstrap")
+	}
+	if strings.Contains(err.Error(), "config file") && strings.Contains(err.Error(), "no such file or directory") {
+		t.Fatalf("bootstrap should have created config file, got %v", err)
+	}
+	if _, statErr := os.Stat(cfgPath); statErr != nil {
+		t.Fatalf("expected bootstrap config at %s: %v", cfgPath, statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(bootstrapDir, "config.yaml")); !os.IsNotExist(statErr) {
+		t.Fatalf("expected bootstrap to use explicit --config path, but found bootstrap-dir config: %v", statErr)
+	}
+}
+
+func TestRootBootstrapCreatesMissingConfigWhenLOCKD_CONFIGIsSet(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	t.Setenv("LOCKD_CONFIG_DIR", t.TempDir())
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	t.Setenv("LOCKD_CONFIG", cfgPath)
+
+	root := newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
+	root.SetArgs([]string{
+		"--bootstrap", dir,
+		"--store", "invalid://store",
+	})
+	err := root.Execute()
+	if err == nil {
+		t.Fatalf("expected invalid store error after bootstrap")
+	}
+	if strings.Contains(err.Error(), "config file") && strings.Contains(err.Error(), "no such file or directory") {
+		t.Fatalf("bootstrap should have created LOCKD_CONFIG file, got %v", err)
+	}
+	if _, statErr := os.Stat(cfgPath); statErr != nil {
+		t.Fatalf("expected bootstrap config at %s: %v", cfgPath, statErr)
 	}
 }
 

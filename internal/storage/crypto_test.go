@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bufio"
 	"bytes"
 	"io"
 	"sync"
@@ -8,6 +9,8 @@ import (
 	"testing"
 
 	"pkt.systems/kryptograf"
+	kryptocipher "pkt.systems/kryptograf/cipher"
+	"pkt.systems/kryptograf/keymgmt"
 )
 
 func TestNewCryptoRequiresMaterial(t *testing.T) {
@@ -194,6 +197,102 @@ func TestCryptoSnappyRoundTrip(t *testing.T) {
 	}
 }
 
+func TestCryptoMaterialDescriptorCacheBounded(t *testing.T) {
+	crypto := mustNewTestCrypto(t, false)
+	crypto.materialCacheCap = 2
+	crypto.materialCache = make(map[materialCacheKey]kryptograf.Material, crypto.materialCacheCap)
+
+	m1, err := crypto.MintMaterial("state:cache-1")
+	if err != nil {
+		t.Fatalf("mint material 1: %v", err)
+	}
+	m2, err := crypto.MintMaterial("state:cache-2")
+	if err != nil {
+		t.Fatalf("mint material 2: %v", err)
+	}
+	m3, err := crypto.MintMaterial("state:cache-3")
+	if err != nil {
+		t.Fatalf("mint material 3: %v", err)
+	}
+
+	r1, err := crypto.MaterialFromDescriptor("state:cache-1", m1.Descriptor)
+	if err != nil {
+		t.Fatalf("reconstruct 1: %v", err)
+	}
+	r1b, err := crypto.MaterialFromDescriptor("state:cache-1", m1.Descriptor)
+	if err != nil {
+		t.Fatalf("reconstruct 1 (cache hit): %v", err)
+	}
+	if r1 != r1b {
+		t.Fatalf("expected cached material to match")
+	}
+	if got := len(crypto.materialCache); got != 1 {
+		t.Fatalf("cache size after repeated same descriptor = %d, want 1", got)
+	}
+
+	if _, err := crypto.MaterialFromDescriptor("state:cache-2", m2.Descriptor); err != nil {
+		t.Fatalf("reconstruct 2: %v", err)
+	}
+	if got := len(crypto.materialCache); got != 2 {
+		t.Fatalf("cache size after second descriptor = %d, want 2", got)
+	}
+
+	if _, err := crypto.MaterialFromDescriptor("state:cache-3", m3.Descriptor); err != nil {
+		t.Fatalf("reconstruct 3: %v", err)
+	}
+	if got := len(crypto.materialCache); got != 1 {
+		t.Fatalf("cache size after bounded flush = %d, want 1", got)
+	}
+}
+
+func TestCryptoCipherCacheBounded(t *testing.T) {
+	crypto := mustNewTestCrypto(t, false)
+	crypto.cipherCacheCap = 2
+	crypto.cipherCache = make(map[keymgmt.Descriptor]kryptocipher.Cipher, crypto.cipherCacheCap)
+
+	m1, err := crypto.MintMaterial("state:cipher-1")
+	if err != nil {
+		t.Fatalf("mint material 1: %v", err)
+	}
+	m2, err := crypto.MintMaterial("state:cipher-2")
+	if err != nil {
+		t.Fatalf("mint material 2: %v", err)
+	}
+	m3, err := crypto.MintMaterial("state:cipher-3")
+	if err != nil {
+		t.Fatalf("mint material 3: %v", err)
+	}
+
+	c1, err := crypto.cipherForMaterial(m1.Material)
+	if err != nil {
+		t.Fatalf("cipher material 1: %v", err)
+	}
+	c1b, err := crypto.cipherForMaterial(m1.Material)
+	if err != nil {
+		t.Fatalf("cipher material 1 cached: %v", err)
+	}
+	if c1 != c1b {
+		t.Fatalf("expected cached cipher instance for repeated descriptor")
+	}
+	if got := len(crypto.cipherCache); got != 1 {
+		t.Fatalf("cipher cache size after repeated same descriptor = %d, want 1", got)
+	}
+
+	if _, err := crypto.cipherForMaterial(m2.Material); err != nil {
+		t.Fatalf("cipher material 2: %v", err)
+	}
+	if got := len(crypto.cipherCache); got != 2 {
+		t.Fatalf("cipher cache size after second descriptor = %d, want 2", got)
+	}
+
+	if _, err := crypto.cipherForMaterial(m3.Material); err != nil {
+		t.Fatalf("cipher material 3: %v", err)
+	}
+	if got := len(crypto.cipherCache); got != 1 {
+		t.Fatalf("cipher cache size after bounded flush = %d, want 1", got)
+	}
+}
+
 func mustNewTestCrypto(t *testing.T, snappy bool) *Crypto {
 	t.Helper()
 	cfg := mustNewTestCryptoConfig(t, snappy)
@@ -242,6 +341,25 @@ func TestCryptoBufferPoolToggle(t *testing.T) {
 	})
 }
 
+func TestCryptoSourceReadBufferPoolToggle(t *testing.T) {
+	t.Run("enabled_by_default", func(t *testing.T) {
+		cfg := mustNewTestCryptoConfig(t, false)
+		calls := exerciseCryptoSourceReadPool(t, cfg)
+		if calls == 0 {
+			t.Fatalf("expected source read buffer pool to be used by default")
+		}
+	})
+
+	t.Run("disabled_via_config", func(t *testing.T) {
+		cfg := mustNewTestCryptoConfig(t, false)
+		cfg.DisableBufferPool = true
+		calls := exerciseCryptoSourceReadPool(t, cfg)
+		if calls != 0 {
+			t.Fatalf("expected source read buffer pool to be disabled via config; got %d allocations", calls)
+		}
+	})
+}
+
 // exerciseCryptoPool encrypts and decrypts metadata while counting pool.Get calls.
 func exerciseCryptoPool(t *testing.T, cfg CryptoConfig) int32 {
 	t.Helper()
@@ -270,6 +388,61 @@ func exerciseCryptoPool(t *testing.T, cfg CryptoConfig) int32 {
 	}
 	if !bytes.Equal(plaintext, payload) {
 		t.Fatalf("round trip mismatch")
+	}
+	return atomic.LoadInt32(&gets)
+}
+
+func exerciseCryptoSourceReadPool(t *testing.T, cfg CryptoConfig) int32 {
+	t.Helper()
+	var gets int32
+	cryptoSourceReadBufferPool = sync.Pool{
+		New: func() any {
+			atomic.AddInt32(&gets, 1)
+			return bufio.NewReaderSize(bytes.NewReader(nil), defaultDecryptSourceReadBufferSize)
+		},
+	}
+	t.Cleanup(func() {
+		cryptoSourceReadBufferPool = sync.Pool{
+			New: func() any {
+				return bufio.NewReaderSize(bytes.NewReader(nil), defaultDecryptSourceReadBufferSize)
+			},
+		}
+	})
+	crypto, err := NewCrypto(cfg)
+	if err != nil {
+		t.Fatalf("init crypto: %v", err)
+	}
+	minted, err := crypto.MintMaterial("state:source-buffer-pool")
+	if err != nil {
+		t.Fatalf("mint material: %v", err)
+	}
+	var cipherBuf bytes.Buffer
+	writer, err := crypto.EncryptWriterForMaterial(&cipherBuf, minted.Material)
+	if err != nil {
+		t.Fatalf("encrypt writer: %v", err)
+	}
+	payload := bytes.Repeat([]byte("source-pool-check"), 64)
+	if _, err := writer.Write(payload); err != nil {
+		writer.Close()
+		t.Fatalf("encrypt write: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("encrypt close: %v", err)
+	}
+	mat, err := crypto.MaterialFromDescriptor("state:source-buffer-pool", minted.Descriptor)
+	if err != nil {
+		t.Fatalf("material from descriptor: %v", err)
+	}
+	reader, err := crypto.DecryptReaderForMaterial(bytes.NewReader(cipherBuf.Bytes()), mat)
+	if err != nil {
+		t.Fatalf("decrypt reader: %v", err)
+	}
+	if _, err := io.Copy(io.Discard, reader); err != nil {
+		reader.Close()
+		t.Fatalf("decrypt read: %v", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatalf("decrypt close: %v", err)
 	}
 	return atomic.LoadInt32(&gets)
 }

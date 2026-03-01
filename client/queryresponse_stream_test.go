@@ -103,3 +103,35 @@ func TestQueryResponseDocumentKeysDefensiveCopy(t *testing.T) {
 	}
 	resp.Close()
 }
+
+func TestQueryResponseStreamEscapedFields(t *testing.T) {
+	body := `{"ns":"def\"ault","key":"doc\/1","doc":{"status":"ok"}}
+`
+	resp := newDocumentQueryResponse("default", "", 0, nil, io.NopCloser(strings.NewReader(body)))
+	defer resp.Close()
+
+	var ns string
+	var key string
+	err := resp.ForEach(func(row QueryRow) error {
+		ns = row.Namespace
+		key = row.Key
+		reader, err := row.DocumentReader()
+		if err != nil {
+			return err
+		}
+		_, err = io.ReadAll(reader)
+		if err != nil {
+			return err
+		}
+		return reader.Close()
+	})
+	if err != nil {
+		t.Fatalf("for each: %v", err)
+	}
+	if ns != "def\"ault" {
+		t.Fatalf("namespace = %q, want %q", ns, "def\"ault")
+	}
+	if key != "doc/1" {
+		t.Fatalf("key = %q, want %q", key, "doc/1")
+	}
+}

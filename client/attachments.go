@@ -20,6 +20,7 @@ const (
 	headerAttachmentSize      = "X-Attachment-Size"
 	headerAttachmentCreatedAt = "X-Attachment-Created-At"
 	headerAttachmentUpdatedAt = "X-Attachment-Updated-At"
+	headerAttachmentSHA256    = "X-Attachment-SHA256"
 )
 
 // AttachmentInfo describes attachment metadata.
@@ -30,6 +31,8 @@ type AttachmentInfo struct {
 	Name string
 	// Size is the payload size in bytes.
 	Size int64
+	// PlaintextSHA256 is the SHA-256 checksum of the uploaded plaintext payload.
+	PlaintextSHA256 string
 	// ContentType is the media type associated with the payload.
 	ContentType string
 	// CreatedAtUnix is the creation timestamp as Unix seconds.
@@ -88,7 +91,7 @@ type AttachRequest struct {
 	// TxnID associates the operation with a transaction coordinator record.
 	TxnID string
 	// FencingToken is the monotonic token used to fence stale writers.
-	FencingToken string
+	FencingToken *int64
 	// Name is the human-readable identifier for the referenced object.
 	Name string
 	// Body provides the request or response payload stream/content.
@@ -130,7 +133,7 @@ type ListAttachmentsRequest struct {
 	// TxnID associates the operation with a transaction coordinator record.
 	TxnID string
 	// FencingToken is the monotonic token used to fence stale writers.
-	FencingToken string
+	FencingToken *int64
 	// Public enables read-only attachment listing without lease credentials when public reads are allowed.
 	Public bool
 }
@@ -156,7 +159,7 @@ type GetAttachmentRequest struct {
 	// TxnID associates the operation with a transaction coordinator record.
 	TxnID string
 	// FencingToken is the monotonic token used to fence stale writers.
-	FencingToken string
+	FencingToken *int64
 	// Public enables read-only attachment retrieval without lease credentials when public reads are allowed.
 	Public bool
 	// Selector identifies which attachment to retrieve (by ID, Name, or both).
@@ -174,7 +177,7 @@ type DeleteAttachmentRequest struct {
 	// TxnID associates the operation with a transaction coordinator record.
 	TxnID string
 	// FencingToken is the monotonic token used to fence stale writers.
-	FencingToken string
+	FencingToken *int64
 	// Selector identifies which attachment to delete (by ID, Name, or both).
 	Selector AttachmentSelector
 }
@@ -190,7 +193,7 @@ type DeleteAllAttachmentsRequest struct {
 	// TxnID associates the operation with a transaction coordinator record.
 	TxnID string
 	// FencingToken is the monotonic token used to fence stale writers.
-	FencingToken string
+	FencingToken *int64
 }
 
 // DeleteAttachmentResult reports delete status for a single attachment.
@@ -536,7 +539,7 @@ func (c *Client) Attach(ctx context.Context, req AttachRequest) (*AttachResult, 
 		httpReq.Header.Set("Content-Type", contentType)
 		httpReq.Header.Set("X-Lease-ID", leaseID)
 		httpReq.Header.Set(headerTxnID, req.TxnID)
-		httpReq.Header.Set(headerFencingToken, token)
+		httpReq.Header.Set(headerFencingToken, strconv.FormatInt(token, 10))
 		c.applyCorrelationHeader(ctx, httpReq, "")
 		return httpReq, cancel, nil
 	}
@@ -555,7 +558,7 @@ func (c *Client) Attach(ctx context.Context, req AttachRequest) (*AttachResult, 
 	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
 		return nil, err
 	}
-	if newToken := resp.Header.Get(headerFencingToken); newToken != "" {
+	if newToken, ok := parseFencingTokenHeader(resp.Header.Get(headerFencingToken)); ok {
 		c.RegisterLeaseToken(leaseID, newToken)
 	}
 	result := &AttachResult{
@@ -617,7 +620,7 @@ func (c *Client) ListAttachments(ctx context.Context, req ListAttachmentsRequest
 			}
 			httpReq.Header.Set("X-Lease-ID", leaseID)
 			httpReq.Header.Set(headerTxnID, req.TxnID)
-			httpReq.Header.Set(headerFencingToken, token)
+			httpReq.Header.Set(headerFencingToken, strconv.FormatInt(token, 10))
 		}
 		c.applyCorrelationHeader(ctx, httpReq, "")
 		return httpReq, cancel, nil
@@ -705,7 +708,7 @@ func (c *Client) GetAttachment(ctx context.Context, req GetAttachmentRequest) (*
 			}
 			httpReq.Header.Set("X-Lease-ID", leaseID)
 			httpReq.Header.Set(headerTxnID, req.TxnID)
-			httpReq.Header.Set(headerFencingToken, token)
+			httpReq.Header.Set(headerFencingToken, strconv.FormatInt(token, 10))
 		}
 		c.applyCorrelationHeader(ctx, httpReq, "")
 		return httpReq, cancel, nil
@@ -798,7 +801,7 @@ func (c *Client) DeleteAttachment(ctx context.Context, req DeleteAttachmentReque
 		}
 		httpReq.Header.Set("X-Lease-ID", leaseID)
 		httpReq.Header.Set(headerTxnID, req.TxnID)
-		httpReq.Header.Set(headerFencingToken, token)
+		httpReq.Header.Set(headerFencingToken, strconv.FormatInt(token, 10))
 		c.applyCorrelationHeader(ctx, httpReq, "")
 		return httpReq, cancel, nil
 	}
@@ -817,7 +820,7 @@ func (c *Client) DeleteAttachment(ctx context.Context, req DeleteAttachmentReque
 	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
 		return nil, err
 	}
-	if newToken := resp.Header.Get(headerFencingToken); newToken != "" {
+	if newToken, ok := parseFencingTokenHeader(resp.Header.Get(headerFencingToken)); ok {
 		c.RegisterLeaseToken(leaseID, newToken)
 	}
 	return &DeleteAttachmentResult{Deleted: apiResp.Deleted, Version: apiResp.Version}, nil
@@ -868,7 +871,7 @@ func (c *Client) DeleteAllAttachments(ctx context.Context, req DeleteAllAttachme
 		}
 		httpReq.Header.Set("X-Lease-ID", leaseID)
 		httpReq.Header.Set(headerTxnID, req.TxnID)
-		httpReq.Header.Set(headerFencingToken, token)
+		httpReq.Header.Set(headerFencingToken, strconv.FormatInt(token, 10))
 		c.applyCorrelationHeader(ctx, httpReq, "")
 		return httpReq, cancel, nil
 	}
@@ -887,7 +890,7 @@ func (c *Client) DeleteAllAttachments(ctx context.Context, req DeleteAllAttachme
 	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
 		return nil, err
 	}
-	if newToken := resp.Header.Get(headerFencingToken); newToken != "" {
+	if newToken, ok := parseFencingTokenHeader(resp.Header.Get(headerFencingToken)); ok {
 		c.RegisterLeaseToken(leaseID, newToken)
 	}
 	return &DeleteAllAttachmentsResult{Deleted: apiResp.Deleted, Version: apiResp.Version}, nil
@@ -908,12 +911,13 @@ func attachmentBodyFactory(body io.Reader) (func() (io.Reader, error), bool) {
 
 func attachmentInfoFromAPI(info api.AttachmentInfo) AttachmentInfo {
 	return AttachmentInfo{
-		ID:            info.ID,
-		Name:          info.Name,
-		Size:          info.Size,
-		ContentType:   info.ContentType,
-		CreatedAtUnix: info.CreatedAtUnix,
-		UpdatedAtUnix: info.UpdatedAtUnix,
+		ID:              info.ID,
+		Name:            info.Name,
+		Size:            info.Size,
+		PlaintextSHA256: strings.TrimSpace(info.PlaintextSHA256),
+		ContentType:     info.ContentType,
+		CreatedAtUnix:   info.CreatedAtUnix,
+		UpdatedAtUnix:   info.UpdatedAtUnix,
 	}
 }
 
@@ -937,9 +941,10 @@ func normalizeAttachmentSelector(sel AttachmentSelector) AttachmentSelector {
 
 func attachmentInfoFromHeaders(headers http.Header, selector AttachmentSelector) AttachmentInfo {
 	info := AttachmentInfo{
-		ID:          strings.TrimSpace(headers.Get(headerAttachmentID)),
-		Name:        strings.TrimSpace(headers.Get(headerAttachmentName)),
-		ContentType: strings.TrimSpace(headers.Get("Content-Type")),
+		ID:              strings.TrimSpace(headers.Get(headerAttachmentID)),
+		Name:            strings.TrimSpace(headers.Get(headerAttachmentName)),
+		PlaintextSHA256: strings.TrimSpace(headers.Get(headerAttachmentSHA256)),
+		ContentType:     strings.TrimSpace(headers.Get("Content-Type")),
 	}
 	if info.ID == "" {
 		info.ID = selector.ID

@@ -39,6 +39,13 @@ func TestAzureQueuePollingBasics(t *testing.T) {
 		scheduleAzureQueueCleanup(t, cfg, queue)
 		queuetestutil.RunQueueNackScenario(t, cli, queue, []byte("azure poll nack"))
 	})
+
+	t.Run("ObservabilityReadOnly", func(t *testing.T) {
+		queuetestutil.InstallWatchdog(t, "azure-poll-observability", 60*time.Second)
+		queue := queuetestutil.QueueName("azure-poll-observability")
+		scheduleAzureQueueCleanup(t, cfg, queue)
+		queuetestutil.RunQueueObservabilityReadOnlyScenario(t, cli, queue)
+	})
 }
 
 func TestAzureQueuePollingIdleEnqueueDoesNotPoll(t *testing.T) {

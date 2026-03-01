@@ -1,14 +1,22 @@
 package index
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"runtime"
 	"slices"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/internal/search"
 	"pkt.systems/lockd/internal/storage"
+	"pkt.systems/lockd/internal/storage/disk"
 	"pkt.systems/lockd/internal/storage/memory"
 	"pkt.systems/lockd/namespaces"
 )
@@ -44,6 +52,45 @@ func TestSegmentRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSegmentRoundTripV5(t *testing.T) {
+	seg := NewSegment("seg-v5", time.Unix(1_700_000_011, 0))
+	seg.Format = IndexFormatVersionV5
+	seg.Fields["/status"] = FieldBlock{Postings: map[string][]string{
+		"open":   {"doc-2", "doc-1", "doc-1"},
+		"closed": {"doc-3"},
+	}}
+	seg.Fields["/kind"] = FieldBlock{Postings: map[string][]string{
+		"order": {"doc-1", "doc-2", "doc-3"},
+	}}
+	seg.DocMeta["doc-1"] = DocumentMetadata{
+		StateETag:           "etag-doc-1",
+		StatePlaintextBytes: 12,
+		PublishedVersion:    7,
+	}
+	msg := seg.ToProto()
+	if msg.GetV5() == nil {
+		t.Fatalf("expected v5 payload in proto segment")
+	}
+	if len(msg.GetFields()) != 0 {
+		t.Fatalf("expected legacy fields to be omitted for v5 payload")
+	}
+	loaded := SegmentFromProto(msg)
+	if loaded.Format != IndexFormatVersionV5 {
+		t.Fatalf("unexpected loaded format %d", loaded.Format)
+	}
+	status := loaded.Fields["/status"].Postings
+	if !slices.Equal(status["open"], []string{"doc-1", "doc-2"}) {
+		t.Fatalf("unexpected /status open postings %v", status["open"])
+	}
+	if !slices.Equal(status["closed"], []string{"doc-3"}) {
+		t.Fatalf("unexpected /status closed postings %v", status["closed"])
+	}
+	kind := loaded.Fields["/kind"].Postings
+	if !slices.Equal(kind["order"], []string{"doc-1", "doc-2", "doc-3"}) {
+		t.Fatalf("unexpected /kind order postings %v", kind["order"])
+	}
+}
+
 func TestStoreManifestLifecycle(t *testing.T) {
 	store := memory.New()
 	idxStore := NewStore(store, nil)
@@ -62,6 +109,58 @@ func TestStoreManifestLifecycle(t *testing.T) {
 	loaded := manifestRes.Manifest
 	if manifestRes.ETag == "" || loaded.Seq != manifest.Seq {
 		t.Fatalf("unexpected manifest: %+v etag=%q", loaded, manifestRes.ETag)
+	}
+}
+
+func TestStoreLoadManifestReadOnlySharesCachedManifest(t *testing.T) {
+	store := memory.New()
+	idxStore := NewStore(store, nil)
+	ctx := context.Background()
+
+	manifest := NewManifest()
+	manifest.Seq = 7
+	manifest.UpdatedAt = time.Now().UTC()
+	manifest.Shards[0] = &Shard{ID: 0}
+	if _, err := idxStore.SaveManifest(ctx, "default", manifest, ""); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+
+	first, err := idxStore.LoadManifestReadOnly(ctx, "default")
+	if err != nil {
+		t.Fatalf("first read-only load: %v", err)
+	}
+	second, err := idxStore.LoadManifestReadOnly(ctx, "default")
+	if err != nil {
+		t.Fatalf("second read-only load: %v", err)
+	}
+	if first.Manifest == nil || second.Manifest == nil {
+		t.Fatalf("expected non-nil manifests")
+	}
+	if first.Manifest != second.Manifest {
+		t.Fatalf("expected shared cached manifest pointer for read-only loads")
+	}
+
+	cloned, err := idxStore.LoadManifest(ctx, "default")
+	if err != nil {
+		t.Fatalf("cloned load: %v", err)
+	}
+	if cloned.Manifest == nil {
+		t.Fatalf("expected non-nil cloned manifest")
+	}
+	if cloned.Manifest == first.Manifest {
+		t.Fatalf("expected cloned load to return a distinct manifest pointer")
+	}
+	cloned.Manifest.Seq = 99
+
+	after, err := idxStore.LoadManifestReadOnly(ctx, "default")
+	if err != nil {
+		t.Fatalf("post-mutation read-only load: %v", err)
+	}
+	if after.Manifest == nil {
+		t.Fatalf("expected non-nil manifest after mutation check")
+	}
+	if got, want := after.Manifest.Seq, uint64(7); got != want {
+		t.Fatalf("cached read-only manifest mutated through cloned load: got seq %d want %d", got, want)
 	}
 }
 
@@ -139,14 +238,39 @@ func TestIndexAdapterQuery(t *testing.T) {
 	mem := memory.New()
 	store := NewStore(mem, nil)
 	segment := NewSegment("seg-query", time.Unix(1_700_000_020, 0))
-	segment.Fields["status"] = FieldBlock{Postings: map[string][]string{
+	segment.Fields["/status"] = FieldBlock{Postings: map[string][]string{
 		"open":   {"orders-open-1", "orders-open-2", "orders-open-3"},
 		"closed": {"orders-closed"},
 	}}
-	segment.Fields["device.telemetry.battery_mv"] = FieldBlock{Postings: map[string][]string{
+	segment.Fields["/device/telemetry/battery_mv"] = FieldBlock{Postings: map[string][]string{
 		"4200": {"device-gw-42"},
 		"3300": {"device-gw-7"},
 	}}
+	segment.DocMeta["orders-open-1"] = DocumentMetadata{
+		StateETag:        "etag-orders-open-1",
+		PublishedVersion: 1,
+	}
+	segment.DocMeta["orders-open-2"] = DocumentMetadata{
+		StateETag:        "etag-orders-open-2",
+		PublishedVersion: 1,
+		QueryExcluded:    true,
+	}
+	segment.DocMeta["orders-open-3"] = DocumentMetadata{
+		StateETag:        "etag-orders-open-3",
+		PublishedVersion: 1,
+	}
+	segment.DocMeta["orders-closed"] = DocumentMetadata{
+		StateETag:        "etag-orders-closed",
+		PublishedVersion: 1,
+	}
+	segment.DocMeta["device-gw-42"] = DocumentMetadata{
+		StateETag:        "etag-device-gw-42",
+		PublishedVersion: 1,
+	}
+	segment.DocMeta["device-gw-7"] = DocumentMetadata{
+		StateETag:        "etag-device-gw-7",
+		PublishedVersion: 0,
+	}
 	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
 		t.Fatalf("write segment: %v", err)
 	}
@@ -196,7 +320,7 @@ func TestIndexAdapterQuery(t *testing.T) {
 	resp, err := adapter.Query(ctx, search.Request{
 		Namespace: namespaces.Default,
 		Selector: api.Selector{
-			Eq: &api.Term{Field: "status", Value: "open"},
+			Eq: &api.Term{Field: "/status", Value: "open"},
 		},
 		Limit:  10,
 		Engine: search.EngineIndex,
@@ -213,7 +337,7 @@ func TestIndexAdapterQuery(t *testing.T) {
 	rangeResp, err := adapter.Query(ctx, search.Request{
 		Namespace: namespaces.Default,
 		Selector: api.Selector{
-			Range: &api.RangeTerm{Field: "device.telemetry.battery_mv", GTE: floatPtr(4000)},
+			Range: &api.RangeTerm{Field: "/device/telemetry/battery_mv", GTE: api.NewNumericRangeBound(4000)},
 		},
 		Limit:  5,
 		Engine: search.EngineIndex,
@@ -229,7 +353,7 @@ func TestIndexAdapterQuery(t *testing.T) {
 	page1, err := adapter.Query(ctx, search.Request{
 		Namespace: namespaces.Default,
 		Selector: api.Selector{
-			Eq: &api.Term{Field: "status", Value: "open"},
+			Eq: &api.Term{Field: "/status", Value: "open"},
 		},
 		Limit:  1,
 		Engine: search.EngineIndex,
@@ -243,7 +367,7 @@ func TestIndexAdapterQuery(t *testing.T) {
 	page2, err := adapter.Query(ctx, search.Request{
 		Namespace: namespaces.Default,
 		Selector: api.Selector{
-			Eq: &api.Term{Field: "status", Value: "open"},
+			Eq: &api.Term{Field: "/status", Value: "open"},
 		},
 		Limit:  2,
 		Cursor: page1.Cursor,
@@ -257,12 +381,954 @@ func TestIndexAdapterQuery(t *testing.T) {
 	}
 }
 
+func TestIndexAdapterQueryMixedSegmentFormats(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	store := NewStore(mem, nil)
+
+	segV4 := NewSegment("seg-v4", time.Unix(1_700_000_021, 0))
+	segV4.Format = IndexFormatVersionV4
+	segV4.Fields["/status"] = FieldBlock{Postings: map[string][]string{
+		"open": {"doc-v4"},
+	}}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segV4); err != nil {
+		t.Fatalf("write v4 segment: %v", err)
+	}
+
+	segV5 := NewSegment("seg-v5", time.Unix(1_700_000_022, 0))
+	segV5.Format = IndexFormatVersionV5
+	segV5.Fields["/status"] = FieldBlock{Postings: map[string][]string{
+		"open": {"doc-v5"},
+	}}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segV5); err != nil {
+		t.Fatalf("write v5 segment: %v", err)
+	}
+
+	manifest := NewManifest()
+	manifest.Format = IndexFormatVersionV5
+	manifest.Seq = 10
+	manifest.UpdatedAt = segV5.CreatedAt
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{
+			{ID: segV5.ID, CreatedAt: segV5.CreatedAt, DocCount: segV5.DocCount()},
+			{ID: segV4.ID, CreatedAt: segV4.CreatedAt, DocCount: segV4.DocCount()},
+		},
+	}
+	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+
+	for _, key := range []string{"doc-v4", "doc-v5"} {
+		meta := &storage.Meta{
+			Version:          1,
+			PublishedVersion: 1,
+			StateETag:        "etag-" + key,
+		}
+		if _, err := mem.StoreMeta(ctx, namespaces.Default, key, meta, ""); err != nil {
+			t.Fatalf("store meta %s: %v", key, err)
+		}
+	}
+
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	resp, err := adapter.Query(ctx, search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			Eq: &api.Term{Field: "/status", Value: "open"},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	})
+	if err != nil {
+		t.Fatalf("query mixed formats: %v", err)
+	}
+	if !slices.Equal(resp.Keys, []string{"doc-v4", "doc-v5"}) {
+		t.Fatalf("unexpected mixed format keys %v", resp.Keys)
+	}
+}
+
+func TestIndexAdapterQueryStableOrderingAndCursorAcrossOr(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	store := NewStore(mem, nil)
+	segment := NewSegment("seg-order-or", time.Unix(1_700_000_021, 0))
+	segment.Fields["/group"] = FieldBlock{Postings: map[string][]string{
+		"alpha": {"zeta", "alpha"},
+		"beta":  {"mu", "beta"},
+	}}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+	manifest := NewManifest()
+	manifest.Seq = 3
+	manifest.UpdatedAt = segment.CreatedAt
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{{
+			ID:        segment.ID,
+			CreatedAt: segment.CreatedAt,
+			DocCount:  segment.DocCount(),
+		}},
+	}
+	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+	for _, key := range []string{"alpha", "beta", "mu", "zeta"} {
+		meta := &storage.Meta{
+			Version:          1,
+			PublishedVersion: 1,
+			StateETag:        "etag-" + key,
+		}
+		if _, err := mem.StoreMeta(ctx, namespaces.Default, key, meta, ""); err != nil {
+			t.Fatalf("store meta %s: %v", key, err)
+		}
+	}
+
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	req := search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			Or: []api.Selector{
+				{Eq: &api.Term{Field: "/group", Value: "alpha"}},
+				{Eq: &api.Term{Field: "/group", Value: "beta"}},
+			},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	}
+	full, err := adapter.Query(ctx, req)
+	if err != nil {
+		t.Fatalf("full query: %v", err)
+	}
+	want := []string{"alpha", "beta", "mu", "zeta"}
+	if !slices.Equal(full.Keys, want) {
+		t.Fatalf("unexpected full keys %v", full.Keys)
+	}
+
+	page1, err := adapter.Query(ctx, search.Request{
+		Namespace: req.Namespace,
+		Selector:  req.Selector,
+		Limit:     2,
+		Engine:    req.Engine,
+	})
+	if err != nil {
+		t.Fatalf("page1 query: %v", err)
+	}
+	if !slices.Equal(page1.Keys, want[:2]) || page1.Cursor == "" {
+		t.Fatalf("unexpected page1 %+v", page1)
+	}
+	page2, err := adapter.Query(ctx, search.Request{
+		Namespace: req.Namespace,
+		Selector:  req.Selector,
+		Limit:     2,
+		Cursor:    page1.Cursor,
+		Engine:    req.Engine,
+	})
+	if err != nil {
+		t.Fatalf("page2 query: %v", err)
+	}
+	if !slices.Equal(page2.Keys, want[2:]) || page2.Cursor != "" {
+		t.Fatalf("unexpected page2 %+v", page2)
+	}
+}
+
+func TestIndexAdapterQueryStableOrderingAndCursorWithNot(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	store := NewStore(mem, nil)
+	segment := NewSegment("seg-order-not", time.Unix(1_700_000_022, 0))
+	segment.Fields["/status"] = FieldBlock{Postings: map[string][]string{
+		"open":   {"k3", "k1"},
+		"closed": {"k2"},
+	}}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+	manifest := NewManifest()
+	manifest.Seq = 4
+	manifest.UpdatedAt = segment.CreatedAt
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{{
+			ID:        segment.ID,
+			CreatedAt: segment.CreatedAt,
+			DocCount:  segment.DocCount(),
+		}},
+	}
+	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+	for _, key := range []string{"k1", "k2", "k3"} {
+		meta := &storage.Meta{
+			Version:          1,
+			PublishedVersion: 1,
+			StateETag:        "etag-" + key,
+		}
+		if _, err := mem.StoreMeta(ctx, namespaces.Default, key, meta, ""); err != nil {
+			t.Fatalf("store meta %s: %v", key, err)
+		}
+	}
+
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	req := search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			Not: &api.Selector{Eq: &api.Term{Field: "/status", Value: "closed"}},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	}
+	full, err := adapter.Query(ctx, req)
+	if err != nil {
+		t.Fatalf("full query: %v", err)
+	}
+	want := []string{"k1", "k3"}
+	if !slices.Equal(full.Keys, want) {
+		t.Fatalf("unexpected full keys %v", full.Keys)
+	}
+
+	page1, err := adapter.Query(ctx, search.Request{
+		Namespace: req.Namespace,
+		Selector:  req.Selector,
+		Limit:     1,
+		Engine:    req.Engine,
+	})
+	if err != nil {
+		t.Fatalf("page1 query: %v", err)
+	}
+	if !slices.Equal(page1.Keys, want[:1]) || page1.Cursor == "" {
+		t.Fatalf("unexpected page1 %+v", page1)
+	}
+	page2, err := adapter.Query(ctx, search.Request{
+		Namespace: req.Namespace,
+		Selector:  req.Selector,
+		Limit:     1,
+		Cursor:    page1.Cursor,
+		Engine:    req.Engine,
+	})
+	if err != nil {
+		t.Fatalf("page2 query: %v", err)
+	}
+	if !slices.Equal(page2.Keys, want[1:]) || page2.Cursor != "" {
+		t.Fatalf("unexpected page2 %+v", page2)
+	}
+}
+
+func TestIndexAdapterQueryContainsSelectors(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	store := NewStore(mem, nil)
+	segment := NewSegment("seg-contains", time.Unix(1_700_000_030, 0))
+	segment.Fields["/message"] = FieldBlock{Postings: map[string][]string{
+		"timeout while syncing": {"log-1"},
+		"operation complete":    {"log-2"},
+	}}
+	segment.Fields["/service"] = FieldBlock{Postings: map[string][]string{
+		"auth-api":    {"log-1"},
+		"billing-api": {"log-2"},
+	}}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+	manifest := NewManifest()
+	manifest.Seq = 3
+	manifest.UpdatedAt = segment.CreatedAt
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{{
+			ID:        segment.ID,
+			CreatedAt: segment.CreatedAt,
+			DocCount:  segment.DocCount(),
+		}},
+	}
+	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+	for _, key := range []string{"log-1", "log-2"} {
+		meta := &storage.Meta{
+			Version:          1,
+			PublishedVersion: 1,
+			StateETag:        "etag-" + key,
+		}
+		if _, err := mem.StoreMeta(ctx, namespaces.Default, key, meta, ""); err != nil {
+			t.Fatalf("store meta %s: %v", key, err)
+		}
+	}
+
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+
+	containsResp, err := adapter.Query(ctx, search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			Contains: &api.Term{Field: "/message", Value: "timeout"},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	})
+	if err != nil {
+		t.Fatalf("query contains: %v", err)
+	}
+	if !slices.Equal(containsResp.Keys, []string{"log-1"}) {
+		t.Fatalf("unexpected contains keys %v", containsResp.Keys)
+	}
+
+	icontainsResp, err := adapter.Query(ctx, search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			IContains: &api.Term{Field: "/message", Value: "TIMEOUT"},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	})
+	if err != nil {
+		t.Fatalf("query icontains: %v", err)
+	}
+	if !slices.Equal(icontainsResp.Keys, []string{"log-1"}) {
+		t.Fatalf("unexpected icontains keys %v", icontainsResp.Keys)
+	}
+
+	iprefixResp, err := adapter.Query(ctx, search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			IPrefix: &api.Term{Field: "/service", Value: "AUTH"},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	})
+	if err != nil {
+		t.Fatalf("query iprefix: %v", err)
+	}
+	if !slices.Equal(iprefixResp.Keys, []string{"log-1"}) {
+		t.Fatalf("unexpected iprefix keys %v", iprefixResp.Keys)
+	}
+}
+
+func TestIndexAdapterQueryContainsUsesTrigramPostings(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	store := NewStore(mem, nil)
+	segment := NewSegment("seg-contains-grams", time.Unix(1_700_000_031, 0))
+	segment.Fields["/message"] = FieldBlock{Postings: map[string][]string{
+		"timeout": {"log-1"},
+	}}
+	gramField := containsGramField("/message")
+	segment.Fields[gramField] = FieldBlock{Postings: map[string][]string{
+		"tim": {"log-1"},
+		"ime": {"log-1"},
+	}}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+	manifest := NewManifest()
+	manifest.Seq = 3
+	manifest.UpdatedAt = segment.CreatedAt
+	manifest.Format = IndexFormatVersionV4
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{{
+			ID:        segment.ID,
+			CreatedAt: segment.CreatedAt,
+			DocCount:  segment.DocCount(),
+		}},
+	}
+	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+	meta := &storage.Meta{
+		Version:          1,
+		PublishedVersion: 1,
+		StateETag:        "etag-log-1",
+	}
+	if _, err := mem.StoreMeta(ctx, namespaces.Default, "log-1", meta, ""); err != nil {
+		t.Fatalf("store meta: %v", err)
+	}
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	resp, err := adapter.Query(ctx, search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			Contains: &api.Term{Field: "/message", Value: "time"},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	})
+	if err != nil {
+		t.Fatalf("query contains: %v", err)
+	}
+	if !slices.Equal(resp.Keys, []string{"log-1"}) {
+		t.Fatalf("unexpected contains keys %v", resp.Keys)
+	}
+}
+
+func TestIndexAdapterQueryContainsTrigramFilterAvoidsFalsePositives(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	store := NewStore(mem, nil)
+	segment := NewSegment("seg-contains-grams-false-positive", time.Unix(1_700_000_033, 0))
+	segment.Fields["/message"] = FieldBlock{Postings: map[string][]string{
+		"abcbcd":   {"log-fp"},
+		"xxabcdyy": {"log-hit"},
+	}}
+	gramField := containsGramField("/message")
+	segment.Fields[gramField] = FieldBlock{Postings: map[string][]string{
+		"abc": {"log-fp", "log-hit"},
+		"bcd": {"log-fp", "log-hit"},
+	}}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+	manifest := NewManifest()
+	manifest.Seq = 4
+	manifest.UpdatedAt = segment.CreatedAt
+	manifest.Format = IndexFormatVersionV4
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{{
+			ID:        segment.ID,
+			CreatedAt: segment.CreatedAt,
+			DocCount:  segment.DocCount(),
+		}},
+	}
+	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+	for _, key := range []string{"log-fp", "log-hit"} {
+		meta := &storage.Meta{
+			Version:          1,
+			PublishedVersion: 1,
+			StateETag:        "etag-" + key,
+		}
+		if _, err := mem.StoreMeta(ctx, namespaces.Default, key, meta, ""); err != nil {
+			t.Fatalf("store meta %s: %v", key, err)
+		}
+	}
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	resp, err := adapter.Query(ctx, search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			Contains: &api.Term{Field: "/message", Value: "abcd"},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	})
+	if err != nil {
+		t.Fatalf("query contains: %v", err)
+	}
+	if !slices.Equal(resp.Keys, []string{"log-hit"}) {
+		t.Fatalf("unexpected contains keys %v", resp.Keys)
+	}
+}
+
+func TestIndexAdapterQueryIContainsTokenizedOnlyField(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	store := NewStore(mem, nil)
+	segment := NewSegment("seg-icontains-tokenized-only", time.Unix(1_700_000_034, 0))
+	segment.Fields[tokenizedField("/message")] = FieldBlock{Postings: map[string][]string{
+		"timeout": {"log-1"},
+		"while":   {"log-1"},
+		"syncing": {"log-1"},
+		"healthy": {"log-2"},
+	}}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+	manifest := NewManifest()
+	manifest.Seq = 5
+	manifest.UpdatedAt = segment.CreatedAt
+	manifest.Format = IndexFormatVersionV5
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{{
+			ID:        segment.ID,
+			CreatedAt: segment.CreatedAt,
+			DocCount:  segment.DocCount(),
+		}},
+	}
+	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+	for _, key := range []string{"log-1", "log-2"} {
+		meta := &storage.Meta{
+			Version:          1,
+			PublishedVersion: 1,
+			StateETag:        "etag-" + key,
+		}
+		if _, err := mem.StoreMeta(ctx, namespaces.Default, key, meta, ""); err != nil {
+			t.Fatalf("store meta %s: %v", key, err)
+		}
+	}
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+
+	resp, err := adapter.Query(ctx, search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			IContains: &api.Term{Field: "/message", Value: "TIMEOUT"},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	})
+	if err != nil {
+		t.Fatalf("query icontains: %v", err)
+	}
+	if !slices.Equal(resp.Keys, []string{"log-1"}) {
+		t.Fatalf("unexpected icontains keys %v", resp.Keys)
+	}
+
+	containsResp, err := adapter.Query(ctx, search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			Contains: &api.Term{Field: "/message", Value: "timeout"},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	})
+	if err != nil {
+		t.Fatalf("query contains: %v", err)
+	}
+	if len(containsResp.Keys) != 0 {
+		t.Fatalf("expected contains to require raw postings, got %v", containsResp.Keys)
+	}
+}
+
+func TestIndexAdapterQueryIContainsAllTextField(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	store := NewStore(mem, nil)
+	segment := NewSegment("seg-icontains-alltext", time.Unix(1_700_000_035, 0))
+	segment.Fields["/message"] = FieldBlock{Postings: map[string][]string{
+		"timeout while syncing": {"log-1"},
+		"healthy and green":     {"log-2"},
+	}}
+	segment.Fields[tokenizedField("/message")] = FieldBlock{Postings: map[string][]string{
+		"timeout": {"log-1"},
+		"while":   {"log-1"},
+		"syncing": {"log-1"},
+		"healthy": {"log-2"},
+		"green":   {"log-2"},
+	}}
+	segment.Fields[tokenAllTextField] = FieldBlock{Postings: map[string][]string{
+		"timeout": {"log-1"},
+		"while":   {"log-1"},
+		"syncing": {"log-1"},
+		"healthy": {"log-2"},
+		"green":   {"log-2"},
+	}}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+	manifest := NewManifest()
+	manifest.Seq = 6
+	manifest.UpdatedAt = segment.CreatedAt
+	manifest.Format = IndexFormatVersionV5
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{{
+			ID:        segment.ID,
+			CreatedAt: segment.CreatedAt,
+			DocCount:  segment.DocCount(),
+		}},
+	}
+	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+	for _, key := range []string{"log-1", "log-2"} {
+		meta := &storage.Meta{
+			Version:          1,
+			PublishedVersion: 1,
+			StateETag:        "etag-" + key,
+		}
+		if _, err := mem.StoreMeta(ctx, namespaces.Default, key, meta, ""); err != nil {
+			t.Fatalf("store meta %s: %v", key, err)
+		}
+	}
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	resp, err := adapter.Query(ctx, search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			IContains: &api.Term{Field: "/...", Value: "TIMEOUT"},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	})
+	if err != nil {
+		t.Fatalf("query icontains all_text: %v", err)
+	}
+	if !slices.Equal(resp.Keys, []string{"log-1"}) {
+		t.Fatalf("unexpected all_text icontains keys %v", resp.Keys)
+	}
+}
+
+func TestIndexAdapterQueryAndSelectorCombination(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	store := NewStore(mem, nil)
+	segment := NewSegment("seg-and-combo", time.Unix(1_700_000_032, 0))
+	segment.Fields["/voucher/book"] = FieldBlock{Postings: map[string][]string{
+		"general": {"voucher-ap-2025-1101"},
+	}}
+	segment.Fields["/voucher/header/period"] = FieldBlock{Postings: map[string][]string{
+		"2025-11": {"voucher-ap-2025-1101"},
+	}}
+	segment.Fields["/voucher/header/posted"] = FieldBlock{Postings: map[string][]string{
+		"false": {"voucher-ap-2025-1101"},
+	}}
+	segment.Fields["/voucher/lines/10/amount"] = FieldBlock{Postings: map[string][]string{
+		"3500": {"voucher-ap-2025-1101"},
+	}}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+	manifest := NewManifest()
+	manifest.Seq = 5
+	manifest.UpdatedAt = segment.CreatedAt
+	manifest.Format = IndexFormatVersionV4
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{{
+			ID:        segment.ID,
+			CreatedAt: segment.CreatedAt,
+			DocCount:  segment.DocCount(),
+		}},
+	}
+	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+	writeIndexedState(t, mem, namespaces.Default, "voucher-ap-2025-1101", map[string]any{
+		"voucher": map[string]any{
+			"book": "GENERAL",
+			"header": map[string]any{
+				"period": "2025-11",
+				"posted": false,
+			},
+			"lines": map[string]any{
+				"10": map[string]any{"amount": 3500},
+				"20": map[string]any{"amount": -3500},
+			},
+		},
+	})
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	threeK := 3000.0
+	resp, err := adapter.Query(ctx, search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			And: []api.Selector{
+				{Eq: &api.Term{Field: "/voucher/book", Value: "GENERAL"}},
+				{Eq: &api.Term{Field: "/voucher/header/period", Value: "2025-11"}},
+				{Eq: &api.Term{Field: "/voucher/header/posted", Value: "false"}},
+				{Range: &api.RangeTerm{Field: "/voucher/lines/10/amount", GTE: api.NewNumericRangeBound(threeK)}},
+			},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	})
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if !slices.Equal(resp.Keys, []string{"voucher-ap-2025-1101"}) {
+		t.Fatalf("unexpected keys %v", resp.Keys)
+	}
+}
+
+func TestIndexAdapterQueryDocumentsStreamsMatches(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	store := NewStore(mem, nil)
+	segment := NewSegment("seg-docs", time.Unix(1_700_000_050, 0))
+	segment.Fields["/status"] = FieldBlock{Postings: map[string][]string{
+		"open":   {"orders-open-1"},
+		"closed": {"orders-closed-1"},
+	}}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+	manifest := NewManifest()
+	manifest.Seq = 4
+	manifest.UpdatedAt = segment.CreatedAt
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{{
+			ID:        segment.ID,
+			CreatedAt: segment.CreatedAt,
+			DocCount:  segment.DocCount(),
+		}},
+	}
+	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+	writeIndexedState(t, mem, namespaces.Default, "orders-open-1", map[string]any{"status": "open"})
+	writeIndexedState(t, mem, namespaces.Default, "orders-closed-1", map[string]any{"status": "closed"})
+
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	sink := &capturingIndexDocumentSink{}
+	result, err := adapter.QueryDocuments(ctx, search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			Eq: &api.Term{Field: "/status", Value: "open"},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	}, sink)
+	if err != nil {
+		t.Fatalf("query documents: %v", err)
+	}
+	if !slices.Equal(result.Keys, []string{"orders-open-1"}) {
+		t.Fatalf("unexpected streamed keys %v", result.Keys)
+	}
+	if got := result.Metadata[search.MetadataQueryCandidatesSeen]; got != "1" {
+		t.Fatalf("expected %s=1, got %q", search.MetadataQueryCandidatesSeen, got)
+	}
+	if got := result.Metadata[search.MetadataQueryCandidatesMatched]; got != "1" {
+		t.Fatalf("expected %s=1, got %q", search.MetadataQueryCandidatesMatched, got)
+	}
+	if len(sink.rows) != 1 || sink.rows[0].key != "orders-open-1" {
+		t.Fatalf("unexpected streamed rows %+v", sink.rows)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(sink.rows[0].doc, &doc); err != nil {
+		t.Fatalf("decode streamed doc: %v", err)
+	}
+	if doc["status"] != "open" {
+		t.Fatalf("unexpected document payload %+v", doc)
+	}
+}
+
+func TestIndexAdapterQueryDocumentsUsesSegmentDocMetaWithoutLoadMeta(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	tracking := &loadMetaTrackingBackend{
+		Backend:      mem,
+		failLoadMeta: true,
+	}
+	store := NewStore(tracking, nil)
+	segment := NewSegment("seg-docmeta-fastpath", time.Unix(1_700_000_055, 0))
+	segment.Fields["/status"] = FieldBlock{Postings: map[string][]string{
+		"open": {"orders-open-1"},
+	}}
+	segment.DocMeta["orders-open-1"] = DocumentMetadata{
+		StateETag:           "etag-segment-open-1",
+		StatePlaintextBytes: 128,
+		PublishedVersion:    1,
+	}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+	manifest := NewManifest()
+	manifest.Seq = 5
+	manifest.UpdatedAt = segment.CreatedAt
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{{
+			ID:        segment.ID,
+			CreatedAt: segment.CreatedAt,
+			DocCount:  segment.DocCount(),
+		}},
+	}
+	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+	writeIndexedState(t, tracking, namespaces.Default, "orders-open-1", map[string]any{"status": "open"})
+
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	sink := &capturingIndexDocumentSink{}
+	result, err := adapter.QueryDocuments(ctx, search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			Eq: &api.Term{Field: "/status", Value: "open"},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	}, sink)
+	if err != nil {
+		t.Fatalf("query documents: %v", err)
+	}
+	if !slices.Equal(result.Keys, []string{"orders-open-1"}) {
+		t.Fatalf("unexpected streamed keys %v", result.Keys)
+	}
+	if got := tracking.LoadMetaCalls(); got != 0 {
+		t.Fatalf("expected zero load meta calls during query documents, got %d", got)
+	}
+}
+
+func TestIndexAdapterQueryDocumentsSingleLargeMatchTotalAllocBounded(t *testing.T) {
+	ctx := context.Background()
+	backend, err := disk.New(disk.Config{Root: t.TempDir(), QueueWatch: false})
+	if err != nil {
+		t.Fatalf("disk store: %v", err)
+	}
+	t.Cleanup(func() { _ = backend.Close() })
+
+	store := NewStore(backend, nil)
+	segment := NewSegment("seg-docs-large", time.Unix(1_700_000_057, 0))
+	segment.Fields["/message"] = FieldBlock{Postings: map[string][]string{
+		"timeout": {"orders-huge-1"},
+	}}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+	manifest := NewManifest()
+	manifest.Seq = 6
+	manifest.UpdatedAt = segment.CreatedAt
+	manifest.Format = IndexFormatVersionV4
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{{
+			ID:        segment.ID,
+			CreatedAt: segment.CreatedAt,
+			DocCount:  segment.DocCount(),
+		}},
+	}
+	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+
+	const docBytes = 50 << 20
+	writeIndexedState(t, backend, namespaces.Default, "orders-huge-1", map[string]any{
+		"message": strings.Repeat("timeout payload ", docBytes/len("timeout payload ")),
+		"id":      1,
+	})
+
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	req := search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			Contains: &api.Term{Field: "/message", Value: "timeout"},
+		},
+		Limit:  1,
+		Engine: search.EngineIndex,
+	}
+
+	// Warm once to remove one-time setup noise from alloc accounting.
+	if _, err := adapter.QueryDocuments(ctx, req, &drainingIndexDocumentSink{}); err != nil {
+		t.Fatalf("warm query documents: %v", err)
+	}
+
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	sink := &drainingIndexDocumentSink{}
+	result, err := adapter.QueryDocuments(ctx, req, sink)
+	if err != nil {
+		t.Fatalf("query documents: %v", err)
+	}
+	if len(result.Keys) != 1 || result.Keys[0] != "orders-huge-1" {
+		t.Fatalf("unexpected keys %v", result.Keys)
+	}
+	if sink.docs != 1 {
+		t.Fatalf("expected one streamed doc, got %d", sink.docs)
+	}
+
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	delta := after.TotalAlloc - before.TotalAlloc
+
+	const allocCap = uint64(24 << 20) // Must remain far below 50 MiB document size.
+	if delta > allocCap {
+		t.Fatalf("query documents total alloc too large: got=%d cap=%d payload=%d", delta, allocCap, docBytes)
+	}
+}
+
+func TestIndexAdapterQueryUsesSegmentDocMetaWithoutLoadMeta(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	tracking := &loadMetaTrackingBackend{
+		Backend:      mem,
+		failLoadMeta: true,
+	}
+	store := NewStore(tracking, nil)
+	segment := NewSegment("seg-query-docmeta-fastpath", time.Unix(1_700_000_056, 0))
+	segment.Fields["/status"] = FieldBlock{Postings: map[string][]string{
+		"open": {"orders-open-1"},
+	}}
+	segment.DocMeta["orders-open-1"] = DocumentMetadata{
+		StateETag:           "etag-segment-open-1",
+		StatePlaintextBytes: 128,
+		PublishedVersion:    1,
+	}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+	manifest := NewManifest()
+	manifest.Seq = 5
+	manifest.UpdatedAt = segment.CreatedAt
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{{
+			ID:        segment.ID,
+			CreatedAt: segment.CreatedAt,
+			DocCount:  segment.DocCount(),
+		}},
+	}
+	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+	writeIndexedState(t, tracking, namespaces.Default, "orders-open-1", map[string]any{"status": "open"})
+
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	result, err := adapter.Query(ctx, search.Request{
+		Namespace: namespaces.Default,
+		Selector: api.Selector{
+			Eq: &api.Term{Field: "/status", Value: "open"},
+		},
+		Limit:  10,
+		Engine: search.EngineIndex,
+	})
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if !slices.Equal(result.Keys, []string{"orders-open-1"}) {
+		t.Fatalf("unexpected keys %v", result.Keys)
+	}
+	if got := tracking.LoadMetaCalls(); got != 0 {
+		t.Fatalf("expected zero load meta calls during query, got %d", got)
+	}
+}
+
 func TestIndexAdapterDocMeta(t *testing.T) {
 	ctx := context.Background()
 	mem := memory.New()
 	store := NewStore(mem, nil)
 	segment := NewSegment("seg-meta", time.Unix(1_700_000_060, 0))
-	segment.Fields["status"] = FieldBlock{Postings: map[string][]string{
+	segment.Fields["/status"] = FieldBlock{Postings: map[string][]string{
 		"open": {"doc-1"},
 	}}
 	segment.DocMeta["doc-1"] = DocumentMetadata{
@@ -302,7 +1368,7 @@ func TestIndexAdapterDocMeta(t *testing.T) {
 	}
 	resp, err := adapter.Query(ctx, search.Request{
 		Namespace:      namespaces.Default,
-		Selector:       api.Selector{Eq: &api.Term{Field: "status", Value: "open"}},
+		Selector:       api.Selector{Eq: &api.Term{Field: "/status", Value: "open"}},
 		Limit:          1,
 		Engine:         search.EngineIndex,
 		IncludeDocMeta: true,
@@ -324,7 +1390,7 @@ func TestIndexAdapterDocMetaPrefersNewestSegment(t *testing.T) {
 	store := NewStore(mem, nil)
 
 	oldSeg := NewSegment("seg-old", time.Unix(1_700_000_000, 0))
-	oldSeg.Fields["status"] = FieldBlock{Postings: map[string][]string{
+	oldSeg.Fields["/status"] = FieldBlock{Postings: map[string][]string{
 		"open": {"doc-1"},
 	}}
 	oldSeg.DocMeta["doc-1"] = DocumentMetadata{
@@ -337,7 +1403,7 @@ func TestIndexAdapterDocMetaPrefersNewestSegment(t *testing.T) {
 	}
 
 	newSeg := NewSegment("seg-new", time.Unix(1_700_000_120, 0))
-	newSeg.Fields["status"] = FieldBlock{Postings: map[string][]string{
+	newSeg.Fields["/status"] = FieldBlock{Postings: map[string][]string{
 		"open": {"doc-1"},
 	}}
 	newSeg.DocMeta["doc-1"] = DocumentMetadata{
@@ -386,7 +1452,7 @@ func TestIndexAdapterDocMetaPrefersNewestSegment(t *testing.T) {
 	}
 	resp, err := adapter.Query(ctx, search.Request{
 		Namespace:      namespaces.Default,
-		Selector:       api.Selector{Eq: &api.Term{Field: "status", Value: "open"}},
+		Selector:       api.Selector{Eq: &api.Term{Field: "/status", Value: "open"}},
 		Limit:          1,
 		Engine:         search.EngineIndex,
 		IncludeDocMeta: true,
@@ -404,7 +1470,7 @@ func TestIndexAdapterRespectsVisibilityLedger(t *testing.T) {
 	mem := memory.New()
 	store := NewStore(mem, nil)
 	segment := NewSegment("seg-vis", time.Unix(1_700_000_040, 0))
-	segment.Fields["status"] = FieldBlock{Postings: map[string][]string{
+	segment.Fields["/status"] = FieldBlock{Postings: map[string][]string{
 		"open": {"orders-open-1", "orders-open-2", "orders-open-3"},
 	}}
 	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
@@ -469,7 +1535,7 @@ func TestIndexAdapterRespectsVisibilityLedger(t *testing.T) {
 	resp, err := adapter.Query(ctx, search.Request{
 		Namespace: namespaces.Default,
 		Selector: api.Selector{
-			Eq: &api.Term{Field: "status", Value: "open"},
+			Eq: &api.Term{Field: "/status", Value: "open"},
 		},
 		Limit:  10,
 		Engine: search.EngineIndex,
@@ -483,6 +1549,94 @@ func TestIndexAdapterRespectsVisibilityLedger(t *testing.T) {
 	}
 }
 
-func floatPtr(val float64) *float64 {
-	return &val
+type indexDocumentRow struct {
+	namespace string
+	key       string
+	version   int64
+	doc       []byte
+}
+
+type capturingIndexDocumentSink struct {
+	rows []indexDocumentRow
+}
+
+func (s *capturingIndexDocumentSink) OnDocument(_ context.Context, namespace, key string, version int64, reader io.Reader) error {
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return err
+	}
+	s.rows = append(s.rows, indexDocumentRow{
+		namespace: namespace,
+		key:       key,
+		version:   version,
+		doc:       append([]byte(nil), data...),
+	})
+	return nil
+}
+
+type drainingIndexDocumentSink struct {
+	chunkBytes int
+	perChunk   time.Duration
+	docs       int
+}
+
+func (s *drainingIndexDocumentSink) OnDocument(_ context.Context, _ string, _ string, _ int64, reader io.Reader) error {
+	chunk := s.chunkBytes
+	if chunk <= 0 {
+		chunk = 32 << 10
+	}
+	buf := make([]byte, chunk)
+	for {
+		n, err := reader.Read(buf)
+		if n > 0 && s.perChunk > 0 {
+			time.Sleep(s.perChunk)
+		}
+		if err == io.EOF {
+			s.docs++
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
+}
+
+func writeIndexedState(t *testing.T, store storage.Backend, namespace, key string, doc map[string]any) {
+	t.Helper()
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	stateRes, err := store.WriteState(context.Background(), namespace, key, bytes.NewReader(payload), storage.PutStateOptions{})
+	if err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+	meta := &storage.Meta{
+		Version:             1,
+		PublishedVersion:    1,
+		StateETag:           stateRes.NewETag,
+		StatePlaintextBytes: stateRes.BytesWritten,
+		StateDescriptor:     append([]byte(nil), stateRes.Descriptor...),
+	}
+	if _, err := store.StoreMeta(context.Background(), namespace, key, meta, ""); err != nil {
+		t.Fatalf("store meta: %v", err)
+	}
+}
+
+type loadMetaTrackingBackend struct {
+	storage.Backend
+	failLoadMeta  bool
+	loadMetaCalls atomic.Int64
+}
+
+func (b *loadMetaTrackingBackend) LoadMeta(ctx context.Context, namespace, key string) (storage.LoadMetaResult, error) {
+	b.loadMetaCalls.Add(1)
+	if b.failLoadMeta {
+		return storage.LoadMetaResult{}, errors.New("load meta disabled in test")
+	}
+	return b.Backend.LoadMeta(ctx, namespace, key)
+}
+
+func (b *loadMetaTrackingBackend) LoadMetaCalls() int64 {
+	return b.loadMetaCalls.Load()
 }

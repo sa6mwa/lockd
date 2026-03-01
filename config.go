@@ -94,11 +94,12 @@ const (
 	// DefaultMaxConcurrentStreams sets the default HTTP/2 MaxConcurrentStreams when not explicitly configured.
 	DefaultMaxConcurrentStreams = 1024
 	// DefaultLogstoreCommitMaxOps caps how many logstore entries are committed per fsync batch.
-	DefaultLogstoreCommitMaxOps = 1024
+	DefaultLogstoreCommitMaxOps = 4096
 	// DefaultLogstoreSegmentSize caps the size of a single logstore segment before rolling.
 	DefaultLogstoreSegmentSize = int64(64 << 20)
 	// DefaultQueryDocPrefetch caps the number of in-flight document fetches for query return=documents.
-	DefaultQueryDocPrefetch = 8
+	// A conservative default avoids over-saturating local disk backends; callers can raise this explicitly.
+	DefaultQueryDocPrefetch = 1
 	// DefaultDiskLockFileCacheSize caps cached lockfile descriptors (disk/NFS).
 	DefaultDiskLockFileCacheSize = 2048
 	// DefaultS3MaxPartSize tunes multipart uploads when writing state to S3-compatible stores.
@@ -190,7 +191,7 @@ const (
 	DefaultLSFLogInterval = 15 * time.Second
 
 	// DefaultIndexerFlushDocs determines how many documents trigger a flush.
-	DefaultIndexerFlushDocs = 1000
+	DefaultIndexerFlushDocs = 2000
 	// DefaultIndexerFlushInterval bounds how long a memtable buffers before flushing.
 	DefaultIndexerFlushInterval = 30 * time.Second
 )
@@ -495,7 +496,8 @@ type Config struct {
 	// LSFLogIntervalSet reports whether LSFLogInterval was explicitly set.
 	LSFLogIntervalSet bool
 
-	// ConnguardEnabled enables suspicious-connection protection in the listener path.
+	// ConnguardEnabled enables suspicious-connection protection in the TCP listener path.
+	// This setting is unsupported for listen-proto=unix.
 	ConnguardEnabled bool
 	// ConnguardEnabledSet reports whether ConnguardEnabled was explicitly set.
 	ConnguardEnabledSet bool
@@ -505,7 +507,7 @@ type Config struct {
 	ConnguardFailureWindow time.Duration
 	// ConnguardBlockDuration controls how long a suspicious source IP is blocked.
 	ConnguardBlockDuration time.Duration
-	// ConnguardProbeTimeout controls how long non-TLS connections are probed before classification.
+	// ConnguardProbeTimeout controls how long plain TCP connections are probed before classification.
 	ConnguardProbeTimeout time.Duration
 }
 
@@ -717,32 +719,40 @@ func (c *Config) Validate() error {
 	if !c.ConnguardEnabledSet {
 		c.ConnguardEnabled = true
 	}
-	if c.ConnguardFailureThreshold < 0 {
-		return fmt.Errorf("config: connguard failure threshold must be >= 0")
-	}
-	if c.ConnguardFailureThreshold == 0 {
-		c.ConnguardFailureThreshold = DefaultConnguardFailureThreshold
-	}
-	if c.ConnguardFailureWindow < 0 {
-		return fmt.Errorf("config: connguard failure window must be >= 0")
-	}
-	if c.ConnguardFailureWindow == 0 {
-		c.ConnguardFailureWindow = DefaultConnguardFailureWindow
-	}
-	if c.ConnguardBlockDuration < 0 {
-		return fmt.Errorf("config: connguard block duration must be >= 0")
-	}
-	if c.ConnguardBlockDuration == 0 {
-		c.ConnguardBlockDuration = DefaultConnguardBlockDuration
-	}
-	if c.ConnguardProbeTimeout < 0 {
-		return fmt.Errorf("config: connguard probe timeout must be >= 0")
-	}
-	if c.ConnguardProbeTimeout == 0 {
-		c.ConnguardProbeTimeout = DefaultConnguardProbeTimeout
-	}
-	if c.ConnguardFailureThreshold < 2 {
-		return fmt.Errorf("config: connguard failure threshold must be >= 2")
+	if strings.EqualFold(strings.TrimSpace(c.ListenProto), "unix") {
+		if c.ConnguardEnabledSet && c.ConnguardEnabled {
+			return fmt.Errorf("config: connguard is not supported for listen-proto=unix")
+		}
+		c.ConnguardEnabled = false
+		c.ConnguardProbeTimeout = 0
+	} else {
+		if c.ConnguardFailureThreshold < 0 {
+			return fmt.Errorf("config: connguard failure threshold must be >= 0")
+		}
+		if c.ConnguardFailureThreshold == 0 {
+			c.ConnguardFailureThreshold = DefaultConnguardFailureThreshold
+		}
+		if c.ConnguardFailureWindow < 0 {
+			return fmt.Errorf("config: connguard failure window must be >= 0")
+		}
+		if c.ConnguardFailureWindow == 0 {
+			c.ConnguardFailureWindow = DefaultConnguardFailureWindow
+		}
+		if c.ConnguardBlockDuration < 0 {
+			return fmt.Errorf("config: connguard block duration must be >= 0")
+		}
+		if c.ConnguardBlockDuration == 0 {
+			c.ConnguardBlockDuration = DefaultConnguardBlockDuration
+		}
+		if c.ConnguardProbeTimeout < 0 {
+			return fmt.Errorf("config: connguard probe timeout must be >= 0")
+		}
+		if c.ConnguardProbeTimeout == 0 {
+			c.ConnguardProbeTimeout = DefaultConnguardProbeTimeout
+		}
+		if c.ConnguardFailureThreshold < 2 {
+			return fmt.Errorf("config: connguard failure threshold must be >= 2")
+		}
 	}
 	if c.TCTrustDir == "" {
 		dir, err := DefaultTCTrustDir()

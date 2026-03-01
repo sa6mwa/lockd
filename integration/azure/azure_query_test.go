@@ -28,6 +28,14 @@ func TestAzureQuerySelectors(t *testing.T) {
 	queriesuite.RunSelectors(t, startAzureQueryServer)
 }
 
+func TestAzureQueryFlushWaitReadabilityContract(t *testing.T) {
+	queriesuite.RunFlushWaitReadabilityContract(t, startAzureQueryServer)
+}
+
+func TestAzureQueryRefreshWaitForContract(t *testing.T) {
+	queriesuite.RunQueryRefreshWaitForContract(t, startAzureQueryServer)
+}
+
 func TestAzureQueryPagination(t *testing.T) {
 	queriesuite.RunPagination(t, startAzureQueryServer)
 }
@@ -42,6 +50,22 @@ func TestAzureQueryResultsSupportPublicRead(t *testing.T) {
 
 func TestAzureQueryDocumentStreaming(t *testing.T) {
 	queriesuite.RunDocumentStreaming(t, startAzureQueryServer)
+}
+
+func TestAzureQueryDocumentStreamingFlowControl(t *testing.T) {
+	queriesuite.RunDocumentStreamingFlowControl(t, startAzureQueryServer)
+}
+
+func TestAzureQueryIndexRebuildUpgrade(t *testing.T) {
+	queriesuite.RunIndexRebuildUpgrade(t, startAzureQueryServer)
+}
+
+func TestAzureQueryLargeNamespaceLowMatchKeys(t *testing.T) {
+	queriesuite.RunLargeNamespaceLowMatchKeys(t, startAzureQueryServer)
+}
+
+func TestAzureQueryLargeNamespaceLowMatchDocuments(t *testing.T) {
+	queriesuite.RunLargeNamespaceLowMatchDocuments(t, startAzureQueryServer)
 }
 
 func TestAzureQueryDomainDatasets(t *testing.T) {

@@ -3,7 +3,9 @@ package storage
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"sort"
 	"time"
 )
 
@@ -51,6 +53,45 @@ type Meta struct {
 	StagedAttachmentsClear    bool               `json:"staged_attachments_clear,omitempty"`
 }
 
+// MetaSummary contains the metadata fields needed by query/filter hot paths.
+type MetaSummary struct {
+	Version             int64
+	PublishedVersion    int64
+	StateETag           string
+	StateDescriptor     []byte
+	StatePlaintextBytes int64
+	QueryExcluded       bool
+}
+
+// EffectiveVersion returns published version when present, otherwise the latest version.
+func (m *MetaSummary) EffectiveVersion() int64 {
+	if m == nil {
+		return 0
+	}
+	if m.PublishedVersion != 0 {
+		return m.PublishedVersion
+	}
+	return m.Version
+}
+
+// MetaSummaryFromMeta extracts query-relevant fields from meta.
+func MetaSummaryFromMeta(meta *Meta) *MetaSummary {
+	if meta == nil {
+		return nil
+	}
+	summary := &MetaSummary{
+		Version:             meta.Version,
+		PublishedVersion:    meta.PublishedVersion,
+		StateETag:           meta.StateETag,
+		StatePlaintextBytes: meta.StatePlaintextBytes,
+		QueryExcluded:       meta.QueryExcluded(),
+	}
+	if len(meta.StateDescriptor) > 0 {
+		summary.StateDescriptor = append([]byte(nil), meta.StateDescriptor...)
+	}
+	return summary
+}
+
 // MetaRecord pairs metadata with its ETag for backends that persist them together.
 type MetaRecord struct {
 	ETag string
@@ -79,14 +120,15 @@ type StateInfo struct {
 
 // Attachment captures metadata about a stored attachment object.
 type Attachment struct {
-	ID             string `json:"id,omitempty"`
-	Name           string `json:"name,omitempty"`
-	Size           int64  `json:"size,omitempty"`
-	PlaintextBytes int64  `json:"plaintext_bytes,omitempty"`
-	ContentType    string `json:"content_type,omitempty"`
-	Descriptor     []byte `json:"descriptor,omitempty"`
-	CreatedAtUnix  int64  `json:"created_at_unix,omitempty"`
-	UpdatedAtUnix  int64  `json:"updated_at_unix,omitempty"`
+	ID              string `json:"id,omitempty"`
+	Name            string `json:"name,omitempty"`
+	Size            int64  `json:"size,omitempty"`
+	PlaintextBytes  int64  `json:"plaintext_bytes,omitempty"`
+	PlaintextSHA256 string `json:"plaintext_sha256,omitempty"`
+	ContentType     string `json:"content_type,omitempty"`
+	Descriptor      []byte `json:"descriptor,omitempty"`
+	CreatedAtUnix   int64  `json:"created_at_unix,omitempty"`
+	UpdatedAtUnix   int64  `json:"updated_at_unix,omitempty"`
 }
 
 // StagedAttachment describes a pending attachment payload staged for a txn.
@@ -95,6 +137,7 @@ type StagedAttachment struct {
 	Name             string `json:"name,omitempty"`
 	Size             int64  `json:"size,omitempty"`
 	PlaintextBytes   int64  `json:"plaintext_bytes,omitempty"`
+	PlaintextSHA256  string `json:"plaintext_sha256,omitempty"`
 	ContentType      string `json:"content_type,omitempty"`
 	StagedDescriptor []byte `json:"staged_descriptor,omitempty"`
 	CreatedAtUnix    int64  `json:"created_at_unix,omitempty"`
@@ -124,6 +167,130 @@ type PutStateResult struct {
 type LoadMetaResult struct {
 	Meta *Meta
 	ETag string
+}
+
+// LoadMetaSummaryResult captures query-relevant metadata and its ETag.
+type LoadMetaSummaryResult struct {
+	Meta *MetaSummary
+	ETag string
+}
+
+// ScanMetaSummariesRequest configures metadata-summary scanning for query paths.
+type ScanMetaSummariesRequest struct {
+	Namespace  string
+	StartAfter string
+	Limit      int
+}
+
+// ScanMetaSummaryRow contains one key and its query-relevant metadata summary.
+type ScanMetaSummaryRow struct {
+	Key  string
+	Meta *MetaSummary
+	ETag string
+}
+
+// ScanMetaSummariesResult captures pagination details for summary scans.
+type ScanMetaSummariesResult struct {
+	NextStartAfter string
+	Truncated      bool
+}
+
+// MetaSummaryLoader is an optional fast path for query hot loops.
+type MetaSummaryLoader interface {
+	LoadMetaSummary(ctx context.Context, namespace, key string) (LoadMetaSummaryResult, error)
+}
+
+// MetaSummaryScanner is an optional backend capability for scanning key+summary rows in one pass.
+type MetaSummaryScanner interface {
+	ScanMetaSummaries(ctx context.Context, req ScanMetaSummariesRequest, visit func(ScanMetaSummaryRow) error) (ScanMetaSummariesResult, error)
+}
+
+// LoadMetaSummary uses an optimized backend path when available.
+func LoadMetaSummary(ctx context.Context, backend Backend, namespace, key string) (LoadMetaSummaryResult, error) {
+	if loader, ok := backend.(MetaSummaryLoader); ok {
+		return loader.LoadMetaSummary(ctx, namespace, key)
+	}
+	result, err := backend.LoadMeta(ctx, namespace, key)
+	if err != nil {
+		return LoadMetaSummaryResult{}, err
+	}
+	return LoadMetaSummaryResult{
+		Meta: MetaSummaryFromMeta(result.Meta),
+		ETag: result.ETag,
+	}, nil
+}
+
+// ScanMetaSummaries uses backend scanning support when available.
+func ScanMetaSummaries(ctx context.Context, backend Backend, req ScanMetaSummariesRequest, visit func(ScanMetaSummaryRow) error) (ScanMetaSummariesResult, error) {
+	if scanner, ok := backend.(MetaSummaryScanner); ok {
+		return scanner.ScanMetaSummaries(ctx, req, visit)
+	}
+	return ScanMetaSummariesFallback(ctx, backend, req, visit)
+}
+
+// ScanMetaSummariesFallback scans via ListMetaKeys + LoadMetaSummary.
+func ScanMetaSummariesFallback(ctx context.Context, backend Backend, req ScanMetaSummariesRequest, visit func(ScanMetaSummaryRow) error) (ScanMetaSummariesResult, error) {
+	if backend == nil {
+		return ScanMetaSummariesResult{}, ErrNotImplemented
+	}
+	if visit == nil {
+		return ScanMetaSummariesResult{}, ErrNotImplemented
+	}
+	keys, err := backend.ListMetaKeys(ctx, req.Namespace)
+	if err != nil {
+		return ScanMetaSummariesResult{}, err
+	}
+	if len(keys) == 0 {
+		return ScanMetaSummariesResult{}, nil
+	}
+	if !sort.StringsAreSorted(keys) {
+		sort.Strings(keys)
+	}
+	start := 0
+	if req.StartAfter != "" {
+		start = sort.SearchStrings(keys, req.StartAfter)
+		for start < len(keys) && keys[start] <= req.StartAfter {
+			start++
+		}
+	}
+	if start >= len(keys) {
+		return ScanMetaSummariesResult{}, nil
+	}
+	limit := req.Limit
+	if limit <= 0 {
+		limit = len(keys) - start
+	}
+	visited := 0
+	last := ""
+	for i := start; i < len(keys); i++ {
+		if err := ctx.Err(); err != nil {
+			return ScanMetaSummariesResult{}, err
+		}
+		if visited >= limit {
+			return ScanMetaSummariesResult{
+				Truncated:      true,
+				NextStartAfter: last,
+			}, nil
+		}
+		key := keys[i]
+		summary, err := LoadMetaSummary(ctx, backend, req.Namespace, key)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) || IsTransient(err) {
+				continue
+			}
+			return ScanMetaSummariesResult{}, fmt.Errorf("load meta %s: %w", key, err)
+		}
+		if err := visit(ScanMetaSummaryRow{
+			Key:  key,
+			Meta: summary.Meta,
+			ETag: summary.ETag,
+		}); err != nil {
+			return ScanMetaSummariesResult{}, err
+		}
+		visited++
+		last = key
+	}
+	return ScanMetaSummariesResult{}, nil
 }
 
 // ReadStateResult captures a state reader with its metadata.

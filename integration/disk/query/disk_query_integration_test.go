@@ -32,6 +32,14 @@ func TestDiskQuerySelectors(t *testing.T) {
 	queriesuite.RunSelectors(t, startDiskQueryServer)
 }
 
+func TestDiskQueryFlushWaitReadabilityContract(t *testing.T) {
+	queriesuite.RunFlushWaitReadabilityContract(t, startDiskQueryServer)
+}
+
+func TestDiskQueryRefreshWaitForContract(t *testing.T) {
+	queriesuite.RunQueryRefreshWaitForContract(t, startDiskQueryServer)
+}
+
 func TestDiskQueryPagination(t *testing.T) {
 	queriesuite.RunPagination(t, startDiskQueryServer)
 }
@@ -46,6 +54,22 @@ func TestDiskQueryResultsSupportPublicRead(t *testing.T) {
 
 func TestDiskQueryDocumentStreaming(t *testing.T) {
 	queriesuite.RunDocumentStreaming(t, startDiskQueryServer)
+}
+
+func TestDiskQueryDocumentStreamingFlowControl(t *testing.T) {
+	queriesuite.RunDocumentStreamingFlowControl(t, startDiskQueryServer)
+}
+
+func TestDiskQueryIndexRebuildUpgrade(t *testing.T) {
+	queriesuite.RunIndexRebuildUpgrade(t, startDiskQueryServer)
+}
+
+func TestDiskQueryLargeNamespaceLowMatchKeys(t *testing.T) {
+	queriesuite.RunLargeNamespaceLowMatchKeys(t, startDiskQueryServer)
+}
+
+func TestDiskQueryLargeNamespaceLowMatchDocuments(t *testing.T) {
+	queriesuite.RunLargeNamespaceLowMatchDocuments(t, startDiskQueryServer)
 }
 
 func TestDiskQueryDomainDatasets(t *testing.T) {

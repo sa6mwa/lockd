@@ -11,11 +11,13 @@ This directory contains subsystem-level analysis synthesized from repository doc
 - `DESIGN_NOTES_NAMESPACE_AND_QUERY.md` -> `search-and-index.md`
 - `TESTING.md` -> `operations-testing-performance.md`
 - `client/doc.go` -> `api-sdk-cli.md`, `attachments.md`, `queue-lq.md`
+- `mcp/doc.go` -> `api-sdk-cli.md`
 - `docs/ATTACHMENTS.md` -> `attachments.md`
 - `docs/BATCHING.md` -> `storage-backends-and-crypto.md`
 - `docs/LEADERELECTION.md` -> `tc-leader-cluster-rm.md`
 - `docs/LOGSTORE.md` -> `storage-backends-and-crypto.md`
 - `docs/LQ.md` -> `queue-lq.md`
+- `docs/MCP.md` -> `api-sdk-cli.md`
 - `docs/QRF.md` -> `operations-testing-performance.md`
 - `docs/SWEEPERS.md` -> `operations-testing-performance.md`
 - `docs/XA.md` -> `xa-transaction-coordinator.md`

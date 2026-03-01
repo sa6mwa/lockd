@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -164,7 +163,7 @@ func BenchmarkLockdDiskLargeJSON(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		key := nextDiskKey("lockd-large", i)
 		lease := acquireWithRetry(b, ctx, cli, key, "bench-large", diskBenchmarkLeaseTTL, diskBenchmarkBlockSecs)
-		opts := lockdclient.UpdateOptions{IfVersion: strconv.FormatInt(lease.Version, 10)}
+		opts := lockdclient.UpdateOptions{IfVersion: lockdclient.Int64(lease.Version)}
 		if _, err := cli.UpdateBytes(ctx, key, lease.LeaseID, payload, opts); err != nil {
 			b.Fatalf("update state: %v", err)
 		}
@@ -191,7 +190,7 @@ func BenchmarkLockdDiskLargeJSONStream(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		key := nextDiskKey("lockd-large-stream", i)
 		lease := acquireWithRetry(b, ctx, cli, key, "bench-large-stream", diskBenchmarkLeaseTTL, diskBenchmarkBlockSecs)
-		opts := lockdclient.UpdateOptions{IfVersion: strconv.FormatInt(lease.Version, 10)}
+		opts := lockdclient.UpdateOptions{IfVersion: lockdclient.Int64(lease.Version)}
 		stream := newDiskJSONStream(diskLargeJSONSize)
 		if _, err := cli.Update(ctx, key, lease.LeaseID, stream, opts); err != nil {
 			b.Fatalf("update state stream: %v", err)
@@ -250,7 +249,7 @@ func BenchmarkLockdDiskSmallJSONStream(b *testing.B) {
 		key := nextDiskKey("lockd-small-stream", i)
 		lease := acquireWithRetry(b, ctx, cli, key, "bench-small-stream", diskBenchmarkLeaseTTL, diskBenchmarkBlockSecs)
 		stream := newDiskJSONStream(diskSmallJSONSize)
-		if _, err := cli.Update(ctx, key, lease.LeaseID, stream, lockdclient.UpdateOptions{IfVersion: strconv.FormatInt(lease.Version, 10)}); err != nil {
+		if _, err := cli.Update(ctx, key, lease.LeaseID, stream, lockdclient.UpdateOptions{IfVersion: lockdclient.Int64(lease.Version)}); err != nil {
 			b.Fatalf("update state stream: %v", err)
 		}
 		if _, err := cli.Release(ctx, api.ReleaseRequest{
@@ -308,12 +307,12 @@ func runLockdDiskSmallJSON(b *testing.B, env *diskBenchmarkEnv) {
 	for i := 0; i < b.N; i++ {
 		key := nextDiskKey("lockd-small", i)
 		lease := acquireWithRetry(b, ctx, cli, key, "bench-small", diskBenchmarkLeaseTTL, diskBenchmarkBlockSecs)
-		version := strconv.FormatInt(lease.Version, 10)
+		ifVersion := lockdclient.Int64(lease.Version)
 		for _, payload := range batch {
-			if _, err := cli.UpdateBytes(ctx, key, lease.LeaseID, payload, lockdclient.UpdateOptions{IfVersion: version}); err != nil {
+			if _, err := cli.UpdateBytes(ctx, key, lease.LeaseID, payload, lockdclient.UpdateOptions{IfVersion: ifVersion}); err != nil {
 				b.Fatalf("update state: %v", err)
 			}
-			version = ""
+			ifVersion = nil
 		}
 		if _, err := cli.Release(ctx, api.ReleaseRequest{
 			Namespace: namespaces.Default,
@@ -367,7 +366,7 @@ func BenchmarkLockdDiskConcurrent(b *testing.B) {
 			key := nextDiskKey("lockd-concurrent", int(id))
 			owner := fmt.Sprintf("worker-%d", id)
 			lease := acquireWithRetry(b, ctx, cli, key, owner, diskBenchmarkLeaseTTL, diskBenchmarkBlockSecs)
-			opts := lockdclient.UpdateOptions{IfVersion: strconv.FormatInt(lease.Version, 10)}
+			opts := lockdclient.UpdateOptions{IfVersion: lockdclient.Int64(lease.Version)}
 			if _, err := cli.UpdateBytes(ctx, key, lease.LeaseID, payload, opts); err != nil {
 				b.Fatalf("update state: %v", err)
 			}
@@ -399,7 +398,7 @@ func BenchmarkLockdDiskLargeJSONNFS(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		key := nextDiskKey("lockd-large-nfs", i)
 		lease := acquireWithRetry(b, ctx, cli, key, "bench-large-nfs", diskBenchmarkLeaseTTL, diskBenchmarkBlockSecs)
-		opts := lockdclient.UpdateOptions{IfVersion: strconv.FormatInt(lease.Version, 10)}
+		opts := lockdclient.UpdateOptions{IfVersion: lockdclient.Int64(lease.Version)}
 		if _, err := cli.UpdateBytes(ctx, key, lease.LeaseID, payload, opts); err != nil {
 			b.Fatalf("update state: %v", err)
 		}
@@ -568,7 +567,7 @@ func diskBenchLoggerOptions(tb testing.TB) (lockd.TestServerOption, lockdclient.
 		tb.Cleanup(func() { _ = os.Remove(logPath) })
 	}
 
-	baseLogger := svcfields.WithSubsystem(pslog.NewStructured(writer), "bench.disk")
+	baseLogger := svcfields.WithSubsystem(pslog.NewStructured(context.Background(), writer), "bench.disk")
 	if level, ok := pslog.ParseLevel(levelStr); ok {
 		baseLogger = baseLogger.LogLevel(level)
 	} else {

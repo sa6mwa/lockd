@@ -130,7 +130,7 @@ func main() {
 		logLevel:         "error",
 		haMode:           "concurrent",
 		haLeaseTTL:       5 * time.Second,
-		commitMaxOps:     1024,
+		commitMaxOps:     lockd.DefaultLogstoreCommitMaxOps,
 		segmentSize:      0,
 		warmupRuns:       1,
 		runs:             3,
@@ -661,7 +661,7 @@ func newBenchLogger(cfg benchConfig) (pslog.Logger, func()) {
 		writer = f
 		cleanup = func() { _ = f.Close() }
 	}
-	logger := pslog.NewStructured(writer).LogLevel(level)
+	logger := pslog.NewStructured(context.Background(), writer).LogLevel(level)
 	return logger, cleanup
 }
 

@@ -2,6 +2,7 @@ package index
 
 import (
 	"sort"
+	"strings"
 	"time"
 
 	"pkt.systems/lockd/internal/uuidv7"
@@ -28,13 +29,50 @@ func (m *MemTable) Add(field, term, key string) {
 	if field == "" || term == "" || key == "" {
 		return
 	}
-	m.docKeys[key] = struct{}{}
 	terms := m.fields[field]
 	if terms == nil {
-		terms = make(map[string][]string)
+		terms = make(map[string][]string, 8)
 		m.fields[field] = terms
 	}
-	terms[term] = append(terms[term], key)
+	keys := terms[term]
+	if keys == nil {
+		term = strings.Clone(term)
+	}
+	terms[term] = append(keys, key)
+}
+
+// AddTerms records postings for field/terms -> key and reports whether at least
+// one non-empty term was accepted.
+func (m *MemTable) AddTerms(field string, terms []string, key string) bool {
+	if field == "" || key == "" || len(terms) == 0 {
+		return false
+	}
+	postings := m.fields[field]
+	if postings == nil {
+		postings = make(map[string][]string, len(terms))
+		m.fields[field] = postings
+	}
+	added := false
+	for _, term := range terms {
+		if term == "" {
+			continue
+		}
+		keys := postings[term]
+		if keys == nil {
+			term = strings.Clone(term)
+		}
+		postings[term] = append(keys, key)
+		added = true
+	}
+	return added
+}
+
+// TrackDoc records a document key once for doc-count accounting.
+func (m *MemTable) TrackDoc(key string) {
+	if key == "" {
+		return
+	}
+	m.docKeys[key] = struct{}{}
 }
 
 // Reset clears the memtable contents.
@@ -48,21 +86,17 @@ func (m *MemTable) Reset() {
 func (m *MemTable) Flush(now time.Time) *Segment {
 	segmentID := uuidv7.NewString()
 	segment := NewSegment(segmentID, now.UTC())
+	segment.docCount = uint64(len(m.docKeys))
 	for field, terms := range m.fields {
-		block := FieldBlock{Postings: make(map[string][]string, len(terms))}
 		for term, keys := range terms {
-			block.Postings[term] = dedupeAndSort(keys)
+			terms[term] = dedupeAndSort(keys)
 		}
-		segment.Fields[field] = block
+		segment.Fields[field] = FieldBlock{Postings: terms}
 	}
 	if len(m.docMeta) > 0 {
 		segment.DocMeta = make(map[string]DocumentMetadata, len(m.docMeta))
 		for key, meta := range m.docMeta {
-			cloned := meta
-			if len(meta.StateDescriptor) > 0 {
-				cloned.StateDescriptor = append([]byte(nil), meta.StateDescriptor...)
-			}
-			segment.DocMeta[key] = cloned
+			segment.DocMeta[key] = meta
 		}
 	}
 	m.Reset()
@@ -79,20 +113,53 @@ func (m *MemTable) SetMeta(key string, meta DocumentMetadata) {
 	if key == "" {
 		return
 	}
+	if len(meta.StateDescriptor) > 0 {
+		meta.StateDescriptor = append([]byte(nil), meta.StateDescriptor...)
+	}
 	m.docMeta[key] = meta
 }
 
 func dedupeAndSort(keys []string) []string {
 	if len(keys) <= 1 {
-		return append([]string(nil), keys...)
+		return keys
 	}
-	copyKeys := append([]string(nil), keys...)
-	sort.Strings(copyKeys)
-	uniq := copyKeys[:0]
-	for i, key := range copyKeys {
-		if i == 0 || key != copyKeys[i-1] {
-			uniq = append(uniq, key)
+	nonDecreasing := true
+	hasDup := false
+	prev := keys[0]
+	for i := 1; i < len(keys); i++ {
+		cur := keys[i]
+		if cur < prev {
+			nonDecreasing = false
+			break
+		}
+		if cur == prev {
+			hasDup = true
+		}
+		prev = cur
+	}
+	if nonDecreasing {
+		if !hasDup {
+			return keys
+		}
+		writeIdx := 1
+		last := keys[0]
+		for i := 1; i < len(keys); i++ {
+			if keys[i] == last {
+				continue
+			}
+			last = keys[i]
+			keys[writeIdx] = keys[i]
+			writeIdx++
+		}
+		return keys[:writeIdx]
+	}
+	sort.Strings(keys)
+	writeIdx := 1
+	for i := 1; i < len(keys); i++ {
+		if keys[i] != keys[writeIdx-1] {
+			keys[writeIdx] = keys[i]
+			writeIdx++
 		}
 	}
-	return uniq
+	return keys[:writeIdx]
 }

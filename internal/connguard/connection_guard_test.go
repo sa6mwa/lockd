@@ -1,6 +1,7 @@
 package connguard
 
 import (
+	"crypto/tls"
 	"errors"
 	"io"
 	"net"
@@ -111,6 +112,82 @@ func TestConnectionGuardPrefixedConnPreservesByte(t *testing.T) {
 	}
 }
 
+func TestConnectionGuardTLSTimeoutDoesNotBlock(t *testing.T) {
+	logger := newCaptureLogger()
+	g := NewConnectionGuard(ConnectionGuardConfig{
+		Enabled:          true,
+		FailureThreshold: 2,
+		FailureWindow:    time.Second,
+		BlockDuration:    time.Minute,
+		ProbeTimeout:     25 * time.Millisecond,
+	}, logger)
+	listener := &guardedListener{
+		guard:     g,
+		tlsConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+	}
+	remote := "127.0.0.1:7777"
+
+	for i := 0; i < 3; i++ {
+		conn := &failingConn{
+			remote:  remote,
+			readErr: timeoutReadError{},
+		}
+		accepted, rejected, err := listener.wrapTLSConnection(conn, remote)
+		if err == nil {
+			t.Fatalf("expected tls handshake timeout")
+		}
+		if !rejected {
+			t.Fatalf("expected timeout connection to be rejected")
+		}
+		if accepted != nil {
+			_ = accepted.Close()
+		}
+	}
+
+	if g.isBlocked(remote) {
+		t.Fatalf("timeout handshakes must not trigger hard block")
+	}
+	if _, ok := logger.find("lockd.connguard.engaged"); ok {
+		t.Fatalf("timeout handshakes must not emit engaged log")
+	}
+}
+
+func TestConnectionGuardTLSHandshakeErrorStillBlocks(t *testing.T) {
+	g := NewConnectionGuard(ConnectionGuardConfig{
+		Enabled:          true,
+		FailureThreshold: 2,
+		FailureWindow:    time.Second,
+		BlockDuration:    time.Minute,
+		ProbeTimeout:     25 * time.Millisecond,
+	}, pslog.NoopLogger())
+	listener := &guardedListener{
+		guard:     g,
+		tlsConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+	}
+	remote := "127.0.0.1:8888"
+
+	for i := 0; i < 2; i++ {
+		conn := &failingConn{
+			remote:  remote,
+			readErr: io.EOF,
+		}
+		accepted, rejected, err := listener.wrapTLSConnection(conn, remote)
+		if err == nil {
+			t.Fatalf("expected tls handshake failure")
+		}
+		if !rejected {
+			t.Fatalf("expected malformed connection to be rejected")
+		}
+		if accepted != nil {
+			_ = accepted.Close()
+		}
+	}
+
+	if !g.isBlocked(remote) {
+		t.Fatalf("non-timeout handshake failures must still block after threshold")
+	}
+}
+
 type captureEntry struct {
 	level  string
 	msg    string
@@ -176,3 +253,40 @@ func (l *captureLogger) LogLevel(pslog.Level) pslog.Logger {
 	return l
 }
 func (l *captureLogger) LogLevelFromEnv(string) pslog.Logger { return l }
+
+type timeoutReadError struct{}
+
+func (timeoutReadError) Error() string   { return "i/o timeout" }
+func (timeoutReadError) Timeout() bool   { return true }
+func (timeoutReadError) Temporary() bool { return true }
+
+type fakeAddr string
+
+func (a fakeAddr) Network() string { return "tcp" }
+func (a fakeAddr) String() string  { return string(a) }
+
+type failingConn struct {
+	remote      string
+	readErr     error
+	readInvoked bool
+}
+
+func (c *failingConn) Read(p []byte) (int, error) {
+	c.readInvoked = true
+	if c.readErr != nil {
+		return 0, c.readErr
+	}
+	return 0, io.EOF
+}
+
+func (c *failingConn) Write(p []byte) (int, error) { return len(p), nil }
+func (c *failingConn) Close() error                { return nil }
+func (c *failingConn) LocalAddr() net.Addr         { return fakeAddr("127.0.0.1:0") }
+func (c *failingConn) RemoteAddr() net.Addr        { return fakeAddr(c.remote) }
+func (c *failingConn) SetDeadline(time.Time) error { return nil }
+func (c *failingConn) SetReadDeadline(time.Time) error {
+	return nil
+}
+func (c *failingConn) SetWriteDeadline(time.Time) error {
+	return nil
+}

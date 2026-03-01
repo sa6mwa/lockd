@@ -21,6 +21,7 @@ import (
 const (
 	defaultQueryDocPrefetch = 8
 	maxQueryDocPrefetch     = 64
+	maxStagedIndexDocBytes  = 256 << 10
 )
 
 // Service aggregates transport-agnostic domain services.
@@ -88,6 +89,9 @@ type Service struct {
 	txnReplayRunning    atomic.Bool
 	txnReplayLast       atomic.Int64
 	queueDecisionCache  sync.Map
+	stagedIndexDocs     sync.Map
+	stagedIndexDocHeads sync.Map
+	stagedIndexDocsMu   sync.Mutex
 
 	queryDocPrefetch int
 
@@ -147,6 +151,7 @@ func New(cfg Config) *Service {
 	if haMode == "" {
 		haMode = "failover"
 	}
+	haNodeID := strings.TrimSpace(cfg.HANodeID)
 	haLeaseTTL := cfg.HALeaseTTL
 	if haLeaseTTL == 0 {
 		haLeaseTTL = 5 * time.Second
@@ -216,7 +221,10 @@ func New(cfg Config) *Service {
 		tcDecider:                 cfg.TCDecider,
 	}
 	if svc.haMode == "failover" && svc.haLeaseTTL > 0 {
-		svc.haNodeID = uuidv7.NewString()
+		if haNodeID == "" {
+			haNodeID = uuidv7.NewString()
+		}
+		svc.haNodeID = haNodeID
 		svc.startHA()
 	}
 	return svc

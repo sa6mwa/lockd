@@ -21,6 +21,7 @@ import (
 	lockdclient "pkt.systems/lockd/client"
 	querydata "pkt.systems/lockd/integration/query/querydata"
 	"pkt.systems/lockd/internal/core"
+	indexer "pkt.systems/lockd/internal/search/index"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/namespaces"
 	"pkt.systems/lql"
@@ -83,6 +84,185 @@ and.range{field=/amount,gte=100,lt=200}`)
 	})
 }
 
+// RunFlushWaitReadabilityContract verifies that an explicit index flush in wait
+// mode makes recently committed documents query-visible in the index engine.
+func RunFlushWaitReadabilityContract(t *testing.T, factory ServerFactory) {
+	withServer(t, factory, 2*time.Minute, func(ctx context.Context, ts *lockd.TestServer, httpClient *http.Client) {
+		namespace := "q-flush-contract-" + xid.New().String()
+		const totalDocs = 32
+		const tag = "flush-wait-contract"
+
+		seedOne := func(i int) error {
+			key := fmt.Sprintf("fwc-%03d", i)
+			body := map[string]any{
+				"kind":   tag,
+				"index":  i,
+				"status": "ready",
+			}
+			payload, err := json.Marshal(body)
+			if err != nil {
+				return err
+			}
+			lease, err := ts.Client.Acquire(ctx, api.AcquireRequest{
+				Namespace:  namespace,
+				Key:        key,
+				Owner:      "query-flush-contract",
+				TTLSeconds: 60,
+			})
+			if err != nil {
+				return err
+			}
+			if _, err := lease.UpdateBytes(ctx, payload); err != nil {
+				return err
+			}
+			return lease.Release(ctx)
+		}
+
+		for i := 0; i < totalDocs; i++ {
+			if err := seedOne(i); err != nil {
+				t.Fatalf("seed flush-wait contract dataset: %v", err)
+			}
+		}
+
+		flushNamespaces(ctx, t, ts.Client, namespace)
+
+		selector, err := lql.ParseSelectorString(fmt.Sprintf(`eq{field=/kind,value=%s}`, tag))
+		if err != nil || selector.IsEmpty() {
+			t.Fatalf("parse selector: %v", err)
+		}
+
+		var (
+			cursor    string
+			collected []string
+		)
+		for {
+			resp := doQuery(t, httpClient, ts.URL(), api.QueryRequest{
+				Namespace: namespace,
+				Selector:  selector,
+				Limit:     32,
+				Cursor:    cursor,
+			})
+			collected = append(collected, resp.Keys...)
+			if resp.Cursor == "" {
+				break
+			}
+			cursor = resp.Cursor
+			if len(collected) > totalDocs*2 {
+				t.Fatalf("query pagination runaway: %d keys", len(collected))
+			}
+		}
+
+		expected := make([]string, 0, totalDocs)
+		for i := 0; i < totalDocs; i++ {
+			expected = append(expected, fmt.Sprintf("fwc-%03d", i))
+		}
+		querydata.ExpectKeySet(t, collected, expected)
+	})
+}
+
+// RunQueryRefreshWaitForContract verifies refresh=wait_for does not stall until
+// request timeout when writes are actively arriving in the same namespace.
+func RunQueryRefreshWaitForContract(t *testing.T, factory ServerFactory) {
+	withServer(t, factory, 2*time.Minute, func(ctx context.Context, ts *lockd.TestServer, _ *http.Client) {
+		namespace := namespaces.Default
+		keyPrefix := "qwf-" + xid.New().String()
+		selector, err := lql.ParseSelectorString(`eq{field=/kind,value=wait-for-contract}`)
+		if err != nil || selector.IsEmpty() {
+			t.Fatalf("parse selector: %v", err)
+		}
+		if _, err := ts.Client.UpdateNamespaceConfig(ctx, api.NamespaceConfigRequest{
+			Namespace: namespace,
+			Query: &api.NamespaceQueryConfig{
+				PreferredEngine: "index",
+				FallbackEngine:  "scan",
+			},
+		}, lockdclient.NamespaceConfigOptions{}); err != nil {
+			t.Fatalf("set namespace query config: %v", err)
+		}
+
+		querydata.SeedState(ctx, t, ts.Client, namespace, keyPrefix+"-seed", map[string]any{
+			"kind":   "wait-for-contract",
+			"seq":    -1,
+			"status": "seed",
+		})
+		flushNamespaces(ctx, t, ts.Client, namespace)
+
+		const writes = 40
+		firstWriteDone := make(chan struct{})
+		writeErr := make(chan error, 1)
+		go func() {
+			for i := 0; i < writes; i++ {
+				key := fmt.Sprintf("%s-%03d", keyPrefix, i)
+				body := map[string]any{
+					"kind":   "wait-for-contract",
+					"seq":    i,
+					"status": "active",
+				}
+				payload, err := json.Marshal(body)
+				if err != nil {
+					writeErr <- err
+					return
+				}
+				lease, err := ts.Client.Acquire(ctx, api.AcquireRequest{
+					Namespace:  namespace,
+					Key:        key,
+					Owner:      "query-wait-for-contract",
+					TTLSeconds: 60,
+				})
+				if err != nil {
+					writeErr <- err
+					return
+				}
+				if _, err := lease.UpdateBytes(ctx, payload); err != nil {
+					writeErr <- err
+					return
+				}
+				if err := lease.Release(ctx); err != nil {
+					writeErr <- err
+					return
+				}
+				if i == 0 {
+					close(firstWriteDone)
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			writeErr <- nil
+		}()
+
+		select {
+		case <-firstWriteDone:
+		case <-ctx.Done():
+			t.Fatalf("timed out waiting for first write: %v", ctx.Err())
+		}
+
+		req := api.QueryRequest{
+			Namespace: namespace,
+			Selector:  selector,
+			Limit:     16,
+		}
+		for i := 0; i < 6; i++ {
+			qctx, cancel := context.WithTimeout(ctx, 12*time.Second)
+			resp, err := ts.Client.Query(qctx,
+				lockdclient.WithQueryEngine("index"),
+				lockdclient.WithQueryRefreshWaitFor(),
+				lockdclient.WithQueryRequest(&req),
+			)
+			cancel()
+			if err != nil {
+				t.Fatalf("wait_for query %d: %v", i, err)
+			}
+			if resp == nil {
+				t.Fatalf("wait_for query %d: nil response", i)
+			}
+			resp.Close()
+		}
+
+		if err := <-writeErr; err != nil {
+			t.Fatalf("write loop failed: %v", err)
+		}
+	})
+}
+
 // RunPagination verifies cursor pagination works across all backends.
 func RunPagination(t *testing.T, factory ServerFactory) {
 	withServer(t, factory, 15*time.Second, func(ctx context.Context, ts *lockd.TestServer, httpClient *http.Client) {
@@ -131,6 +311,33 @@ func RunPagination(t *testing.T, factory ServerFactory) {
 		}
 		expected := []string{"batch-00", "batch-01", "batch-02", "batch-03"}
 		querydata.ExpectKeySet(t, collected, expected)
+
+		// Regression guard: when total matches == limit, scan must not emit a cursor.
+		exactNS := "pagination-exact-" + xid.New().String()
+		querydata.SeedState(ctx, t, ts.Client, exactNS, "exact-00", map[string]any{"status": "open"})
+		querydata.SeedState(ctx, t, ts.Client, exactNS, "exact-01", map[string]any{"status": "open"})
+		querydata.SeedState(ctx, t, ts.Client, exactNS, "exact-02", map[string]any{"status": "closed"})
+		flushNamespaces(ctx, t, ts.Client, exactNS)
+
+		exactSelector, err := lql.ParseSelectorString(`eq{field=/status,value=open}`)
+		if err != nil || exactSelector.IsEmpty() {
+			t.Fatalf("parse selector: %v", err)
+		}
+		exact, scanOK := doQueryWithParamsAllowEngineUnavailable(t, httpClient, ts.URL(), api.QueryRequest{
+			Namespace: exactNS,
+			Selector:  exactSelector,
+			Limit:     2,
+		}, url.Values{"engine": []string{"scan"}})
+		if !scanOK {
+			t.Log("scan engine unavailable for namespace; skipping scan-specific exact-limit cursor assertion")
+			return
+		}
+		if len(exact.Keys) != 2 {
+			t.Fatalf("expected 2 keys in exact-limit page, got %d (%v)", len(exact.Keys), exact.Keys)
+		}
+		if exact.Cursor != "" {
+			t.Fatalf("expected empty cursor when no additional matches, got %q", exact.Cursor)
+		}
 	})
 }
 
@@ -233,7 +440,376 @@ func RunDocumentStreaming(t *testing.T, factory ServerFactory) {
 		if doc["region"] != "emea" {
 			t.Fatalf("unexpected document: %+v", doc)
 		}
+
+		// Regression guard: setup failures must return structured HTTP errors in documents mode.
+		status, apiErr := doQueryErrorWithParams(t, httpClient, ts.URL(), api.QueryRequest{
+			Namespace: namespaces.Default,
+			Selector:  sel,
+			Cursor:    "invalid",
+			Return:    api.QueryReturnDocuments,
+		}, url.Values{"return": []string{string(api.QueryReturnDocuments)}})
+		if status != http.StatusBadRequest {
+			t.Fatalf("expected status 400 for invalid cursor, got %d (%+v)", status, apiErr)
+		}
+		if apiErr.ErrorCode != "invalid_cursor" {
+			t.Fatalf("expected invalid_cursor, got %q", apiErr.ErrorCode)
+		}
+
+		// Regression guard: when total matches == limit, documents mode scan must not emit cursor trailer.
+		exactNS := "doc-stream-exact-" + xid.New().String()
+		querydata.SeedState(ctx, t, ts.Client, exactNS, "exact-doc-1", map[string]any{"status": "staged"})
+		querydata.SeedState(ctx, t, ts.Client, exactNS, "exact-doc-2", map[string]any{"status": "staged"})
+		querydata.SeedState(ctx, t, ts.Client, exactNS, "exact-doc-3", map[string]any{"status": "draft"})
+		flushNamespaces(ctx, t, ts.Client, exactNS)
+		exactRows, scanOK := doQueryDocumentsWithParamsAllowEngineUnavailable(t, httpClient, ts.URL(), api.QueryRequest{
+			Namespace: exactNS,
+			Selector:  sel,
+			Limit:     2,
+		}, url.Values{"engine": []string{"scan"}})
+		if !scanOK {
+			t.Log("scan engine unavailable for namespace; skipping scan-specific document cursor assertion")
+			return
+		}
+		if len(exactRows.Rows) != 2 {
+			t.Fatalf("expected 2 streamed documents, got %d", len(exactRows.Rows))
+		}
+		if exactRows.Cursor != "" {
+			t.Fatalf("expected empty cursor trailer when no additional matches, got %q", exactRows.Cursor)
+		}
 	})
+}
+
+// RunIndexRebuildUpgrade validates rebuild/cleanup behavior when a namespace
+// upgrades from legacy v4 segments to v5 while preserving query correctness.
+func RunIndexRebuildUpgrade(t *testing.T, factory ServerFactory) {
+	withServer(t, factory, 2*time.Minute, func(ctx context.Context, ts *lockd.TestServer, httpClient *http.Client) {
+		namespace := "q-rebuild-" + xid.New().String()
+		keyA := "rebuild-doc-a"
+		keyB := "rebuild-doc-b"
+		querydata.SeedState(ctx, t, ts.Client, namespace, keyA, map[string]any{"status": "open", "kind": "ticket"})
+		querydata.SeedState(ctx, t, ts.Client, namespace, keyB, map[string]any{"status": "open", "kind": "ticket"})
+		flushNamespaces(ctx, t, ts.Client, namespace)
+
+		crypto := rebuildCryptoFromServerConfig(t, ts.Config)
+		idxStore := indexer.NewStore(ts.Backend(), crypto)
+		idxManager := indexer.NewManager(idxStore, indexer.WriterOptions{
+			FlushDocs:     1000,
+			FlushInterval: time.Minute,
+		})
+		defer idxManager.Close(context.Background())
+
+		legacy := indexer.NewSegment("legacy-v4-"+xid.New().String(), time.Now().UTC().Add(-time.Minute))
+		legacy.Format = indexer.IndexFormatVersionV4
+		legacy.Fields["/status"] = indexer.FieldBlock{Postings: map[string][]string{
+			"open": {keyA},
+		}}
+		if _, _, err := idxStore.WriteSegment(ctx, namespace, legacy); err != nil {
+			t.Fatalf("write legacy segment: %v", err)
+		}
+		manifest := indexer.NewManifest()
+		manifest.Format = indexer.IndexFormatVersionV5
+		manifest.Seq = 3
+		manifest.UpdatedAt = legacy.CreatedAt
+		manifest.Shards[0] = &indexer.Shard{
+			ID: 0,
+			Segments: []indexer.SegmentRef{
+				{ID: legacy.ID, CreatedAt: legacy.CreatedAt, DocCount: legacy.DocCount()},
+			},
+		}
+		if _, err := idxStore.SaveManifest(ctx, namespace, manifest, ""); err != nil {
+			t.Fatalf("save seed manifest: %v", err)
+		}
+
+		defaultCfg := namespaces.DefaultConfig()
+		if provider, ok := ts.Backend().(namespaces.ConfigProvider); ok && provider != nil {
+			defaultCfg = provider.DefaultNamespaceConfig()
+		}
+		svc := core.New(core.Config{
+			Store:                  ts.Backend(),
+			Crypto:                 crypto,
+			IndexManager:           idxManager,
+			DefaultNamespace:       ts.Config.DefaultNamespace,
+			DefaultNamespaceConfig: defaultCfg,
+			HALeaseTTL:             -1,
+		})
+		res, err := svc.RebuildIndex(ctx, namespace, core.IndexRebuildOptions{
+			Mode:         "wait",
+			Cleanup:      true,
+			CleanupDelay: 0,
+		})
+		if err != nil {
+			t.Fatalf("rebuild index: %v", err)
+		}
+		if !res.Rebuilt {
+			t.Fatalf("expected rebuilt=true, got %+v", res)
+		}
+
+		manifestRes, err := idxStore.LoadManifest(ctx, namespace)
+		if err != nil {
+			t.Fatalf("load manifest: %v", err)
+		}
+		if manifestRes.Manifest == nil || manifestRes.Manifest.Format != indexer.IndexFormatVersionV5 {
+			t.Fatalf("expected manifest format v5, got %+v", manifestRes.Manifest)
+		}
+		shard := manifestRes.Manifest.Shards[0]
+		if shard == nil || len(shard.Segments) == 0 {
+			t.Fatalf("expected rebuilt segments")
+		}
+		for _, ref := range shard.Segments {
+			if ref.ID == legacy.ID {
+				t.Fatalf("legacy v4 segment should be removed from manifest")
+			}
+			seg, err := idxStore.LoadSegment(ctx, namespace, ref.ID)
+			if err != nil {
+				t.Fatalf("load segment %s: %v", ref.ID, err)
+			}
+			if seg.Format != indexer.IndexFormatVersionV5 {
+				t.Fatalf("expected segment format v5, got %d", seg.Format)
+			}
+		}
+		if _, err := idxStore.LoadSegment(ctx, namespace, legacy.ID); !errors.Is(err, storage.ErrNotFound) {
+			t.Fatalf("expected legacy segment object deleted, got err=%v", err)
+		}
+
+		sel, err := lql.ParseSelectorString(`eq{field=/status,value=open}`)
+		if err != nil || sel.IsEmpty() {
+			t.Fatalf("parse selector: %v", err)
+		}
+		resp := doQuery(t, httpClient, ts.URL(), api.QueryRequest{
+			Namespace: namespace,
+			Selector:  sel,
+			Limit:     10,
+		})
+		querydata.ExpectKeySet(t, resp.Keys, []string{keyA, keyB})
+	})
+}
+
+// RunLargeNamespaceLowMatchKeys validates key-return queries stay correct for
+// large namespaces when selectors match very few documents.
+func RunLargeNamespaceLowMatchKeys(t *testing.T, factory ServerFactory) {
+	withServer(t, factory, 3*time.Minute, func(ctx context.Context, ts *lockd.TestServer, httpClient *http.Client) {
+		namespace := "q-lowmatch-keys-" + xid.New().String()
+		const targetTerm = "needle-token-42"
+		totalDocs := largeNamespaceLowMatchTotalDocs(ts.Config.Store)
+		targetKey := ""
+		for i := 0; i < totalDocs; i++ {
+			key := fmt.Sprintf("lowmatch-key-%03d", i)
+			msgA := fmt.Sprintf("normal telemetry %03d", i)
+			if i == totalDocs-7 {
+				msgA = "contains needle-token-42 for exact low match"
+				targetKey = key
+			}
+			querydata.SeedState(ctx, t, ts.Client, namespace, key, map[string]any{
+				"kind": "work",
+				"details": map[string]any{
+					"a": map[string]any{"message": msgA},
+					"b": map[string]any{"message": fmt.Sprintf("background %03d", i)},
+				},
+			})
+		}
+		flushNamespaces(ctx, t, ts.Client, namespace)
+
+		sel, err := lql.ParseSelectorString(`
+and.eq{field=/kind,value=work},
+and.contains{field=/details/*/message,value=` + targetTerm + `}`)
+		if err != nil || sel.IsEmpty() {
+			t.Fatalf("parse low-match selector: %v", err)
+		}
+		resp := doQuery(t, httpClient, ts.URL(), api.QueryRequest{
+			Namespace: namespace,
+			Selector:  sel,
+			Limit:     16,
+		})
+		if len(resp.Keys) != 1 || resp.Keys[0] != targetKey {
+			t.Fatalf("expected single key %q, got %+v", targetKey, resp.Keys)
+		}
+		if resp.Cursor != "" {
+			t.Fatalf("expected empty cursor for low-match single result, got %q", resp.Cursor)
+		}
+	})
+}
+
+// RunLargeNamespaceLowMatchDocuments validates document-return streaming for
+// large namespaces when selectors match very few documents.
+func RunLargeNamespaceLowMatchDocuments(t *testing.T, factory ServerFactory) {
+	withServer(t, factory, 3*time.Minute, func(ctx context.Context, ts *lockd.TestServer, httpClient *http.Client) {
+		namespace := "q-lowmatch-docs-" + xid.New().String()
+		const targetTerm = "needle-token-84"
+		totalDocs := largeNamespaceLowMatchTotalDocs(ts.Config.Store)
+		targetKey := ""
+		for i := 0; i < totalDocs; i++ {
+			key := fmt.Sprintf("lowmatch-doc-%03d", i)
+			msgA := fmt.Sprintf("normal payload %03d", i)
+			if i == totalDocs-11 {
+				msgA = "contains needle-token-84 for document streaming"
+				targetKey = key
+			}
+			querydata.SeedState(ctx, t, ts.Client, namespace, key, map[string]any{
+				"kind": "work",
+				"details": map[string]any{
+					"a": map[string]any{"message": msgA},
+					"b": map[string]any{"message": fmt.Sprintf("secondary %03d", i)},
+				},
+			})
+		}
+		flushNamespaces(ctx, t, ts.Client, namespace)
+
+		sel, err := lql.ParseSelectorString(`
+and.eq{field=/kind,value=work},
+and.contains{field=/details/*/message,value=` + targetTerm + `}`)
+		if err != nil || sel.IsEmpty() {
+			t.Fatalf("parse low-match document selector: %v", err)
+		}
+		rows := doQueryDocuments(t, httpClient, ts.URL(), api.QueryRequest{
+			Namespace: namespace,
+			Selector:  sel,
+			Limit:     16,
+		})
+		if len(rows) != 1 {
+			t.Fatalf("expected one streamed document, got %d", len(rows))
+		}
+		if rows[0].Namespace != namespace {
+			t.Fatalf("expected namespace %q, got %q", namespace, rows[0].Namespace)
+		}
+		if rows[0].Key != targetKey {
+			t.Fatalf("expected key %q, got %q", targetKey, rows[0].Key)
+		}
+		var doc map[string]any
+		if err := json.Unmarshal(rows[0].Doc, &doc); err != nil {
+			t.Fatalf("decode streamed doc: %v", err)
+		}
+		if kind, _ := doc["kind"].(string); kind != "work" {
+			t.Fatalf("unexpected streamed doc payload: %+v", doc)
+		}
+	})
+}
+
+// RunDocumentStreamingFlowControl validates cancellation and slow-reader
+// behavior for return=documents streaming.
+func RunDocumentStreamingFlowControl(t *testing.T, factory ServerFactory) {
+	withServer(t, factory, 2*time.Minute, func(ctx context.Context, ts *lockd.TestServer, httpClient *http.Client) {
+		namespace := "q-stream-flow-" + xid.New().String()
+		totalDocs := documentStreamingFlowTotalDocs(ts.Config.Store)
+		for i := 0; i < totalDocs; i++ {
+			key := fmt.Sprintf("stream-flow-%03d", i)
+			querydata.SeedState(ctx, t, ts.Client, namespace, key, map[string]any{
+				"status": "open",
+				"index":  i,
+			})
+		}
+		flushNamespaces(ctx, t, ts.Client, namespace)
+
+		sel, err := lql.ParseSelectorString(`eq{field=/status,value=open}`)
+		if err != nil || sel.IsEmpty() {
+			t.Fatalf("parse selector: %v", err)
+		}
+		reqBody, err := json.Marshal(api.QueryRequest{
+			Namespace: namespace,
+			Selector:  sel,
+			Limit:     totalDocs,
+			Return:    api.QueryReturnDocuments,
+		})
+		if err != nil {
+			t.Fatalf("marshal query request: %v", err)
+		}
+		endpoint := fmt.Sprintf("%s/v1/query?return=%s", ts.URL(), api.QueryReturnDocuments)
+
+		t.Run("cancel-mid-stream", func(t *testing.T) {
+			reqCtx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, endpoint, bytes.NewReader(reqBody))
+			if err != nil {
+				t.Fatalf("new request: %v", err)
+			}
+			httpReq.Header.Set("Content-Type", "application/json")
+			resp, err := httpClient.Do(httpReq)
+			if err != nil {
+				t.Fatalf("query request failed: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				data, _ := io.ReadAll(resp.Body)
+				t.Fatalf("expected status 200, got %d: %s", resp.StatusCode, data)
+			}
+			scanner := bufio.NewScanner(resp.Body)
+			count := 0
+			for scanner.Scan() {
+				count++
+				if count >= 10 {
+					cancel()
+					break
+				}
+			}
+			_ = resp.Body.Close()
+			if count < 10 {
+				t.Fatalf("expected at least 10 rows before cancellation, got %d", count)
+			}
+			verify := doQuery(t, httpClient, ts.URL(), api.QueryRequest{
+				Namespace: namespace,
+				Selector:  sel,
+				Limit:     1,
+			})
+			if len(verify.Keys) != 1 {
+				t.Fatalf("expected server to remain responsive after cancellation, got keys=%v", verify.Keys)
+			}
+		})
+
+		t.Run("slow-reader", func(t *testing.T) {
+			httpReq, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(reqBody))
+			if err != nil {
+				t.Fatalf("new request: %v", err)
+			}
+			httpReq.Header.Set("Content-Type", "application/json")
+			resp, err := httpClient.Do(httpReq)
+			if err != nil {
+				t.Fatalf("query request failed: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				data, _ := io.ReadAll(resp.Body)
+				t.Fatalf("expected status 200, got %d: %s", resp.StatusCode, data)
+			}
+			scanner := bufio.NewScanner(resp.Body)
+			count := 0
+			for scanner.Scan() {
+				count++
+				time.Sleep(2 * time.Millisecond)
+			}
+			if err := scanner.Err(); err != nil {
+				t.Fatalf("scan stream: %v", err)
+			}
+			if count != totalDocs {
+				t.Fatalf("expected %d rows from slow reader stream, got %d", totalDocs, count)
+			}
+		})
+	})
+}
+
+func documentStreamingFlowTotalDocs(store string) int {
+	switch {
+	case isObjectStoreStore(store):
+		// Object-store backends have substantially higher per-document seed
+		// latency in CI; keep enough rows for flow-control assertions while
+		// avoiding suite-level timeout pressure.
+		return 24
+	default:
+		return 128
+	}
+}
+
+func largeNamespaceLowMatchTotalDocs(store string) int {
+	if isObjectStoreStore(store) {
+		// Keep the low-match semantics while reducing fixture size for slower
+		// object-store backends.
+		return 48
+	}
+	return 384
+}
+
+func isObjectStoreStore(store string) bool {
+	return strings.HasPrefix(store, "aws://") ||
+		strings.HasPrefix(store, "azure://") ||
+		strings.HasPrefix(store, "s3://")
 }
 
 // RunDomainDatasets seeds richer domain data (finance, firmware, SALUTE, flight) and evaluates selectors.
@@ -1052,12 +1628,20 @@ func newHTTPClient(t testing.TB, ts *lockd.TestServer) *http.Client {
 }
 
 func doQuery(t testing.TB, httpClient *http.Client, baseURL string, req api.QueryRequest) api.QueryResponse {
+	return doQueryWithParams(t, httpClient, baseURL, req, nil)
+}
+
+func doQueryWithParams(t testing.TB, httpClient *http.Client, baseURL string, req api.QueryRequest, params url.Values) api.QueryResponse {
 	t.Helper()
 	body, err := json.Marshal(req)
 	if err != nil {
 		t.Fatalf("marshal query request: %v", err)
 	}
-	httpReq, err := http.NewRequest(http.MethodPost, baseURL+"/v1/query", bytes.NewReader(body))
+	endpoint := baseURL + "/v1/query"
+	if len(params) > 0 {
+		endpoint += "?" + params.Encode()
+	}
+	httpReq, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("prepare http request: %v", err)
 	}
@@ -1078,6 +1662,44 @@ func doQuery(t testing.TB, httpClient *http.Client, baseURL string, req api.Quer
 	return out
 }
 
+func doQueryWithParamsAllowEngineUnavailable(t testing.TB, httpClient *http.Client, baseURL string, req api.QueryRequest, params url.Values) (api.QueryResponse, bool) {
+	t.Helper()
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal query request: %v", err)
+	}
+	endpoint := baseURL + "/v1/query"
+	if len(params) > 0 {
+		endpoint += "?" + params.Encode()
+	}
+	httpReq, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("prepare http request: %v", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient.Do(httpReq)
+	if err != nil {
+		t.Fatalf("query request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusOK {
+		var out api.QueryResponse
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		return out, true
+	}
+	var apiErr api.ErrorResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiErr); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if resp.StatusCode == http.StatusBadRequest && apiErr.ErrorCode == "query_engine_unavailable" {
+		return api.QueryResponse{}, false
+	}
+	t.Fatalf("unexpected status %d: %+v", resp.StatusCode, apiErr)
+	return api.QueryResponse{}, false
+}
+
 type documentRow struct {
 	Namespace string          `json:"ns"`
 	Key       string          `json:"key"`
@@ -1086,13 +1708,29 @@ type documentRow struct {
 }
 
 func doQueryDocuments(t testing.TB, httpClient *http.Client, baseURL string, req api.QueryRequest) []documentRow {
+	return doQueryDocumentsWithParams(t, httpClient, baseURL, req, nil).Rows
+}
+
+type documentStreamResponse struct {
+	Rows     []documentRow
+	Cursor   string
+	IndexSeq string
+	Metadata string
+}
+
+func doQueryDocumentsWithParams(t testing.TB, httpClient *http.Client, baseURL string, req api.QueryRequest, params url.Values) documentStreamResponse {
 	t.Helper()
 	req.Return = api.QueryReturnDocuments
 	body, err := json.Marshal(req)
 	if err != nil {
 		t.Fatalf("marshal query request: %v", err)
 	}
-	endpoint := fmt.Sprintf("%s/v1/query?return=%s", baseURL, api.QueryReturnDocuments)
+	query := make(url.Values)
+	query.Set("return", string(api.QueryReturnDocuments))
+	for key, values := range params {
+		query[key] = append([]string(nil), values...)
+	}
+	endpoint := fmt.Sprintf("%s/v1/query?%s", baseURL, query.Encode())
 	httpReq, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("prepare http request: %v", err)
@@ -1123,7 +1761,97 @@ func doQueryDocuments(t testing.TB, httpClient *http.Client, baseURL string, req
 	if err := scanner.Err(); err != nil {
 		t.Fatalf("scan documents: %v", err)
 	}
-	return rows
+	return documentStreamResponse{
+		Rows:     rows,
+		Cursor:   strings.TrimSpace(resp.Trailer.Get("X-Lockd-Query-Cursor")),
+		IndexSeq: strings.TrimSpace(resp.Trailer.Get("X-Lockd-Query-Index-Seq")),
+		Metadata: strings.TrimSpace(resp.Trailer.Get("X-Lockd-Query-Metadata")),
+	}
+}
+
+func doQueryDocumentsWithParamsAllowEngineUnavailable(t testing.TB, httpClient *http.Client, baseURL string, req api.QueryRequest, params url.Values) (documentStreamResponse, bool) {
+	t.Helper()
+	req.Return = api.QueryReturnDocuments
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal query request: %v", err)
+	}
+	query := make(url.Values)
+	query.Set("return", string(api.QueryReturnDocuments))
+	for key, values := range params {
+		query[key] = append([]string(nil), values...)
+	}
+	endpoint := fmt.Sprintf("%s/v1/query?%s", baseURL, query.Encode())
+	httpReq, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("prepare http request: %v", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient.Do(httpReq)
+	if err != nil {
+		t.Fatalf("query request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusOK {
+		scanner := bufio.NewScanner(resp.Body)
+		rows := make([]documentRow, 0)
+		for scanner.Scan() {
+			line := bytes.TrimSpace(scanner.Bytes())
+			if len(line) == 0 {
+				continue
+			}
+			var row documentRow
+			if err := json.Unmarshal(line, &row); err != nil {
+				t.Fatalf("decode document row: %v", err)
+			}
+			rows = append(rows, row)
+		}
+		if err := scanner.Err(); err != nil {
+			t.Fatalf("scan documents: %v", err)
+		}
+		return documentStreamResponse{
+			Rows:     rows,
+			Cursor:   strings.TrimSpace(resp.Trailer.Get("X-Lockd-Query-Cursor")),
+			IndexSeq: strings.TrimSpace(resp.Trailer.Get("X-Lockd-Query-Index-Seq")),
+			Metadata: strings.TrimSpace(resp.Trailer.Get("X-Lockd-Query-Metadata")),
+		}, true
+	}
+	var apiErr api.ErrorResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiErr); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if resp.StatusCode == http.StatusBadRequest && apiErr.ErrorCode == "query_engine_unavailable" {
+		return documentStreamResponse{}, false
+	}
+	t.Fatalf("unexpected status %d: %+v", resp.StatusCode, apiErr)
+	return documentStreamResponse{}, false
+}
+
+func doQueryErrorWithParams(t testing.TB, httpClient *http.Client, baseURL string, req api.QueryRequest, params url.Values) (int, api.ErrorResponse) {
+	t.Helper()
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal query request: %v", err)
+	}
+	endpoint := baseURL + "/v1/query"
+	if len(params) > 0 {
+		endpoint += "?" + params.Encode()
+	}
+	httpReq, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("prepare http request: %v", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient.Do(httpReq)
+	if err != nil {
+		t.Fatalf("query request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	var out api.ErrorResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	return resp.StatusCode, out
 }
 
 func flushNamespaces(ctx context.Context, t testing.TB, cli *lockdclient.Client, namespaces ...string) {
@@ -1421,4 +2149,23 @@ func waitForTxnRecordsDecided(ctx context.Context, backend storage.Backend) erro
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+func rebuildCryptoFromServerConfig(t testing.TB, cfg lockd.Config) *storage.Crypto {
+	t.Helper()
+	if !cfg.StorageEncryptionEnabled() {
+		return nil
+	}
+	crypto, err := storage.NewCrypto(storage.CryptoConfig{
+		Enabled:            true,
+		RootKey:            cfg.MetadataRootKey,
+		MetadataDescriptor: cfg.MetadataDescriptor,
+		MetadataContext:    []byte(cfg.MetadataContext),
+		Snappy:             cfg.StorageEncryptionSnappy,
+		DisableBufferPool:  cfg.DisableKryptoPool,
+	})
+	if err != nil {
+		t.Fatalf("build rebuild crypto: %v", err)
+	}
+	return crypto
 }

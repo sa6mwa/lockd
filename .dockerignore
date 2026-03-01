@@ -1,6 +1,3 @@
-# VCS metadata
-.git
-
 # Local environment files
 .env
 .env.*

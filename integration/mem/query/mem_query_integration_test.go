@@ -29,6 +29,14 @@ func TestMemQuerySelectors(t *testing.T) {
 	queriesuite.RunSelectors(t, startMemQueryServer)
 }
 
+func TestMemQueryFlushWaitReadabilityContract(t *testing.T) {
+	queriesuite.RunFlushWaitReadabilityContract(t, startMemQueryServer)
+}
+
+func TestMemQueryRefreshWaitForContract(t *testing.T) {
+	queriesuite.RunQueryRefreshWaitForContract(t, startMemQueryServer)
+}
+
 func TestMemQueryPagination(t *testing.T) {
 	queriesuite.RunPagination(t, startMemQueryServer)
 }
@@ -43,6 +51,22 @@ func TestMemQueryResultsSupportPublicRead(t *testing.T) {
 
 func TestMemQueryDocumentStreaming(t *testing.T) {
 	queriesuite.RunDocumentStreaming(t, startMemQueryServer)
+}
+
+func TestMemQueryDocumentStreamingFlowControl(t *testing.T) {
+	queriesuite.RunDocumentStreamingFlowControl(t, startMemQueryServer)
+}
+
+func TestMemQueryIndexRebuildUpgrade(t *testing.T) {
+	queriesuite.RunIndexRebuildUpgrade(t, startMemQueryServer)
+}
+
+func TestMemQueryLargeNamespaceLowMatchKeys(t *testing.T) {
+	queriesuite.RunLargeNamespaceLowMatchKeys(t, startMemQueryServer)
+}
+
+func TestMemQueryLargeNamespaceLowMatchDocuments(t *testing.T) {
+	queriesuite.RunLargeNamespaceLowMatchDocuments(t, startMemQueryServer)
 }
 
 func TestMemQueryDomainDatasets(t *testing.T) {

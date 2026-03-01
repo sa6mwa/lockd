@@ -56,6 +56,10 @@ func (s *Store) PromoteStagedState(ctx context.Context, namespace, key, txnID st
 	dstOpts := minio.CopyDestOptions{Bucket: s.cfg.Bucket, Object: dstObject}
 	info, err := s.client.CopyObject(ctx, dstOpts, srcOpts)
 	if err != nil {
+		if isNotFound(err) {
+			logger.Debug("s3.promote_staged.copy_not_found", "namespace", namespace, "key", key, "staged", stagedKey, "object", dstObject)
+			return nil, storage.ErrNotFound
+		}
 		logger.Debug("s3.promote_staged.copy_error", "namespace", namespace, "key", key, "staged", stagedKey, "object", dstObject, "error", err)
 		return nil, s.wrapError(err, "s3: promote staged copy")
 	}

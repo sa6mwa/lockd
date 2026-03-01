@@ -51,5 +51,21 @@ type Term = lql.Term
 // RangeTerm is a type alias for the shared LQL range term.
 type RangeTerm = lql.RangeTerm
 
+// RangeBound is a type alias for shared LQL range bound values.
+type RangeBound = lql.RangeBound
+
+// DateTerm is a type alias for the shared LQL date term.
+type DateTerm = lql.DateTerm
+
+// NewNumericRangeBound builds a numeric range bound.
+func NewNumericRangeBound(v float64) *RangeBound {
+	return lql.NewNumericRangeBound(v)
+}
+
+// NewDatetimeRangeBound builds a datetime range bound.
+func NewDatetimeRangeBound(v string) *RangeBound {
+	return lql.NewDatetimeRangeBound(v)
+}
+
 // InTerm is a type alias for the shared LQL in-term.
 type InTerm = lql.InTerm

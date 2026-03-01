@@ -18,6 +18,7 @@ type VisibilityWriterConfig struct {
 	Store         *Store
 	FlushEntries  int
 	FlushInterval time.Duration
+	NoSync        bool
 	Clock         clock.Clock
 	Logger        pslog.Logger
 }
@@ -139,6 +140,9 @@ func (w *VisibilityWriter) flushLocked(ctx context.Context) error {
 func (w *VisibilityWriter) persistSegment(ctx context.Context, segment *VisibilitySegment) error {
 	if w.store == nil {
 		return nil
+	}
+	if w.cfg.NoSync {
+		ctx = storage.ContextWithNoSync(ctx)
 	}
 	if _, _, err := w.store.WriteVisibilitySegment(ctx, w.cfg.Namespace, segment); err != nil {
 		return err

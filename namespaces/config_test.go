@@ -2,12 +2,25 @@ package namespaces_test
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"pkt.systems/lockd/internal/search"
+	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/memory"
 	namespaces "pkt.systems/lockd/namespaces"
 )
+
+type countingBackend struct {
+	storage.Backend
+	getCalls atomic.Int64
+}
+
+func (b *countingBackend) GetObject(ctx context.Context, namespace, key string) (storage.GetObjectResult, error) {
+	b.getCalls.Add(1)
+	return b.Backend.GetObject(ctx, namespace, key)
+}
 
 func TestConfigSelectEngine(t *testing.T) {
 	cfg := namespaces.DefaultConfig()
@@ -67,5 +80,40 @@ func TestConfigStoreRoundTrip(t *testing.T) {
 	}
 	if _, err := cfgStore.Save(ctx, ns, cfg, "bogus"); err == nil {
 		t.Fatalf("expected cas mismatch when saving with stale etag")
+	}
+}
+
+func TestConfigStoreLoadCachesResults(t *testing.T) {
+	backend := &countingBackend{Backend: memory.New()}
+	cfgStore := namespaces.NewConfigStore(backend, nil, nil, namespaces.DefaultConfig())
+	ctx := context.Background()
+	ns := "default"
+
+	if _, err := cfgStore.Load(ctx, ns); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if _, err := cfgStore.Load(ctx, ns); err != nil {
+		t.Fatalf("load cached: %v", err)
+	}
+	if got := backend.getCalls.Load(); got != 1 {
+		t.Fatalf("expected one backend load within cache ttl, got %d", got)
+	}
+}
+
+func TestConfigStoreLoadCacheExpires(t *testing.T) {
+	backend := &countingBackend{Backend: memory.New()}
+	cfgStore := namespaces.NewConfigStore(backend, nil, nil, namespaces.DefaultConfig())
+	ctx := context.Background()
+	ns := "default"
+
+	if _, err := cfgStore.Load(ctx, ns); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	time.Sleep(350 * time.Millisecond)
+	if _, err := cfgStore.Load(ctx, ns); err != nil {
+		t.Fatalf("load after ttl: %v", err)
+	}
+	if got := backend.getCalls.Load(); got != 2 {
+		t.Fatalf("expected cache miss after ttl expiry, got %d backend loads", got)
 	}
 }

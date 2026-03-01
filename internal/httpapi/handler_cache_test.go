@@ -102,8 +102,60 @@ func TestHandlerLeaseCacheAvoidsExtraLoadMeta(t *testing.T) {
 	if _, _, _, ok := h.leaseSnapshot(acq.LeaseID); ok {
 		t.Fatalf("expected lease cache to be cleared after release")
 	}
+	if store.loadMetaCount != 0 {
+		t.Fatalf("expected release to use cached meta, got %d loads", store.loadMetaCount)
+	}
+}
+
+func TestHandlerReleaseFallsBackWhenLeaseCacheKeyMismatches(t *testing.T) {
+	store := newStubStore()
+	h := New(Config{
+		Store:                   store,
+		Logger:                  pslog.NoopLogger(),
+		HAMode:                  "concurrent",
+		JSONMaxBytes:            1 << 20,
+		DefaultTTL:              30 * time.Second,
+		MaxTTL:                  time.Minute,
+		AcquireBlock:            5 * time.Second,
+		MetaWarmupAttempts:      0,
+		StateWarmupAttempts:     0,
+		MetaWarmupInitialDelay:  0,
+		StateWarmupInitialDelay: 0,
+	})
+
+	acquireReq := bytes.NewBufferString(`{"key":"orders","owner":"worker-1","ttl_seconds":30,"block_seconds":0}`)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/acquire", acquireReq)
+	if err := h.handleAcquire(rr, req); err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if rr.Code != http.StatusOK {
+		t.Fatalf("acquire status=%d body=%s", rr.Code, rr.Body.Bytes())
+	}
+	var acq api.AcquireResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &acq); err != nil {
+		t.Fatalf("decode acquire: %v", err)
+	}
+	fence := strconv.FormatInt(acq.FencingToken, 10)
+
+	cachedMeta, cachedETag, _, ok := h.leaseSnapshot(acq.LeaseID)
+	if !ok {
+		t.Fatalf("expected lease cache to contain acquire result")
+	}
+	h.cacheLease(acq.LeaseID, h.defaultNamespace+"/other", cachedMeta, cachedETag)
+
+	store.resetCounters()
+	relReq := httptest.NewRequest(http.MethodPost, "/v1/release", bytes.NewBufferString(`{"key":"orders","lease_id":"`+acq.LeaseID+`","txn_id":"`+acq.TxnID+`"}`))
+	relReq.Header.Set("X-Fencing-Token", fence)
+	rr = httptest.NewRecorder()
+	if err := h.handleRelease(rr, relReq); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if rr.Code != http.StatusOK {
+		t.Fatalf("release status=%d body=%s", rr.Code, rr.Body.Bytes())
+	}
 	if store.loadMetaCount != 1 {
-		t.Fatalf("expected release to load meta once, got %d", store.loadMetaCount)
+		t.Fatalf("expected release to bypass mismatched cache and load meta once, got %d", store.loadMetaCount)
 	}
 }
 

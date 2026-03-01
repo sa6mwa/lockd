@@ -58,7 +58,10 @@ func (s *Store) PromoteStagedState(ctx context.Context, namespace, key, txnID st
 		if isPreconditionFailed(err) {
 			return nil, storage.ErrCASMismatch
 		}
-		return nil, err
+		if isCopySourceAuthError(err) {
+			return s.promoteStagedStateByStream(ctx, namespace, key, stagedKey, opts)
+		}
+		return nil, fmt.Errorf("azure: promote staged copy: %w", err)
 	}
 	if resp.ETag == nil {
 		return nil, fmt.Errorf("azure: promote staged copy missing etag")
@@ -71,6 +74,28 @@ func (s *Store) PromoteStagedState(ctx context.Context, namespace, key, txnID st
 		NewETag:      string(*resp.ETag),
 		Descriptor:   append([]byte(nil), desc...),
 	}, nil
+}
+
+func (s *Store) promoteStagedStateByStream(ctx context.Context, namespace, key, stagedKey string, opts storage.PromoteStagedOptions) (*storage.PutStateResult, error) {
+	staged, err := s.ReadState(ctx, namespace, stagedKey)
+	if err != nil {
+		return nil, err
+	}
+	defer staged.Reader.Close()
+
+	writeCtx := storage.ContextWithStatePlaintextSize(ctx, staged.Info.Size)
+	if len(staged.Info.Descriptor) > 0 {
+		writeCtx = storage.ContextWithStateDescriptor(writeCtx, staged.Info.Descriptor)
+	}
+	res, err := s.WriteState(writeCtx, namespace, key, staged.Reader, storage.PutStateOptions{
+		ExpectedETag: opts.ExpectedHeadETag,
+		IfNotExists:  opts.ExpectedHeadETag == "",
+	})
+	if err != nil {
+		return nil, err
+	}
+	_ = s.Remove(ctx, namespace, stagedKey, "")
+	return res, nil
 }
 
 // DiscardStagedState deletes staged state for a transaction.

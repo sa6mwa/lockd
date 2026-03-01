@@ -1190,6 +1190,10 @@ func (h *Handler) handleRelease(w http.ResponseWriter, r *http.Request) error {
 	if payload.Key == "" {
 		return httpError{Status: http.StatusBadRequest, Code: "missing_key", Detail: "key is required"}
 	}
+	storageKey, err := h.namespacedKey(namespace, payload.Key)
+	if err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_key", Detail: err.Error()}
+	}
 	if payload.LeaseID == "" {
 		return httpError{Status: http.StatusBadRequest, Code: "missing_lease", Detail: "lease_id required"}
 	}
@@ -1204,6 +1208,10 @@ func (h *Handler) handleRelease(w http.ResponseWriter, r *http.Request) error {
 	verbose.Debug("release.begin", "namespace", namespace, "key", payload.Key, "lease_id", payload.LeaseID, "txn_id", payload.TxnID)
 	var knownMeta *storage.Meta
 	knownETag := ""
+	if cachedMeta, cachedETag, cachedKey, ok := h.leaseSnapshot(payload.LeaseID); ok && cachedKey == storageKey {
+		knownMeta = &cachedMeta
+		knownETag = cachedETag
+	}
 	res, err := h.core.Release(ctx, core.ReleaseCommand{
 		Namespace:     namespace,
 		Key:           payload.Key,
@@ -1308,7 +1316,7 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request) error {
 
 // handleQuery godoc
 // @Summary      Query keys within a namespace
-// @Description  Executes a selector-based search within a namespace. When return=keys, responds with a JSON envelope containing keys + cursor. When return=documents, streams NDJSON rows (one document per line).
+// @Description  Executes a selector-based search within a namespace. When return=keys, responds with a JSON envelope containing keys + cursor. When return=documents, streams NDJSON rows (one document per line) and emits query cursor/index metadata in response trailers.
 // @Tags         lease
 // @Accept       json
 // @Produce      json
@@ -1445,11 +1453,6 @@ func (h *Handler) handleQuery(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	if engine == search.EngineIndex && refreshMode == refreshWaitFor {
-		if err := h.waitForIndexReadable(r.Context(), namespace); err != nil {
-			return err
-		}
-	}
 	cmd := core.QueryCommand{
 		Namespace: namespace,
 		Selector:  req.Selector,
@@ -1460,22 +1463,22 @@ func (h *Handler) handleQuery(w http.ResponseWriter, r *http.Request) error {
 		Return:    returnMode,
 		Refresh:   core.RefreshMode(refreshMode),
 	}
+	if returnMode == api.QueryReturnDocuments {
+		return h.writeQueryDocumentsCore(r.Context(), w, cmd)
+	}
+
 	result, err := h.core.Query(r.Context(), cmd)
 	if err != nil {
 		return convertCoreError(err)
 	}
-	if returnMode != api.QueryReturnDocuments {
-		resp := api.QueryResponse{
-			Namespace: namespace,
-			Keys:      result.Keys,
-			Cursor:    result.Cursor,
-			IndexSeq:  result.IndexSeq,
-			Metadata:  result.Metadata,
-		}
-		return h.writeQueryKeysResponse(w, resp, returnMode)
+	resp := api.QueryResponse{
+		Namespace: namespace,
+		Keys:      result.Keys,
+		Cursor:    result.Cursor,
+		IndexSeq:  result.IndexSeq,
+		Metadata:  result.Metadata,
 	}
-
-	return h.writeQueryDocumentsCore(r.Context(), w, cmd)
+	return h.writeQueryKeysResponse(w, resp, returnMode)
 }
 
 // handleIndexFlush godoc
@@ -1605,6 +1608,240 @@ func (h *Handler) handleIndexFlush(w http.ResponseWriter, r *http.Request) error
 	return nil
 }
 
+// handleMutate godoc
+// @Summary      Atomically mutate JSON state for a key using LQL
+// @Description  Loads lease-visible state for the key, applies LQL mutations server-side via streaming, then stages the mutated JSON as an update. Optional CAS headers guard against concurrent updates.
+// @Tags         lease
+// @Accept       json
+// @Produce      json
+// @Param        namespace          query   string  false  "Namespace override (defaults to server setting)"
+// @Param        key                query   string  true   "Lease key"
+// @Param        X-Lease-ID         header  string  true   "Lease identifier (xid from Acquire, 20-char lowercase base32)"
+// @Param        X-Txn-ID           header  string  true   "Transaction identifier (xid from Acquire)"
+// @Param        X-Fencing-Token    header  string  false  "Optional fencing token proof"
+// @Param        X-If-Version       header  string  false  "Conditionally update when the current version matches"
+// @Param        X-If-State-ETag    header  string  false  "Conditionally update when the state ETag matches"
+// @Param        request            body    api.MutateRequest  true  "LQL mutation request payload"
+// @Success      200                {object}  api.UpdateResponse
+// @Failure      400                {object}  api.ErrorResponse
+// @Failure      404                {object}  api.ErrorResponse
+// @Failure      409                {object}  api.ErrorResponse
+// @Failure      413                {object}  api.ErrorResponse
+// @Failure      503                {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/mutate [post]
+func (h *Handler) handleMutate(w http.ResponseWriter, r *http.Request) error {
+	key := strings.TrimSpace(r.URL.Query().Get("key"))
+	if key == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_key", Detail: "key query required"}
+	}
+
+	reqBody := http.MaxBytesReader(w, r.Body, h.jsonMaxBytes)
+	defer reqBody.Close()
+	var payload api.MutateRequest
+	if err := decodeJSONBody(reqBody, &payload, jsonDecodeOptions{disallowUnknowns: true}); err != nil {
+		return httpError{
+			Status: http.StatusBadRequest,
+			Code:   "invalid_body",
+			Detail: fmt.Sprintf("failed to decode request: %v", err),
+		}
+	}
+	mutationExprs := make([]string, 0, len(payload.Mutations))
+	for _, raw := range payload.Mutations {
+		expr := strings.TrimSpace(raw)
+		if expr != "" {
+			mutationExprs = append(mutationExprs, expr)
+		}
+	}
+	if len(mutationExprs) == 0 {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_body", Detail: "mutations required"}
+	}
+
+	namespaceInput := strings.TrimSpace(payload.Namespace)
+	if override := strings.TrimSpace(r.URL.Query().Get("namespace")); override != "" {
+		namespaceInput = override
+	}
+	namespace, err := h.resolveNamespace(namespaceInput)
+	if err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
+	}
+	if err := h.authorizeNamespace(r, namespace, nsauth.AccessWrite); err != nil {
+		return err
+	}
+	h.observeNamespace(namespace)
+
+	leaseID := strings.TrimSpace(r.Header.Get("X-Lease-ID"))
+	if leaseID == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_lease", Detail: "X-Lease-ID required"}
+	}
+	txnID := strings.TrimSpace(r.Header.Get("X-Txn-ID"))
+	if txnID == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_txn", Detail: "X-Txn-ID required"}
+	}
+	fencingToken, err := parseFencingToken(r)
+	if err != nil {
+		return err
+	}
+	expectVersion := int64(0)
+	expectVersionSet := false
+	if raw := strings.TrimSpace(r.Header.Get("X-If-Version")); raw != "" {
+		parsed, parseErr := strconv.ParseInt(raw, 10, 64)
+		if parseErr != nil {
+			return httpError{Status: http.StatusBadRequest, Code: "invalid_version", Detail: parseErr.Error()}
+		}
+		expectVersion = parsed
+		expectVersionSet = true
+	}
+	expectETag := strings.TrimSpace(r.Header.Get("X-If-State-ETag"))
+	if _, err := parseMetadataHeaders(r); err != nil {
+		return err
+	}
+
+	mutations, err := lql.ParseMutations(mutationExprs, h.clock.Now())
+	if err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_mutations", Detail: err.Error()}
+	}
+	plan, err := lql.NewMutateStreamPlan(mutations)
+	if err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_mutations", Detail: err.Error()}
+	}
+
+	storageKey, err := h.namespacedKey(namespace, key)
+	if err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_key", Detail: err.Error()}
+	}
+	var knownMeta *storage.Meta
+	knownETag := ""
+	if cachedMeta, cachedETag, cachedKey, ok := h.leaseSnapshot(leaseID); ok && cachedKey == storageKey {
+		knownMeta = &cachedMeta
+		knownETag = cachedETag
+	}
+
+	current, err := h.core.Get(r.Context(), core.GetCommand{
+		Namespace:    namespace,
+		Key:          key,
+		LeaseID:      leaseID,
+		FencingToken: fencingToken,
+		Public:       false,
+	})
+	if err != nil {
+		return convertCoreError(err)
+	}
+	source := current.Reader
+	if current.NoContent || source == nil {
+		source = io.NopCloser(strings.NewReader(`{}`))
+	}
+
+	pipeReader, pipeWriter := io.Pipe()
+	type mutateStreamRun struct {
+		result lql.MutateStreamResult
+		err    error
+	}
+	mutateResultCh := make(chan mutateStreamRun, 1)
+	go func() {
+		defer source.Close()
+		req := lql.MutateStreamRequest{
+			Ctx:               r.Context(),
+			Reader:            source,
+			Writer:            pipeWriter,
+			Mode:              lql.MutateSingleObjectOnly,
+			Plan:              plan,
+			MaxCandidateBytes: h.jsonMaxBytes,
+		}
+		runResult, mutateErr := lql.MutateStreamWithResult(req)
+		if mutateErr != nil {
+			_ = pipeWriter.CloseWithError(mutateErr)
+			mutateResultCh <- mutateStreamRun{err: mutateErr}
+			return
+		}
+		_ = pipeWriter.Close()
+		mutateResultCh <- mutateStreamRun{result: runResult}
+	}()
+
+	res, err := h.core.Update(r.Context(), core.UpdateCommand{
+		Namespace:      namespace,
+		Key:            key,
+		LeaseID:        leaseID,
+		TxnID:          txnID,
+		FencingToken:   fencingToken,
+		IfVersion:      expectVersion,
+		IfVersionSet:   expectVersionSet,
+		IfStateETag:    expectETag,
+		Body:           pipeReader,
+		CompactWriter:  h.compactWriter,
+		MaxBytes:       h.jsonMaxBytes,
+		SpoolThreshold: h.spoolThreshold,
+		KnownMeta:      knownMeta,
+		KnownMetaETag:  knownETag,
+	})
+	if err != nil {
+		_ = pipeReader.Close()
+		if run := <-mutateResultCh; run.err != nil {
+			return convertMutateStreamError(run.err)
+		}
+		return convertCoreError(err)
+	}
+	run := <-mutateResultCh
+	if run.err != nil {
+		return convertMutateStreamError(run.err)
+	}
+	if res.Meta != nil && res.Meta.Lease != nil {
+		h.cacheLease(leaseID, storageKey, *res.Meta, res.MetaETag)
+	}
+	headers := map[string]string{
+		"X-Key-Version": strconv.FormatInt(res.NewVersion, 10),
+		"ETag":          res.NewStateETag,
+	}
+	for key, value := range mutateStreamSummaryHeaders(run.result) {
+		headers[key] = value
+	}
+	h.writeJSON(w, http.StatusOK, api.UpdateResponse{
+		NewVersion:   res.NewVersion,
+		NewStateETag: res.NewStateETag,
+		Bytes:        res.Bytes,
+		Metadata:     metadataAttributesFromMeta(res.Meta),
+	}, headers)
+	return nil
+}
+
+func mutateStreamSummaryHeaders(result lql.MutateStreamResult) map[string]string {
+	return map[string]string{
+		headerMutateCandidatesSeen:    strconv.FormatInt(result.CandidatesSeen, 10),
+		headerMutateCandidatesWritten: strconv.FormatInt(result.CandidatesWritten, 10),
+		headerMutateBytesRead:         strconv.FormatInt(result.BytesRead, 10),
+		headerMutateBytesWritten:      strconv.FormatInt(result.BytesWritten, 10),
+		headerMutateBytesCaptured:     strconv.FormatInt(result.BytesCaptured, 10),
+		headerMutateSpillCount:        strconv.FormatInt(result.SpillCount, 10),
+		headerMutateSpillBytes:        strconv.FormatInt(result.SpillBytes, 10),
+	}
+}
+
+func convertMutateStreamError(err error) error {
+	if err == nil {
+		return nil
+	}
+	streamErr, ok := lql.AsStreamError(err)
+	if !ok || streamErr == nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_body", Detail: err.Error()}
+	}
+	detail := streamErr.Detail
+	if detail == "" {
+		detail = streamErr.Error()
+	}
+	switch streamErr.Code {
+	case lql.StreamErrorInvalidSelector:
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_mutations", Detail: detail}
+	case lql.StreamErrorDocumentTooLarge:
+		return httpError{Status: http.StatusRequestEntityTooLarge, Code: "document_too_large", Detail: detail}
+	case lql.StreamErrorContextCanceled:
+		return httpError{Status: http.StatusRequestTimeout, Code: "context_canceled", Detail: detail}
+	case lql.StreamErrorInternal:
+		return httpError{Status: http.StatusInternalServerError, Code: "internal", Detail: detail}
+	default:
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_body", Detail: detail}
+	}
+}
+
 // handleUpdate godoc
 // @Summary      Atomically update the JSON state for a key
 // @Description  Streams JSON from the request body, compacts it, and installs it if the caller holds the lease. Optional CAS headers guard against concurrent updates.
@@ -1618,6 +1855,8 @@ func (h *Handler) handleIndexFlush(w http.ResponseWriter, r *http.Request) error
 // @Param        X-Fencing-Token    header  string  false  "Optional fencing token proof"
 // @Param        X-If-Version       header  string  false  "Conditionally update when the current version matches"
 // @Param        X-If-State-ETag    header  string  false  "Conditionally update when the state ETag matches"
+// @Param        X-Expected-SHA256  header  string  false  "Optional lowercase hex SHA-256 checksum for the submitted JSON bytes (pre-compaction)"
+// @Param        X-Expected-Bytes   header  string  false  "Optional exact byte length for the submitted JSON bytes (pre-compaction)"
 // @Param        state              body    string  true   "New JSON state payload"
 // @Success      200                {object}  api.UpdateResponse
 // @Failure      400                {object}  api.ErrorResponse
@@ -1666,6 +1905,20 @@ func (h *Handler) handleUpdate(w http.ResponseWriter, r *http.Request) error {
 		}
 	}
 	expectETag := strings.TrimSpace(r.Header.Get("X-If-State-ETag"))
+	expectedSHA256 := strings.TrimSpace(r.Header.Get(headerExpectedSHA256))
+	expectedBytes := int64(0)
+	expectedBytesSet := false
+	if raw := strings.TrimSpace(r.Header.Get(headerExpectedBytes)); raw != "" {
+		parsed, parseErr := strconv.ParseInt(raw, 10, 64)
+		if parseErr != nil {
+			return httpError{Status: http.StatusBadRequest, Code: "invalid_expected_bytes", Detail: parseErr.Error()}
+		}
+		if parsed < 0 {
+			return httpError{Status: http.StatusBadRequest, Code: "invalid_expected_bytes", Detail: "X-Expected-Bytes must be >= 0"}
+		}
+		expectedBytes = parsed
+		expectedBytesSet = true
+	}
 	if _, err := parseMetadataHeaders(r); err != nil {
 		return err
 	} // TODO: pass through when core supports metadata patch
@@ -1676,20 +1929,23 @@ func (h *Handler) handleUpdate(w http.ResponseWriter, r *http.Request) error {
 		knownETag = cachedETag
 	}
 	res, err := h.core.Update(r.Context(), core.UpdateCommand{
-		Namespace:      r.URL.Query().Get("namespace"),
-		Key:            key,
-		LeaseID:        leaseID,
-		TxnID:          txnID,
-		FencingToken:   fencingToken,
-		IfVersion:      expectVersion,
-		IfStateETag:    expectETag,
-		Body:           http.MaxBytesReader(w, r.Body, h.jsonMaxBytes),
-		CompactWriter:  h.compactWriter,
-		MaxBytes:       h.jsonMaxBytes,
-		SpoolThreshold: h.spoolThreshold,
-		KnownMeta:      knownMeta,
-		KnownMetaETag:  knownETag,
-		IfVersionSet:   expectVersionSet,
+		Namespace:        r.URL.Query().Get("namespace"),
+		Key:              key,
+		LeaseID:          leaseID,
+		TxnID:            txnID,
+		FencingToken:     fencingToken,
+		IfVersion:        expectVersion,
+		IfStateETag:      expectETag,
+		ExpectedSHA256:   expectedSHA256,
+		ExpectedBytes:    expectedBytes,
+		ExpectedBytesSet: expectedBytesSet,
+		Body:             http.MaxBytesReader(w, r.Body, h.jsonMaxBytes),
+		CompactWriter:    h.compactWriter,
+		MaxBytes:         h.jsonMaxBytes,
+		SpoolThreshold:   h.spoolThreshold,
+		KnownMeta:        knownMeta,
+		KnownMetaETag:    knownETag,
+		IfVersionSet:     expectVersionSet,
 	})
 	if err != nil {
 		return convertCoreError(err)
@@ -2113,6 +2369,100 @@ func (h *Handler) handleQueueEnqueue(w http.ResponseWriter, r *http.Request) err
 	return nil
 }
 
+// handleQueueStats godoc
+// @Summary      Read queue runtime stats
+// @Description  Returns side-effect-free queue stats for one namespace/queue, including dispatcher waiter metrics and current head availability snapshot.
+// @Tags         queue
+// @Accept       json
+// @Produce      json
+// @Param        namespace  query    string  false  "Namespace override when the request body omits it"
+// @Param        queue      query    string  false  "Queue name override when the request body omits it"
+// @Param        request  body      api.QueueStatsRequest  true  "Queue stats parameters"
+// @Success      200      {object}  api.QueueStatsResponse
+// @Failure      400      {object}  api.ErrorResponse
+// @Failure      503      {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/queue/stats [post]
+func (h *Handler) handleQueueStats(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
+	reqBody := http.MaxBytesReader(w, r.Body, h.jsonMaxBytes)
+	defer reqBody.Close()
+
+	var req api.QueueStatsRequest
+	if err := decodeJSONBody(reqBody, &req, jsonDecodeOptions{
+		allowEmpty:       true,
+		disallowUnknowns: true,
+	}); err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_body", Detail: fmt.Sprintf("failed to parse request: %v", err)}
+	}
+
+	namespace := strings.TrimSpace(req.Namespace)
+	if namespace == "" {
+		namespace = strings.TrimSpace(r.URL.Query().Get("namespace"))
+	}
+	resolvedNamespace, err := h.resolveNamespace(namespace)
+	if err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
+	}
+	if err := h.authorizeNamespace(r, resolvedNamespace, nsauth.AccessRead); err != nil {
+		return err
+	}
+	h.observeNamespace(resolvedNamespace)
+
+	queueName := strings.TrimSpace(req.Queue)
+	if queueName == "" {
+		queueName = strings.TrimSpace(r.URL.Query().Get("queue"))
+	}
+	if queueName == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_queue", Detail: "queue is required"}
+	}
+
+	qsvc, err := h.requireQueueService()
+	if err != nil {
+		return err
+	}
+
+	dispatcherStats := h.queueDisp.QueueStats(resolvedNamespace, queueName)
+	resp := api.QueueStatsResponse{
+		Namespace:         resolvedNamespace,
+		Queue:             queueName,
+		WaitingConsumers:  dispatcherStats.WaitingConsumers,
+		PendingCandidates: dispatcherStats.PendingCandidates,
+		TotalConsumers:    dispatcherStats.TotalConsumers,
+		HasActiveWatcher:  h.queueDisp.HasActiveWatcher(resolvedNamespace, queueName),
+		CorrelationID:     correlation.ID(ctx),
+	}
+	candidate, err := qsvc.PeekCandidate(ctx, resolvedNamespace, queueName, "", 1)
+	switch {
+	case err == nil && candidate.Descriptor != nil:
+		head := candidate.Descriptor.Document
+		resp.Available = true
+		resp.HeadMessageID = strings.TrimSpace(head.ID)
+		resp.HeadEnqueuedAtUnix = head.EnqueuedAt.UTC().Unix()
+		resp.HeadNotVisibleUntilUnix = head.NotVisibleUntil.UTC().Unix()
+		now := time.Now().UTC()
+		if h.clock != nil {
+			now = h.clock.Now().UTC()
+		}
+		if !head.EnqueuedAt.IsZero() {
+			age := now.Sub(head.EnqueuedAt).Seconds()
+			if age < 0 {
+				age = 0
+			}
+			resp.HeadAgeSeconds = int64(age)
+		}
+	case errors.Is(err, storage.ErrNotFound):
+		// Queue currently has no visible head candidate.
+	case errors.Is(err, queue.ErrInvalidQueue):
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_queue", Detail: err.Error()}
+	case err != nil:
+		return convertCoreError(err)
+	}
+
+	h.writeJSON(w, http.StatusOK, resp, nil)
+	return nil
+}
+
 // handleQueueDequeue godoc
 // @Summary      Dequeue messages
 // @Description  Dequeues one or more messages from the specified queue. Supports long polling via wait_seconds. If txn_id is provided, the message is enlisted as a transaction participant.
@@ -2483,6 +2833,230 @@ func (h *Handler) handleQueueDequeueWithState(w http.ResponseWriter, r *http.Req
 	}
 	disconnectStatus = "delivered"
 	return nil
+}
+
+const (
+	queueWatchHeartbeatInterval = 20 * time.Second
+	queueWatchPollInterval      = 1 * time.Second
+)
+
+type queueWatchSnapshot struct {
+	available bool
+	headID    string
+}
+
+func (s queueWatchSnapshot) equal(other queueWatchSnapshot) bool {
+	return s.available == other.available && s.headID == other.headID
+}
+
+// handleQueueWatch godoc
+// @Summary      Watch queue availability (SSE)
+// @Description  Opens a text/event-stream channel that emits queue visibility updates without consuming messages.
+// @Tags         queue
+// @Accept       json
+// @Produce      text/event-stream
+// @Param        namespace  query    string  false  "Namespace override when the request body omits it"
+// @Param        queue      query    string  false  "Queue name override when the request body omits it"
+// @Param        request  body      api.QueueWatchRequest  true  "Queue watch parameters"
+// @Success      200      {string}  string  "SSE stream: queue_watch events"
+// @Failure      400      {object}  api.ErrorResponse
+// @Failure      503      {object}  api.ErrorResponse
+// @Security     mTLS
+// @Router       /v1/queue/watch [post]
+func (h *Handler) handleQueueWatch(w http.ResponseWriter, r *http.Request) error {
+	reqBody := http.MaxBytesReader(w, r.Body, h.jsonMaxBytes)
+	defer reqBody.Close()
+
+	var req api.QueueWatchRequest
+	if err := decodeJSONBody(reqBody, &req, jsonDecodeOptions{
+		allowEmpty:       true,
+		disallowUnknowns: true,
+	}); err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_body", Detail: fmt.Sprintf("failed to parse request: %v", err)}
+	}
+
+	namespace := strings.TrimSpace(req.Namespace)
+	if namespace == "" {
+		namespace = strings.TrimSpace(r.URL.Query().Get("namespace"))
+	}
+	resolvedNamespace, err := h.resolveNamespace(namespace)
+	if err != nil {
+		return httpError{Status: http.StatusBadRequest, Code: "invalid_namespace", Detail: err.Error()}
+	}
+	if err := h.authorizeNamespace(r, resolvedNamespace, nsauth.AccessRead); err != nil {
+		return err
+	}
+
+	queueName := strings.TrimSpace(req.Queue)
+	if queueName == "" {
+		queueName = strings.TrimSpace(r.URL.Query().Get("queue"))
+	}
+	if queueName == "" {
+		return httpError{Status: http.StatusBadRequest, Code: "missing_queue", Detail: "queue is required"}
+	}
+
+	qsvc, err := h.requireQueueService()
+	if err != nil {
+		return err
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		return httpError{Status: http.StatusInternalServerError, Code: "streaming_unsupported", Detail: "streaming not supported by response writer"}
+	}
+
+	ctx := r.Context()
+	if !correlation.Has(ctx) {
+		ctx = correlation.Set(ctx, correlation.Generate())
+	}
+	span := trace.SpanFromContext(ctx)
+	ctx, logger := applyCorrelation(ctx, pslog.LoggerFromContext(ctx), span)
+	r = r.WithContext(ctx)
+	queueLogger := logger.With("namespace", resolvedNamespace, "queue", queueName)
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	queueLogger.Info("queue.watch.connect", "remote_addr", h.clientKeyFromRequest(r))
+	defer queueLogger.Info("queue.watch.disconnect")
+
+	feed, hasFeed := h.store.(storage.QueueChangeFeed)
+	var sub storage.QueueChangeSubscription
+	if hasFeed {
+		s, err := feed.SubscribeQueueChanges(resolvedNamespace, queueName)
+		if err != nil {
+			hasFeed = false
+			queueLogger.Warn("queue.watch.feed_unavailable", "error", err)
+		} else {
+			sub = s
+			defer sub.Close()
+		}
+	}
+
+	snapshot := func(callCtx context.Context) (queueWatchSnapshot, error) {
+		res, err := qsvc.PeekCandidate(callCtx, resolvedNamespace, queueName, "", 1)
+		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				return queueWatchSnapshot{}, nil
+			}
+			return queueWatchSnapshot{}, err
+		}
+		headID := ""
+		if res.Descriptor != nil {
+			headID = strings.TrimSpace(res.Descriptor.Document.ID)
+		}
+		return queueWatchSnapshot{
+			available: true,
+			headID:    headID,
+		}, nil
+	}
+
+	eventID := int64(0)
+	writeEvent := func(state queueWatchSnapshot) error {
+		eventID++
+		payload := api.QueueWatchEvent{
+			Namespace:     resolvedNamespace,
+			Queue:         queueName,
+			Available:     state.available,
+			HeadMessageID: state.headID,
+			ChangedAtUnix: time.Now().UTC().Unix(),
+			CorrelationID: correlation.ID(ctx),
+		}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(w, "id: %d\n", eventID); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(w, "event: queue_watch"); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", raw); err != nil {
+			return err
+		}
+		flusher.Flush()
+		return nil
+	}
+
+	writeHeartbeat := func() error {
+		if _, err := fmt.Fprintln(w, ": keepalive"); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(w); err != nil {
+			return err
+		}
+		flusher.Flush()
+		return nil
+	}
+
+	last, err := snapshot(ctx)
+	if err != nil {
+		return convertCoreError(err)
+	}
+	if err := writeEvent(last); err != nil {
+		return convertCoreError(err)
+	}
+
+	heartbeat := time.NewTicker(queueWatchHeartbeatInterval)
+	defer heartbeat.Stop()
+
+	if hasFeed && sub != nil {
+		for {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-heartbeat.C:
+				if err := writeHeartbeat(); err != nil {
+					return convertCoreError(err)
+				}
+			case _, ok := <-sub.Events():
+				if !ok {
+					return nil
+				}
+				next, err := snapshot(ctx)
+				if err != nil {
+					return convertCoreError(err)
+				}
+				if next.equal(last) {
+					continue
+				}
+				last = next
+				if err := writeEvent(last); err != nil {
+					return convertCoreError(err)
+				}
+			}
+		}
+	}
+
+	poll := time.NewTicker(queueWatchPollInterval)
+	defer poll.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-heartbeat.C:
+			if err := writeHeartbeat(); err != nil {
+				return convertCoreError(err)
+			}
+		case <-poll.C:
+			next, err := snapshot(ctx)
+			if err != nil {
+				return convertCoreError(err)
+			}
+			if next.equal(last) {
+				continue
+			}
+			last = next
+			if err := writeEvent(last); err != nil {
+				return convertCoreError(err)
+			}
+		}
+	}
 }
 
 // handleQueueSubscribe godoc
@@ -3679,6 +4253,9 @@ func (h *Handler) handleAttachmentGet(w http.ResponseWriter, r *http.Request) er
 	if res.Attachment.UpdatedAtUnix > 0 {
 		w.Header().Set(headerAttachmentUpdatedAt, strconv.FormatInt(res.Attachment.UpdatedAtUnix, 10))
 	}
+	if checksum := strings.TrimSpace(res.Attachment.PlaintextSHA256); checksum != "" {
+		w.Header().Set(headerAttachmentSHA256, checksum)
+	}
 	w.WriteHeader(http.StatusOK)
 	_, err = io.Copy(w, res.Reader)
 	return err
@@ -3810,12 +4387,13 @@ func parseMaxBytesQuery(raw string) (int64, bool, error) {
 
 func attachmentInfoToAPI(info core.AttachmentInfo) api.AttachmentInfo {
 	return api.AttachmentInfo{
-		ID:            info.ID,
-		Name:          info.Name,
-		Size:          info.Size,
-		ContentType:   info.ContentType,
-		CreatedAtUnix: info.CreatedAtUnix,
-		UpdatedAtUnix: info.UpdatedAtUnix,
+		ID:              info.ID,
+		Name:            info.Name,
+		Size:            info.Size,
+		PlaintextSHA256: info.PlaintextSHA256,
+		ContentType:     info.ContentType,
+		CreatedAtUnix:   info.CreatedAtUnix,
+		UpdatedAtUnix:   info.UpdatedAtUnix,
 	}
 }
 

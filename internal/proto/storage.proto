@@ -47,6 +47,7 @@ message Attachment {
   int64 created_at_unix = 6;
   int64 updated_at_unix = 7;
   int64 plaintext_bytes = 8;
+  string plaintext_sha256 = 9;
 }
 
 message StagedAttachment {
@@ -58,6 +59,7 @@ message StagedAttachment {
   int64 created_at_unix = 6;
   int64 updated_at_unix = 7;
   int64 plaintext_bytes = 8;
+  string plaintext_sha256 = 9;
 }
 
 message MetaRecord {

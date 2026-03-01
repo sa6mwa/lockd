@@ -13,13 +13,14 @@ LOCKD_VERSION ?= $(shell $(GO) run ./cmd/lockd version --version)
 LOCKD_SEMVER ?= $(shell $(GO) run ./cmd/lockd version --semver)
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-integration bench fuzz diagrams swagger build container push-container clean install
+.PHONY: help test test-integration bench perf-guard-search fuzz diagrams swagger build container push-container clean install
 
 help:
 	@echo "Available targets:"
 	@echo "  make test                    # run unit tests"
 	@echo "  make test-integration        # run integration suites (pass SUITES=...)"
 	@echo "  make bench                   # run benchmark suites (pass SUITES=...)"
+	@echo "  make perf-guard-search       # run search/index perf regression guard against frozen baseline"
 	@echo "  make fuzz                    # run all fuzzers (default 15s each, override FUZZ_TIME=...)"
 	@echo "  make swagger                 # regenerate Swagger/OpenAPI artifacts"
 	@echo "  make diagrams                # render PlantUML sequence diagrams to JPEG"
@@ -70,6 +71,9 @@ bench:
 		echo "Running benchmark suites: $(SUITES)"; \
 		./run-benchmark-suites.sh $(SUITES); \
 	fi
+
+perf-guard-search:
+	@./scripts/check_search_perf_regression.sh
 
 FUZZ_TIME ?= 15s
 
@@ -123,6 +127,9 @@ build: $(BIN_PATH)
 
 podman.yaml:
 	envsubst < podman.template.yaml > podman.yaml
+
+podman-mcp.yaml:
+	envsubst < podman-mcp.template.yaml > podman-mcp.yaml
 
 container:
 	@if [ -z "$(CONTAINER_BUILDER)" ]; then \

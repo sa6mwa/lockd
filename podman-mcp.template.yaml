@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: lockd-mcp
+  annotations:
+    io.podman.annotations.userns: keep-id
+spec:
+  restartPolicy: Always
+  containers:
+    - name: lockd
+      image: docker.io/pktsystems/lockd:latest
+      imagePullPolicy: IfNotPresent
+      env:
+        - name: LOCKD_MCP_SERVER
+          value: https://localhost:9341
+        - name: LOCKD_MCP_DEFAULT_NAMESPACE
+          value: mcp
+        - name: LOCKD_MCP_LISTEN
+          value: 0.0.0.0:19341
+        - name: LOCKD_MCP_BASE_URL
+          value: &mcp_base_url https://localhost:19341
+        - name: LOCKD_MCP_ISSUER
+          value: *mcp_base_url
+        - name: LOCKD_MCP_BUNDLE
+          value: /opt/lockd/config/server.pem
+        - name: LOCKD_MCP_CLIENT_BUNDLE
+          value: /opt/lockd/config/client.pem
+        - name: LOCKD_MCP_STATE_FILE
+          value: /opt/lockd/config/mcp.pem
+        - name: LOCKD_MCP_TOKEN_STORE
+          value: /opt/lockd/config/mcp-token-store.enc.json
+        - name: LOCKD_LOG_MODE
+          value: json
+        - name: LOCKD_LOG_LEVEL
+          value: debug
+      args:
+        - mcp
+      ports:
+        - containerPort: 19341
+          hostPort: 19341
+          protocol: TCP
+      volumeMounts:
+        - name: lockd-config
+          mountPath: /opt/lockd/config
+  volumes:
+    - name: lockd-config
+      hostPath:
+        path: ${HOME}/.lockd
+        type: DirectoryOrCreate

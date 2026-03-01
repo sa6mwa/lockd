@@ -96,7 +96,7 @@ func (s *Store) DefaultNamespaceConfig() namespaces.Config {
 
 // IndexerFlushDefaults suggests disk-friendly indexer tuning.
 func (s *Store) IndexerFlushDefaults() (int, time.Duration) {
-	return 1000, 10 * time.Second
+	return 2000, 10 * time.Second
 }
 
 const (
@@ -341,7 +341,6 @@ func (s *Store) BackendHash(ctx context.Context) (string, error) {
 
 func (s *Store) loggers(ctx context.Context) (pslog.Logger, pslog.Logger) {
 	logger := pslog.LoggerFromContext(ctx)
-	logger = logger.With("storage_backend", "disk")
 	return logger, logger
 }
 
@@ -529,9 +528,11 @@ func (s *Store) LoadMeta(ctx context.Context, namespace, key string) (storage.Lo
 		meta.Lease = &leaseCopy
 	}
 	cachedMeta := meta
+	cachedSummary := storage.MetaSummaryFromMeta(&meta)
 	ln.mu.Lock()
 	if ref != nil && ln.metaIndex[clean] == ref {
 		ref.cachedMeta = &cachedMeta
+		ref.cachedSummary = cachedSummary
 	}
 	ln.mu.Unlock()
 	leaseOwner := ""
@@ -550,6 +551,119 @@ func (s *Store) LoadMeta(ctx context.Context, namespace, key string) (storage.Lo
 		"elapsed", time.Since(start),
 	)
 	return storage.LoadMetaResult{Meta: &meta, ETag: record.ETag}, nil
+}
+
+// LoadMetaSummary loads only query-relevant metadata fields for hot query paths.
+func (s *Store) LoadMetaSummary(ctx context.Context, namespace, key string) (storage.LoadMetaSummaryResult, error) {
+	logger, verbose := s.loggers(ctx)
+	start := time.Now()
+	verbose.Trace("disk.load_meta_summary.begin", "key", key)
+
+	ns, clean, err := s.normalizeKey(namespace, key)
+	if err != nil {
+		logger.Debug("disk.load_meta_summary.encode_error", "key", key, "error", err)
+		return storage.LoadMetaSummaryResult{}, err
+	}
+	ln, err := s.logstore.namespace(ns)
+	if err != nil {
+		logger.Debug("disk.load_meta_summary.namespace_error", "key", key, "error", err)
+		return storage.LoadMetaSummaryResult{}, err
+	}
+	if err := ln.refresh(); err != nil {
+		logger.Debug("disk.load_meta_summary.refresh_error", "key", key, "error", err)
+		return storage.LoadMetaSummaryResult{}, err
+	}
+	ln.mu.Lock()
+	ref := ln.metaIndex[clean]
+	pending := ln.pendingMeta[clean]
+	var cached *storage.MetaSummary
+	var cachedETag string
+	if pending == nil && ref != nil && ref.cachedSummary != nil {
+		cached = ref.cachedSummary
+		cachedETag = ref.meta.etag
+	}
+	ln.mu.Unlock()
+	if cached != nil {
+		verbose.Debug("disk.load_meta_summary.cache_hit", "key", key, "elapsed", time.Since(start))
+		return storage.LoadMetaSummaryResult{Meta: cached, ETag: cachedETag}, nil
+	}
+	if pending != nil && !pendingGroupMatch(ctx, pending) {
+		if err := waitForPendingCommit(ctx, ln, pending); err != nil {
+			logger.Debug("disk.load_meta_summary.pending_wait_error", "key", key, "error", err)
+			return storage.LoadMetaSummaryResult{}, err
+		}
+		ln.mu.Lock()
+		ref = ln.metaIndex[clean]
+		pending = ln.pendingMeta[clean]
+		cached = nil
+		cachedETag = ""
+		if pending == nil && ref != nil && ref.cachedSummary != nil {
+			cached = ref.cachedSummary
+			cachedETag = ref.meta.etag
+		}
+		ln.mu.Unlock()
+		if cached != nil {
+			verbose.Debug("disk.load_meta_summary.cache_hit", "key", key, "elapsed", time.Since(start))
+			return storage.LoadMetaSummaryResult{Meta: cached, ETag: cachedETag}, nil
+		}
+		if pending != nil && !pendingGroupMatch(ctx, pending) {
+			logger.Debug("disk.load_meta_summary.pending_mismatch", "key", key)
+			return storage.LoadMetaSummaryResult{}, storage.ErrCASMismatch
+		}
+	}
+	if ref == nil {
+		verbose.Debug("disk.load_meta_summary.not_found", "key", key, "elapsed", time.Since(start))
+		return storage.LoadMetaSummaryResult{}, storage.ErrNotFound
+	}
+	payload, err := ln.readPayload(ref)
+	if err != nil {
+		logger.Debug("disk.load_meta_summary.payload_error", "key", key, "error", err)
+		return storage.LoadMetaSummaryResult{}, err
+	}
+	summary, err := storage.UnmarshalMetaRecordSummary(payload, s.crypto)
+	if err != nil {
+		logger.Debug("disk.load_meta_summary.decode_error", "key", key, "error", err)
+		if refreshErr := ln.refreshForce(); refreshErr != nil {
+			logger.Debug("disk.load_meta_summary.refresh_force_error", "key", key, "error", refreshErr)
+			return storage.LoadMetaSummaryResult{}, err
+		}
+		ln.mu.Lock()
+		ref = ln.metaIndex[clean]
+		ln.mu.Unlock()
+		if ref == nil {
+			verbose.Debug("disk.load_meta_summary.not_found", "key", key, "elapsed", time.Since(start))
+			return storage.LoadMetaSummaryResult{}, storage.ErrNotFound
+		}
+		payload, payloadErr := ln.readPayload(ref)
+		if payloadErr != nil {
+			logger.Debug("disk.load_meta_summary.payload_error", "key", key, "error", payloadErr)
+			return storage.LoadMetaSummaryResult{}, payloadErr
+		}
+		summary, err = storage.UnmarshalMetaRecordSummary(payload, s.crypto)
+		if err != nil {
+			logger.Debug("disk.load_meta_summary.decode_error", "key", key, "error", err)
+			return storage.LoadMetaSummaryResult{}, err
+		}
+	}
+	if summary.Meta == nil {
+		summary.Meta = &storage.MetaSummary{}
+	}
+	ln.mu.Lock()
+	if ref != nil && ln.metaIndex[clean] == ref {
+		ref.cachedSummary = summary.Meta
+	}
+	ln.mu.Unlock()
+
+	verbose.Debug("disk.load_meta_summary.success",
+		"key", key,
+		"version", summary.Meta.Version,
+		"published_version", summary.Meta.PublishedVersion,
+		"state_etag", summary.Meta.StateETag,
+		"query_excluded", summary.Meta.QueryExcluded,
+		"meta_etag", summary.ETag,
+		"elapsed", time.Since(start),
+	)
+	return summary, nil
 }
 
 // StoreMeta persists metadata with conditional semantics when expectedETag is provided.
@@ -689,8 +803,10 @@ func (s *Store) StoreMeta(ctx context.Context, namespace, key string, meta *stor
 	}
 	if ref != nil {
 		cached := copyMeta
+		summary := storage.MetaSummaryFromMeta(&copyMeta)
 		ln.mu.Lock()
 		ref.cachedMeta = &cached
+		ref.cachedSummary = summary
 		ln.mu.Unlock()
 	}
 
@@ -820,14 +936,124 @@ func (s *Store) ListMetaKeys(ctx context.Context, namespace string) ([]string, e
 		return nil, err
 	}
 	ln.mu.Lock()
-	keys := make([]string, 0, len(ln.metaIndex))
-	for key := range ln.metaIndex {
-		keys = append(keys, key)
-	}
+	keys := append([]string(nil), ln.sortedMeta...)
 	ln.mu.Unlock()
-	sort.Strings(keys)
 	verbose.Debug("disk.list_meta_keys.success", "namespace", namespace, "count", len(keys), "elapsed", time.Since(start))
 	return keys, nil
+}
+
+// ScanMetaSummaries enumerates key+summary rows in lexical order.
+func (s *Store) ScanMetaSummaries(ctx context.Context, req storage.ScanMetaSummariesRequest, visit func(storage.ScanMetaSummaryRow) error) (storage.ScanMetaSummariesResult, error) {
+	logger, verbose := s.loggers(ctx)
+	start := time.Now()
+	verbose.Trace("disk.scan_meta_summaries.begin", "namespace", req.Namespace, "start_after", req.StartAfter, "limit", req.Limit)
+
+	namespace := strings.TrimSpace(req.Namespace)
+	if namespace == "" {
+		return storage.ScanMetaSummariesResult{}, fmt.Errorf("disk: namespace required")
+	}
+	if visit == nil {
+		return storage.ScanMetaSummariesResult{}, fmt.Errorf("disk: visit required")
+	}
+	ln, err := s.logstore.namespace(namespace)
+	if err != nil {
+		logger.Debug("disk.scan_meta_summaries.namespace_error", "namespace", namespace, "error", err)
+		return storage.ScanMetaSummariesResult{}, err
+	}
+	if err := ln.refresh(); err != nil {
+		logger.Debug("disk.scan_meta_summaries.refresh_error", "namespace", namespace, "error", err)
+		return storage.ScanMetaSummariesResult{}, err
+	}
+	ln.mu.Lock()
+	if len(ln.sortedMeta) == 0 {
+		ln.mu.Unlock()
+		return storage.ScanMetaSummariesResult{}, nil
+	}
+
+	startIdx := 0
+	if req.StartAfter != "" {
+		startIdx = sort.SearchStrings(ln.sortedMeta, req.StartAfter)
+		for startIdx < len(ln.sortedMeta) && ln.sortedMeta[startIdx] <= req.StartAfter {
+			startIdx++
+		}
+	}
+	if startIdx >= len(ln.sortedMeta) {
+		ln.mu.Unlock()
+		return storage.ScanMetaSummariesResult{}, nil
+	}
+
+	limit := req.Limit
+	if limit <= 0 {
+		limit = len(ln.sortedMeta) - startIdx
+	}
+	endIdx := startIdx + limit
+	if endIdx > len(ln.sortedMeta) {
+		endIdx = len(ln.sortedMeta)
+	}
+	truncated := endIdx < len(ln.sortedMeta)
+	keys := append([]string(nil), ln.sortedMeta[startIdx:endIdx]...)
+	refs := make([]*recordRef, len(keys))
+	for i, key := range keys {
+		refs[i] = ln.metaIndex[key]
+	}
+	ln.mu.Unlock()
+
+	visited := 0
+	last := ""
+	for i, key := range keys {
+		if err := ctx.Err(); err != nil {
+			return storage.ScanMetaSummariesResult{}, err
+		}
+		ref := refs[i]
+		if ref == nil {
+			continue
+		}
+		summary := ref.cachedSummary
+		etag := ref.meta.etag
+		if summary == nil {
+			payload, err := ln.readPayload(ref)
+			if err != nil {
+				logger.Debug("disk.scan_meta_summaries.payload_error", "namespace", namespace, "key", key, "error", err)
+				return storage.ScanMetaSummariesResult{}, err
+			}
+			decoded, err := storage.UnmarshalMetaRecordSummary(payload, s.crypto)
+			if err != nil {
+				logger.Debug("disk.scan_meta_summaries.decode_error", "namespace", namespace, "key", key, "error", err)
+				return storage.ScanMetaSummariesResult{}, err
+			}
+			etag = decoded.ETag
+			summary = decoded.Meta
+			if summary == nil {
+				summary = &storage.MetaSummary{}
+			}
+			ln.mu.Lock()
+			if ln.metaIndex[key] == ref {
+				ref.cachedSummary = summary
+			}
+			ln.mu.Unlock()
+		}
+		if err := visit(storage.ScanMetaSummaryRow{
+			Key:  key,
+			Meta: summary,
+			ETag: etag,
+		}); err != nil {
+			return storage.ScanMetaSummariesResult{}, err
+		}
+		visited++
+		last = key
+	}
+	if truncated {
+		next := last
+		if next == "" && len(keys) > 0 {
+			next = keys[len(keys)-1]
+		}
+		return storage.ScanMetaSummariesResult{
+			Truncated:      true,
+			NextStartAfter: next,
+		}, nil
+	}
+	verbose.Debug("disk.scan_meta_summaries.success", "namespace", namespace, "visited", visited, "elapsed", time.Since(start))
+	return storage.ScanMetaSummariesResult{}, nil
 }
 
 // ListNamespaces enumerates namespace roots on disk.
@@ -908,11 +1134,9 @@ func (s *Store) ReadState(ctx context.Context, namespace, key string) (storage.R
 		return storage.ReadStateResult{}, err
 	}
 	encrypted := s.crypto != nil && s.crypto.Enabled()
-	var descriptor []byte
+	descriptor := ref.meta.descriptor
 	if descFromCtx, ok := storage.StateDescriptorFromContext(ctx); ok && len(descFromCtx) > 0 {
-		descriptor = append([]byte(nil), descFromCtx...)
-	} else if len(ref.meta.descriptor) > 0 {
-		descriptor = append([]byte(nil), ref.meta.descriptor...)
+		descriptor = descFromCtx
 	}
 	outReader := reader
 	if encrypted {

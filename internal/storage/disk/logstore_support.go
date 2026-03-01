@@ -48,7 +48,7 @@ type fsyncBatchStats struct {
 	buckets       [len(fsyncBatchBounds) + 1]uint64
 }
 
-var fsyncBatchBounds = [...]int{1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024}
+var fsyncBatchBounds = [...]int{1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096}
 
 const defaultFsyncBatchDelay = 2 * time.Millisecond
 

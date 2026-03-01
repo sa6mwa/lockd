@@ -27,6 +27,7 @@ func (s *Service) updateLeaseIndex(ctx context.Context, namespace, key string, o
 	if s == nil {
 		return nil
 	}
+	ctx = s.maybeNoSync(ctx)
 	oldBucket := sweepBucketFromUnix(oldExpires)
 	newBucket := sweepBucketFromUnix(newExpires)
 	if oldBucket == newBucket && newBucket == "" {

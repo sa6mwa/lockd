@@ -1,6 +1,10 @@
 package httpapi
 
 import (
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -43,14 +47,17 @@ func TestParseQueryReturnMode(t *testing.T) {
 
 func TestNormalizeSelectorFields(t *testing.T) {
 	sel := api.Selector{
-		Eq:     &api.Term{Field: "/foo"},
-		Exists: "/bar",
-		And:    []api.Selector{{In: &api.InTerm{Field: "/baz"}}},
+		Eq:        &api.Term{Field: "/foo"},
+		Contains:  &api.Term{Field: "/msg"},
+		IContains: &api.Term{Field: "/desc"},
+		IPrefix:   &api.Term{Field: "/service"},
+		Exists:    "/bar",
+		And:       []api.Selector{{In: &api.InTerm{Field: "/baz"}}},
 	}
 	if err := normalizeSelectorFields(&sel); err != nil {
 		t.Fatalf("normalizeSelectorFields error: %v", err)
 	}
-	if sel.Eq.Field != "/foo" || sel.Exists != "/bar" || sel.And[0].In.Field != "/baz" {
+	if sel.Eq.Field != "/foo" || sel.Contains.Field != "/msg" || sel.IContains.Field != "/desc" || sel.IPrefix.Field != "/service" || sel.Exists != "/bar" || sel.And[0].In.Field != "/baz" {
 		t.Fatalf("fields not normalized: %+v", sel)
 	}
 }
@@ -140,4 +147,99 @@ func TestDurationToSecondsCap(t *testing.T) {
 	if got := durationToSeconds(999 * time.Millisecond); got != 1 {
 		t.Fatalf("expected ceil to 1 second, got %d", got)
 	}
+}
+
+func TestClientIdentityFromRequest(t *testing.T) {
+	if got := clientIdentityFromRequest(nil); got != "" {
+		t.Fatalf("nil request should not return identity, got %q", got)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	if got := clientIdentityFromRequest(req); got != "" {
+		t.Fatalf("request without TLS cert should not return identity, got %q", got)
+	}
+
+	cert := &x509.Certificate{
+		Subject:      pkix.Name{CommonName: "bench-client", Organization: []string{"lockd"}},
+		SerialNumber: big.NewInt(0x2a),
+		Raw:          []byte("cert-2a"),
+	}
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
+	want := cert.Subject.String() + "#" + cert.SerialNumber.Text(16)
+	if got := clientIdentityFromRequest(req); got != want {
+		t.Fatalf("identity mismatch: got %q want %q", got, want)
+	}
+}
+
+func TestClientIdentityFromRequestCachedAllocations(t *testing.T) {
+	resetClientIdentityCacheForTest()
+	t.Cleanup(resetClientIdentityCacheForTest)
+
+	cert := &x509.Certificate{
+		Subject:      pkix.Name{CommonName: "bench-client", OrganizationalUnit: []string{"perf"}},
+		SerialNumber: big.NewInt(0x99),
+		Raw:          []byte("cert-99"),
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
+	_ = clientIdentityFromRequest(req) // warm cache
+
+	allocs := testing.AllocsPerRun(1000, func() {
+		_ = clientIdentityFromRequest(req)
+	})
+	if allocs > 0 {
+		t.Fatalf("cached client identity should not allocate, got %.2f allocs/run", allocs)
+	}
+}
+
+func TestClientIdentityCacheDedupesEquivalentCertificates(t *testing.T) {
+	resetClientIdentityCacheForTest()
+	t.Cleanup(resetClientIdentityCacheForTest)
+
+	certA := &x509.Certificate{
+		Subject:      pkix.Name{CommonName: "bench-client", Organization: []string{"lockd"}},
+		SerialNumber: big.NewInt(0x2a),
+		Raw:          []byte("cert-2a"),
+	}
+	certB := &x509.Certificate{
+		Subject:      pkix.Name{CommonName: "bench-client", Organization: []string{"lockd"}},
+		SerialNumber: big.NewInt(0x2a),
+		Raw:          []byte("cert-2a"),
+	}
+
+	idA := clientIdentityFromCertificate(certA)
+	idB := clientIdentityFromCertificate(certB)
+	if idA == "" || idB == "" || idA != idB {
+		t.Fatalf("expected equivalent certs to resolve same identity, got %q vs %q", idA, idB)
+	}
+	if got := clientIdentityCacheCountForTest(); got != 1 {
+		t.Fatalf("expected one cached identity entry, got %d", got)
+	}
+}
+
+func TestClientIdentityCacheRespectsBound(t *testing.T) {
+	original := clientIdentityCache
+	clientIdentityCache = newLRUCache[certCacheKey, string](2)
+	t.Cleanup(func() {
+		clientIdentityCache = original
+		resetClientIdentityCacheForTest()
+	})
+
+	for i := 0; i < 3; i++ {
+		_ = clientIdentityFromCertificate(&x509.Certificate{
+			Subject:      pkix.Name{CommonName: "bench-client"},
+			SerialNumber: big.NewInt(int64(100 + i)),
+			Raw:          []byte{byte(100 + i)},
+		})
+	}
+	if got := clientIdentityCacheCountForTest(); got != 2 {
+		t.Fatalf("expected bounded cache size=2, got %d", got)
+	}
+}
+
+func resetClientIdentityCacheForTest() {
+	clientIdentityCache.clear()
+}
+
+func clientIdentityCacheCountForTest() int {
+	return clientIdentityCache.len()
 }

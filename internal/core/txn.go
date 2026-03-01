@@ -719,6 +719,7 @@ func (s *Service) ApplyTxnDecisionRecord(ctx context.Context, rec *TxnRecord) (T
 // applyTxnDecision applies the recorded decision to all participants.
 type txnApplyOptions struct {
 	tolerateQueueLeaseMismatch bool
+	deferFinalize              bool
 }
 
 type txnApplyHint struct {
@@ -755,6 +756,10 @@ func applyHintFromContext(ctx context.Context) *txnApplyHint {
 
 // MarkTxnParticipantsApplied records applied participants and deletes the txn record once all are applied.
 func (s *Service) MarkTxnParticipantsApplied(ctx context.Context, txnID string, applied []TxnParticipant) error {
+	return s.markTxnParticipantsApplied(ctx, txnID, applied, true)
+}
+
+func (s *Service) markTxnParticipantsApplied(ctx context.Context, txnID string, applied []TxnParticipant, finalize bool) error {
 	if s == nil {
 		return nil
 	}
@@ -780,16 +785,21 @@ func (s *Service) MarkTxnParticipantsApplied(ctx context.Context, txnID string, 
 		now := s.clock.Now().Unix()
 		rec.UpdatedAtUnix = now
 		if allApplied && rec.State != TxnStatePending {
-			if err := s.writeDecisionMarker(commitCtx, rec); err != nil {
-				return plan.Wait(err)
-			}
-			if err := s.store.DeleteObject(commitCtx, txnNamespace, rec.TxnID, storage.DeleteObjectOptions{}); err != nil {
-				if errors.Is(err, storage.ErrNotFound) || errors.Is(err, storage.ErrNotImplemented) {
-					return plan.Wait(nil)
+			if finalize {
+				if err := s.writeDecisionMarker(commitCtx, rec); err != nil {
+					return plan.Wait(err)
 				}
-				return plan.Wait(err)
+				if err := s.store.DeleteObject(commitCtx, txnNamespace, rec.TxnID, storage.DeleteObjectOptions{}); err != nil {
+					if errors.Is(err, storage.ErrNotFound) || errors.Is(err, storage.ErrNotImplemented) {
+						return plan.Wait(nil)
+					}
+					return plan.Wait(err)
+				}
+				return plan.Wait(nil)
 			}
-			return plan.Wait(nil)
+			if !changed {
+				return plan.Wait(nil)
+			}
 		}
 		if _, err := s.putTxnRecord(commitCtx, rec, etag); err != nil {
 			if errors.Is(err, storage.ErrCASMismatch) {
@@ -941,13 +951,14 @@ func (s *Service) applyTxnDecisionWithOptions(ctx context.Context, rec *TxnRecor
 	if s.txnMetrics != nil {
 		s.txnMetrics.recordApply(ctx, rec.State, appliedCount, failedCount, retryCount, duration)
 	}
+	finalize := !opts.deferFinalize
 	if firstErr != nil {
-		if err := s.MarkTxnParticipantsApplied(ctx, rec.TxnID, appliedParticipants); err != nil && s.logger != nil {
+		if err := s.markTxnParticipantsApplied(ctx, rec.TxnID, appliedParticipants, finalize); err != nil && s.logger != nil {
 			s.logger.Warn("txn.apply.mark_applied.failed", "txn_id", rec.TxnID, "state", rec.State, "error", err)
 		}
 		return fmt.Errorf("txn apply failed for %d/%d participants: %w", failedCount, len(rec.Participants), firstErr)
 	}
-	if err := s.MarkTxnParticipantsApplied(ctx, rec.TxnID, appliedParticipants); err != nil {
+	if err := s.markTxnParticipantsApplied(ctx, rec.TxnID, appliedParticipants, finalize); err != nil {
 		if s.logger != nil {
 			s.logger.Warn("txn.apply.mark_applied.failed", "txn_id", rec.TxnID, "state", rec.State, "error", err)
 		}
@@ -1018,7 +1029,10 @@ func (s *Service) applyTxnDecisionForMeta(ctx context.Context, namespace, key, t
 	var promotedStagedETag string
 	var promotedAttachments map[string]storage.Attachment
 	var promotedAttachmentsTxn string
-	queueIndexInsert := func(plan *writePlan, namespace, key string) {
+	var preparedIndexInsert func(*storage.Meta) error
+	var preparedIndexTxnID string
+	var preparedIndexStagedETag string
+	queueIndexInsert := func(plan *writePlan, namespace, key string, prepared func(*storage.Meta) error) {
 		if s.indexManager == nil || plan == nil {
 			return
 		}
@@ -1028,13 +1042,17 @@ func (s *Service) applyTxnDecisionForMeta(ctx context.Context, namespace, key, t
 			return
 		}
 		plan.AddFinalizer(func() error {
+			if prepared != nil {
+				return prepared(meta)
+			}
+			docMeta := buildIndexDocumentMeta(meta)
 			stateRes, err := s.store.ReadState(storage.ContextWithCommitGroup(ctx, nil), namespace, key)
 			if err != nil {
 				return nil
 			}
 			defer stateRes.Reader.Close()
 			if doc, derr := buildDocumentFromJSON(key, stateRes.Reader); derr == nil {
-				if docMeta := buildIndexDocumentMeta(meta); docMeta != nil {
+				if docMeta != nil {
 					doc.Meta = docMeta
 				}
 				_ = s.indexManager.Insert(namespace, doc)
@@ -1042,11 +1060,49 @@ func (s *Service) applyTxnDecisionForMeta(ctx context.Context, namespace, key, t
 			return nil
 		})
 	}
-	queueVisibilityUpdate := func(plan *writePlan, namespace, key string, meta *storage.Meta) {
-		if s.indexManager == nil || plan == nil || meta == nil {
+	prepareQueueIndexInsertFromStaged := func(commitCtx context.Context, namespace, key string, meta *storage.Meta) func(*storage.Meta) error {
+		if s.indexManager == nil || meta == nil || strings.TrimSpace(meta.StagedTxnID) == "" {
+			return nil
+		}
+		if cachedDoc, ok := s.stagedIndexDoc(namespace, key, meta.StagedTxnID, meta.StagedStateETag); ok {
+			return func(currentMeta *storage.Meta) error {
+				doc := cachedDoc
+				if docMeta := buildIndexDocumentMeta(currentMeta); docMeta != nil {
+					doc.Meta = docMeta
+				}
+				_ = s.indexManager.Insert(namespace, doc)
+				return nil
+			}
+		}
+		stagedCtx := storage.ContextWithStateObjectContext(commitCtx, storage.StateObjectContext(path.Join(namespace, key)))
+		if len(meta.StagedStateDescriptor) > 0 {
+			stagedCtx = storage.ContextWithStateDescriptor(stagedCtx, meta.StagedStateDescriptor)
+		}
+		if meta.StagedStatePlaintextBytes > 0 {
+			stagedCtx = storage.ContextWithStatePlaintextSize(stagedCtx, meta.StagedStatePlaintextBytes)
+		}
+		stateRes, err := s.staging.LoadStagedState(stagedCtx, namespace, key, meta.StagedTxnID)
+		if err != nil {
+			return nil
+		}
+		defer stateRes.Reader.Close()
+		stagedDoc, derr := buildDocumentFromJSON(key, stateRes.Reader)
+		if derr != nil {
+			return nil
+		}
+		return func(currentMeta *storage.Meta) error {
+			doc := stagedDoc
+			if docMeta := buildIndexDocumentMeta(currentMeta); docMeta != nil {
+				doc.Meta = docMeta
+			}
+			_ = s.indexManager.Insert(namespace, doc)
+			return nil
+		}
+	}
+	queueVisibilityUpdate := func(plan *writePlan, namespace, key string, visible bool) {
+		if s.indexManager == nil || plan == nil {
 			return
 		}
-		visible := meta.PublishedVersion > 0 && !meta.QueryExcluded()
 		plan.AddFinalizer(func() error {
 			if err := s.indexManager.UpdateVisibility(namespace, key, visible); err != nil {
 				if s.logger != nil {
@@ -1113,6 +1169,10 @@ func (s *Service) applyTxnDecisionForMeta(ctx context.Context, namespace, key, t
 				"state_etag", meta.StateETag,
 				"staged_remove", meta.StagedRemove)
 		}
+		previousPublished := meta.PublishedVersion > 0
+		previousVisible := previousPublished && !meta.QueryExcluded()
+		stagedTxnID := meta.StagedTxnID
+		stagedStateETag := meta.StagedStateETag
 		now := s.clock.Now()
 		if !commit {
 			oldExpires := int64(0)
@@ -1150,6 +1210,7 @@ func (s *Service) applyTxnDecisionForMeta(ctx context.Context, namespace, key, t
 			if err := s.updateLeaseIndex(commitCtx, namespace, key, oldExpires, 0); err != nil && s.logger != nil {
 				s.logger.Warn("lease.index.update_failed", "namespace", namespace, "key", key, "error", err)
 			}
+			s.deleteStagedIndexDoc(namespace, key, stagedTxnID, stagedStateETag)
 			return waitCommit(nil)
 		}
 
@@ -1206,131 +1267,138 @@ func (s *Service) applyTxnDecisionForMeta(ctx context.Context, namespace, key, t
 			meta.Version = pickStagedVersion(meta)
 			meta.PublishedVersion = meta.Version
 		} else if meta.StagedStateETag != "" {
-			skipPromote := false
-			if stateRes, rerr := s.store.ReadState(commitCtx, namespace, key); rerr == nil {
-				info := stateRes.Info
-				if info == nil {
-					info = &storage.StateInfo{}
-				}
-				if info.ETag != "" && info.ETag != meta.StateETag {
-					if s.logger != nil {
-						s.logger.Debug("txn.apply.promote.skip.head_mismatch",
-							"namespace", namespace,
-							"key", key,
-							"txn_id", txnID,
-							"expected_etag", meta.StateETag,
-							"head_etag", info.ETag)
-					}
-					meta.StateETag = info.ETag
-					meta.StateDescriptor = info.Descriptor
-					meta.StatePlaintextBytes = info.Size
-					meta.Version = pickStagedVersion(meta)
-					meta.PublishedVersion = meta.Version
-					queueIndexInsert(plan, namespace, key)
-					_ = s.staging.DiscardStagedState(commitCtx, namespace, key, meta.StagedTxnID, storage.DiscardStagedOptions{IgnoreNotFound: true})
-					skipPromote = true
-				} else {
-					_ = stateRes.Reader.Close()
-				}
-			} else if !errors.Is(rerr, storage.ErrNotFound) {
-				return waitCommit(rerr)
+			if preparedIndexInsert == nil ||
+				preparedIndexTxnID != meta.StagedTxnID ||
+				preparedIndexStagedETag != meta.StagedStateETag {
+				preparedIndexInsert = prepareQueueIndexInsertFromStaged(commitCtx, namespace, key, meta)
+				preparedIndexTxnID = meta.StagedTxnID
+				preparedIndexStagedETag = meta.StagedStateETag
 			}
-
-			if !skipPromote {
-				if promoted != nil && promotedTxnID == meta.StagedTxnID && promotedStagedETag == meta.StagedStateETag {
-					meta.StateETag = promoted.NewETag
-					meta.StateDescriptor = promoted.Descriptor
-					meta.StatePlaintextBytes = promoted.BytesWritten
-					meta.Version = pickStagedVersion(meta)
-					meta.PublishedVersion = meta.Version
+			queuedHeadIndex := false
+			if promoted != nil && promotedTxnID == meta.StagedTxnID && promotedStagedETag == meta.StagedStateETag {
+				meta.StateETag = promoted.NewETag
+				meta.StateDescriptor = promoted.Descriptor
+				meta.StatePlaintextBytes = promoted.BytesWritten
+				meta.Version = pickStagedVersion(meta)
+				meta.PublishedVersion = meta.Version
+			} else {
+				useLegacy := false
+				if s.crypto != nil && s.crypto.Enabled() && len(meta.StagedStateDescriptor) > 0 {
+					objectCtx := storage.StateObjectContext(path.Join(namespace, key))
+					if _, derr := s.crypto.MaterialFromDescriptor(objectCtx, meta.StagedStateDescriptor); derr != nil {
+						useLegacy = true
+					}
+				}
+				var (
+					result *storage.PutStateResult
+					err    error
+				)
+				if useLegacy {
+					legacy := storage.NewDefaultStagingBackend(s.store)
+					result, err = legacy.PromoteStagedState(commitCtx, namespace, key, meta.StagedTxnID, storage.PromoteStagedOptions{ExpectedHeadETag: meta.StateETag})
 				} else {
-					useLegacy := false
-					if s.crypto != nil && s.crypto.Enabled() && len(meta.StagedStateDescriptor) > 0 {
-						objectCtx := storage.StateObjectContext(path.Join(namespace, key))
-						if _, derr := s.crypto.MaterialFromDescriptor(objectCtx, meta.StagedStateDescriptor); derr != nil {
-							useLegacy = true
-						}
+					promoteCtx := storage.ContextWithStateObjectContext(commitCtx, storage.StateObjectContext(path.Join(namespace, key)))
+					if len(meta.StagedStateDescriptor) > 0 {
+						promoteCtx = storage.ContextWithStateDescriptor(promoteCtx, meta.StagedStateDescriptor)
 					}
-					var (
-						result *storage.PutStateResult
-						err    error
-					)
-					if useLegacy {
-						legacy := storage.NewDefaultStagingBackend(s.store)
-						result, err = legacy.PromoteStagedState(commitCtx, namespace, key, meta.StagedTxnID, storage.PromoteStagedOptions{ExpectedHeadETag: meta.StateETag})
-					} else {
-						promoteCtx := storage.ContextWithStateObjectContext(commitCtx, storage.StateObjectContext(path.Join(namespace, key)))
-						if len(meta.StagedStateDescriptor) > 0 {
-							promoteCtx = storage.ContextWithStateDescriptor(promoteCtx, meta.StagedStateDescriptor)
-						}
-						if meta.StagedStatePlaintextBytes > 0 {
-							promoteCtx = storage.ContextWithStatePlaintextSize(promoteCtx, meta.StagedStatePlaintextBytes)
-						}
-						result, err = s.staging.PromoteStagedState(promoteCtx, namespace, key, meta.StagedTxnID, storage.PromoteStagedOptions{ExpectedHeadETag: meta.StateETag})
+					if meta.StagedStatePlaintextBytes > 0 {
+						promoteCtx = storage.ContextWithStatePlaintextSize(promoteCtx, meta.StagedStatePlaintextBytes)
 					}
-					if err != nil {
-						if errors.Is(err, storage.ErrCASMismatch) {
-							if s.logger != nil {
-								s.logger.Debug("txn.apply.promote.cas_mismatch",
-									"namespace", namespace,
-									"key", key,
-									"txn_id", txnID,
-									"expected_etag", meta.StateETag)
-							}
-							if waitErr := waitCommit(nil); waitErr != nil {
-								return waitErr
-							}
-							meta = nil
-							continue
-						}
-						if errors.Is(err, storage.ErrNotFound) {
-							if s.logger != nil {
-								s.logger.Warn("txn.apply.promote.missing_staging",
-									"namespace", namespace,
-									"key", key,
-									"txn_id", txnID)
-							}
-							stateRes, readErr := s.store.ReadState(commitCtx, namespace, key)
-							if readErr != nil {
-								return waitCommit(readErr)
-							}
-							reader := stateRes.Reader
-							info := stateRes.Info
-							_ = reader.Close()
-							meta.StateETag = info.ETag
-							meta.StateDescriptor = info.Descriptor
-							meta.StatePlaintextBytes = info.Size
-							meta.Version = pickStagedVersion(meta)
-							meta.PublishedVersion = meta.Version
-						} else {
-							if s.logger != nil {
-								s.logger.Warn("txn.apply.promote.error",
-									"namespace", namespace,
-									"key", key,
-									"txn_id", txnID,
-									"error", err)
-							}
-							return waitCommit(err)
-						}
-					} else {
-						promoted = result
-						promotedTxnID = meta.StagedTxnID
-						promotedStagedETag = meta.StagedStateETag
+					result, err = s.staging.PromoteStagedState(promoteCtx, namespace, key, meta.StagedTxnID, storage.PromoteStagedOptions{ExpectedHeadETag: meta.StateETag})
+				}
+				if err != nil {
+					if errors.Is(err, storage.ErrCASMismatch) {
 						if s.logger != nil {
-							s.logger.Debug("txn.apply.promote.success",
+							s.logger.Debug("txn.apply.promote.skip.head_mismatch",
 								"namespace", namespace,
 								"key", key,
 								"txn_id", txnID,
-								"new_etag", result.NewETag)
+								"expected_etag", meta.StateETag)
 						}
-						meta.StateETag = result.NewETag
-						meta.StateDescriptor = result.Descriptor
-						meta.StatePlaintextBytes = result.BytesWritten
+						var headIndexInsert func(*storage.Meta) error
+						stateRes, readErr := s.store.ReadState(commitCtx, namespace, key)
+						if readErr != nil {
+							if errors.Is(readErr, storage.ErrNotFound) {
+								meta.StateETag = ""
+								meta.StateDescriptor = nil
+								meta.StatePlaintextBytes = 0
+							} else {
+								return waitCommit(readErr)
+							}
+						} else {
+							info := stateRes.Info
+							if info == nil {
+								info = &storage.StateInfo{}
+							}
+							if headDoc, derr := buildDocumentFromJSON(key, stateRes.Reader); derr == nil {
+								headIndexInsert = func(currentMeta *storage.Meta) error {
+									doc := headDoc
+									if docMeta := buildIndexDocumentMeta(currentMeta); docMeta != nil {
+										doc.Meta = docMeta
+									}
+									_ = s.indexManager.Insert(namespace, doc)
+									return nil
+								}
+							}
+							_ = stateRes.Reader.Close()
+							meta.StateETag = info.ETag
+							meta.StateDescriptor = info.Descriptor
+							meta.StatePlaintextBytes = info.Size
+						}
 						meta.Version = pickStagedVersion(meta)
 						meta.PublishedVersion = meta.Version
+						queueIndexInsert(plan, namespace, key, headIndexInsert)
+						queuedHeadIndex = true
+						_ = s.staging.DiscardStagedState(commitCtx, namespace, key, meta.StagedTxnID, storage.DiscardStagedOptions{IgnoreNotFound: true})
+					} else if errors.Is(err, storage.ErrNotFound) {
+						if s.logger != nil {
+							s.logger.Warn("txn.apply.promote.missing_staging",
+								"namespace", namespace,
+								"key", key,
+								"txn_id", txnID)
+						}
+						stateRes, readErr := s.store.ReadState(commitCtx, namespace, key)
+						if readErr != nil {
+							return waitCommit(readErr)
+						}
+						reader := stateRes.Reader
+						info := stateRes.Info
+						_ = reader.Close()
+						meta.StateETag = info.ETag
+						meta.StateDescriptor = info.Descriptor
+						meta.StatePlaintextBytes = info.Size
+						meta.Version = pickStagedVersion(meta)
+						meta.PublishedVersion = meta.Version
+					} else {
+						if s.logger != nil {
+							s.logger.Warn("txn.apply.promote.error",
+								"namespace", namespace,
+								"key", key,
+								"txn_id", txnID,
+								"error", err)
+						}
+						return waitCommit(err)
 					}
+				} else {
+					promoted = result
+					promotedTxnID = meta.StagedTxnID
+					promotedStagedETag = meta.StagedStateETag
+					if s.logger != nil {
+						s.logger.Debug("txn.apply.promote.success",
+							"namespace", namespace,
+							"key", key,
+							"txn_id", txnID,
+							"new_etag", result.NewETag)
+					}
+					meta.StateETag = result.NewETag
+					meta.StateDescriptor = result.Descriptor
+					meta.StatePlaintextBytes = result.BytesWritten
+					meta.Version = pickStagedVersion(meta)
+					meta.PublishedVersion = meta.Version
 				}
-				queueIndexInsert(plan, namespace, key)
+			}
+			if !queuedHeadIndex {
+				queueIndexInsert(plan, namespace, key, preparedIndexInsert)
 			}
 		}
 
@@ -1441,10 +1509,17 @@ func (s *Service) applyTxnDecisionForMeta(ctx context.Context, namespace, key, t
 			}
 			return waitCommit(err)
 		}
-		queueVisibilityUpdate(plan, namespace, key, meta)
+		nextPublished := meta.PublishedVersion > 0
+		nextVisible := nextPublished && !meta.QueryExcluded()
+		// First publication of a hidden key must write a visibility override entry;
+		// otherwise index query defaults treat it as visible.
+		if previousVisible != nextVisible || (!previousPublished && nextPublished) {
+			queueVisibilityUpdate(plan, namespace, key, nextVisible)
+		}
 		if err := s.updateLeaseIndex(commitCtx, namespace, key, oldExpires, 0); err != nil && s.logger != nil {
 			s.logger.Warn("lease.index.update_failed", "namespace", namespace, "key", key, "error", err)
 		}
+		s.deleteStagedIndexDoc(namespace, key, stagedTxnID, stagedStateETag)
 		return waitCommit(nil)
 	}
 }

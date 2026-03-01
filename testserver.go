@@ -199,7 +199,7 @@ func (ts *TestServer) Abort(ctx context.Context) error {
 func NewTestingLogger(t testing.TB, level pslog.Level) pslog.Logger {
 	writer := &testingWriter{t: t, maxEntries: testingLogBufferEntries}
 	t.Cleanup(writer.close)
-	logger := pslog.NewStructured(writer)
+	logger := pslog.NewStructured(context.Background(), writer)
 	if level != pslog.NoLevel {
 		logger = logger.LogLevel(level)
 		logger = logger.With("loglevel", pslog.LevelString(level))

@@ -4,7 +4,7 @@ import "time"
 
 const (
 	// DefaultFlushDocs controls how many documents trigger a segment flush.
-	DefaultFlushDocs = 1000
+	DefaultFlushDocs = 2000
 	// DefaultFlushInterval bounds how long we buffer before forcing a flush.
 	DefaultFlushInterval = 30 * time.Second
 	// manifestSaveMaxRetries bounds CAS retry attempts when appending segments.
@@ -17,4 +17,8 @@ const (
 	IndexFormatVersionV2 = 2
 	// IndexFormatVersionV3 includes query-excluded hints in document metadata.
 	IndexFormatVersionV3 = 3
+	// IndexFormatVersionV4 adds trigram text postings for contains selectors.
+	IndexFormatVersionV4 = 4
+	// IndexFormatVersionV5 stores field/term dictionaries and docID postings.
+	IndexFormatVersionV5 = 5
 )

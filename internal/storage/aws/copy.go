@@ -57,6 +57,9 @@ func (s *Store) CopyObject(ctx context.Context, namespace, srcKey, dstKey string
 
 	out, err := s.client.CopyObject(ctx, input)
 	if err != nil {
+		if classified := classifyCopyObjectError(err); classified != nil {
+			return nil, classified
+		}
 		logger.Debug("aws.copy_object.copy_error", "namespace", namespace, "src_key", srcKey, "dst_key", dstKey, "error", err)
 		return nil, s.wrapError(err, "aws: copy object")
 	}

@@ -24,6 +24,7 @@ type Manager struct {
 type WriterOptions struct {
 	FlushDocs     int
 	FlushInterval time.Duration
+	NoSync        bool
 	Clock         clock.Clock
 	Logger        pslog.Logger
 }
@@ -62,6 +63,7 @@ func (m *Manager) WriterFor(namespace string) *Writer {
 		Store:         m.store,
 		FlushDocs:     m.options.FlushDocs,
 		FlushInterval: m.options.FlushInterval,
+		NoSync:        m.options.NoSync,
 		Clock:         m.options.Clock,
 		Logger:        m.options.Logger,
 	})
@@ -93,6 +95,7 @@ func (m *Manager) visibilityWriter(namespace string) *VisibilityWriter {
 		Store:         m.store,
 		FlushEntries:  m.options.FlushDocs,
 		FlushInterval: m.options.FlushInterval,
+		NoSync:        m.options.NoSync,
 		Clock:         m.options.Clock,
 		Logger:        m.options.Logger,
 	})
@@ -122,14 +125,19 @@ func (m *Manager) UpdateVisibility(namespace, key string, visible bool) error {
 // to flush so queries observe the latest index state.
 func (m *Manager) WaitForReadable(ctx context.Context, namespace string) error {
 	writer := m.writer(namespace)
-	if writer == nil {
-		return nil
-	}
-	if err := writer.WaitForReadable(ctx); err != nil {
-		return err
+	if writer != nil {
+		if writer.HasPending() {
+			if err := writer.Flush(ctx); err != nil {
+				return err
+			}
+		}
 	}
 	if vis := m.visibilityWriter(namespace); vis != nil {
-		return vis.WaitForReadable(ctx)
+		if vis.HasPending() {
+			if err := vis.Flush(ctx); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -152,7 +160,7 @@ func (m *Manager) ManifestSeq(ctx context.Context, namespace string) (uint64, er
 	if m == nil || m.store == nil {
 		return 0, fmt.Errorf("index store unavailable")
 	}
-	manifestRes, err := m.store.LoadManifest(ctx, namespace)
+	manifestRes, err := m.store.LoadManifestReadOnly(ctx, namespace)
 	if err != nil {
 		return 0, err
 	}

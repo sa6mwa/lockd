@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -352,6 +354,92 @@ func TestAuthNewServerMissingCA(t *testing.T) {
 	}
 }
 
+func TestAuthNewServerHostsVariadic(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	runAuthCommand(t, "new", "ca", "--cn", "lockd-ca-test")
+
+	serverOutPath := filepath.Join(t.TempDir(), "server-custom-san.pem")
+	runAuthCommand(t, "new", "server", "--out", serverOutPath, "--cn", "lockd-mcp-server", "--hosts", "mcp.local", "--hosts", "127.0.0.1")
+
+	bundle, err := tlsutil.LoadBundle(serverOutPath, "")
+	if err != nil {
+		t.Fatalf("load server bundle: %v", err)
+	}
+	if bundle.ServerCert == nil {
+		t.Fatalf("expected server certificate in bundle")
+	}
+	if !slices.Contains(bundle.ServerCert.DNSNames, "mcp.local") {
+		t.Fatalf("expected dns SAN mcp.local, got %v", bundle.ServerCert.DNSNames)
+	}
+	if slices.Contains(bundle.ServerCert.DNSNames, "*") {
+		t.Fatalf("did not expect wildcard SAN when explicit --hosts values are provided")
+	}
+	if !containsIP(bundle.ServerCert.IPAddresses, net.ParseIP("127.0.0.1")) {
+		t.Fatalf("expected ip SAN 127.0.0.1, got %v", bundle.ServerCert.IPAddresses)
+	}
+
+	explicitWildcardPath := filepath.Join(t.TempDir(), "server-explicit-wildcard.pem")
+	runAuthCommand(t, "new", "server", "--out", explicitWildcardPath, "--hosts", "*")
+	explicitWildcardBundle, err := tlsutil.LoadBundle(explicitWildcardPath, "")
+	if err != nil {
+		t.Fatalf("load explicit wildcard bundle: %v", err)
+	}
+	if explicitWildcardBundle.ServerCert == nil || !slices.Contains(explicitWildcardBundle.ServerCert.DNSNames, "*") {
+		t.Fatalf("expected explicit wildcard SAN in server cert, got %v", explicitWildcardBundle.ServerCert.DNSNames)
+	}
+}
+
+func TestAuthNewServerDefaultWildcardWhenNoHostsProvided(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	runAuthCommand(t, "new", "ca", "--cn", "lockd-ca-test")
+
+	serverOutPath := filepath.Join(t.TempDir(), "server-default-wildcard.pem")
+	runAuthCommand(t, "new", "server", "--out", serverOutPath, "--cn", "lockd-default")
+
+	bundle, err := tlsutil.LoadBundle(serverOutPath, "")
+	if err != nil {
+		t.Fatalf("load server bundle: %v", err)
+	}
+	if bundle.ServerCert == nil || !slices.Contains(bundle.ServerCert.DNSNames, "*") {
+		t.Fatalf("expected wildcard SAN when no SAN inputs are provided, got %v", bundle.ServerCert.DNSNames)
+	}
+}
+
+func TestAuthNewServerHostsCSVCompatibility(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	runAuthCommand(t, "new", "ca", "--cn", "lockd-ca-test")
+
+	serverOutPath := filepath.Join(t.TempDir(), "server-hosts-csv.pem")
+	runAuthCommand(t, "new", "server", "--out", serverOutPath, "--hosts", "csv.example.com,127.0.0.2")
+
+	bundle, err := tlsutil.LoadBundle(serverOutPath, "")
+	if err != nil {
+		t.Fatalf("load server bundle: %v", err)
+	}
+	if bundle.ServerCert == nil {
+		t.Fatalf("expected server certificate in bundle")
+	}
+	if !slices.Contains(bundle.ServerCert.DNSNames, "csv.example.com") {
+		t.Fatalf("expected DNS SAN csv.example.com, got %v", bundle.ServerCert.DNSNames)
+	}
+	if !containsIP(bundle.ServerCert.IPAddresses, net.ParseIP("127.0.0.2")) {
+		t.Fatalf("expected IP SAN 127.0.0.2, got %v", bundle.ServerCert.IPAddresses)
+	}
+}
+
+func TestCollectServerSANHosts(t *testing.T) {
+	got := collectServerSANHosts([]string{"a.example,b.example", "127.0.0.1", "a.example", "c.example,d.example"})
+	want := []string{"a.example", "b.example", "127.0.0.1", "c.example", "d.example"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("collectServerSANHosts mismatch: got %v want %v", got, want)
+	}
+
+	got = collectServerSANHosts(nil)
+	if got != nil {
+		t.Fatalf("expected nil hosts when no SAN values are provided, got %v", got)
+	}
+}
+
 func TestAuthNewClientNamespaceAliases(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	runAuthCommand(t, "new", "ca", "--cn", "lockd-ca-test")
@@ -495,4 +583,16 @@ func countClaimURIsWithPrefix(uris []*url.URL, prefix string) int {
 		}
 	}
 	return count
+}
+
+func containsIP(ips []net.IP, target net.IP) bool {
+	if target == nil {
+		return false
+	}
+	for _, ip := range ips {
+		if ip.Equal(target) {
+			return true
+		}
+	}
+	return false
 }

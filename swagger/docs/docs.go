@@ -74,7 +74,7 @@ const docTemplate = `{
                         "mTLS": []
                     }
                 ],
-                "description": "Acquire or wait for an exclusive lease on a key. When block_seconds \u003e 0 the request will long-poll until a lease becomes available or the timeout elapses. Returns a compact xid-based ` + "`" + `lease_id` + "`" + ` and ` + "`" + `txn_id` + "`" + ` (20-char lowercase base32, e.g. ` + "`" + `c5v9d0sl70b3m3q8ndg0` + "`" + `) that must be echoed on write operations. Namespaces starting with ` + "`" + `.` + "`" + ` are reserved (e.g. ` + "`" + `.txns` + "`" + `) and will be rejected.",
+                "description": "Acquire or wait for an exclusive lease on a key. When block_seconds \u003e 0 the request will long-poll until a lease becomes available or the timeout elapses. Set if_not_exists=true to enforce create-only semantics and fail with already_exists when the key already exists. Returns a compact xid-based ` + "`" + `lease_id` + "`" + ` and ` + "`" + `txn_id` + "`" + ` (20-char lowercase base32, e.g. ` + "`" + `c5v9d0sl70b3m3q8ndg0` + "`" + `) that must be echoed on write operations. Namespaces starting with ` + "`" + `.` + "`" + ` are reserved (e.g. ` + "`" + `.txns` + "`" + `) and will be rejected.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1630,7 +1630,7 @@ const docTemplate = `{
                         "mTLS": []
                     }
                 ],
-                "description": "Requeues the delivery with optional delay and last error metadata. If a txn_id is present (or the lease is already enlisted) and TC is enabled, this records a rollback decision via the TC.",
+                "description": "Requeues the delivery with optional delay and last error metadata (intent=failure only). Set intent=defer to requeue intentionally without consuming max_attempts failure budget. If a txn_id is present (or the lease is already enlisted) and TC is enabled, this records a rollback decision via the TC.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1679,6 +1679,69 @@ const docTemplate = `{
                     },
                     "409": {
                         "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/queue/stats": {
+            "post": {
+                "security": [
+                    {
+                        "mTLS": []
+                    }
+                ],
+                "description": "Returns side-effect-free queue stats for one namespace/queue, including dispatcher waiter metrics and current head availability snapshot.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "queue"
+                ],
+                "summary": "Read queue runtime stats",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Namespace override when the request body omits it",
+                        "name": "namespace",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Queue name override when the request body omits it",
+                        "name": "queue",
+                        "in": "query"
+                    },
+                    {
+                        "description": "Queue stats parameters",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.QueueStatsRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.QueueStatsResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
                         "schema": {
                             "$ref": "#/definitions/api.ErrorResponse"
                         }
@@ -1835,6 +1898,69 @@ const docTemplate = `{
                     },
                     "409": {
                         "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/queue/watch": {
+            "post": {
+                "security": [
+                    {
+                        "mTLS": []
+                    }
+                ],
+                "description": "Opens a text/event-stream channel that emits queue visibility updates without consuming messages.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "text/event-stream"
+                ],
+                "tags": [
+                    "queue"
+                ],
+                "summary": "Watch queue availability (SSE)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Namespace override when the request body omits it",
+                        "name": "namespace",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Queue name override when the request body omits it",
+                        "name": "queue",
+                        "in": "query"
+                    },
+                    {
+                        "description": "Queue watch parameters",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.QueueWatchRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "SSE stream: queue_watch events",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
                         "schema": {
                             "$ref": "#/definitions/api.ErrorResponse"
                         }
@@ -2892,33 +3018,43 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "fencing_token": {
+                    "description": "FencingToken is the monotonic token used to fence stale writers.",
                     "type": "integer"
                 },
                 "lease_id": {
+                    "description": "LeaseID identifies the active lease required for protected mutations.",
                     "type": "string"
                 },
                 "message_id": {
+                    "description": "MessageID uniquely identifies a queue message.",
                     "type": "string"
                 },
                 "meta_etag": {
+                    "description": "MetaETag is the queue metadata entity tag used for CAS semantics.",
                     "type": "string"
                 },
                 "namespace": {
+                    "description": "Namespace scopes the request or response to a lockd namespace.",
                     "type": "string"
                 },
                 "queue": {
+                    "description": "Queue is the queue name targeted by the operation.",
                     "type": "string"
                 },
                 "state_etag": {
+                    "description": "StateETag is the state entity tag used for CAS semantics.",
                     "type": "string"
                 },
                 "state_fencing_token": {
+                    "description": "StateFencingToken is the fencing token for the associated workflow state lease.",
                     "type": "integer"
                 },
                 "state_lease_id": {
+                    "description": "StateLeaseID identifies the associated workflow state lease.",
                     "type": "string"
                 },
                 "txn_id": {
+                    "description": "TxnID associates the operation with a transaction coordinator record.",
                     "type": "string"
                 }
             }
@@ -2927,9 +3063,11 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "acked": {
+                    "description": "Acked maps to the \"acked\" JSON field.",
                     "type": "boolean"
                 },
                 "correlation_id": {
+                    "description": "CorrelationID links related operations across request/response logs.",
                     "type": "string"
                 }
             }
@@ -2938,21 +3076,31 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "block_seconds": {
+                    "description": "BlockSecs controls acquire wait behavior in seconds (-1 no-wait, 0 indefinite, \u003e0 bounded wait).",
                     "type": "integer"
                 },
+                "if_not_exists": {
+                    "description": "IfNotExists enforces create-only semantics: fail when the key already exists.",
+                    "type": "boolean"
+                },
                 "key": {
+                    "description": "Key identifies the lock/state key within the namespace.",
                     "type": "string"
                 },
                 "namespace": {
+                    "description": "Namespace scopes the request or response to a lockd namespace.",
                     "type": "string"
                 },
                 "owner": {
+                    "description": "Owner identifies the caller or worker owning the lease or queue delivery.",
                     "type": "string"
                 },
                 "ttl_seconds": {
+                    "description": "TTLSeconds is a duration in seconds.",
                     "type": "integer"
                 },
                 "txn_id": {
+                    "description": "TxnID associates the operation with a transaction coordinator record.",
                     "type": "string"
                 }
             }
@@ -2961,36 +3109,47 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "correlation_id": {
+                    "description": "CorrelationID links related operations across request/response logs.",
                     "type": "string"
                 },
                 "expires_at_unix": {
+                    "description": "ExpiresAt is the lease expiry time as a Unix timestamp in seconds.",
                     "type": "integer"
                 },
                 "fencing_token": {
+                    "description": "FencingToken is the monotonic token used to fence stale writers.",
                     "type": "integer"
                 },
                 "key": {
+                    "description": "Key identifies the lock/state key within the namespace.",
                     "type": "string"
                 },
                 "lease_id": {
+                    "description": "LeaseID identifies the active lease required for protected mutations.",
                     "type": "string"
                 },
                 "namespace": {
+                    "description": "Namespace scopes the request or response to a lockd namespace.",
                     "type": "string"
                 },
                 "owner": {
+                    "description": "Owner identifies the caller or worker owning the lease or queue delivery.",
                     "type": "string"
                 },
                 "retry_after_seconds": {
+                    "description": "RetryAfter is the server hint (seconds) before retrying a contended acquire.",
                     "type": "integer"
                 },
                 "state_etag": {
+                    "description": "StateETag is the state entity tag used for CAS semantics.",
                     "type": "string"
                 },
                 "txn_id": {
+                    "description": "TxnID associates the operation with a transaction coordinator record.",
                     "type": "string"
                 },
                 "version": {
+                    "description": "Version is the lockd monotonic version for the target object.",
                     "type": "integer"
                 }
             }
@@ -2999,21 +3158,31 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "content_type": {
+                    "description": "ContentType is the media type associated with the payload.",
                     "type": "string"
                 },
                 "created_at_unix": {
+                    "description": "CreatedAtUnix is the creation timestamp as Unix seconds.",
                     "type": "integer"
                 },
                 "id": {
+                    "description": "ID is the unique identifier for the referenced object.",
                     "type": "string"
                 },
                 "name": {
+                    "description": "Name is the human-readable identifier for the referenced object.",
+                    "type": "string"
+                },
+                "plaintext_sha256": {
+                    "description": "PlaintextSHA256 is the SHA-256 checksum of the uploaded plaintext payload.",
                     "type": "string"
                 },
                 "size": {
+                    "description": "Size is the payload size in bytes.",
                     "type": "integer"
                 },
                 "updated_at_unix": {
+                    "description": "UpdatedAtUnix is the last update timestamp as Unix seconds.",
                     "type": "integer"
                 }
             }
@@ -3022,15 +3191,18 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "attachments": {
+                    "description": "Attachments enumerates attachments associated with the target key.",
                     "type": "array",
                     "items": {
                         "$ref": "#/definitions/api.AttachmentInfo"
                     }
                 },
                 "key": {
+                    "description": "Key identifies the lock/state key within the namespace.",
                     "type": "string"
                 },
                 "namespace": {
+                    "description": "Namespace scopes the request or response to a lockd namespace.",
                     "type": "string"
                 }
             }
@@ -3039,27 +3211,35 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "namespace": {
+                    "description": "Namespace scopes the request or response to a lockd namespace.",
                     "type": "string"
                 },
                 "owner": {
+                    "description": "Owner identifies the caller or worker owning the lease or queue delivery.",
                     "type": "string"
                 },
                 "page_size": {
+                    "description": "PageSize limits the number of items returned in one response.",
                     "type": "integer"
                 },
                 "queue": {
+                    "description": "Queue is the queue name targeted by the operation.",
                     "type": "string"
                 },
                 "start_after": {
+                    "description": "StartAfter is the server-issued cursor for continuing from a prior position.",
                     "type": "string"
                 },
                 "txn_id": {
+                    "description": "TxnID associates the operation with a transaction coordinator record.",
                     "type": "string"
                 },
                 "visibility_timeout_seconds": {
+                    "description": "VisibilityTimeoutSeconds controls how long a leased message remains invisible, in seconds.",
                     "type": "integer"
                 },
                 "wait_seconds": {
+                    "description": "WaitSeconds controls long-poll wait time in seconds for dequeue/subscribe calls.",
                     "type": "integer"
                 }
             }
@@ -3068,9 +3248,15 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "message": {
-                    "$ref": "#/definitions/api.Message"
+                    "description": "Message carries the dequeued queue message envelope when available.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/api.Message"
+                        }
+                    ]
                 },
                 "next_cursor": {
+                    "description": "NextCursor is the server-issued cursor for subsequent pagination.",
                     "type": "string"
                 }
             }
@@ -3079,30 +3265,43 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "expires_at_unix": {
+                    "description": "ExpiresAt is the lease expiry time as a Unix timestamp in seconds when a lease is present.",
                     "type": "integer"
                 },
                 "key": {
+                    "description": "Key identifies the lock/state key within the namespace.",
                     "type": "string"
                 },
                 "lease_id": {
+                    "description": "LeaseID identifies the active lease required for protected mutations.",
                     "type": "string"
                 },
                 "metadata": {
-                    "$ref": "#/definitions/api.MetadataAttributes"
+                    "description": "Metadata carries metadata values returned by the server for this object.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/api.MetadataAttributes"
+                        }
+                    ]
                 },
                 "namespace": {
+                    "description": "Namespace scopes the request or response to a lockd namespace.",
                     "type": "string"
                 },
                 "owner": {
+                    "description": "Owner identifies the caller or worker owning the lease or queue delivery.",
                     "type": "string"
                 },
                 "state_etag": {
+                    "description": "StateETag is the state entity tag used for CAS semantics.",
                     "type": "string"
                 },
                 "updated_at_unix": {
+                    "description": "UpdatedAt is the last committed state update time as a Unix timestamp in seconds.",
                     "type": "integer"
                 },
                 "version": {
+                    "description": "Version is the lockd monotonic version for the target object.",
                     "type": "integer"
                 }
             }
@@ -3111,30 +3310,43 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "attempts": {
+                    "description": "Attempts is the number of delivery attempts observed so far.",
                     "type": "integer"
                 },
                 "correlation_id": {
+                    "description": "CorrelationID links related operations across request/response logs.",
                     "type": "string"
                 },
+                "failure_attempts": {
+                    "description": "FailureAttempts is the number of failed attempts observed so far.",
+                    "type": "integer"
+                },
                 "max_attempts": {
+                    "description": "MaxAttempts caps how many failed attempts are allowed before terminal handling.",
                     "type": "integer"
                 },
                 "message_id": {
+                    "description": "MessageID uniquely identifies a queue message.",
                     "type": "string"
                 },
                 "namespace": {
+                    "description": "Namespace scopes the request or response to a lockd namespace.",
                     "type": "string"
                 },
                 "not_visible_until_unix": {
+                    "description": "NotVisibleUntilUnix is when the message becomes visible for delivery again, as Unix seconds.",
                     "type": "integer"
                 },
                 "payload_bytes": {
+                    "description": "PayloadBytes is the payload size in bytes.",
                     "type": "integer"
                 },
                 "queue": {
+                    "description": "Queue is the queue name targeted by the operation.",
                     "type": "string"
                 },
                 "visibility_timeout_seconds": {
+                    "description": "VisibilityTimeoutSeconds controls how long a leased message remains invisible, in seconds.",
                     "type": "integer"
                 }
             }
@@ -3143,21 +3355,27 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "current_etag": {
+                    "description": "CurrentETag returns the server's current ETag for conflict diagnostics.",
                     "type": "string"
                 },
                 "current_version": {
+                    "description": "CurrentVersion returns the server's current version for conflict diagnostics.",
                     "type": "integer"
                 },
                 "detail": {
+                    "description": "Detail provides human-readable diagnostic context for the error.",
                     "type": "string"
                 },
                 "error": {
+                    "description": "ErrorCode is the stable lockd error identifier.",
                     "type": "string"
                 },
                 "leader_endpoint": {
+                    "description": "LeaderEndpoint identifies the active leader endpoint to retry against when applicable.",
                     "type": "string"
                 },
                 "retry_after_seconds": {
+                    "description": "RetryAfterSeconds is the server-provided retry hint in seconds.",
                     "type": "integer"
                 }
             }
@@ -3166,33 +3384,43 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "extend_by_seconds": {
+                    "description": "ExtendBySeconds is the requested visibility extension duration in seconds.",
                     "type": "integer"
                 },
                 "fencing_token": {
+                    "description": "FencingToken is the monotonic token used to fence stale writers.",
                     "type": "integer"
                 },
                 "lease_id": {
+                    "description": "LeaseID identifies the active lease required for protected mutations.",
                     "type": "string"
                 },
                 "message_id": {
+                    "description": "MessageID uniquely identifies a queue message.",
                     "type": "string"
                 },
                 "meta_etag": {
+                    "description": "MetaETag is the queue metadata entity tag used for CAS semantics.",
                     "type": "string"
                 },
                 "namespace": {
+                    "description": "Namespace scopes the request or response to a lockd namespace.",
                     "type": "string"
                 },
                 "queue": {
+                    "description": "Queue is the queue name targeted by the operation.",
                     "type": "string"
                 },
                 "state_fencing_token": {
+                    "description": "StateFencingToken is the fencing token for the associated workflow state lease.",
                     "type": "integer"
                 },
                 "state_lease_id": {
+                    "description": "StateLeaseID identifies the associated workflow state lease.",
                     "type": "string"
                 },
                 "txn_id": {
+                    "description": "TxnID associates the operation with a transaction coordinator record.",
                     "type": "string"
                 }
             }
@@ -3201,18 +3429,23 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "correlation_id": {
+                    "description": "CorrelationID links related operations across request/response logs.",
                     "type": "string"
                 },
                 "lease_expires_at_unix": {
+                    "description": "LeaseExpiresAtUnix is the refreshed message lease expiry as a Unix timestamp in seconds.",
                     "type": "integer"
                 },
                 "meta_etag": {
+                    "description": "MetaETag is the queue metadata entity tag used for CAS semantics.",
                     "type": "string"
                 },
                 "state_lease_expires_at_unix": {
+                    "description": "StateLeaseExpiresAtUnix is the refreshed state lease expiry as a Unix timestamp in seconds when state is attached.",
                     "type": "integer"
                 },
                 "visibility_timeout_seconds": {
+                    "description": "VisibilityTimeoutSeconds controls how long a leased message remains invisible, in seconds.",
                     "type": "integer"
                 }
             }
@@ -3221,9 +3454,11 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "mode": {
+                    "description": "Mode controls operation behavior (for example async vs wait).",
                     "type": "string"
                 },
                 "namespace": {
+                    "description": "Namespace scopes the request or response to a lockd namespace.",
                     "type": "string"
                 }
             }
@@ -3232,24 +3467,31 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "accepted": {
+                    "description": "Accepted reports that the server accepted the request for asynchronous processing.",
                     "type": "boolean"
                 },
                 "flush_id": {
+                    "description": "FlushID identifies the asynchronous flush operation when returned.",
                     "type": "string"
                 },
                 "flushed": {
+                    "description": "Flushed reports that the requested index flush completed synchronously.",
                     "type": "boolean"
                 },
                 "index_seq": {
+                    "description": "IndexSeq reports the index sequence observed by the operation.",
                     "type": "integer"
                 },
                 "mode": {
+                    "description": "Mode controls operation behavior (for example async vs wait).",
                     "type": "string"
                 },
                 "namespace": {
+                    "description": "Namespace scopes the request or response to a lockd namespace.",
                     "type": "string"
                 },
                 "pending": {
+                    "description": "Pending reports that flush work remains and will complete asynchronously.",
                     "type": "boolean"
                 }
             }
@@ -3258,18 +3500,23 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "key": {
+                    "description": "Key identifies the lock/state key within the namespace.",
                     "type": "string"
                 },
                 "lease_id": {
+                    "description": "LeaseID identifies the active lease required for protected mutations.",
                     "type": "string"
                 },
                 "namespace": {
+                    "description": "Namespace scopes the request or response to a lockd namespace.",
                     "type": "string"
                 },
                 "ttl_seconds": {
+                    "description": "TTLSeconds is a duration in seconds.",
                     "type": "integer"
                 },
                 "txn_id": {
+                    "description": "TxnID associates the operation with a transaction coordinator record.",
                     "type": "string"
                 }
             }
@@ -3278,6 +3525,7 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "expires_at_unix": {
+                    "description": "ExpiresAt is the refreshed lease expiry time as a Unix timestamp in seconds.",
                     "type": "integer"
                 }
             }
@@ -3286,67 +3534,92 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "attempts": {
+                    "description": "Attempts is the number of delivery attempts observed so far.",
                     "type": "integer"
                 },
                 "attributes": {
+                    "description": "Attributes carries arbitrary JSON metadata associated with the message or request.",
                     "type": "object",
                     "additionalProperties": {}
                 },
                 "correlation_id": {
+                    "description": "CorrelationID links related operations across request/response logs.",
                     "type": "string"
                 },
+                "failure_attempts": {
+                    "description": "FailureAttempts is the number of failed attempts observed so far.",
+                    "type": "integer"
+                },
                 "fencing_token": {
+                    "description": "FencingToken is the monotonic token used to fence stale writers.",
                     "type": "integer"
                 },
                 "lease_expires_at_unix": {
+                    "description": "LeaseExpiresAtUnix is when the message lease expires, as a Unix timestamp in seconds.",
                     "type": "integer"
                 },
                 "lease_id": {
+                    "description": "LeaseID identifies the active lease required for protected mutations.",
                     "type": "string"
                 },
                 "max_attempts": {
+                    "description": "MaxAttempts caps how many failed attempts are allowed before terminal handling.",
                     "type": "integer"
                 },
                 "message_id": {
+                    "description": "MessageID uniquely identifies a queue message.",
                     "type": "string"
                 },
                 "meta_etag": {
+                    "description": "MetaETag is the queue metadata entity tag used for CAS semantics.",
                     "type": "string"
                 },
                 "namespace": {
+                    "description": "Namespace scopes the request or response to a lockd namespace.",
                     "type": "string"
                 },
                 "not_visible_until_unix": {
+                    "description": "NotVisibleUntilUnix is when the message becomes visible again, as a Unix timestamp in seconds.",
                     "type": "integer"
                 },
                 "payload_bytes": {
+                    "description": "PayloadBytes is the payload size in bytes.",
                     "type": "integer"
                 },
                 "payload_content_type": {
+                    "description": "PayloadContentType is the media type for the queue payload.",
                     "type": "string"
                 },
                 "queue": {
+                    "description": "Queue is the queue name targeted by the operation.",
                     "type": "string"
                 },
                 "state_etag": {
+                    "description": "StateETag is the state entity tag used for CAS semantics.",
                     "type": "string"
                 },
                 "state_fencing_token": {
+                    "description": "StateFencingToken is the fencing token for the associated workflow state lease.",
                     "type": "integer"
                 },
                 "state_lease_expires_at_unix": {
+                    "description": "StateLeaseExpiresAtUnix is when the associated state lease expires, as a Unix timestamp in seconds.",
                     "type": "integer"
                 },
                 "state_lease_id": {
+                    "description": "StateLeaseID identifies the associated workflow state lease.",
                     "type": "string"
                 },
                 "state_txn_id": {
+                    "description": "StateTxnID is the transaction identifier attached to the state lease when present.",
                     "type": "string"
                 },
                 "txn_id": {
+                    "description": "TxnID associates the operation with a transaction coordinator record.",
                     "type": "string"
                 },
                 "visibility_timeout_seconds": {
+                    "description": "VisibilityTimeoutSeconds controls how long a leased message remains invisible, in seconds.",
                     "type": "integer"
                 }
             }
@@ -3355,6 +3628,7 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "query_hidden": {
+                    "description": "QueryHidden controls whether the key is hidden from selector/query results.",
                     "type": "boolean"
                 }
             }
@@ -3363,54 +3637,94 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "key": {
+                    "description": "Key identifies the lock/state key within the namespace.",
                     "type": "string"
                 },
                 "metadata": {
-                    "$ref": "#/definitions/api.MetadataAttributes"
+                    "description": "Metadata carries metadata values returned by the server for this object.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/api.MetadataAttributes"
+                        }
+                    ]
                 },
                 "namespace": {
+                    "description": "Namespace scopes the request or response to a lockd namespace.",
                     "type": "string"
                 },
                 "version": {
+                    "description": "Version is the lockd monotonic version for the target object.",
                     "type": "integer"
                 }
             }
+        },
+        "api.NackIntent": {
+            "type": "string",
+            "enum": [
+                "failure",
+                "defer"
+            ],
+            "x-enum-varnames": [
+                "NackIntentFailure",
+                "NackIntentDefer"
+            ]
         },
         "api.NackRequest": {
             "type": "object",
             "properties": {
                 "delay_seconds": {
+                    "description": "DelaySeconds postpones message visibility by the specified number of seconds.",
                     "type": "integer"
                 },
                 "fencing_token": {
+                    "description": "FencingToken is the monotonic token used to fence stale writers.",
                     "type": "integer"
                 },
-                "last_error": {},
+                "intent": {
+                    "description": "Intent controls whether the requeue counts against max_attempts.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/api.NackIntent"
+                        }
+                    ]
+                },
+                "last_error": {
+                    "description": "LastError carries optional error metadata persisted for intent=failure."
+                },
                 "lease_id": {
+                    "description": "LeaseID identifies the active lease required for protected mutations.",
                     "type": "string"
                 },
                 "message_id": {
+                    "description": "MessageID uniquely identifies a queue message.",
                     "type": "string"
                 },
                 "meta_etag": {
+                    "description": "MetaETag is the queue metadata entity tag used for CAS semantics.",
                     "type": "string"
                 },
                 "namespace": {
+                    "description": "Namespace scopes the request or response to a lockd namespace.",
                     "type": "string"
                 },
                 "queue": {
+                    "description": "Queue is the queue name targeted by the operation.",
                     "type": "string"
                 },
                 "state_etag": {
+                    "description": "StateETag is the state entity tag used for CAS semantics.",
                     "type": "string"
                 },
                 "state_fencing_token": {
+                    "description": "StateFencingToken is the fencing token for the associated workflow state lease.",
                     "type": "integer"
                 },
                 "state_lease_id": {
+                    "description": "StateLeaseID identifies the associated workflow state lease.",
                     "type": "string"
                 },
                 "txn_id": {
+                    "description": "TxnID associates the operation with a transaction coordinator record.",
                     "type": "string"
                 }
             }
@@ -3419,12 +3733,15 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "correlation_id": {
+                    "description": "CorrelationID links related operations across request/response logs.",
                     "type": "string"
                 },
                 "meta_etag": {
+                    "description": "MetaETag is the queue metadata entity tag used for CAS semantics.",
                     "type": "string"
                 },
                 "requeued": {
+                    "description": "Requeued maps to the \"requeued\" JSON field.",
                     "type": "boolean"
                 }
             }
@@ -3433,10 +3750,16 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "namespace": {
+                    "description": "Namespace scopes the request or response to a lockd namespace.",
                     "type": "string"
                 },
                 "query": {
-                    "$ref": "#/definitions/api.NamespaceQueryConfig"
+                    "description": "Query contains namespace query-engine configuration settings.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/api.NamespaceQueryConfig"
+                        }
+                    ]
                 }
             }
         },
@@ -3444,10 +3767,16 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "namespace": {
+                    "description": "Namespace scopes the request or response to a lockd namespace.",
                     "type": "string"
                 },
                 "query": {
-                    "$ref": "#/definitions/api.NamespaceQueryConfig"
+                    "description": "Query contains namespace query-engine configuration settings.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/api.NamespaceQueryConfig"
+                        }
+                    ]
                 }
             }
         },
@@ -3455,9 +3784,11 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "fallback_engine": {
+                    "description": "FallbackEngine selects the fallback strategy when the preferred engine cannot satisfy the request.",
                     "type": "string"
                 },
                 "preferred_engine": {
+                    "description": "PreferredEngine selects the primary query execution strategy for the namespace.",
                     "type": "string"
                 }
             }
@@ -3466,22 +3797,32 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "cursor": {
+                    "description": "Cursor is the pagination cursor returned by the query engine.",
                     "type": "string"
                 },
                 "fields": {
+                    "description": "Fields maps to the \"fields\" JSON field.",
                     "type": "object",
                     "additionalProperties": {}
                 },
                 "limit": {
+                    "description": "Limit caps the number of query results returned.",
                     "type": "integer"
                 },
                 "namespace": {
+                    "description": "Namespace scopes the request or response to a lockd namespace.",
                     "type": "string"
                 },
                 "return": {
-                    "$ref": "#/definitions/api.QueryReturn"
+                    "description": "Return controls whether query responses return keys or full documents.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/api.QueryReturn"
+                        }
+                    ]
                 },
                 "selector": {
+                    "description": "Selector is the LQL selector AST used to match keys/documents.",
                     "type": "object",
                     "x-example": "{\"eq\":{\"field\":\"type\",\"value\":\"alpha\"}}"
                 }
@@ -3491,24 +3832,29 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "cursor": {
+                    "description": "Cursor is the pagination cursor returned by the query engine.",
                     "type": "string"
                 },
                 "index_seq": {
+                    "description": "IndexSeq is the index sequence observed by the query execution.",
                     "type": "integer"
                 },
                 "keys": {
+                    "description": "Keys contains matching key identifiers for key-mode query responses.",
                     "type": "array",
                     "items": {
                         "type": "string"
                     }
                 },
                 "metadata": {
+                    "description": "Metadata carries metadata values returned by the server for this object.",
                     "type": "object",
                     "additionalProperties": {
                         "type": "string"
                     }
                 },
                 "namespace": {
+                    "description": "Namespace scopes the request or response to a lockd namespace.",
                     "type": "string"
                 }
             }
@@ -3524,22 +3870,106 @@ const docTemplate = `{
                 "QueryReturnDocuments"
             ]
         },
+        "api.QueueStatsRequest": {
+            "type": "object",
+            "properties": {
+                "namespace": {
+                    "description": "Namespace scopes the request or response to a lockd namespace.",
+                    "type": "string"
+                },
+                "queue": {
+                    "description": "Queue is the queue name targeted by the operation.",
+                    "type": "string"
+                }
+            }
+        },
+        "api.QueueStatsResponse": {
+            "type": "object",
+            "properties": {
+                "available": {
+                    "description": "Available reports whether a visible head message is currently available.",
+                    "type": "boolean"
+                },
+                "correlation_id": {
+                    "description": "CorrelationID links related operations across request/response logs.",
+                    "type": "string"
+                },
+                "has_active_watcher": {
+                    "description": "HasActiveWatcher indicates whether the dispatcher currently maintains a live watcher for this queue.",
+                    "type": "boolean"
+                },
+                "head_age_seconds": {
+                    "description": "HeadAgeSeconds is the age of the visible head message in seconds.",
+                    "type": "integer"
+                },
+                "head_enqueued_at_unix": {
+                    "description": "HeadEnqueuedAtUnix is when the visible head message was originally enqueued, as Unix seconds.",
+                    "type": "integer"
+                },
+                "head_message_id": {
+                    "description": "HeadMessageID is the current visible head message identifier when available.",
+                    "type": "string"
+                },
+                "head_not_visible_until_unix": {
+                    "description": "HeadNotVisibleUntilUnix is when the head message became visible, as Unix seconds.",
+                    "type": "integer"
+                },
+                "namespace": {
+                    "description": "Namespace scopes the request or response to a lockd namespace.",
+                    "type": "string"
+                },
+                "pending_candidates": {
+                    "description": "PendingCandidates is the number of ready candidates currently buffered for this queue by the dispatcher.",
+                    "type": "integer"
+                },
+                "queue": {
+                    "description": "Queue is the queue name targeted by the operation.",
+                    "type": "string"
+                },
+                "total_consumers": {
+                    "description": "TotalConsumers is the number of active consumers across all queues for this server process.",
+                    "type": "integer"
+                },
+                "waiting_consumers": {
+                    "description": "WaitingConsumers is the number of active consumers currently blocked waiting for work on this queue.",
+                    "type": "integer"
+                }
+            }
+        },
+        "api.QueueWatchRequest": {
+            "type": "object",
+            "properties": {
+                "namespace": {
+                    "description": "Namespace scopes the request or response to a lockd namespace.",
+                    "type": "string"
+                },
+                "queue": {
+                    "description": "Queue is the queue name targeted by the operation.",
+                    "type": "string"
+                }
+            }
+        },
         "api.ReleaseRequest": {
             "type": "object",
             "properties": {
                 "key": {
+                    "description": "Key identifies the lock/state key within the namespace.",
                     "type": "string"
                 },
                 "lease_id": {
+                    "description": "LeaseID identifies the active lease required for protected mutations.",
                     "type": "string"
                 },
                 "namespace": {
+                    "description": "Namespace scopes the request or response to a lockd namespace.",
                     "type": "string"
                 },
                 "rollback": {
+                    "description": "Rollback requests rollback semantics instead of commit for lease release.",
                     "type": "boolean"
                 },
                 "txn_id": {
+                    "description": "TxnID associates the operation with a transaction coordinator record.",
                     "type": "string"
                 }
             }
@@ -3548,6 +3978,7 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "released": {
+                    "description": "Released reports whether the lease or TC lock release succeeded.",
                     "type": "boolean"
                 }
             }
@@ -3556,9 +3987,11 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "new_version": {
+                    "description": "NewVersion is the updated monotonic version after a successful mutation.",
                     "type": "integer"
                 },
                 "removed": {
+                    "description": "Removed reports whether the target state document was removed.",
                     "type": "boolean"
                 }
             }
@@ -3567,6 +4000,7 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "self_endpoint": {
+                    "description": "SelfEndpoint is the announcing node endpoint for cluster membership.",
                     "type": "string"
                 }
             }
@@ -3575,15 +4009,18 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "endpoints": {
+                    "description": "Endpoints lists active endpoints known for this cluster or backend.",
                     "type": "array",
                     "items": {
                         "type": "string"
                     }
                 },
                 "expires_at_unix": {
+                    "description": "ExpiresAtUnix is when this node's membership lease expires, as a Unix timestamp in seconds.",
                     "type": "integer"
                 },
                 "updated_at_unix": {
+                    "description": "UpdatedAtUnix is when the cluster membership set was last updated, as a Unix timestamp in seconds.",
                     "type": "integer"
                 }
             }
@@ -3595,12 +4032,14 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "endpoints": {
+                    "description": "Endpoints lists active endpoints known for this cluster or backend.",
                     "type": "array",
                     "items": {
                         "type": "string"
                     }
                 },
                 "updated_at_unix": {
+                    "description": "UpdatedAtUnix is when the cluster membership set was last updated, as a Unix timestamp in seconds.",
                     "type": "integer"
                 }
             }
@@ -3609,12 +4048,14 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "endpoints": {
+                    "description": "Endpoints lists active endpoints known for this cluster or backend.",
                     "type": "array",
                     "items": {
                         "type": "string"
                     }
                 },
                 "updated_at_unix": {
+                    "description": "UpdatedAtUnix is when the cluster membership set was last updated, as a Unix timestamp in seconds.",
                     "type": "integer"
                 }
             }
@@ -3623,15 +4064,19 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "expires_at": {
+                    "description": "ExpiresAtUnix is the active leader lease expiry as a Unix timestamp in seconds.",
                     "type": "integer"
                 },
                 "leader_endpoint": {
+                    "description": "LeaderEndpoint identifies the active leader endpoint to retry against when applicable.",
                     "type": "string"
                 },
                 "leader_id": {
+                    "description": "LeaderID identifies the current TC leader node.",
                     "type": "string"
                 },
                 "term": {
+                    "description": "Term is the leader-election term associated with this operation.",
                     "type": "integer"
                 }
             }
@@ -3640,15 +4085,19 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "candidate_endpoint": {
+                    "description": "CandidateEndpoint is the network endpoint for the leadership candidate.",
                     "type": "string"
                 },
                 "candidate_id": {
+                    "description": "CandidateID identifies the node requesting TC leadership.",
                     "type": "string"
                 },
                 "term": {
+                    "description": "Term is the leader-election term associated with this operation.",
                     "type": "integer"
                 },
                 "ttl_ms": {
+                    "description": "TTLMillis is the requested TC lease duration in milliseconds.",
                     "type": "integer"
                 }
             }
@@ -3657,18 +4106,23 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "expires_at": {
+                    "description": "ExpiresAtUnix is the TC lease expiry as a Unix timestamp in seconds when granted.",
                     "type": "integer"
                 },
                 "granted": {
+                    "description": "Granted reports whether the lease acquire request succeeded.",
                     "type": "boolean"
                 },
                 "leader_endpoint": {
+                    "description": "LeaderEndpoint identifies the active leader endpoint to retry against when applicable.",
                     "type": "string"
                 },
                 "leader_id": {
+                    "description": "LeaderID identifies the current TC leader node.",
                     "type": "string"
                 },
                 "term": {
+                    "description": "Term is the leader-election term associated with this operation.",
                     "type": "integer"
                 }
             }
@@ -3677,9 +4131,11 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "leader_id": {
+                    "description": "LeaderID identifies the current TC leader node.",
                     "type": "string"
                 },
                 "term": {
+                    "description": "Term is the leader-election term associated with this operation.",
                     "type": "integer"
                 }
             }
@@ -3688,6 +4144,7 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "released": {
+                    "description": "Released reports whether the lease or TC lock release succeeded.",
                     "type": "boolean"
                 }
             }
@@ -3696,12 +4153,15 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "leader_id": {
+                    "description": "LeaderID identifies the current TC leader node.",
                     "type": "string"
                 },
                 "term": {
+                    "description": "Term is the leader-election term associated with this operation.",
                     "type": "integer"
                 },
                 "ttl_ms": {
+                    "description": "TTLMillis is the requested renewal duration in milliseconds.",
                     "type": "integer"
                 }
             }
@@ -3710,18 +4170,23 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "expires_at": {
+                    "description": "ExpiresAtUnix is the renewed TC lease expiry as a Unix timestamp in seconds.",
                     "type": "integer"
                 },
                 "leader_endpoint": {
+                    "description": "LeaderEndpoint identifies the active leader endpoint to retry against when applicable.",
                     "type": "string"
                 },
                 "leader_id": {
+                    "description": "LeaderID identifies the current TC leader node.",
                     "type": "string"
                 },
                 "renewed": {
+                    "description": "Renewed reports whether the lease renew request succeeded.",
                     "type": "boolean"
                 },
                 "term": {
+                    "description": "Term is the leader-election term associated with this operation.",
                     "type": "integer"
                 }
             }
@@ -3730,15 +4195,18 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "backend_hash": {
+                    "description": "BackendHash identifies a storage backend island for RM routing.",
                     "type": "string"
                 },
                 "endpoints": {
+                    "description": "Endpoints lists active endpoints known for this cluster or backend.",
                     "type": "array",
                     "items": {
                         "type": "string"
                     }
                 },
                 "updated_at_unix": {
+                    "description": "UpdatedAtUnix is when this backend mapping was last updated, as a Unix timestamp in seconds.",
                     "type": "integer"
                 }
             }
@@ -3747,12 +4215,14 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "backends": {
+                    "description": "Backends enumerates backend-to-endpoint mappings.",
                     "type": "array",
                     "items": {
                         "$ref": "#/definitions/api.TCRMBackend"
                     }
                 },
                 "updated_at_unix": {
+                    "description": "UpdatedAtUnix is when the RM backend registry was last updated, as a Unix timestamp in seconds.",
                     "type": "integer"
                 }
             }
@@ -3761,9 +4231,11 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "backend_hash": {
+                    "description": "BackendHash identifies a storage backend island for RM routing.",
                     "type": "string"
                 },
                 "endpoint": {
+                    "description": "Endpoint is a registered RM or cluster endpoint.",
                     "type": "string"
                 }
             }
@@ -3772,15 +4244,18 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "backend_hash": {
+                    "description": "BackendHash identifies a storage backend island for RM routing.",
                     "type": "string"
                 },
                 "endpoints": {
+                    "description": "Endpoints lists active endpoints known for this cluster or backend.",
                     "type": "array",
                     "items": {
                         "type": "string"
                     }
                 },
                 "updated_at_unix": {
+                    "description": "UpdatedAtUnix is when the backend registry entry was last updated, as a Unix timestamp in seconds.",
                     "type": "integer"
                 }
             }
@@ -3789,9 +4264,11 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "backend_hash": {
+                    "description": "BackendHash identifies a storage backend island for RM routing.",
                     "type": "string"
                 },
                 "endpoint": {
+                    "description": "Endpoint is a registered RM or cluster endpoint.",
                     "type": "string"
                 }
             }
@@ -3800,15 +4277,18 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "backend_hash": {
+                    "description": "BackendHash identifies a storage backend island for RM routing.",
                     "type": "string"
                 },
                 "endpoints": {
+                    "description": "Endpoints lists active endpoints known for this cluster or backend.",
                     "type": "array",
                     "items": {
                         "type": "string"
                     }
                 },
                 "updated_at_unix": {
+                    "description": "UpdatedAtUnix is when the backend registry entry was last updated, as a Unix timestamp in seconds.",
                     "type": "integer"
                 }
             }
@@ -3817,9 +4297,11 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "expires_at_unix": {
+                    "description": "ExpiresAtUnix is a Unix timestamp in seconds indicating when the lease or record expires.",
                     "type": "integer"
                 },
                 "participants": {
+                    "description": "Participants enumerates transaction participants that should be tracked for the decision.",
                     "type": "array",
                     "items": {
                         "$ref": "#/definitions/api.TxnParticipant"
@@ -3838,6 +4320,7 @@ const docTemplate = `{
                     "type": "integer"
                 },
                 "txn_id": {
+                    "description": "TxnID associates the operation with a transaction coordinator record.",
                     "type": "string"
                 }
             }
@@ -3846,9 +4329,11 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "state": {
+                    "description": "State carries the transaction decision state (for example pending, commit, rollback).",
                     "type": "string"
                 },
                 "txn_id": {
+                    "description": "TxnID associates the operation with a transaction coordinator record.",
                     "type": "string"
                 }
             }
@@ -3861,9 +4346,11 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "key": {
+                    "description": "Key identifies the lock/state key within the namespace.",
                     "type": "string"
                 },
                 "namespace": {
+                    "description": "Namespace scopes the request or response to a lockd namespace.",
                     "type": "string"
                 }
             }
@@ -3872,6 +4359,7 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "txn_id": {
+                    "description": "TxnID associates the operation with a transaction coordinator record.",
                     "type": "string"
                 }
             }
@@ -3880,9 +4368,11 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "state": {
+                    "description": "State carries the transaction decision state (for example pending, commit, rollback).",
                     "type": "string"
                 },
                 "txn_id": {
+                    "description": "TxnID associates the operation with a transaction coordinator record.",
                     "type": "string"
                 }
             }
@@ -3891,15 +4381,23 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "bytes": {
+                    "description": "Bytes is the number of state bytes written by the update.",
                     "type": "integer"
                 },
                 "metadata": {
-                    "$ref": "#/definitions/api.MetadataAttributes"
+                    "description": "Metadata carries metadata values returned by the server for this object.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/api.MetadataAttributes"
+                        }
+                    ]
                 },
                 "new_state_etag": {
+                    "description": "NewStateETag is the updated state entity tag after a successful mutation.",
                     "type": "string"
                 },
                 "new_version": {
+                    "description": "NewVersion is the updated monotonic version after a successful mutation.",
                     "type": "integer"
                 }
             }

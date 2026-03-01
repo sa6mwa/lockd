@@ -26,18 +26,38 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	l := pslog.LoggerFromEnv(pslog.WithEnvOptions(pslog.Options{
+	l := pslog.LoggerFromEnv(context.Background(), pslog.WithEnvOptions(pslog.Options{
 		Mode:       pslog.ModeConsole,
 		TimeFormat: time.RFC3339,
 		MinLevel:   pslog.InfoLevel,
 	}))
 
+	caPEM, err := lockd.CreateCABundle(lockd.CreateCABundleRequest{})
+	if err != nil {
+		l.With(err).Fatal("lockd.create_ca_bundle")
+	}
+	serverPEM, err := lockd.CreateServerBundle(lockd.CreateServerBundleRequest{
+		CABundlePEM: caPEM,
+		CommonName:  "localhost",
+	})
+	if err != nil {
+		l.With(err).Fatal("lockd.create_server_bundle")
+	}
+	clientPEM, err := lockd.CreateClientBundle(lockd.CreateClientBundleRequest{
+		CABundlePEM:     caPEM,
+		CommonName:      "client01",
+		NamespaceClaims: []string{"default=r", "stash=rw"},
+	})
+	if err != nil {
+		l.With(err).Fatal("lockd.create_client_bundle")
+	}
+
 	cfg := lockd.Config{
-		Store:            "mem://",
-		Listen:           "127.0.0.1:13371",
-		BundlePath:       "$HOME/.lockd/server.pem",
-		DefaultNamespace: "stash",
-		DrainGrace:       3 * time.Second,
+		Store:  "mem://",
+		Listen: "127.0.0.1:13371",
+		//BundlePath:       "$HOME/.lockd/server.pem",
+		BundlePEM:  serverPEM,
+		DrainGrace: 3 * time.Second,
 	}
 
 	serverLogger := l.With("actor", "server")
@@ -62,14 +82,17 @@ func main() {
 		prettyx.PrettyTo(os.Stdout, b, nil)
 	}()
 
-	clientLogger := pslog.LoggerFromEnv(pslog.WithEnvPrefix("CLIENT_LOG_"), pslog.WithEnvOptions(pslog.Options{
+	clientLogger := pslog.LoggerFromEnv(context.Background(), pslog.WithEnvPrefix("CLIENT_LOG_"), pslog.WithEnvOptions(pslog.Options{
 		Mode:       pslog.ModeConsole,
 		TimeFormat: time.RFC3339,
 		MinLevel:   pslog.InfoLevel,
 		Palette:    &ansi.PaletteEverforest,
 	})).With("actor", "client")
 
-	cli, err := client.New("localhost:13371", client.WithBundlePath("$HOME/.lockd/client.pem"), client.WithLogger(clientLogger))
+	cli, err := client.New("localhost:13371",
+		client.WithBundlePEM(clientPEM),
+		//client.WithBundlePath("$HOME/.lockd/client.pem"),
+		client.WithLogger(clientLogger))
 	if err != nil {
 		l.With(err).Fatal("client.new")
 	}
@@ -79,7 +102,8 @@ func main() {
 	// defer cancel()
 
 	_, err = cli.EnqueueBytes(ctx, "testing", []byte(`{"hello":"world"}`), client.EnqueueOptions{
-		Delay: 1 * time.Second,
+		Namespace: "stash",
+		Delay:     1 * time.Second,
 	})
 	if err != nil {
 		l.With(err).Fatal("client.enqueue.bytes")
@@ -106,6 +130,7 @@ func main() {
 	l.Info("client.start_consumer")
 
 	if err := cli.StartConsumer(consumerCtx, client.ConsumerConfig{
+		Namespace: "stash",
 		Name:      "ackOnThree",
 		Queue:     "testing",
 		WithState: true,

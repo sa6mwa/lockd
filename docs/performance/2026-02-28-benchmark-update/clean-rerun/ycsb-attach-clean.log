@@ -1,0 +1,14 @@
+## 2026-02-28T14:27:40Z
+backend=lockd phase=load scenario=attach-load series=attach-clean baseline_ref= run_id= workload=core recordcount=10000 operationcount=100000 threads=8 target=0 endpoints=https://127.0.0.1:9341 wal_fsync_interval= wal_commit_max_ops= wal_commit_single_wait= query_engine=index query_return=documents attach_enabled=true attach_read=true attach_bytes=1024 txn_explicit= public_read=true
+Run finished, takes 12.499046557s
+INSERT - Takes(s): 12.5, Count: 20000, OPS: 1603.8, Avg(us): 9946, Min(us): 3184, Max(us): 269823, 50th(us): 7815, 90th(us): 10735, 95th(us): 20559, 99th(us): 65311, 99.9th(us): 172031, 99.99th(us): 269311
+TOTAL  - Takes(s): 12.5, Count: 20000, OPS: 1603.7, Avg(us): 9946, Min(us): 3184, Max(us): 269823, 50th(us): 7815, 90th(us): 10735, 95th(us): 20559, 99th(us): 65311, 99.9th(us): 172031, 99.99th(us): 269311
+
+## 2026-02-28T14:29:18Z
+backend=lockd phase=run scenario=attach-run series=attach-clean baseline_ref= run_id= workload=core recordcount=10000 operationcount=100000 threads=8 target=0 endpoints=https://127.0.0.1:9341 wal_fsync_interval= wal_commit_max_ops= wal_commit_single_wait= query_engine=index query_return=documents attach_enabled=true attach_read=true attach_bytes=1024 txn_explicit= public_read=true
+Run finished, takes 1m17.963010634s
+READ   - Takes(s): 78.0, Count: 99918, OPS: 1281.7, Avg(us): 2531, Min(us): 732, Max(us): 261375, 50th(us): 2295, 90th(us): 3073, 95th(us): 3401, 99th(us): 6919, 99.9th(us): 81471, 99.99th(us): 257535
+READ_ERROR - Takes(s): 67.8, Count: 4, OPS: 0.1, Avg(us): 2216, Min(us): 1852, Max(us): 2579, 50th(us): 1867, 90th(us): 2579, 95th(us): 2579, 99th(us): 2579, 99.9th(us): 2579, 99.99th(us): 2579
+TOTAL  - Takes(s): 78.0, Count: 199996, OPS: 2565.6, Avg(us): 6161, Min(us): 732, Max(us): 762879, 50th(us): 4061, 90th(us): 8887, 95th(us): 21903, 99th(us): 30191, 99.9th(us): 158975, 99.99th(us): 507391
+UPDATE - Takes(s): 77.9, Count: 100078, OPS: 1284.0, Avg(us): 9785, Min(us): 2208, Max(us): 762879, 50th(us): 7163, 90th(us): 21407, 95th(us): 26719, 99th(us): 35295, 99.9th(us): 263423, 99.99th(us): 508671
+

@@ -31,6 +31,11 @@ func TestMinioQueuePollingBasics(t *testing.T) {
 		queuetestutil.InstallWatchdog(t, "minio-poll-nack", 10*time.Second)
 		queuetestutil.RunQueueNackScenario(t, cli, queuetestutil.QueueName("minio-poll-nack"), []byte("minio poll nack"))
 	})
+
+	t.Run("ObservabilityReadOnly", func(t *testing.T) {
+		queuetestutil.InstallWatchdog(t, "minio-poll-observability", 15*time.Second)
+		queuetestutil.RunQueueObservabilityReadOnlyScenario(t, cli, queuetestutil.QueueName("minio-poll-observability"))
+	})
 }
 
 func TestMinioQueuePollingIdleEnqueueDoesNotPoll(t *testing.T) {

@@ -18,6 +18,7 @@ type WriterConfig struct {
 	Store         *Store
 	FlushDocs     int
 	FlushInterval time.Duration
+	NoSync        bool
 	Clock         clock.Clock
 	Logger        pslog.Logger
 }
@@ -28,6 +29,7 @@ type Writer struct {
 	store         *Store
 	memtable      *MemTable
 	mu            sync.Mutex
+	persistMu     sync.Mutex
 	ctx           context.Context
 	cancel        context.CancelFunc
 	clock         clock.Clock
@@ -83,19 +85,21 @@ func (w *Writer) Insert(doc Document) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	before := w.memtable.DocCount()
+	indexedDoc := false
 	for field, terms := range doc.Fields {
-		for _, term := range terms {
-			w.memtable.Add(field, term, doc.Key)
+		if w.memtable.AddTerms(field, terms, doc.Key) {
+			indexedDoc = true
 		}
+	}
+	if indexedDoc {
+		w.memtable.TrackDoc(doc.Key)
 	}
 	if doc.Meta != nil {
 		meta := DocumentMetadata{
 			StateETag:           doc.Meta.StateETag,
 			StatePlaintextBytes: doc.Meta.StatePlaintextBytes,
 			PublishedVersion:    doc.Meta.PublishedVersion,
-		}
-		if len(doc.Meta.StateDescriptor) > 0 {
-			meta.StateDescriptor = append([]byte(nil), doc.Meta.StateDescriptor...)
+			StateDescriptor:     doc.Meta.StateDescriptor,
 		}
 		w.memtable.SetMeta(doc.Key, meta)
 	}
@@ -129,6 +133,44 @@ func (w *Writer) flushLoop() {
 }
 
 func (w *Writer) flushLocked(ctx context.Context) error {
+	segment := w.detachSegmentLocked()
+	if segment == nil {
+		return nil
+	}
+	start := w.clock.Now()
+	w.mu.Unlock()
+	w.persistMu.Lock()
+	segmentBytes, err := w.persistSegment(ctx, segment)
+	w.persistMu.Unlock()
+	w.mu.Lock()
+	if w.metrics != nil {
+		w.metrics.recordFlush(ctx, w.cfg.Namespace, w.clock.Now().Sub(start), err, int64(segment.DocCount()), segmentBytes)
+	}
+	if err != nil {
+		if w.memtable.DocCount() == 0 {
+			w.pending.Store(false)
+			w.oldestPending.Store(0)
+		}
+		if w.logger != nil {
+			w.logger.Warn("index.flush.error", "namespace", w.cfg.Namespace, "error", err)
+		}
+		return err
+	}
+	if w.memtable.DocCount() == 0 {
+		w.pending.Store(false)
+		w.oldestPending.Store(0)
+	} else {
+		w.pending.Store(true)
+	}
+	w.lastFlush.Store(w.clock.Now().UnixNano())
+	w.signalReadableLocked()
+	if w.logger != nil {
+		w.logger.Debug("index.flush.success", "namespace", w.cfg.Namespace, "segment", segment.ID, "docs", segment.DocCount())
+	}
+	return nil
+}
+
+func (w *Writer) detachSegmentLocked() *Segment {
 	if w.memtable.DocCount() == 0 {
 		w.pending.Store(false)
 		w.oldestPending.Store(0)
@@ -140,48 +182,43 @@ func (w *Writer) flushLocked(ctx context.Context) error {
 		w.oldestPending.Store(0)
 		return nil
 	}
-	start := w.clock.Now()
-	segmentBytes, err := w.persistSegment(ctx, segment)
-	if w.metrics != nil {
-		w.metrics.recordFlush(ctx, w.cfg.Namespace, w.clock.Now().Sub(start), err, int64(segment.DocCount()), segmentBytes)
-	}
-	if err != nil {
-		if w.logger != nil {
-			w.logger.Warn("index.flush.error", "namespace", w.cfg.Namespace, "error", err)
-		}
-		return err
-	}
-	w.pending.Store(false)
+	// Segment payload has been detached from the active memtable; any newly
+	// inserted docs will establish a new pending age as they arrive.
 	w.oldestPending.Store(0)
-	w.lastFlush.Store(w.clock.Now().UnixNano())
-	w.signalReadableLocked()
-	if w.logger != nil {
-		w.logger.Debug("index.flush.success", "namespace", w.cfg.Namespace, "segment", segment.ID, "docs", segment.DocCount())
-	}
-	return nil
+	return segment
 }
 
 func (w *Writer) persistSegment(ctx context.Context, segment *Segment) (int64, error) {
 	if w.store == nil {
 		return 0, storage.ErrNotImplemented
 	}
+	if w.cfg.NoSync {
+		ctx = storage.ContextWithNoSync(ctx)
+	}
+	manifestRes, err := w.store.LoadManifest(ctx, w.cfg.Namespace)
+	if err != nil {
+		return 0, err
+	}
+	targetFormat := uint32(IndexFormatVersionV4)
+	if manifest := manifestRes.Manifest; manifest != nil && manifest.Format >= IndexFormatVersionV4 {
+		targetFormat = manifest.Format
+	}
+	segment.Format = targetFormat
+
 	_, segmentBytes, err := w.store.WriteSegment(ctx, w.cfg.Namespace, segment)
 	if err != nil {
 		return 0, err
 	}
 	var lastErr error
 	for attempt := 0; attempt < manifestSaveMaxRetries; attempt++ {
-		manifestRes, err := w.store.LoadManifest(ctx, w.cfg.Namespace)
-		if err != nil {
-			return 0, err
-		}
 		manifest := manifestRes.Manifest
 		etag := manifestRes.ETag
 		if manifest != nil && manifest.Format == 0 {
-			manifest.Format = IndexFormatVersionV3
+			manifest.Format = targetFormat
 		}
 		if manifest == nil || len(manifest.Shards) == 0 {
 			manifest = NewManifest()
+			manifest.Format = targetFormat
 		}
 		shard := manifest.Shards[0]
 		if shard == nil {
@@ -205,6 +242,10 @@ func (w *Writer) persistSegment(ctx context.Context, segment *Segment) (int64, e
 		}
 		if attempt+1 < manifestSaveMaxRetries {
 			w.clock.Sleep(manifestSaveRetryDelay)
+			manifestRes, err = w.store.LoadManifest(ctx, w.cfg.Namespace)
+			if err != nil {
+				return 0, err
+			}
 		}
 	}
 	if lastErr != nil {

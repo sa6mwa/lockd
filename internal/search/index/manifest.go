@@ -31,7 +31,7 @@ type SegmentRef struct {
 
 // NewManifest returns an initial manifest.
 func NewManifest() *Manifest {
-	return &Manifest{Shards: make(map[uint32]*Shard), Format: IndexFormatVersionV3}
+	return &Manifest{Shards: make(map[uint32]*Shard), Format: IndexFormatVersionV4}
 }
 
 // Clone creates a deep copy of the manifest.

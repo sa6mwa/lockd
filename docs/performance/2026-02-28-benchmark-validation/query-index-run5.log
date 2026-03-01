@@ -1,0 +1,22 @@
+=== query-index validation run 5/5 ===
+bench qrf config: cpu_soft=70.0 cpu_hard=85.0 mem_soft=75.0 mem_hard=85.0 mem_headroom=15.0 mem_soft_bytes=0 mem_hard_bytes=0 swap_soft=0.0 swap_hard=0.0 soft_delay=50ms engaged_delay=250ms recovery_delay=200ms max_wait=5s
+bench workload=query-index run=1/3 warmup=false ops=2000 concurrency=8 payload_bytes=1000 namespace=bench-20260228t201438.279753282z-0
+index_flush=214.288679ms
+total: ops=2000 ops/s=9376.8 avg=850.136µs p50=586.058µs p90=1.46025ms p95=1.778396ms p99=3.098002ms p99.9=11.827856ms min=259.847µs max=15.789467ms errors=0
+query: ops=2000 ops/s=9376.8 avg=441.686µs p50=279.02µs p90=722.978µs p95=972.068µs p99=2.221012ms p99.9=10.306982ms min=104.83µs max=14.100085ms errors=0
+bench qrf status: state=disengaged reason= cpu=52.1 mem=28.7 swap=51.7 load1=2.78 load1x=1.03 inflight_lock=0 inflight_queue=0 inflight_query=7
+bench workload=query-index run=2/3 warmup=false ops=2000 concurrency=8 payload_bytes=1000 namespace=bench-20260228t201438.279753282z-1
+index_flush=246.009138ms
+total: ops=2000 ops/s=8162.5 avg=976.45µs p50=676.536µs p90=1.561046ms p95=2.160046ms p99=5.735796ms p99.9=9.260972ms min=275.269µs max=9.599975ms errors=0
+query: ops=2000 ops/s=8162.5 avg=511.229µs p50=331.605µs p90=811.297µs p95=1.212673ms p99=3.766232ms p99.9=8.35863ms min=96.072µs max=8.766573ms errors=0
+bench qrf status: state=disengaged reason= cpu=69.8 mem=28.7 swap=51.7 load1=3.06 load1x=1.04 inflight_lock=0 inflight_queue=0 inflight_query=6
+bench workload=query-index run=3/3 warmup=false ops=2000 concurrency=8 payload_bytes=1000 namespace=bench-20260228t201438.279753282z-2
+index_flush=451.691035ms
+total: ops=2000 ops/s=4442.4 avg=1.797363ms p50=572.091µs p90=1.140274ms p95=1.450151ms p99=4.673596ms p99.9=251.607958ms min=249.235µs max=251.87197ms errors=0
+query: ops=2000 ops/s=4442.4 avg=1.435522ms p50=273.523µs p90=596.572µs p95=813.67µs p99=3.092832ms p99.9=251.237959ms min=106.216µs max=251.514989ms errors=0
+bench qrf status: state=engaged reason=cpu_hard cpu=5.1 mem=28.7 swap=51.7 load1=3.05 load1x=1.00 inflight_lock=0 inflight_queue=0 inflight_query=0
+bench summary: workload=query-index runs=3 warmup=0 aggregation=median
+total: ops=2000 ops/s=8162.5 avg=976.45µs p50=586.058µs p90=1.46025ms p95=1.778396ms p99=4.673596ms p99.9=11.827856ms min=259.847µs max=15.789467ms errors=0
+query: ops=2000 ops/s=8162.5 avg=511.229µs p50=279.02µs p90=722.978µs p95=972.068µs p99=3.092832ms p99.9=10.306982ms min=104.83µs max=14.100085ms errors=0
+bench cleanup: skipped (temp root)
+

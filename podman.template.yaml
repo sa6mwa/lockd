@@ -12,13 +12,18 @@ spec:
       imagePullPolicy: IfNotPresent
       env:
         - name: LOCKD_STORE
-          value: disk://lockd/.lockd/storage
+          value: disk:///opt/lockd/storage
+        - name: LOCKD_CONFIG
+          value: /opt/lockd/config/config.yaml
         - name: LOCKD_LOG_MODE
           value: json
         - name: LOCKD_LOG_LEVEL
           value: debug
         - name: LOCKD_METRICS_LISTEN
           value: ":9464"
+      args:
+        - --bootstrap
+        - /opt/lockd/config
       ports:
         - containerPort: 9341
           hostPort: 9341
@@ -28,9 +33,9 @@ spec:
           protocol: TCP
       volumeMounts:
         - name: lockd-config
-          mountPath: /lockd/.lockd
+          mountPath: /opt/lockd/config
         - name: lockd-storage
-          mountPath: /lockd/.lockd/storage
+          mountPath: /opt/lockd/storage
   volumes:
     - name: lockd-config
       hostPath:

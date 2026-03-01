@@ -27,6 +27,14 @@ func TestAWSQuerySelectors(t *testing.T) {
 	queriesuite.RunSelectors(t, startAWSQueryServer)
 }
 
+func TestAWSQueryFlushWaitReadabilityContract(t *testing.T) {
+	queriesuite.RunFlushWaitReadabilityContract(t, startAWSQueryServer)
+}
+
+func TestAWSQueryRefreshWaitForContract(t *testing.T) {
+	queriesuite.RunQueryRefreshWaitForContract(t, startAWSQueryServer)
+}
+
 func TestAWSQueryPagination(t *testing.T) {
 	queriesuite.RunPagination(t, startAWSQueryServer)
 }
@@ -41,6 +49,22 @@ func TestAWSQueryResultsSupportPublicRead(t *testing.T) {
 
 func TestAWSQueryDocumentStreaming(t *testing.T) {
 	queriesuite.RunDocumentStreaming(t, startAWSQueryServer)
+}
+
+func TestAWSQueryDocumentStreamingFlowControl(t *testing.T) {
+	queriesuite.RunDocumentStreamingFlowControl(t, startAWSQueryServer)
+}
+
+func TestAWSQueryIndexRebuildUpgrade(t *testing.T) {
+	queriesuite.RunIndexRebuildUpgrade(t, startAWSQueryServer)
+}
+
+func TestAWSQueryLargeNamespaceLowMatchKeys(t *testing.T) {
+	queriesuite.RunLargeNamespaceLowMatchKeys(t, startAWSQueryServer)
+}
+
+func TestAWSQueryLargeNamespaceLowMatchDocuments(t *testing.T) {
+	queriesuite.RunLargeNamespaceLowMatchDocuments(t, startAWSQueryServer)
 }
 
 func TestAWSQueryDomainDatasets(t *testing.T) {

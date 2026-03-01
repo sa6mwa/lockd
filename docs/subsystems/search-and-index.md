@@ -41,7 +41,8 @@ It also owns server-side streaming mutation (`/v1/mutate`) so selector/mutator l
 ## Engine Selection and Fallback
 
 - `internal/search/dispatcher.go` routes by requested engine hint (`auto|index|scan`)
-- `auto` tries index first, then scan on capability/streaming fallback boundaries
+- key mode (`Query`): `auto` tries index first, then falls back to scan when index returns an error
+- document mode (`QueryDocuments`): falls back to scan only when index document streaming is unsupported (`ErrDocumentStreamingUnsupported`)
 - index adapter supports full document streaming (`QueryDocuments`), so query-doc paths remain single-pass and do not re-query per match
 
 ## Selector Support Matrix

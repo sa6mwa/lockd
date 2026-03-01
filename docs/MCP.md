@@ -33,7 +33,7 @@ Core properties:
 - Local OAuth 2.1 provider enabled by default (`/authorize`, `/token`, metadata endpoints)
 - default namespace: `mcp`
 - default coordination queue: `lockd.agent.bus`
-- each MCP session auto-subscribes to `mcp/lockd.agent.bus`
+- each MCP session auto-subscribes to `<default-namespace>/<agent-bus-queue>` (defaults: `mcp/lockd.agent.bus`)
 - transfer URLs are composed as: `base-url path + mcp-path + /transfer/<capability_id>`
 
 ## Security Model
@@ -179,6 +179,7 @@ Lock/state:
 - `lockd.query`
 - `lockd.query.stream`
 - `lockd.state.update`
+- `lockd.state.mutate`
 - `lockd.state.patch`
 - `lockd.state.write_stream.begin`
 - `lockd.state.write_stream.status`

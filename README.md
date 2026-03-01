@@ -2,8 +2,9 @@
 
 `lockd` is a single-binary coordination plane that fuses **exclusive leases**,
 **atomic JSON state + attachments**, **indexed document search with streaming
-queries**, and an **at-least-once queue** into one API—so you don’t need a lock
-service, a document store, and a message broker just to run reliable workflows.
+queries**, an **at-least-once queue**, and an **MCP facade for agent workflows**
+into one API—so you don’t need a lock service, a document store, a message
+broker, and a separate agent memory/sync facade just to run reliable workflows.
 It runs its own TC leader election and implicit XA, so multi-key updates and
 queue acknowledgements commit safely across nodes and even across backend
 _"islands"_ without external consensus systems. The same storage abstraction
@@ -78,6 +79,7 @@ internals (e.g. `.txns` stores transaction decisions) and are rejected.
 - **Simple HTTP/JSON API** (no gRPC) with optional mTLS. All endpoints support correlation IDs, structured errors, and fencing tokens.
 - **Go SDK (`client`)** with retries, structured `APIError`, acquire-for-update, streaming query helpers, document helpers (`client.Document`), and attachment helpers.
 - **Cobra/Viper CLI** that mirrors the SDK (leases, attachments, queue operations, `lockd client query`, `lockd client namespace`, etc.) and is covered by unit tests.
+- **MCP facade server (`lockd mcp`, package `pkt.systems/lockd/mcp`)** for agent workflows with lock/state/queue/query/attachment tools, LQL query+mutate support, and large-payload stream capabilities (`docs/MCP.md`).
 
 ### Storage backends
 

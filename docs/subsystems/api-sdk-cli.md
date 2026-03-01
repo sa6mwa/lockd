@@ -1,8 +1,8 @@
-# HTTP API + Go SDK + CLI Subsystem
+# HTTP API + Go SDK + CLI + MCP Subsystem
 
 ## 1) Purpose
 
-This subsystem is lockd’s user-facing control plane: HTTP handlers, Go client, and CLI tooling that expose leases, state, query, queue, attachments, and TC/XA operations.
+This subsystem is lockd’s user-facing control plane: HTTP handlers, Go client, CLI tooling, and the MCP facade that expose leases, state, query, queue, attachments, and TC/XA operations.
 
 ## 2) Architecture and implementation details
 
@@ -15,6 +15,9 @@ This subsystem is lockd’s user-facing control plane: HTTP handlers, Go client,
 - CLI:
   - `cmd/lockd/client_cli.go` uses cobra/viper and environment variable export conventions.
   - CLI commands are thin wrappers over SDK behavior to preserve one behavior model.
+- MCP facade:
+  - `mcp/server.go` hosts streamable MCP HTTP with lockd tool bindings.
+  - `mcp/tool_descriptions.go` defines tool-local invariants (bootstrap, terminal/sensitive rules, and next-step guidance) used by MCP agents at tool-selection time.
 - TC-auth surfaces:
   - handler gate methods (`requireTCClient`, `requireTCServer`) enforce mTLS trust roots and EKU checks for coordinator-specific endpoints.
 

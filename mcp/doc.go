@@ -40,7 +40,7 @@
 //
 // On MCP session initialization, the server auto-subscribes the session to the
 // configured agent-bus queue (default queue `lockd.agent.bus` in default
-// namespace `mcp`). Queue activity is emitted as MCP progress notifications,
+// namespace `mcp`, unless `DefaultNamespace` is overridden). Queue activity is emitted as MCP progress notifications,
 // and consumers explicitly dequeue/ack/nack/defer/extend messages.
 //
 // For interactive clients that cannot maintain long-lived subscriptions, use
@@ -69,6 +69,8 @@
 // For writes, small payloads can be sent inline through `lockd.state.update`,
 // `lockd.queue.enqueue`, and `lockd.attachments.put`, bounded by
 // `Config.InlineMaxBytes` (default 2MiB).
+// Expression-based partial state mutation is also available through
+// `lockd.state.mutate` (LQL mutation expressions).
 // Partial state updates are available with `lockd.state.patch` (JSON merge patch),
 // also bounded by the inline limit.
 // Larger writes should use the write-stream tool families:

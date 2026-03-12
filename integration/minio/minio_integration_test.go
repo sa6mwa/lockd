@@ -130,6 +130,33 @@ func TestMinioLockLifecycle(t *testing.T) {
 	cleanupMinio(t, cfg, key)
 }
 
+func TestMinioMutateLocalStreamsFileBackedValues(t *testing.T) {
+	cfg := loadMinioConfig(t)
+	ensureMinioBucket(t, cfg)
+	ensureStoreReady(t, context.Background(), cfg)
+	ts := startMinioTestServer(t, cfg)
+	t.Cleanup(func() { _ = ts.Stop(context.Background()) })
+
+	locktest.RunMutateLocalFileUpload(t, locktest.MutateLocalFileUploadConfig{
+		Client:       ts.Client,
+		KeyPrefix:    "minio-local-mutate",
+		OwnerPrefix:  "minio-local-mutate",
+		FixtureName:  "blob.bin",
+		FixtureBytes: []byte{0x00, 0x01, 0x02, 'a'},
+		Mutations: []string{
+			`base64file:/payload=blob.bin`,
+			`/filename=blob.bin`,
+		},
+		ExpectedFields: map[string]any{
+			"filename": "blob.bin",
+			"payload":  "AAECYQ==",
+		},
+		CleanupKey: func(key string) {
+			cleanupMinio(t, cfg, key)
+		},
+	})
+}
+
 func TestMinioAcquireNoWaitReturnsWaiting(t *testing.T) {
 	cfg := loadMinioConfig(t)
 	ensureMinioBucket(t, cfg)

@@ -47,6 +47,10 @@ func TestAWSQueryResultsSupportPublicRead(t *testing.T) {
 	queriesuite.RunPublicRead(t, startAWSQueryServer)
 }
 
+func TestAWSQueryFileUploadedField(t *testing.T) {
+	queriesuite.RunFileUploadedFieldQuery(t, startAWSQueryServer)
+}
+
 func TestAWSQueryDocumentStreaming(t *testing.T) {
 	queriesuite.RunDocumentStreaming(t, startAWSQueryServer)
 }

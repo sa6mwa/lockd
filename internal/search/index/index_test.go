@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/internal/search"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/disk"
@@ -319,11 +318,9 @@ func TestIndexAdapterQuery(t *testing.T) {
 	// Eq selector should skip hidden keys.
 	resp, err := adapter.Query(ctx, search.Request{
 		Namespace: namespaces.Default,
-		Selector: api.Selector{
-			Eq: &api.Term{Field: "/status", Value: "open"},
-		},
-		Limit:  10,
-		Engine: search.EngineIndex,
+		Selector:  mustParseSelector(t, `eq{field=/status,value=open}`),
+		Limit:     10,
+		Engine:    search.EngineIndex,
 	})
 	if err != nil {
 		t.Fatalf("query eq: %v", err)
@@ -336,11 +333,9 @@ func TestIndexAdapterQuery(t *testing.T) {
 	// Range selector should only include published matches.
 	rangeResp, err := adapter.Query(ctx, search.Request{
 		Namespace: namespaces.Default,
-		Selector: api.Selector{
-			Range: &api.RangeTerm{Field: "/device/telemetry/battery_mv", GTE: api.NewNumericRangeBound(4000)},
-		},
-		Limit:  5,
-		Engine: search.EngineIndex,
+		Selector:  mustParseSelector(t, `range{field=/device/telemetry/battery_mv,gte=4000}`),
+		Limit:     5,
+		Engine:    search.EngineIndex,
 	})
 	if err != nil {
 		t.Fatalf("query range: %v", err)
@@ -352,11 +347,9 @@ func TestIndexAdapterQuery(t *testing.T) {
 	// Pagination should advance past the last returned key even with hidden entries.
 	page1, err := adapter.Query(ctx, search.Request{
 		Namespace: namespaces.Default,
-		Selector: api.Selector{
-			Eq: &api.Term{Field: "/status", Value: "open"},
-		},
-		Limit:  1,
-		Engine: search.EngineIndex,
+		Selector:  mustParseSelector(t, `eq{field=/status,value=open}`),
+		Limit:     1,
+		Engine:    search.EngineIndex,
 	})
 	if err != nil {
 		t.Fatalf("query page1: %v", err)
@@ -366,12 +359,10 @@ func TestIndexAdapterQuery(t *testing.T) {
 	}
 	page2, err := adapter.Query(ctx, search.Request{
 		Namespace: namespaces.Default,
-		Selector: api.Selector{
-			Eq: &api.Term{Field: "/status", Value: "open"},
-		},
-		Limit:  2,
-		Cursor: page1.Cursor,
-		Engine: search.EngineIndex,
+		Selector:  mustParseSelector(t, `eq{field=/status,value=open}`),
+		Limit:     2,
+		Cursor:    page1.Cursor,
+		Engine:    search.EngineIndex,
 	})
 	if err != nil {
 		t.Fatalf("query page2: %v", err)
@@ -436,11 +427,9 @@ func TestIndexAdapterQueryMixedSegmentFormats(t *testing.T) {
 	}
 	resp, err := adapter.Query(ctx, search.Request{
 		Namespace: namespaces.Default,
-		Selector: api.Selector{
-			Eq: &api.Term{Field: "/status", Value: "open"},
-		},
-		Limit:  10,
-		Engine: search.EngineIndex,
+		Selector:  mustParseSelector(t, `eq{field=/status,value=open}`),
+		Limit:     10,
+		Engine:    search.EngineIndex,
 	})
 	if err != nil {
 		t.Fatalf("query mixed formats: %v", err)
@@ -493,14 +482,9 @@ func TestIndexAdapterQueryStableOrderingAndCursorAcrossOr(t *testing.T) {
 	}
 	req := search.Request{
 		Namespace: namespaces.Default,
-		Selector: api.Selector{
-			Or: []api.Selector{
-				{Eq: &api.Term{Field: "/group", Value: "alpha"}},
-				{Eq: &api.Term{Field: "/group", Value: "beta"}},
-			},
-		},
-		Limit:  10,
-		Engine: search.EngineIndex,
+		Selector:  mustParseSelector(t, `or.eq{field=/group,value=alpha},or.eq{field=/group,value=beta}`),
+		Limit:     10,
+		Engine:    search.EngineIndex,
 	}
 	full, err := adapter.Query(ctx, req)
 	if err != nil {
@@ -581,11 +565,9 @@ func TestIndexAdapterQueryStableOrderingAndCursorWithNot(t *testing.T) {
 	}
 	req := search.Request{
 		Namespace: namespaces.Default,
-		Selector: api.Selector{
-			Not: &api.Selector{Eq: &api.Term{Field: "/status", Value: "closed"}},
-		},
-		Limit:  10,
-		Engine: search.EngineIndex,
+		Selector:  mustParseSelector(t, `not.eq{field=/status,value=closed}`),
+		Limit:     10,
+		Engine:    search.EngineIndex,
 	}
 	full, err := adapter.Query(ctx, req)
 	if err != nil {
@@ -671,11 +653,9 @@ func TestIndexAdapterQueryContainsSelectors(t *testing.T) {
 
 	containsResp, err := adapter.Query(ctx, search.Request{
 		Namespace: namespaces.Default,
-		Selector: api.Selector{
-			Contains: &api.Term{Field: "/message", Value: "timeout"},
-		},
-		Limit:  10,
-		Engine: search.EngineIndex,
+		Selector:  mustParseSelector(t, `contains{field=/message,value=timeout}`),
+		Limit:     10,
+		Engine:    search.EngineIndex,
 	})
 	if err != nil {
 		t.Fatalf("query contains: %v", err)
@@ -686,11 +666,9 @@ func TestIndexAdapterQueryContainsSelectors(t *testing.T) {
 
 	icontainsResp, err := adapter.Query(ctx, search.Request{
 		Namespace: namespaces.Default,
-		Selector: api.Selector{
-			IContains: &api.Term{Field: "/message", Value: "TIMEOUT"},
-		},
-		Limit:  10,
-		Engine: search.EngineIndex,
+		Selector:  mustParseSelector(t, `icontains{field=/message,value=TIMEOUT}`),
+		Limit:     10,
+		Engine:    search.EngineIndex,
 	})
 	if err != nil {
 		t.Fatalf("query icontains: %v", err)
@@ -701,17 +679,84 @@ func TestIndexAdapterQueryContainsSelectors(t *testing.T) {
 
 	iprefixResp, err := adapter.Query(ctx, search.Request{
 		Namespace: namespaces.Default,
-		Selector: api.Selector{
-			IPrefix: &api.Term{Field: "/service", Value: "AUTH"},
-		},
-		Limit:  10,
-		Engine: search.EngineIndex,
+		Selector:  mustParseSelector(t, `iprefix{field=/service,value=AUTH}`),
+		Limit:     10,
+		Engine:    search.EngineIndex,
 	})
 	if err != nil {
 		t.Fatalf("query iprefix: %v", err)
 	}
 	if !slices.Equal(iprefixResp.Keys, []string{"log-1"}) {
 		t.Fatalf("unexpected iprefix keys %v", iprefixResp.Keys)
+	}
+}
+
+func TestIndexAdapterQueryContainsAnySelectors(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	store := NewStore(mem, nil)
+	segment := NewSegment("seg-contains-any", time.Unix(1_700_000_030, 0))
+	segment.Fields["/message"] = FieldBlock{Postings: map[string][]string{
+		"timeout while syncing": {"log-1"},
+		"operation complete":    {"log-2"},
+	}}
+	if _, _, err := store.WriteSegment(ctx, namespaces.Default, segment); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+	manifest := NewManifest()
+	manifest.Seq = 3
+	manifest.UpdatedAt = segment.CreatedAt
+	manifest.Shards[0] = &Shard{
+		ID: 0,
+		Segments: []SegmentRef{{
+			ID:        segment.ID,
+			CreatedAt: segment.CreatedAt,
+			DocCount:  segment.DocCount(),
+		}},
+	}
+	if _, err := store.SaveManifest(ctx, namespaces.Default, manifest, ""); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+	for _, key := range []string{"log-1", "log-2"} {
+		meta := &storage.Meta{
+			Version:          1,
+			PublishedVersion: 1,
+			StateETag:        "etag-" + key,
+		}
+		if _, err := mem.StoreMeta(ctx, namespaces.Default, key, meta, ""); err != nil {
+			t.Fatalf("store meta %s: %v", key, err)
+		}
+	}
+
+	adapter, err := NewAdapter(AdapterConfig{Store: store})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+
+	containsResp, err := adapter.Query(ctx, search.Request{
+		Namespace: namespaces.Default,
+		Selector:  mustParseSelector(t, `contains{field=/message,any="timeout|missing"}`),
+		Limit:     10,
+		Engine:    search.EngineIndex,
+	})
+	if err != nil {
+		t.Fatalf("query contains any: %v", err)
+	}
+	if !slices.Equal(containsResp.Keys, []string{"log-1"}) {
+		t.Fatalf("unexpected contains any keys %v", containsResp.Keys)
+	}
+
+	icontainsResp, err := adapter.Query(ctx, search.Request{
+		Namespace: namespaces.Default,
+		Selector:  mustParseSelector(t, `icontains{field=/message,any="TIMEOUT|MISSING"}`),
+		Limit:     10,
+		Engine:    search.EngineIndex,
+	})
+	if err != nil {
+		t.Fatalf("query icontains any: %v", err)
+	}
+	if !slices.Equal(icontainsResp.Keys, []string{"log-1"}) {
+		t.Fatalf("unexpected icontains any keys %v", icontainsResp.Keys)
 	}
 }
 
@@ -760,11 +805,9 @@ func TestIndexAdapterQueryContainsUsesTrigramPostings(t *testing.T) {
 	}
 	resp, err := adapter.Query(ctx, search.Request{
 		Namespace: namespaces.Default,
-		Selector: api.Selector{
-			Contains: &api.Term{Field: "/message", Value: "time"},
-		},
-		Limit:  10,
-		Engine: search.EngineIndex,
+		Selector:  mustParseSelector(t, `contains{field=/message,value=time}`),
+		Limit:     10,
+		Engine:    search.EngineIndex,
 	})
 	if err != nil {
 		t.Fatalf("query contains: %v", err)
@@ -822,11 +865,9 @@ func TestIndexAdapterQueryContainsTrigramFilterAvoidsFalsePositives(t *testing.T
 	}
 	resp, err := adapter.Query(ctx, search.Request{
 		Namespace: namespaces.Default,
-		Selector: api.Selector{
-			Contains: &api.Term{Field: "/message", Value: "abcd"},
-		},
-		Limit:  10,
-		Engine: search.EngineIndex,
+		Selector:  mustParseSelector(t, `contains{field=/message,value=abcd}`),
+		Limit:     10,
+		Engine:    search.EngineIndex,
 	})
 	if err != nil {
 		t.Fatalf("query contains: %v", err)
@@ -882,11 +923,9 @@ func TestIndexAdapterQueryIContainsTokenizedOnlyField(t *testing.T) {
 
 	resp, err := adapter.Query(ctx, search.Request{
 		Namespace: namespaces.Default,
-		Selector: api.Selector{
-			IContains: &api.Term{Field: "/message", Value: "TIMEOUT"},
-		},
-		Limit:  10,
-		Engine: search.EngineIndex,
+		Selector:  mustParseSelector(t, `icontains{field=/message,value=TIMEOUT}`),
+		Limit:     10,
+		Engine:    search.EngineIndex,
 	})
 	if err != nil {
 		t.Fatalf("query icontains: %v", err)
@@ -897,11 +936,9 @@ func TestIndexAdapterQueryIContainsTokenizedOnlyField(t *testing.T) {
 
 	containsResp, err := adapter.Query(ctx, search.Request{
 		Namespace: namespaces.Default,
-		Selector: api.Selector{
-			Contains: &api.Term{Field: "/message", Value: "timeout"},
-		},
-		Limit:  10,
-		Engine: search.EngineIndex,
+		Selector:  mustParseSelector(t, `contains{field=/message,value=timeout}`),
+		Limit:     10,
+		Engine:    search.EngineIndex,
 	})
 	if err != nil {
 		t.Fatalf("query contains: %v", err)
@@ -968,11 +1005,9 @@ func TestIndexAdapterQueryIContainsAllTextField(t *testing.T) {
 	}
 	resp, err := adapter.Query(ctx, search.Request{
 		Namespace: namespaces.Default,
-		Selector: api.Selector{
-			IContains: &api.Term{Field: "/...", Value: "TIMEOUT"},
-		},
-		Limit:  10,
-		Engine: search.EngineIndex,
+		Selector:  mustParseSelector(t, `icontains{field=/...,value=TIMEOUT}`),
+		Limit:     10,
+		Engine:    search.EngineIndex,
 	})
 	if err != nil {
 		t.Fatalf("query icontains all_text: %v", err)
@@ -1034,19 +1069,11 @@ func TestIndexAdapterQueryAndSelectorCombination(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new adapter: %v", err)
 	}
-	threeK := 3000.0
 	resp, err := adapter.Query(ctx, search.Request{
 		Namespace: namespaces.Default,
-		Selector: api.Selector{
-			And: []api.Selector{
-				{Eq: &api.Term{Field: "/voucher/book", Value: "GENERAL"}},
-				{Eq: &api.Term{Field: "/voucher/header/period", Value: "2025-11"}},
-				{Eq: &api.Term{Field: "/voucher/header/posted", Value: "false"}},
-				{Range: &api.RangeTerm{Field: "/voucher/lines/10/amount", GTE: api.NewNumericRangeBound(threeK)}},
-			},
-		},
-		Limit:  10,
-		Engine: search.EngineIndex,
+		Selector:  mustParseSelector(t, `and.eq{field=/voucher/book,value=GENERAL},and.eq{field=/voucher/header/period,value=2025-11},and.eq{field=/voucher/header/posted,value=false},and.range{field=/voucher/lines/10/amount,gte=3000}`),
+		Limit:     10,
+		Engine:    search.EngineIndex,
 	})
 	if err != nil {
 		t.Fatalf("query: %v", err)
@@ -1092,11 +1119,9 @@ func TestIndexAdapterQueryDocumentsStreamsMatches(t *testing.T) {
 	sink := &capturingIndexDocumentSink{}
 	result, err := adapter.QueryDocuments(ctx, search.Request{
 		Namespace: namespaces.Default,
-		Selector: api.Selector{
-			Eq: &api.Term{Field: "/status", Value: "open"},
-		},
-		Limit:  10,
-		Engine: search.EngineIndex,
+		Selector:  mustParseSelector(t, `eq{field=/status,value=open}`),
+		Limit:     10,
+		Engine:    search.EngineIndex,
 	}, sink)
 	if err != nil {
 		t.Fatalf("query documents: %v", err)
@@ -1165,11 +1190,9 @@ func TestIndexAdapterQueryDocumentsUsesSegmentDocMetaWithoutLoadMeta(t *testing.
 	sink := &capturingIndexDocumentSink{}
 	result, err := adapter.QueryDocuments(ctx, search.Request{
 		Namespace: namespaces.Default,
-		Selector: api.Selector{
-			Eq: &api.Term{Field: "/status", Value: "open"},
-		},
-		Limit:  10,
-		Engine: search.EngineIndex,
+		Selector:  mustParseSelector(t, `eq{field=/status,value=open}`),
+		Limit:     10,
+		Engine:    search.EngineIndex,
 	}, sink)
 	if err != nil {
 		t.Fatalf("query documents: %v", err)
@@ -1226,11 +1249,9 @@ func TestIndexAdapterQueryDocumentsSingleLargeMatchTotalAllocBounded(t *testing.
 	}
 	req := search.Request{
 		Namespace: namespaces.Default,
-		Selector: api.Selector{
-			Contains: &api.Term{Field: "/message", Value: "timeout"},
-		},
-		Limit:  1,
-		Engine: search.EngineIndex,
+		Selector:  mustParseSelector(t, `contains{field=/message,value=timeout}`),
+		Limit:     1,
+		Engine:    search.EngineIndex,
 	}
 
 	// Warm once to remove one-time setup noise from alloc accounting.
@@ -1306,11 +1327,9 @@ func TestIndexAdapterQueryUsesSegmentDocMetaWithoutLoadMeta(t *testing.T) {
 	}
 	result, err := adapter.Query(ctx, search.Request{
 		Namespace: namespaces.Default,
-		Selector: api.Selector{
-			Eq: &api.Term{Field: "/status", Value: "open"},
-		},
-		Limit:  10,
-		Engine: search.EngineIndex,
+		Selector:  mustParseSelector(t, `eq{field=/status,value=open}`),
+		Limit:     10,
+		Engine:    search.EngineIndex,
 	})
 	if err != nil {
 		t.Fatalf("query: %v", err)
@@ -1368,7 +1387,7 @@ func TestIndexAdapterDocMeta(t *testing.T) {
 	}
 	resp, err := adapter.Query(ctx, search.Request{
 		Namespace:      namespaces.Default,
-		Selector:       api.Selector{Eq: &api.Term{Field: "/status", Value: "open"}},
+		Selector:       mustParseSelector(t, `eq{field=/status,value=open}`),
 		Limit:          1,
 		Engine:         search.EngineIndex,
 		IncludeDocMeta: true,
@@ -1452,7 +1471,7 @@ func TestIndexAdapterDocMetaPrefersNewestSegment(t *testing.T) {
 	}
 	resp, err := adapter.Query(ctx, search.Request{
 		Namespace:      namespaces.Default,
-		Selector:       api.Selector{Eq: &api.Term{Field: "/status", Value: "open"}},
+		Selector:       mustParseSelector(t, `eq{field=/status,value=open}`),
 		Limit:          1,
 		Engine:         search.EngineIndex,
 		IncludeDocMeta: true,
@@ -1534,11 +1553,9 @@ func TestIndexAdapterRespectsVisibilityLedger(t *testing.T) {
 	}
 	resp, err := adapter.Query(ctx, search.Request{
 		Namespace: namespaces.Default,
-		Selector: api.Selector{
-			Eq: &api.Term{Field: "/status", Value: "open"},
-		},
-		Limit:  10,
-		Engine: search.EngineIndex,
+		Selector:  mustParseSelector(t, `eq{field=/status,value=open}`),
+		Limit:     10,
+		Engine:    search.EngineIndex,
 	})
 	if err != nil {
 		t.Fatalf("query eq: %v", err)

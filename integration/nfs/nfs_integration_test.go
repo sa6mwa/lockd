@@ -28,6 +28,7 @@ import (
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/integration/internal/cryptotest"
 	"pkt.systems/lockd/integration/internal/hatest"
+	"pkt.systems/lockd/integration/internal/locktest"
 	shutdowntest "pkt.systems/lockd/integration/internal/shutdowntest"
 	testlog "pkt.systems/lockd/integration/internal/testlog"
 	"pkt.systems/lockd/internal/storage/disk"
@@ -215,6 +216,30 @@ func TestNFSShutdownDrainingBlocksAcquire(t *testing.T) {
 		t.Fatalf("server stop timed out")
 	}
 	_ = lease.Release(ctx)
+}
+
+func TestNFSMutateLocalStreamsFileBackedValues(t *testing.T) {
+	base := ensureNFSRootEnv(t)
+	root := prepareNFSRoot(t, base)
+	cfg := buildNFSConfig(t, root, 0)
+	ts := startNFSTestServer(t, cfg)
+	t.Cleanup(func() { _ = ts.Stop(context.Background()) })
+
+	locktest.RunMutateLocalFileUpload(t, locktest.MutateLocalFileUploadConfig{
+		Client:       ts.Client,
+		KeyPrefix:    "nfs-local-mutate",
+		OwnerPrefix:  "nfs-local-mutate",
+		FixtureName:  "blob.bin",
+		FixtureBytes: []byte{0x00, 0x01, 0x02, 'a'},
+		Mutations: []string{
+			`base64file:/payload=blob.bin`,
+			`/filename=blob.bin`,
+		},
+		ExpectedFields: map[string]any{
+			"filename": "blob.bin",
+			"payload":  "AAECYQ==",
+		},
+	})
 }
 
 func TestNFSConcurrency(t *testing.T) {

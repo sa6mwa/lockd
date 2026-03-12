@@ -39,7 +39,7 @@ require (
 	go.uber.org/zap v1.27.1 // indirect
 	golang.org/x/crypto v0.48.0 // indirect
 	golang.org/x/net v0.50.0 // indirect
-	golang.org/x/sys v0.41.0 // indirect
+	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/term v0.40.0 // indirect
 	golang.org/x/text v0.34.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260217215200-42d3e9bedb6d // indirect
@@ -47,6 +47,6 @@ require (
 	google.golang.org/grpc v1.79.1 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	pkt.systems/kryptograf v0.6.0 // indirect
-	pkt.systems/lql v0.13.0 // indirect
+	pkt.systems/lql v0.16.0 // indirect
 	pkt.systems/pslog v0.21.0 // indirect
 )

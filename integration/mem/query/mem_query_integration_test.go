@@ -49,6 +49,10 @@ func TestMemQueryResultsSupportPublicRead(t *testing.T) {
 	queriesuite.RunPublicRead(t, startMemQueryServer)
 }
 
+func TestMemQueryFileUploadedField(t *testing.T) {
+	queriesuite.RunFileUploadedFieldQuery(t, startMemQueryServer)
+}
+
 func TestMemQueryDocumentStreaming(t *testing.T) {
 	queriesuite.RunDocumentStreaming(t, startMemQueryServer)
 }

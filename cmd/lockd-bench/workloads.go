@@ -37,6 +37,37 @@ type benchClient struct {
 	server      *lockd.Server
 }
 
+type workloadKeyMode int
+
+const (
+	workloadKeyModeRandom workloadKeyMode = iota
+	workloadKeyModeSequential
+)
+
+func workloadKeyModeFor(workload string) workloadKeyMode {
+	switch strings.ToLower(strings.TrimSpace(workload)) {
+	case "xa-commit", "xa-rollback":
+		return workloadKeyModeSequential
+	default:
+		return workloadKeyModeRandom
+	}
+}
+
+func pickWorkerKey(workerKeys []benchKey, mode workloadKeyMode, rng *rand.Rand, iteration int) benchKey {
+	if len(workerKeys) == 0 {
+		return benchKey{}
+	}
+	switch mode {
+	case workloadKeyModeSequential:
+		return workerKeys[iteration%len(workerKeys)]
+	default:
+		if len(workerKeys) == 1 {
+			return workerKeys[0]
+		}
+		return workerKeys[rng.Intn(len(workerKeys))]
+	}
+}
+
 func runWorkloadBench(cfg benchConfig) {
 	ctx := context.Background()
 	logger, closeLogger := newBenchLogger(cfg)
@@ -841,6 +872,7 @@ func runWorkloadOps(ctx context.Context, cfg benchConfig, keys []benchKey, phase
 	)
 
 	start := time.Now()
+	keyMode := workloadKeyModeFor(cfg.workload)
 	var wg sync.WaitGroup
 	wg.Add(cfg.concurrency)
 	for w := 0; w < cfg.concurrency; w++ {
@@ -850,8 +882,9 @@ func runWorkloadOps(ctx context.Context, cfg benchConfig, keys []benchKey, phase
 			localPhases := make(map[string][]time.Duration)
 			localErrs := make(map[string]int64)
 			rng := rand.New(rand.NewSource(time.Now().UnixNano() + int64(worker)))
+			localKeyIteration := 0
 			workerKeys := keys
-			if len(keys) >= cfg.concurrency {
+			if keyMode == workloadKeyModeRandom && len(keys) >= cfg.concurrency {
 				workerKeys = make([]benchKey, 0, (len(keys)+cfg.concurrency-1)/cfg.concurrency)
 				for i := worker; i < len(keys); i += cfg.concurrency {
 					workerKeys = append(workerKeys, keys[i])
@@ -863,10 +896,15 @@ func runWorkloadOps(ctx context.Context, cfg benchConfig, keys []benchKey, phase
 					break
 				}
 				var key benchKey
-				if len(workerKeys) > 0 {
-					key = workerKeys[int(idx)%len(workerKeys)]
-					if len(workerKeys) > 1 {
-						key = workerKeys[rng.Intn(len(workerKeys))]
+				switch keyMode {
+				case workloadKeyModeSequential:
+					if len(keys) > 0 {
+						key = pickWorkerKey(keys, keyMode, rng, int(idx))
+					}
+				default:
+					if len(workerKeys) > 0 {
+						key = pickWorkerKey(workerKeys, keyMode, rng, localKeyIteration)
+						localKeyIteration++
 					}
 				}
 				out := fn(ctx, key)

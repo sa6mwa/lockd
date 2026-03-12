@@ -143,6 +143,7 @@ func TestCLIClientStateLifecycle(t *testing.T) {
 		"--key", key,
 		"--namespace", namespaces.Default,
 		"--lease", acquireResp.LeaseID,
+		"--txn-id", acquireResp.TxnID,
 		"--fencing-token", strconv.FormatInt(acquireResp.FencingToken, 10),
 	)
 
@@ -170,6 +171,199 @@ func TestCLIClientStateLifecycle(t *testing.T) {
 	}
 	if _, ok := srvStatus["updated"]; !ok {
 		t.Fatalf("expected updated timestamp in %+v", srvStatus)
+	}
+}
+
+func TestCLIClientSetStreamsFileMutator(t *testing.T) {
+	t.Setenv("LOCKD_CONFIG", "")
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	clk := clock.NewManual(time.Now().UTC())
+	ts := startCLITestServerWithClock(t, clk)
+	serverURL := ts.URL()
+	t.Setenv("LOCKD_CLIENT_SERVER", serverURL)
+	t.Setenv("LOCKD_CLIENT_DISABLE_MTLS", "1")
+
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+	if err := os.WriteFile(filepath.Join(tempDir, "blob.txt"), []byte("hello\n\"quoted\""), 0o600); err != nil {
+		t.Fatalf("write text payload: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	key := "cli-stream-set-" + uuidv7.NewString()
+	txnID := xid.New().String()
+	acquireOut, _ := runCLICommandOutput(t,
+		"client",
+		"--server", serverURL,
+		"--disable-mtls",
+		"acquire",
+		"--key", key,
+		"--owner", "cli-stream-set",
+		"--ttl", "45s",
+		"--txn-id", txnID,
+		"--namespace", namespaces.Default,
+		"--output", "json",
+	)
+	var acquireResp api.AcquireResponse
+	if err := json.Unmarshal([]byte(acquireOut), &acquireResp); err != nil {
+		t.Fatalf("decode acquire response: %v", err)
+	}
+
+	runCLICommand(t,
+		"client",
+		"--server", serverURL,
+		"--disable-mtls",
+		"set",
+		"--key", key,
+		"--namespace", namespaces.Default,
+		"--lease", acquireResp.LeaseID,
+		"--txn-id", txnID,
+		"--fencing-token", strconv.FormatInt(acquireResp.FencingToken, 10),
+		`textfile:/content=blob.txt`,
+		`/filename=blob.txt`,
+	)
+
+	runCLICommand(t,
+		"client",
+		"--server", serverURL,
+		"--disable-mtls",
+		"release",
+		"--key", key,
+		"--namespace", namespaces.Default,
+		"--lease", acquireResp.LeaseID,
+		"--txn-id", txnID,
+		"--fencing-token", strconv.FormatInt(acquireResp.FencingToken, 10),
+	)
+
+	verifyLease, err := ts.Client.Acquire(ctx, api.AcquireRequest{
+		Namespace:  namespaces.Default,
+		Key:        key,
+		Owner:      "cli-stream-set-verify",
+		TTLSeconds: 30,
+		BlockSecs:  client.BlockNoWait,
+	})
+	if err != nil {
+		t.Fatalf("verify acquire: %v", err)
+	}
+	defer verifyLease.Release(ctx)
+
+	var state map[string]any
+	if err := verifyLease.Load(ctx, &state); err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if got := state["filename"]; got != "blob.txt" {
+		t.Fatalf("unexpected filename %#v", got)
+	}
+	if got := state["content"]; got != "hello\n\"quoted\"" {
+		t.Fatalf("unexpected content %#v", got)
+	}
+}
+
+func TestCLIClientMutateLocalStreamsFileMutator(t *testing.T) {
+	t.Setenv("LOCKD_CONFIG", "")
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	clk := clock.NewManual(time.Now().UTC())
+	ts := startCLITestServerWithClock(t, clk)
+	serverURL := ts.URL()
+	t.Setenv("LOCKD_CLIENT_SERVER", serverURL)
+	t.Setenv("LOCKD_CLIENT_DISABLE_MTLS", "1")
+
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+	if err := os.WriteFile(filepath.Join(tempDir, "blob.bin"), []byte{0x00, 0x01, 0x02, 'a'}, 0o600); err != nil {
+		t.Fatalf("write binary payload: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	key := "cli-stream-mutate-" + uuidv7.NewString()
+	txnID := xid.New().String()
+	acquireOut, _ := runCLICommandOutput(t,
+		"client",
+		"--server", serverURL,
+		"--disable-mtls",
+		"acquire",
+		"--key", key,
+		"--owner", "cli-stream-mutate",
+		"--ttl", "45s",
+		"--txn-id", txnID,
+		"--namespace", namespaces.Default,
+		"--output", "json",
+	)
+	var acquireResp api.AcquireResponse
+	if err := json.Unmarshal([]byte(acquireOut), &acquireResp); err != nil {
+		t.Fatalf("decode acquire response: %v", err)
+	}
+
+	runCLICommand(t,
+		"client",
+		"--server", serverURL,
+		"--disable-mtls",
+		"mutate",
+		"--local",
+		"--key", key,
+		"--namespace", namespaces.Default,
+		"--lease", acquireResp.LeaseID,
+		"--txn-id", txnID,
+		"--fencing-token", strconv.FormatInt(acquireResp.FencingToken, 10),
+		`base64file:/payload=blob.bin`,
+		`/filename=blob.bin`,
+	)
+
+	runCLICommand(t,
+		"client",
+		"--server", serverURL,
+		"--disable-mtls",
+		"release",
+		"--key", key,
+		"--namespace", namespaces.Default,
+		"--lease", acquireResp.LeaseID,
+		"--txn-id", txnID,
+		"--fencing-token", strconv.FormatInt(acquireResp.FencingToken, 10),
+	)
+
+	verifyLease, err := ts.Client.Acquire(ctx, api.AcquireRequest{
+		Namespace:  namespaces.Default,
+		Key:        key,
+		Owner:      "cli-stream-mutate-verify",
+		TTLSeconds: 30,
+		BlockSecs:  client.BlockNoWait,
+	})
+	if err != nil {
+		t.Fatalf("verify acquire: %v", err)
+	}
+	defer verifyLease.Release(ctx)
+
+	var state map[string]any
+	if err := verifyLease.Load(ctx, &state); err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if got := state["filename"]; got != "blob.bin" {
+		t.Fatalf("unexpected filename %#v", got)
+	}
+	if got := state["payload"]; got != "AAECYQ==" {
+		t.Fatalf("unexpected payload %#v", got)
+	}
+}
+
+func TestCLIClientMutateRejectsFileBackedMutationWithoutLocalFlag(t *testing.T) {
+	t.Setenv("LOCKD_CONFIG", "")
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	err := runCLICommandExpectError(t,
+		"client",
+		"mutate",
+		"--key", "orders",
+		`textfile:/content=blob.txt`,
+	)
+	if err == nil || !strings.Contains(err.Error(), "file-backed mutations are disabled") {
+		t.Fatalf("expected file-backed mutation error, got %v", err)
 	}
 }
 
@@ -1521,6 +1715,83 @@ func TestCLIClientQueryCommand(t *testing.T) {
 		report := doc["report"].(map[string]any)
 		if report["region"] != "emea" {
 			t.Fatalf("file %s expected region emea, got %v", name, report["region"])
+		}
+	}
+}
+
+func TestCLIClientQueryAnySelectorUsesIndexResults(t *testing.T) {
+	t.Setenv("LOCKD_CONFIG", "")
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	ts := startCLITestServer(t)
+	serverURL := ts.URL()
+	t.Setenv("LOCKD_CLIENT_SERVER", serverURL)
+	t.Setenv("LOCKD_CLIENT_DISABLE_MTLS", "1")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := ts.Client.UpdateNamespaceConfig(ctx, api.NamespaceConfigRequest{
+		Namespace: namespaces.Default,
+		Query: &api.NamespaceQueryConfig{
+			PreferredEngine: "index",
+			FallbackEngine:  "none",
+		},
+	}, client.NamespaceConfigOptions{})
+	if err != nil {
+		t.Fatalf("set namespace config: %v", err)
+	}
+
+	seed := func(key string, summary string) {
+		t.Helper()
+		lease, err := ts.Client.Acquire(ctx, api.AcquireRequest{
+			Namespace:  namespaces.Default,
+			Key:        key,
+			Owner:      "cli-query-any",
+			TTLSeconds: 60,
+			BlockSecs:  client.BlockNoWait,
+		})
+		if err != nil {
+			t.Fatalf("acquire %s: %v", key, err)
+		}
+		body := map[string]any{"summary": summary}
+		if err := lease.Save(ctx, body); err != nil {
+			lease.Release(ctx)
+			t.Fatalf("save %s: %v", key, err)
+		}
+		if err := lease.Release(ctx); err != nil {
+			t.Fatalf("release %s: %v", key, err)
+		}
+	}
+
+	seed("cli-query-any-match", "timeout marker")
+	seed("cli-query-any-miss", "nothing useful")
+
+	if _, err := ts.Client.FlushIndex(ctx, namespaces.Default, client.WithFlushModeWait()); err != nil {
+		t.Fatalf("flush index: %v", err)
+	}
+
+	cases := []string{
+		`icontains{f=/...,any="timeout|missing"}`,
+		`icontains{f=/...,any=timeout|missing}`,
+	}
+	for _, expr := range cases {
+		outJSON, _ := runCLICommandOutput(t,
+			"client",
+			"--server", serverURL,
+			"--disable-mtls",
+			"query",
+			"--namespace", namespaces.Default,
+			expr,
+		)
+
+		var keyList []string
+		if err := json.Unmarshal([]byte(strings.TrimSpace(outJSON)), &keyList); err != nil {
+			t.Fatalf("decode key list for %q: %v", expr, err)
+		}
+		if !stringSetEqual(keyList, []string{"cli-query-any-match"}) {
+			t.Fatalf("unexpected keys for any selector %q: %v", expr, keyList)
 		}
 	}
 }

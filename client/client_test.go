@@ -29,6 +29,7 @@ import (
 	"pkt.systems/lockd/client"
 	"pkt.systems/lockd/namespaces"
 	"pkt.systems/lockd/tlsutil"
+	"pkt.systems/lql"
 	"pkt.systems/pslog"
 )
 
@@ -4964,9 +4965,13 @@ func TestClientFlushIndexEnablesQueryResults(t *testing.T) {
 	if err := lease.Release(ctx); err != nil {
 		t.Fatalf("release: %v", err)
 	}
+	selector, err := lql.ParseSelectorString(`eq{field=/status,value=ready}`)
+	if err != nil || selector.IsEmpty() {
+		t.Fatalf("parse selector: %v", err)
+	}
 	queryReq := api.QueryRequest{
 		Namespace: namespaces.Default,
-		Selector:  api.Selector{Eq: &api.Term{Field: "/status", Value: "ready"}},
+		Selector:  selector,
 	}
 	baseURL := ts.URL()
 	initial := performQuery(t, httpClient, baseURL, queryReq, "index")
@@ -5076,6 +5081,88 @@ func TestClientQuery(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("expected 1 row, got %d", count)
+	}
+}
+
+func TestClientQueryIndexAnySelectorEndToEnd(t *testing.T) {
+	ts := lockd.StartTestServer(t,
+		lockd.WithTestCloseDefaults(lockd.WithDrainLeases(0), lockd.WithShutdownTimeout(500*time.Millisecond)),
+	)
+	cli := ts.Client
+	if cli == nil {
+		var err error
+		cli, err = ts.NewClient()
+		if err != nil {
+			t.Fatalf("new client: %v", err)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err := cli.UpdateNamespaceConfig(ctx, api.NamespaceConfigRequest{
+		Namespace: namespaces.Default,
+		Query: &api.NamespaceQueryConfig{
+			PreferredEngine: "index",
+			FallbackEngine:  "none",
+		},
+	}, client.NamespaceConfigOptions{})
+	if err != nil {
+		t.Fatalf("set namespace config: %v", err)
+	}
+
+	seed := func(key string, doc map[string]any) {
+		t.Helper()
+		lease, err := cli.Acquire(ctx, api.AcquireRequest{
+			Namespace:  namespaces.Default,
+			Key:        key,
+			Owner:      "client-query-any",
+			TTLSeconds: 30,
+			BlockSecs:  client.BlockNoWait,
+		})
+		if err != nil {
+			t.Fatalf("acquire %s: %v", key, err)
+		}
+		if err := lease.Save(ctx, doc); err != nil {
+			lease.Release(ctx)
+			t.Fatalf("save %s: %v", key, err)
+		}
+		if err := lease.Release(ctx); err != nil {
+			t.Fatalf("release %s: %v", key, err)
+		}
+	}
+
+	seed("doc-any-match", map[string]any{"summary": "timeout marker"})
+	seed("doc-any-miss", map[string]any{"summary": "nothing useful"})
+
+	flushResp, err := cli.FlushIndex(ctx, namespaces.Default, client.WithFlushModeWait())
+	if err != nil {
+		t.Fatalf("flush index: %v", err)
+	}
+	if !flushResp.Flushed {
+		t.Fatalf("expected flushed response, got %+v", flushResp)
+	}
+
+	cases := []string{
+		`icontains{f=/...,any="timeout|missing"}`,
+		`icontains{f=/...,any=timeout|missing}`,
+	}
+	for _, expr := range cases {
+		resp, err := cli.Query(ctx,
+			client.WithQueryNamespace(namespaces.Default),
+			client.WithQuery(expr),
+			client.WithQueryEngineIndex(),
+			client.WithQueryRefreshWaitFor(),
+		)
+		if err != nil {
+			t.Fatalf("query any selector %q: %v", expr, err)
+		}
+		keys := resp.Keys()
+		resp.Close()
+
+		if len(keys) != 1 || keys[0] != "doc-any-match" {
+			t.Fatalf("unexpected keys for any selector %q: %v", expr, keys)
+		}
 	}
 }
 

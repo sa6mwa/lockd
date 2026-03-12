@@ -9,7 +9,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     --mount=type=bind,source=.,target=/src/lockd,readonly \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -trimpath -ldflags="-s -w" -o /out/lockd ./cmd/lockd
+    go build -a -trimpath -ldflags="-s -w" -o /out/lockd ./cmd/lockd
 
 FROM scratch
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/

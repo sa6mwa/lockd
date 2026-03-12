@@ -1,7 +1,9 @@
 package index
 
 import (
+	"fmt"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -143,5 +145,73 @@ func TestMemTableFlushTransfersPostingsAndResets(t *testing.T) {
 	}
 	if got := seg.Fields["field"].Postings["a"]; !reflect.DeepEqual(got, []string{"k1", "k2"}) {
 		t.Fatalf("segment postings mutated after reset: %v", got)
+	}
+}
+
+func TestMemTableRepeatedTrigramsRecordedOncePerDocument(t *testing.T) {
+	m := NewMemTable()
+	const (
+		docCount    = 4
+		payloadSize = 1 << 20
+	)
+	payload := strings.Repeat("x", payloadSize)
+	gramField := containsGramField("/message")
+
+	for i := 0; i < docCount; i++ {
+		doc := Document{Key: fmt.Sprintf("doc-%d", i)}
+		doc.AddString("/message", payload)
+		for field, terms := range doc.Fields {
+			if !m.AddTerms(field, terms, doc.Key) {
+				t.Fatalf("expected indexed terms for %s", field)
+			}
+		}
+		m.TrackDoc(doc.Key)
+	}
+
+	got := m.fields[gramField]["xxx"]
+	want := []string{"doc-0", "doc-1", "doc-2", "doc-3"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected trigram postings: got len=%d want=%d", len(got), len(want))
+	}
+}
+
+func TestMemTableLargeRepeatedStringTotalAllocBounded(t *testing.T) {
+	const (
+		docCount    = 4
+		payloadSize = 1 << 20
+		allocCap    = uint64(24 << 20)
+	)
+	payload := strings.Repeat("x", payloadSize)
+
+	run := func() int {
+		m := NewMemTable()
+		for i := 0; i < docCount; i++ {
+			doc := Document{Key: fmt.Sprintf("doc-%d", i)}
+			doc.AddString("/message", payload)
+			for field, terms := range doc.Fields {
+				m.AddTerms(field, terms, doc.Key)
+			}
+			m.TrackDoc(doc.Key)
+		}
+		return len(m.fields[containsGramField("/message")]["xxx"])
+	}
+
+	if got := run(); got != docCount {
+		t.Fatalf("warm trigram postings mismatch: got=%d want=%d", got, docCount)
+	}
+
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	if got := run(); got != docCount {
+		t.Fatalf("trigram postings mismatch: got=%d want=%d", got, docCount)
+	}
+
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	delta := after.TotalAlloc - before.TotalAlloc
+	if delta > allocCap {
+		t.Fatalf("repeated-string indexing alloc too large: got=%d cap=%d payload=%d docs=%d", delta, allocCap, payloadSize, docCount)
 	}
 }

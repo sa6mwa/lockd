@@ -9,6 +9,8 @@ import (
 	"math/rand"
 	"slices"
 	"sort"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,45 +31,22 @@ type parityHarness struct {
 
 func TestIndexScanParitySyntheticCorpus(t *testing.T) {
 	h := newParityHarness(t, buildSyntheticParityDocs(180))
-	cases := []api.Selector{
-		{Eq: &api.Term{Field: "/status", Value: "open"}},
-		{Prefix: &api.Term{Field: "/owner", Value: "ali"}},
-		{IPrefix: &api.Term{Field: "/owner", Value: "ALI"}},
-		{Range: &api.RangeTerm{
-			Field: "/metrics/amount",
-			GTE:   api.NewNumericRangeBound(100),
-			LT:    api.NewNumericRangeBound(300),
-		}},
-		{In: &api.InTerm{Field: "/region", Any: []string{"us", "eu"}}},
-		{Exists: "/flags/priority"},
-		{Contains: &api.Term{Field: "/logs/*/message", Value: "timeout"}},
-		{IContains: &api.Term{Field: "/logs/.../message", Value: "TIMEOUT"}},
-		{
-			And: []api.Selector{
-				{Eq: &api.Term{Field: "/status", Value: "open"}},
-				{Range: &api.RangeTerm{Field: "/metrics/amount", GTE: api.NewNumericRangeBound(100)}},
-			},
-		},
-		{
-			Or: []api.Selector{
-				{Eq: &api.Term{Field: "/owner", Value: "alice"}},
-				{Eq: &api.Term{Field: "/owner", Value: "bob"}},
-			},
-		},
-		{
-			And: []api.Selector{
-				{IContains: &api.Term{Field: "/logs/.../message", Value: "timeout"}},
-				{
-					Not: &api.Selector{
-						Eq: &api.Term{Field: "/status", Value: "closed"},
-					},
-				},
-			},
-		},
+	cases := []string{
+		`eq{field=/status,value=open}`,
+		`prefix{field=/owner,value=ali}`,
+		`iprefix{field=/owner,value=ALI}`,
+		`range{field=/metrics/amount,gte=100,lt=300}`,
+		`in{field=/region,any=us|eu}`,
+		`exists{/flags/priority}`,
+		`contains{field=/logs/*/message,value=timeout}`,
+		`icontains{field=/logs/.../message,value=TIMEOUT}`,
+		`and.eq{field=/status,value=open},and.range{field=/metrics/amount,gte=100}`,
+		`or.eq{field=/owner,value=alice},or.eq{field=/owner,value=bob}`,
+		`and.icontains{field=/logs/.../message,value=timeout},and.not.eq{field=/status,value=closed}`,
 	}
-	for i, sel := range cases {
+	for i, expr := range cases {
 		t.Run(fmt.Sprintf("selector-%02d", i), func(t *testing.T) {
-			h.assertParity(t, sel)
+			h.assertParity(t, mustParseSelector(t, expr))
 		})
 	}
 }
@@ -76,61 +55,23 @@ func TestIndexScanParityNestedRandomSelectors(t *testing.T) {
 	h := newParityHarness(t, buildSyntheticParityDocs(220))
 	rng := rand.New(rand.NewSource(42))
 	for i := 0; i < 140; i++ {
-		sel := randomSelector(rng, 0, 3)
+		expr := randomSelectorExpr(rng, 0, 3)
 		t.Run(fmt.Sprintf("random-%03d", i), func(t *testing.T) {
-			h.assertParity(t, sel)
+			h.assertParity(t, mustParseSelector(t, expr))
 		})
 	}
 }
 
 func TestIndexScanParityMixedFamilySelectors(t *testing.T) {
 	h := newParityHarness(t, buildSyntheticParityDocs(220))
-	cases := []api.Selector{
-		{
-			And: []api.Selector{
-				{Eq: &api.Term{Field: "/status", Value: "open"}},
-				{In: &api.InTerm{Field: "/region", Any: []string{"us", "eu"}}},
-				{Exists: "/flags/priority"},
-				{Range: &api.RangeTerm{Field: "/metrics/amount", GTE: api.NewNumericRangeBound(100)}},
-				{Contains: &api.Term{Field: "/logs/*/message", Value: "timeout"}},
-			},
-		},
-		{
-			And: []api.Selector{
-				{IPrefix: &api.Term{Field: "/owner", Value: "A"}},
-				{
-					Or: []api.Selector{
-						{IContains: &api.Term{Field: "/logs/.../message", Value: "timeout"}},
-						{Eq: &api.Term{Field: "/status", Value: "pending"}},
-					},
-				},
-				{
-					Not: &api.Selector{
-						Eq: &api.Term{Field: "/region", Value: "apac"},
-					},
-				},
-			},
-		},
-		{
-			Or: []api.Selector{
-				{
-					And: []api.Selector{
-						{Eq: &api.Term{Field: "/status", Value: "closed"}},
-						{Range: &api.RangeTerm{Field: "/metrics/amount", LT: api.NewNumericRangeBound(100)}},
-					},
-				},
-				{
-					And: []api.Selector{
-						{Eq: &api.Term{Field: "/status", Value: "open"}},
-						{Contains: &api.Term{Field: "/logs/*/message", Value: "slow"}},
-					},
-				},
-			},
-		},
+	cases := []string{
+		`and.eq{field=/status,value=open},and.in{field=/region,any=us|eu},and.exists{/flags/priority},and.range{field=/metrics/amount,gte=100},and.contains{field=/logs/*/message,value=timeout}`,
+		`and.iprefix{field=/owner,value=A},and.or.0.icontains{field=/logs/.../message,value=timeout},and.or.1.eq{field=/status,value=pending},and.not.eq{field=/region,value=apac}`,
+		`or.0.eq{field=/status,value=closed},or.0.range{field=/metrics/amount,lt=100},or.1.eq{field=/status,value=open},or.1.contains{field=/logs/*/message,value=slow}`,
 	}
-	for i, sel := range cases {
+	for i, expr := range cases {
 		t.Run(fmt.Sprintf("mixed-%02d", i), func(t *testing.T) {
-			h.assertParity(t, sel)
+			h.assertParity(t, mustParseSelector(t, expr))
 		})
 	}
 }
@@ -154,11 +95,7 @@ func TestIndexScanParityTemporalSelectors(t *testing.T) {
 	}
 	for i, expr := range cases {
 		t.Run(fmt.Sprintf("temporal-%02d", i), func(t *testing.T) {
-			sel, err := lql.ParseSelectorString(expr)
-			if err != nil {
-				t.Fatalf("parse selector %q: %v", expr, err)
-			}
-			h.assertParity(t, sel)
+			h.assertParity(t, mustParseSelector(t, expr))
 		})
 	}
 }
@@ -174,29 +111,31 @@ func TestIndexScanParityMalformedAndEscapedPointers(t *testing.T) {
 	h := newParityHarness(t, docs)
 
 	t.Run("escaped-pointer", func(t *testing.T) {
-		h.assertParity(t, api.Selector{
-			Eq: &api.Term{Field: "/meta/x~1y", Value: "slash-value"},
-		})
+		h.assertParity(t, mustParseSelector(t, `eq{field=/meta/x~1y,value=slash-value}`))
 	})
 
-	edgeCases := []api.Selector{
-		{Eq: &api.Term{Field: "/meta/~", Value: "x"}},
-		{Contains: &api.Term{Field: "/logs/~2/message", Value: "timeout"}},
-		{Exists: "/bad/~"},
+	edgeCases := []string{
+		`eq{field=/meta/~,value=x}`,
+		`contains{field=/logs/~2/message,value=timeout}`,
+		`exists{/bad/~}`,
 	}
-	for i, sel := range edgeCases {
+	for i, expr := range edgeCases {
 		t.Run(fmt.Sprintf("edge-%02d", i), func(t *testing.T) {
-			h.assertParity(t, sel)
+			h.assertParity(t, mustParseSelector(t, expr))
 		})
 	}
 
-	invalidCases := []api.Selector{
-		{Eq: &api.Term{Field: "meta/status", Value: "open"}},
-		{Contains: &api.Term{Field: "logs/*/message", Value: "timeout"}},
-		{Exists: "flags/priority"},
+	invalidCases := []string{
+		`eq{field=meta/status,value=open}`,
+		`contains{field=logs/*/message,value=timeout}`,
+		`exists{flags/priority}`,
 	}
-	for i, sel := range invalidCases {
+	for i, expr := range invalidCases {
 		t.Run(fmt.Sprintf("invalid-%02d", i), func(t *testing.T) {
+			sel, err := lql.ParseSelectorString(expr)
+			if err != nil {
+				t.Fatalf("parse selector %q: %v", expr, err)
+			}
 			ctx := context.Background()
 			req := search.Request{
 				Namespace: namespaces.Default,
@@ -247,14 +186,14 @@ func TestIndexScanParityRecursiveNumericSegments(t *testing.T) {
 	}
 	h := newParityHarness(t, docs)
 
-	cases := []api.Selector{
-		{IContains: &api.Term{Field: "/events/.../message", Value: "TIMEOUT"}},
-		{Contains: &api.Term{Field: "/events/*/message", Value: "timeout"}},
-		{Eq: &api.Term{Field: "/events/.../code", Value: "E42"}},
+	cases := []string{
+		`icontains{field=/events/.../message,value=TIMEOUT}`,
+		`contains{field=/events/*/message,value=timeout}`,
+		`eq{field=/events/.../code,value=E42}`,
 	}
-	for i, sel := range cases {
+	for i, expr := range cases {
 		t.Run(fmt.Sprintf("numeric-%02d", i), func(t *testing.T) {
-			h.assertParity(t, sel)
+			h.assertParity(t, mustParseSelector(t, expr))
 		})
 	}
 }
@@ -283,11 +222,66 @@ func TestIndexScanParityStringTermValueIntentAfterJSONRoundTrip(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			sel, err := lql.ParseSelectorString(tc.expr)
-			if err != nil || sel.IsEmpty() {
-				t.Fatalf("parse selector %q: %v", tc.expr, err)
+			sel := selectorJSONRoundTrip(t, mustParseSelector(t, tc.expr))
+			h.assertParity(t, sel)
+
+			indexKeys, _ := h.collectPaged(t, sel, 16, search.EngineIndex)
+			scanKeys, _ := h.collectPaged(t, sel, 16, search.EngineScan)
+			sort.Strings(indexKeys)
+			sort.Strings(scanKeys)
+			want := append([]string(nil), tc.want...)
+			sort.Strings(want)
+			if !slices.Equal(indexKeys, want) {
+				t.Fatalf("index keys mismatch for %q: got=%v want=%v", tc.expr, indexKeys, want)
 			}
-			sel = selectorJSONRoundTrip(t, sel)
+			if !slices.Equal(scanKeys, want) {
+				t.Fatalf("scan keys mismatch for %q: got=%v want=%v", tc.expr, scanKeys, want)
+			}
+		})
+	}
+}
+
+func TestIndexScanParityContainsAnyAfterJSONRoundTrip(t *testing.T) {
+	docs := map[string]map[string]any{
+		"doc-alpha": {"summary": "hjpijs signal"},
+		"doc-beta": {
+			"nested": map[string]any{
+				"note": "HMM escalation",
+			},
+		},
+		"doc-gamma": {"summary": "unrelated content"},
+	}
+	h := newParityHarness(t, docs)
+	cases := []struct {
+		name string
+		expr string
+		want []string
+	}{
+		{
+			name: "contains_any_quoted",
+			expr: `contains{f=/summary,a="hjpijs|missing"}`,
+			want: []string{"doc-alpha"},
+		},
+		{
+			name: "contains_any_unquoted",
+			expr: `contains{f=/summary,a=hjpijs|missing}`,
+			want: []string{"doc-alpha"},
+		},
+		{
+			name: "icontains_any_recursive_quoted",
+			expr: `icontains{f=/...,a="hjpijs|hmm"}`,
+			want: []string{"doc-alpha", "doc-beta"},
+		},
+		{
+			name: "icontains_any_recursive_unquoted",
+			expr: `icontains{f=/...,a=hjpijs|hmm}`,
+			want: []string{"doc-alpha", "doc-beta"},
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			sel := selectorJSONRoundTrip(t, mustParseSelector(t, tc.expr))
 			h.assertParity(t, sel)
 
 			indexKeys, _ := h.collectPaged(t, sel, 16, search.EngineIndex)
@@ -308,12 +302,13 @@ func TestIndexScanParityStringTermValueIntentAfterJSONRoundTrip(t *testing.T) {
 
 func TestIndexScanParityWildcardOrderingAndCursor(t *testing.T) {
 	h := newParityHarness(t, buildSyntheticParityDocs(260))
-	cases := []api.Selector{
-		{Contains: &api.Term{Field: "/logs/*/message", Value: "timeout"}},
-		{IContains: &api.Term{Field: "/logs/.../message", Value: "TIMEOUT"}},
+	cases := []string{
+		`contains{field=/logs/*/message,value=timeout}`,
+		`icontains{field=/logs/.../message,value=TIMEOUT}`,
 	}
-	for i, sel := range cases {
+	for i, expr := range cases {
 		t.Run(fmt.Sprintf("ordering-%02d", i), func(t *testing.T) {
+			sel := mustParseSelector(t, expr)
 			indexKeysA, indexCursorsA := h.collectPaged(t, sel, 9, search.EngineIndex)
 			indexKeysB, indexCursorsB := h.collectPaged(t, sel, 9, search.EngineIndex)
 			scanKeys, _ := h.collectPaged(t, sel, 9, search.EngineScan)
@@ -354,20 +349,15 @@ func TestIndexScanParityPartialSegmentCoverage(t *testing.T) {
 	}
 	h := newParityHarnessSegmented(t, docs, 5)
 
-	cases := []api.Selector{
-		{Exists: "/logs/a/message"},
-		{Contains: &api.Term{Field: "/logs/*/message", Value: "timeout"}},
-		{Exists: "/flags/priority"},
-		{
-			And: []api.Selector{
-				{Eq: &api.Term{Field: "/status", Value: "open"}},
-				{Exists: "/logs/a/message"},
-			},
-		},
+	cases := []string{
+		`exists{/logs/a/message}`,
+		`contains{field=/logs/*/message,value=timeout}`,
+		`exists{/flags/priority}`,
+		`and.eq{field=/status,value=open},and.exists{/logs/a/message}`,
 	}
-	for i, sel := range cases {
+	for i, expr := range cases {
 		t.Run(fmt.Sprintf("partial-%02d", i), func(t *testing.T) {
-			h.assertParity(t, sel)
+			h.assertParity(t, mustParseSelector(t, expr))
 		})
 	}
 }
@@ -667,66 +657,131 @@ func buildSyntheticParityDocs(count int) map[string]map[string]any {
 	return docs
 }
 
-func randomSelector(rng *rand.Rand, depth, maxDepth int) api.Selector {
+func randomSelectorExpr(rng *rand.Rand, depth, maxDepth int) string {
 	if depth >= maxDepth {
-		return randomLeafSelector(rng)
+		return randomLeafSelectorExpr(rng)
 	}
 	switch rng.Intn(6) {
 	case 0:
-		return randomLeafSelector(rng)
+		return randomLeafSelectorExpr(rng)
 	case 1:
-		return api.Selector{
-			And: []api.Selector{
-				randomSelector(rng, depth+1, maxDepth),
-				randomSelector(rng, depth+1, maxDepth),
-			},
-		}
+		return aggregateSelectorExpr("and",
+			randomSelectorExpr(rng, depth+1, maxDepth),
+			randomSelectorExpr(rng, depth+1, maxDepth),
+		)
 	case 2:
-		return api.Selector{
-			Or: []api.Selector{
-				randomSelector(rng, depth+1, maxDepth),
-				randomSelector(rng, depth+1, maxDepth),
-			},
-		}
+		return aggregateSelectorExpr("or",
+			randomSelectorExpr(rng, depth+1, maxDepth),
+			randomSelectorExpr(rng, depth+1, maxDepth),
+		)
 	case 3:
-		child := randomSelector(rng, depth+1, maxDepth)
-		return api.Selector{Not: &child}
+		return prefixSelectorExpr("not", randomSelectorExpr(rng, depth+1, maxDepth))
 	default:
-		return api.Selector{
-			And: []api.Selector{
-				randomLeafSelector(rng),
-				{
-					Or: []api.Selector{
-						randomLeafSelector(rng),
-						randomLeafSelector(rng),
-					},
-				},
-			},
-		}
+		return aggregateSelectorExpr("and",
+			randomLeafSelectorExpr(rng),
+			aggregateSelectorExpr("or", randomLeafSelectorExpr(rng), randomLeafSelectorExpr(rng)),
+		)
 	}
 }
 
-func randomLeafSelector(rng *rand.Rand) api.Selector {
-	switch rng.Intn(8) {
+func randomLeafSelectorExpr(rng *rand.Rand) string {
+	switch rng.Intn(10) {
 	case 0:
 		statuses := []string{"open", "closed", "pending"}
-		return api.Selector{Eq: &api.Term{Field: "/status", Value: statuses[rng.Intn(len(statuses))]}}
+		return fmt.Sprintf(`eq{field=/status,value=%s}`, statuses[rng.Intn(len(statuses))])
 	case 1:
 		owners := []string{"alice", "bob", "carlos", "dina"}
-		return api.Selector{Prefix: &api.Term{Field: "/owner", Value: owners[rng.Intn(len(owners))][:1]}}
+		return fmt.Sprintf(`prefix{field=/owner,value=%s}`, owners[rng.Intn(len(owners))][:1])
 	case 2:
 		regions := []string{"us", "eu", "apac"}
-		return api.Selector{In: &api.InTerm{Field: "/region", Any: regions[:2+rng.Intn(2)]}}
+		if rng.Intn(2) == 0 {
+			return fmt.Sprintf(`in{field=/region,any=%s}`, strings.Join(regions[:2+rng.Intn(2)], "|"))
+		}
+		return fmt.Sprintf(`in{field=/region,any="%s"}`, strings.Join(regions[:2+rng.Intn(2)], "|"))
 	case 3:
 		minVal := float64(rng.Intn(400))
-		return api.Selector{Range: &api.RangeTerm{Field: "/metrics/amount", GTE: api.NewNumericRangeBound(minVal)}}
+		return fmt.Sprintf(`range{field=/metrics/amount,gte=%s}`, strconv.FormatFloat(minVal, 'f', -1, 64))
 	case 4:
-		return api.Selector{Exists: "/flags/priority"}
+		return `exists{/flags/priority}`
 	case 5:
-		return api.Selector{Contains: &api.Term{Field: "/logs/*/message", Value: "timeout"}}
+		return `contains{field=/logs/*/message,value=timeout}`
 	case 6:
-		return api.Selector{IContains: &api.Term{Field: "/logs/.../message", Value: "TIMEOUT"}}
+		return `icontains{field=/logs/.../message,value=TIMEOUT}`
+	case 7:
+		if rng.Intn(2) == 0 {
+			return `contains{field=/logs/*/message,any=timeout|slow}`
+		}
+		return `contains{field=/logs/*/message,any="timeout|slow"}`
+	case 8:
+		if rng.Intn(2) == 0 {
+			return `icontains{field=/logs/.../message,any=TIMEOUT|SLOW}`
+		}
+		return `icontains{field=/logs/.../message,any="TIMEOUT|SLOW"}`
 	default:
-		return api.Selector{Eq: &api.Term{Field: "/records[]/status", Value: "open"}}
+		return `eq{field=/records[]/status,value=open}`
 	}
+}
+
+func aggregateSelectorExpr(op string, exprs ...string) string {
+	clauses := make([]string, 0, len(exprs)*2)
+	for i, expr := range exprs {
+		clauses = append(clauses, splitAndPrefixSelectorExpr(op+"."+strconv.Itoa(i), expr)...)
+	}
+	return strings.Join(clauses, ",")
+}
+
+func prefixSelectorExpr(prefix, expr string) string {
+	return strings.Join(splitAndPrefixSelectorExpr(prefix, expr), ",")
+}
+
+func splitAndPrefixSelectorExpr(prefix, expr string) []string {
+	tokens := splitSelectorExprTokens(expr)
+	out := make([]string, 0, len(tokens))
+	for _, token := range tokens {
+		token = strings.TrimSpace(token)
+		if token == "" {
+			continue
+		}
+		out = append(out, prefix+"."+token)
+	}
+	return out
+}
+
+func splitSelectorExprTokens(expr string) []string {
+	var (
+		tokens   []string
+		start    int
+		depth    int
+		inQuotes bool
+		quote    rune
+	)
+	for i, r := range expr {
+		switch r {
+		case '\'', '"':
+			if !inQuotes {
+				inQuotes = true
+				quote = r
+			} else if quote == r {
+				inQuotes = false
+				quote = 0
+			}
+		case '{':
+			if !inQuotes {
+				depth++
+			}
+		case '}':
+			if !inQuotes && depth > 0 {
+				depth--
+			}
+		case ',', '\n':
+			if !inQuotes && depth == 0 {
+				tokens = append(tokens, expr[start:i])
+				start = i + 1
+			}
+		}
+	}
+	if start <= len(expr) {
+		tokens = append(tokens, expr[start:])
+	}
+	return tokens
 }

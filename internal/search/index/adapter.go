@@ -976,6 +976,11 @@ func (r *segmentReader) docIDsForPrefix(ctx context.Context, term *api.Term) (do
 }
 
 func (r *segmentReader) docIDsForContains(ctx context.Context, term *api.Term, useTrigramIndex bool) (docIDSet, error) {
+	if len(term.Any) > 0 {
+		return r.docIDsForStringTermAny(ctx, term, func(ctx context.Context, candidate *api.Term) (docIDSet, error) {
+			return r.docIDsForContains(ctx, candidate, useTrigramIndex)
+		})
+	}
 	fields, err := r.resolveSelectorFields(ctx, normalizeField(term))
 	if err != nil {
 		return nil, err
@@ -1011,6 +1016,11 @@ func (r *segmentReader) docIDsForContains(ctx context.Context, term *api.Term, u
 }
 
 func (r *segmentReader) docIDsForIContains(ctx context.Context, term *api.Term, useTrigramIndex bool) (docIDSet, error) {
+	if len(term.Any) > 0 {
+		return r.docIDsForStringTermAny(ctx, term, func(ctx context.Context, candidate *api.Term) (docIDSet, error) {
+			return r.docIDsForIContains(ctx, candidate, useTrigramIndex)
+		})
+	}
 	normalizedField := normalizeField(term)
 	fields, err := r.resolveSelectorFields(ctx, normalizedField)
 	if err != nil {
@@ -1072,6 +1082,33 @@ func (r *segmentReader) docIDsForIContains(ctx context.Context, term *api.Term, 
 		*out = append(*out, set...)
 	}
 	return sortUniqueDocIDs(append(docIDSet(nil), (*out)...)), nil
+}
+
+func (r *segmentReader) docIDsForStringTermAny(
+	ctx context.Context,
+	term *api.Term,
+	resolve func(context.Context, *api.Term) (docIDSet, error),
+) (docIDSet, error) {
+	if term == nil || len(term.Any) == 0 {
+		return nil, nil
+	}
+	acc := borrowDocIDAccumulator()
+	defer releaseDocIDAccumulator(acc)
+	candidate := *term
+	candidate.Any = nil
+	for _, raw := range term.Any {
+		value := strings.TrimSpace(raw)
+		if value == "" {
+			continue
+		}
+		candidate.Value = value
+		set, err := resolve(ctx, &candidate)
+		if err != nil {
+			return nil, err
+		}
+		acc.union(set)
+	}
+	return acc.result(), nil
 }
 
 func (r *segmentReader) tokenPrefilterForField(ctx context.Context, field string, tokens []string, useAllText bool) (docIDSet, bool, error) {

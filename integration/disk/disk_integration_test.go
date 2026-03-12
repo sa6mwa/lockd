@@ -2462,6 +2462,27 @@ func TestDiskRejectsReservedNamespace(t *testing.T) {
 	}
 }
 
+func TestDiskMutateLocalStreamsFileBackedValues(t *testing.T) {
+	ensureDiskRootEnv(t)
+	root := prepareDiskRoot(t, "")
+	cfg := buildDiskConfig(t, root, 0)
+	locktest.RunMutateLocalFileUpload(t, locktest.MutateLocalFileUploadConfig{
+		Client:       startDiskServer(t, cfg),
+		KeyPrefix:    "disk-local-mutate",
+		OwnerPrefix:  "disk-local-mutate",
+		FixtureName:  "blob.bin",
+		FixtureBytes: []byte{0x00, 0x01, 0x02, 'a'},
+		Mutations: []string{
+			`base64file:/payload=blob.bin`,
+			`/filename=blob.bin`,
+		},
+		ExpectedFields: map[string]any{
+			"filename": "blob.bin",
+			"payload":  "AAECYQ==",
+		},
+	})
+}
+
 func diskTestLoggerOption(tb testing.TB) lockd.TestServerOption {
 	tb.Helper()
 	levelStr := os.Getenv("LOCKD_BENCH_LOG_LEVEL")

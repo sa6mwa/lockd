@@ -1545,6 +1545,38 @@ func TestMutateRejectsNonObjectState(t *testing.T) {
 	}
 }
 
+func TestMutateRejectsFileBackedMutation(t *testing.T) {
+	server := newTestHTTPServer(t)
+
+	req := api.AcquireRequest{Key: "stream-mutate-file", Owner: "worker-a", TTLSeconds: 5}
+	var acquire api.AcquireResponse
+	if status := doJSON(t, server, http.MethodPost, "/v1/acquire", nil, req, &acquire); status != http.StatusOK {
+		t.Fatalf("acquire: expected 200, got %d", status)
+	}
+
+	headers := map[string]string{
+		"X-Lease-ID":      acquire.LeaseID,
+		"X-Txn-ID":        acquire.TxnID,
+		"X-Fencing-Token": strconv.FormatInt(acquire.FencingToken, 10),
+	}
+	if status := doJSON(t, server, http.MethodPost, "/v1/update?key=stream-mutate-file", headers, map[string]any{
+		"status": "initial",
+	}, nil); status != http.StatusOK {
+		t.Fatalf("update state: expected 200, got %d", status)
+	}
+
+	var errResp api.ErrorResponse
+	status := doJSON(t, server, http.MethodPost, "/v1/mutate?key=stream-mutate-file", headers, api.MutateRequest{
+		Mutations: []string{`file:/payload=blob.txt`},
+	}, &errResp)
+	if status != http.StatusBadRequest {
+		t.Fatalf("expected mutate 400 for file-backed mutation, got %d", status)
+	}
+	if errResp.ErrorCode != "invalid_mutations" {
+		t.Fatalf("expected invalid_mutations, got %s", errResp.ErrorCode)
+	}
+}
+
 func TestConvertMutateStreamErrorMapping(t *testing.T) {
 	tests := []struct {
 		name       string

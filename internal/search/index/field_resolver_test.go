@@ -7,43 +7,31 @@ import (
 	"testing"
 	"time"
 
-	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/internal/search"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/memory"
 	"pkt.systems/lockd/namespaces"
-	"pkt.systems/lql"
 )
 
 func TestSelectorSupportsLegacyIndexFilterAllowsWildcard(t *testing.T) {
-	if !selectorSupportsLegacyIndexFilter(api.Selector{
-		Contains: &api.Term{Field: "/logs/*/message", Value: "timeout"},
-	}) {
+	if !selectorSupportsLegacyIndexFilter(mustParseSelector(t, `contains{field=/logs/*/message,value=timeout}`)) {
 		t.Fatalf("expected wildcard selector to be index-supported")
 	}
 }
 
 func TestSelectorSupportsLegacyIndexFilterAllowsRecursive(t *testing.T) {
-	if !selectorSupportsLegacyIndexFilter(api.Selector{
-		Contains: &api.Term{Field: "/logs/**/message", Value: "timeout"},
-	}) {
+	if !selectorSupportsLegacyIndexFilter(mustParseSelector(t, `contains{field=/logs/**/message,value=timeout}`)) {
 		t.Fatalf("expected recursive selector to be index-supported")
 	}
 }
 
 func TestSelectorSupportsLegacyIndexFilterAllowsTemporalFamilies(t *testing.T) {
-	rangeSel, err := lql.ParseSelectorString(`/timestamp>=2026-03-05T10:28:21Z`)
-	if err != nil {
-		t.Fatalf("parse temporal range selector: %v", err)
-	}
+	rangeSel := mustParseSelector(t, `/timestamp>=2026-03-05T10:28:21Z`)
 	if !selectorSupportsLegacyIndexFilter(rangeSel) {
 		t.Fatalf("expected datetime range selector to be index-supported")
 	}
 
-	dateSel, err := lql.ParseSelectorString(`date{f=/timestamp,a=2026-03-05,b=2026-03-07}`)
-	if err != nil {
-		t.Fatalf("parse date selector: %v", err)
-	}
+	dateSel := mustParseSelector(t, `date{f=/timestamp,a=2026-03-05,b=2026-03-07}`)
 	if !selectorSupportsLegacyIndexFilter(dateSel) {
 		t.Fatalf("expected date selector to be index-supported")
 	}
@@ -61,10 +49,7 @@ func TestSelectorSupportsLegacyIndexFilterRejectsExplicitEmptyStringTerms(t *tes
 		expr := expr
 		t.Run(expr, func(t *testing.T) {
 			t.Parallel()
-			sel, err := lql.ParseSelectorString(expr)
-			if err != nil {
-				t.Fatalf("parse selector %q: %v", expr, err)
-			}
+			sel := mustParseSelector(t, expr)
 			if selectorSupportsLegacyIndexFilter(sel) {
 				t.Fatalf("expected explicit-empty selector %q to require LQL post-eval", expr)
 			}
@@ -84,10 +69,7 @@ func TestSelectorSupportsLegacyIndexFilterAllowsOmittedStringTermAssertions(t *t
 		expr := expr
 		t.Run(expr, func(t *testing.T) {
 			t.Parallel()
-			sel, err := lql.ParseSelectorString(expr)
-			if err != nil {
-				t.Fatalf("parse selector %q: %v", expr, err)
-			}
+			sel := mustParseSelector(t, expr)
 			if !selectorSupportsLegacyIndexFilter(sel) {
 				t.Fatalf("expected omitted-value selector %q to stay index-native", expr)
 			}
@@ -100,32 +82,17 @@ func TestPrepareSelectorExecutionPlanTreatsTextSelectorsAsIndexNative(t *testing
 	adapter := &Adapter{}
 	tests := []struct {
 		name string
-		sel  api.Selector
+		expr string
 	}{
-		{
-			name: "contains",
-			sel: api.Selector{
-				Contains: &api.Term{Field: "/message", Value: "timeout"},
-			},
-		},
-		{
-			name: "icontains",
-			sel: api.Selector{
-				IContains: &api.Term{Field: "/message", Value: "TIMEOUT"},
-			},
-		},
-		{
-			name: "iprefix",
-			sel: api.Selector{
-				IPrefix: &api.Term{Field: "/owner", Value: "TEAM-"},
-			},
-		},
+		{name: "contains", expr: `contains{field=/message,value=timeout}`},
+		{name: "icontains", expr: `icontains{field=/message,value=TIMEOUT}`},
+		{name: "iprefix", expr: `iprefix{field=/owner,value=TEAM-}`},
 	}
 	for _, tt := range tests {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			plan, err := adapter.prepareSelectorExecutionPlan(tt.sel)
+			plan, err := adapter.prepareSelectorExecutionPlan(mustParseSelector(t, tt.expr))
 			if err != nil {
 				t.Fatalf("prepare selector execution plan: %v", err)
 			}
@@ -154,11 +121,7 @@ func TestPrepareSelectorExecutionPlanTreatsTemporalSelectorsAsIndexNative(t *tes
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			sel, err := lql.ParseSelectorString(tt.expr)
-			if err != nil {
-				t.Fatalf("parse selector %q: %v", tt.expr, err)
-			}
-			plan, err := adapter.prepareSelectorExecutionPlan(sel)
+			plan, err := adapter.prepareSelectorExecutionPlan(mustParseSelector(t, tt.expr))
 			if err != nil {
 				t.Fatalf("prepare selector execution plan: %v", err)
 			}
@@ -218,11 +181,9 @@ func TestIndexAdapterQueryWildcardContains(t *testing.T) {
 	}
 	resp, err := adapter.Query(ctx, search.Request{
 		Namespace: namespaces.Default,
-		Selector: api.Selector{
-			IContains: &api.Term{Field: "/logs/*/message", Value: "TIMEOUT"},
-		},
-		Limit:  10,
-		Engine: search.EngineIndex,
+		Selector:  mustParseSelector(t, `icontains{field=/logs/*/message,value=TIMEOUT}`),
+		Limit:     10,
+		Engine:    search.EngineIndex,
 	})
 	if err != nil {
 		t.Fatalf("query wildcard contains: %v", err)
@@ -278,11 +239,9 @@ func TestIndexAdapterQueryRecursiveSingleStep(t *testing.T) {
 	}
 	resp, err := adapter.Query(ctx, search.Request{
 		Namespace: namespaces.Default,
-		Selector: api.Selector{
-			Contains: &api.Term{Field: "/logs/**/message", Value: "timeout"},
-		},
-		Limit:  10,
-		Engine: search.EngineIndex,
+		Selector:  mustParseSelector(t, `contains{field=/logs/**/message,value=timeout}`),
+		Limit:     10,
+		Engine:    search.EngineIndex,
 	})
 	if err != nil {
 		t.Fatalf("query recursive **: %v", err)
@@ -338,11 +297,9 @@ func TestIndexAdapterQueryRecursiveDescendant(t *testing.T) {
 	}
 	resp, err := adapter.Query(ctx, search.Request{
 		Namespace: namespaces.Default,
-		Selector: api.Selector{
-			Contains: &api.Term{Field: "/logs/.../message", Value: "timeout"},
-		},
-		Limit:  10,
-		Engine: search.EngineIndex,
+		Selector:  mustParseSelector(t, `contains{field=/logs/.../message,value=timeout}`),
+		Limit:     10,
+		Engine:    search.EngineIndex,
 	})
 	if err != nil {
 		t.Fatalf("query recursive ...: %v", err)
@@ -393,11 +350,9 @@ func TestIndexAdapterQueryWildcardArraySugar(t *testing.T) {
 	}
 	resp, err := adapter.Query(ctx, search.Request{
 		Namespace: namespaces.Default,
-		Selector: api.Selector{
-			Eq: &api.Term{Field: "/records[]/status", Value: "open"},
-		},
-		Limit:  10,
-		Engine: search.EngineIndex,
+		Selector:  mustParseSelector(t, `eq{field=/records[]/status,value=open}`),
+		Limit:     10,
+		Engine:    search.EngineIndex,
 	})
 	if err != nil {
 		t.Fatalf("query wildcard []: %v", err)

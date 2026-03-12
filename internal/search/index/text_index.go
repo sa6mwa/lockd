@@ -48,6 +48,43 @@ func normalizedTrigramsNormalized(normalized string) []string {
 	return out
 }
 
+func uniqueNormalizedTrigramsNormalized(normalized string) []string {
+	if normalized == "" {
+		return nil
+	}
+	if isASCII(normalized) {
+		if len(normalized) < 3 {
+			return nil
+		}
+		out := make([]string, 0, min(len(normalized)-2, 64))
+		seen := make(map[string]struct{}, min(len(normalized)-2, 64))
+		for i := 0; i+3 <= len(normalized); i++ {
+			gram := normalized[i : i+3]
+			if _, ok := seen[gram]; ok {
+				continue
+			}
+			seen[gram] = struct{}{}
+			out = append(out, gram)
+		}
+		return out
+	}
+	runes := []rune(normalized)
+	if len(runes) < 3 {
+		return nil
+	}
+	out := make([]string, 0, min(len(runes)-2, 64))
+	seen := make(map[string]struct{}, min(len(runes)-2, 64))
+	for i := 0; i+3 <= len(runes); i++ {
+		gram := string(runes[i : i+3])
+		if _, ok := seen[gram]; ok {
+			continue
+		}
+		seen[gram] = struct{}{}
+		out = append(out, gram)
+	}
+	return out
+}
+
 func isASCII(s string) bool {
 	for i := 0; i < len(s); i++ {
 		if s[i] >= 0x80 {

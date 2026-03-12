@@ -1,0 +1,38 @@
+goos: linux
+goarch: amd64
+pkg: pkt.systems/lockd/internal/search/index
+cpu: 13th Gen Intel(R) Core(TM) i7-1355U
+BenchmarkSegmentReaderWildcardContains                       	     356	    303568 ns/op	   70212 B/op	     904 allocs/op
+BenchmarkSegmentReaderWildcardContainsAny                    	     292	    377694 ns/op	   96338 B/op	    1193 allocs/op
+BenchmarkAdapterQueryWildcardContainsCompareProfiles/small/value         	   10000	     13583 ns/op	   14684 B/op	      16 allocs/op
+BenchmarkAdapterQueryWildcardContainsCompareProfiles/small/any           	   10000	     13712 ns/op	   14732 B/op	      15 allocs/op
+BenchmarkAdapterQueryWildcardContainsCompareProfiles/medium/value        	    1617	     62146 ns/op	   66654 B/op	      16 allocs/op
+BenchmarkAdapterQueryWildcardContainsCompareProfiles/medium/any          	    1741	     63375 ns/op	   66702 B/op	      15 allocs/op
+BenchmarkAdapterQueryWildcardContainsCompareProfiles/large/value         	     565	    184115 ns/op	  197727 B/op	      16 allocs/op
+BenchmarkAdapterQueryWildcardContainsCompareProfiles/large/any           	     606	    190918 ns/op	  197776 B/op	      15 allocs/op
+BenchmarkAdapterQueryWildcardIContainsCompareProfiles/small/value        	   10000	     13513 ns/op	   14684 B/op	      16 allocs/op
+BenchmarkAdapterQueryWildcardIContainsCompareProfiles/small/any          	   10000	     13593 ns/op	   14732 B/op	      15 allocs/op
+BenchmarkAdapterQueryWildcardIContainsCompareProfiles/medium/value       	    1658	     62850 ns/op	   66654 B/op	      16 allocs/op
+BenchmarkAdapterQueryWildcardIContainsCompareProfiles/medium/any         	    1624	     62102 ns/op	   66702 B/op	      15 allocs/op
+BenchmarkAdapterQueryWildcardIContainsCompareProfiles/large/value        	     598	    187292 ns/op	  197728 B/op	      16 allocs/op
+BenchmarkAdapterQueryWildcardIContainsCompareProfiles/large/any          	     576	    183763 ns/op	  197776 B/op	      15 allocs/op
+BenchmarkAdapterQueryFullTextContainsCompareProfiles/small/value         	   19831	      6007 ns/op	    5177 B/op	      16 allocs/op
+BenchmarkAdapterQueryFullTextContainsCompareProfiles/small/any           	   19500	      6111 ns/op	    5193 B/op	      15 allocs/op
+BenchmarkAdapterQueryFullTextContainsCompareProfiles/medium/value        	    7652	     17771 ns/op	   17465 B/op	      16 allocs/op
+BenchmarkAdapterQueryFullTextContainsCompareProfiles/medium/any          	    8439	     17737 ns/op	   17481 B/op	      15 allocs/op
+BenchmarkAdapterQueryFullTextContainsCompareProfiles/large/value         	    3727	     49640 ns/op	   50233 B/op	      16 allocs/op
+BenchmarkAdapterQueryFullTextContainsCompareProfiles/large/any           	    3734	     50330 ns/op	   50250 B/op	      15 allocs/op
+BenchmarkAdapterQueryFullTextIContainsCompareProfiles/small/value        	   19880	      6011 ns/op	    5209 B/op	      16 allocs/op
+BenchmarkAdapterQueryFullTextIContainsCompareProfiles/small/any          	   19567	      6138 ns/op	    5193 B/op	      15 allocs/op
+BenchmarkAdapterQueryFullTextIContainsCompareProfiles/medium/value       	   10000	     17387 ns/op	   17497 B/op	      16 allocs/op
+BenchmarkAdapterQueryFullTextIContainsCompareProfiles/medium/any         	    9073	     17592 ns/op	   17481 B/op	      15 allocs/op
+BenchmarkAdapterQueryFullTextIContainsCompareProfiles/large/value        	    3817	     49877 ns/op	   50265 B/op	      16 allocs/op
+BenchmarkAdapterQueryFullTextIContainsCompareProfiles/large/any          	    3770	     49834 ns/op	   50249 B/op	      15 allocs/op
+BenchmarkAdapterQueryFullTextAllTextIContainsCompareProfiles/small/value 	   20025	      5955 ns/op	    5177 B/op	      16 allocs/op
+BenchmarkAdapterQueryFullTextAllTextIContainsCompareProfiles/small/any   	   19732	      6075 ns/op	    5193 B/op	      15 allocs/op
+BenchmarkAdapterQueryFullTextAllTextIContainsCompareProfiles/medium/value         	   10000	     17297 ns/op	   17465 B/op	      16 allocs/op
+BenchmarkAdapterQueryFullTextAllTextIContainsCompareProfiles/medium/any           	    9589	     17553 ns/op	   17481 B/op	      15 allocs/op
+BenchmarkAdapterQueryFullTextAllTextIContainsCompareProfiles/large/value          	    3777	     49622 ns/op	   50234 B/op	      16 allocs/op
+BenchmarkAdapterQueryFullTextAllTextIContainsCompareProfiles/large/any            	    3729	     49280 ns/op	   50250 B/op	      15 allocs/op
+PASS
+ok  	pkt.systems/lockd/internal/search/index	6.191s

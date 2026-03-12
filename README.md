@@ -1164,11 +1164,17 @@ lockd client remove --key orders
 # Atomic JSON mutations (streaming server-side mutate under the active lease)
 lockd client mutate --key orders /progress/step=fetch /progress/count++ time:/progress/updated=NOW
 
+# Client-local streaming mutate (required for file-backed mutators)
+lockd client mutate --local --key orders 'base64file:/payload=blob.bin' /filename=blob.bin
+
 # Rich mutations with brace/quoted syntax (LQL)
 lockd client mutate --key ledger \
   '/data{/hello key="mars traveler",/count++}' \
   /meta/previous=world \
   time:/meta/processed=NOW
+
+# Client-local streaming set (no full document buffering)
+lockd client set --key ledger 'textfile:/content=notes.txt' /filename=notes.txt
 
 # Local JSON helper (no server interaction)
 lockd client edit checkpoint.json /progress/step="done" /progress/count=+5
@@ -1255,8 +1261,11 @@ tools without buffering in memory.
 The CLI auto-discovers `client*.pem` bundles under `$HOME/.lockd/` (or use
 `--bundle`) and performs the same host-agnostic mTLS verification as the SDK.
 `mutate`, `set`, and `edit` consume the shared LQL mutation DSL. `mutate` is
-the streaming server-side path (`/v1/mutate`), while `set` remains available for
-local read-modify-write flows. Paths now use JSON Pointer
+the streaming server-side path (`/v1/mutate`) unless `-l/--local` is set.
+`set` now uses a client-local streaming `Get -> LQL MutateStream -> Update`
+pipeline so large documents and file-backed mutators do not require full JSON
+buffering in memory. `file:`, `textfile:`, and `base64file:` mutation values are
+local-only and require `set` or `mutate --local`. Paths now use JSON Pointer
 syntax ([RFC 6901](https://datatracker.ietf.org/doc/html/rfc6901))
 (`/progress/counter++`), so literal dots, spaces, or Unicode in
 keys are handled transparently (only `/` and `~` are escaped as `~1`/`~0`). The

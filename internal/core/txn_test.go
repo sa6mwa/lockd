@@ -1117,6 +1117,81 @@ func TestApplyTxnDecisionRollback(t *testing.T) {
 	}
 }
 
+func TestTxnRollbackAllowsImmediateReacquireOfParticipants(t *testing.T) {
+	ctx := context.Background()
+	svc := newTestService(t)
+
+	const (
+		namespace = "default"
+		keyA      = "xa-reacquire/a"
+		keyB      = "xa-reacquire/b"
+		owner     = "bench-xa"
+		ttl       = 30
+		loops     = 64
+	)
+
+	for i := 0; i < loops; i++ {
+		acqA, err := svc.Acquire(ctx, AcquireCommand{
+			Namespace:    namespace,
+			Key:          keyA,
+			Owner:        owner,
+			TTLSeconds:   ttl,
+			BlockSeconds: api.BlockNoWait,
+		})
+		if err != nil {
+			t.Fatalf("iter %d acquire-a: %v", i, err)
+		}
+		if _, err := svc.Update(ctx, UpdateCommand{
+			Namespace:     namespace,
+			Key:           keyA,
+			LeaseID:       acqA.LeaseID,
+			FencingToken:  acqA.FencingToken,
+			TxnID:         acqA.TxnID,
+			Body:          bytes.NewBufferString(`{"value":"a"}`),
+			CompactWriter: jsonutil.CompactWriter,
+		}); err != nil {
+			t.Fatalf("iter %d update-a: %v", i, err)
+		}
+
+		acqB, err := svc.Acquire(ctx, AcquireCommand{
+			Namespace:    namespace,
+			Key:          keyB,
+			Owner:        owner,
+			TTLSeconds:   ttl,
+			TxnID:        acqA.TxnID,
+			BlockSeconds: api.BlockNoWait,
+		})
+		if err != nil {
+			t.Fatalf("iter %d acquire-b: %v", i, err)
+		}
+		if _, err := svc.Update(ctx, UpdateCommand{
+			Namespace:     namespace,
+			Key:           keyB,
+			LeaseID:       acqB.LeaseID,
+			FencingToken:  acqB.FencingToken,
+			TxnID:         acqA.TxnID,
+			Body:          bytes.NewBufferString(`{"value":"b"}`),
+			CompactWriter: jsonutil.CompactWriter,
+		}); err != nil {
+			t.Fatalf("iter %d update-b: %v", i, err)
+		}
+
+		state, err := svc.RollbackTxn(ctx, TxnRecord{
+			TxnID: acqA.TxnID,
+			Participants: []TxnParticipant{
+				{Namespace: namespace, Key: keyA},
+				{Namespace: namespace, Key: keyB},
+			},
+		})
+		if err != nil {
+			t.Fatalf("iter %d rollback: %v", i, err)
+		}
+		if state != TxnStateRollback {
+			t.Fatalf("iter %d state=%s want=%s", i, state, TxnStateRollback)
+		}
+	}
+}
+
 func TestApplyTxnDecisionCommitStagedRemoveDeletesState(t *testing.T) {
 	ctx := context.Background()
 	svc := newTestService(t)

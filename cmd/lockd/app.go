@@ -19,6 +19,7 @@ import (
 	"pkt.systems/lockd"
 	"pkt.systems/lockd/internal/svcfields"
 	"pkt.systems/pslog"
+	"pkt.systems/version"
 )
 
 func submain(ctx context.Context) int {
@@ -275,9 +276,11 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 			cliLogger := svcfields.WithSubsystem(logger, "cli.root")
 			ctx := cmd.Context()
 			cmd.SilenceUsage = true
+			lockdVersion := version.Current()
 			svcfields.WithSubsystem(logger, "server.lifecycle.init").WithLogLevel().Info(
-				"welcome to lockd",
+				fmt.Sprintf("welcome to lockd %s", lockdVersion),
 				"app", "lockd",
+				"version", lockdVersion,
 				"pid", os.Getpid(),
 				"uid", os.Getuid(),
 				"gid", os.Getgid(),

@@ -131,6 +131,32 @@ func TestAzureLockLifecycle(t *testing.T) {
 	}
 }
 
+func TestAzureMutateLocalStreamsFileBackedValues(t *testing.T) {
+	cfg := loadAzureConfig(t)
+	ensureAzureStoreReady(t, context.Background(), cfg)
+	ts := startAzureTestServer(t, cfg)
+	t.Cleanup(func() { _ = ts.Stop(context.Background()) })
+
+	locktest.RunMutateLocalFileUpload(t, locktest.MutateLocalFileUploadConfig{
+		Client:       ts.Client,
+		KeyPrefix:    "azure-local-mutate",
+		OwnerPrefix:  "azure-local-mutate",
+		FixtureName:  "blob.bin",
+		FixtureBytes: []byte{0x00, 0x01, 0x02, 'a'},
+		Mutations: []string{
+			`base64file:/payload=blob.bin`,
+			`/filename=blob.bin`,
+		},
+		ExpectedFields: map[string]any{
+			"filename": "blob.bin",
+			"payload":  "AAECYQ==",
+		},
+		CleanupKey: func(key string) {
+			cleanupAzure(t, cfg, key)
+		},
+	})
+}
+
 func TestAzureAcquireNoWaitReturnsWaiting(t *testing.T) {
 	cfg := loadAzureConfig(t)
 	ensureAzureStoreReady(t, context.Background(), cfg)

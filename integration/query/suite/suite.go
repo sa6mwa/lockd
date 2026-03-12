@@ -11,6 +11,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -61,7 +63,27 @@ func RunSelectors(t *testing.T, factory ServerFactory) {
 		querydata.SeedState(ctx, t, ts.Client, "", "orders-open-1", map[string]any{"status": "open", "amount": 150.0, "region": "us"})
 		querydata.SeedState(ctx, t, ts.Client, "", "orders-open-2", map[string]any{"status": "open", "amount": 80.0})
 		querydata.SeedState(ctx, t, ts.Client, "", "orders-closed", map[string]any{"status": "closed", "amount": 200.0})
+		querydata.SeedState(ctx, t, ts.Client, "", "orders-any-alpha", map[string]any{
+			"summary": "hjpijs signal",
+		})
+		querydata.SeedState(ctx, t, ts.Client, "", "orders-any-beta", map[string]any{
+			"nested": map[string]any{
+				"note": "HMM escalation",
+			},
+		})
+		querydata.SeedState(ctx, t, ts.Client, "", "orders-any-gamma", map[string]any{
+			"summary": "unrelated content",
+		})
 		flushNamespaces(ctx, t, ts.Client, namespaces.Default)
+		if _, err := ts.Client.UpdateNamespaceConfig(ctx, api.NamespaceConfigRequest{
+			Namespace: namespaces.Default,
+			Query: &api.NamespaceQueryConfig{
+				PreferredEngine: "index",
+				FallbackEngine:  "scan",
+			},
+		}, lockdclient.NamespaceConfigOptions{}); err != nil {
+			t.Fatalf("set namespace query config: %v", err)
+		}
 
 		selector, err := lql.ParseSelectorString(`
 and.eq{field=/status,value=open},
@@ -80,6 +102,39 @@ and.range{field=/amount,gte=100,lt=200}`)
 		}
 		if resp.Cursor != "" {
 			t.Fatalf("expected empty cursor for single page, got %q", resp.Cursor)
+		}
+
+		containsAnyCases := []struct {
+			name string
+			expr string
+			want []string
+		}{
+			{name: "contains_any_quoted", expr: `contains{f=/summary,a="hjpijs|missing"}`, want: []string{"orders-any-alpha"}},
+			{name: "contains_any_unquoted", expr: `contains{f=/summary,a=hjpijs|missing}`, want: []string{"orders-any-alpha"}},
+			{name: "icontains_any_recursive_quoted", expr: `icontains{f=/...,a="hjpijs|hmm"}`, want: []string{"orders-any-alpha", "orders-any-beta"}},
+			{name: "icontains_any_recursive_unquoted", expr: `icontains{f=/...,a=hjpijs|hmm}`, want: []string{"orders-any-alpha", "orders-any-beta"}},
+		}
+		for _, tc := range containsAnyCases {
+			tc := tc
+			t.Run(tc.name, func(t *testing.T) {
+				sel, err := lql.ParseSelectorString(tc.expr)
+				if err != nil || sel.IsEmpty() {
+					t.Fatalf("parse selector %q: %v", tc.expr, err)
+				}
+				indexResp := doQueryWithParams(t, httpClient, ts.URL(), api.QueryRequest{
+					Namespace: namespaces.Default,
+					Selector:  sel,
+					Limit:     10,
+				}, url.Values{"engine": []string{"index"}})
+				querydata.ExpectKeySet(t, indexResp.Keys, tc.want)
+
+				scanResp := doQueryWithParams(t, httpClient, ts.URL(), api.QueryRequest{
+					Namespace: namespaces.Default,
+					Selector:  sel,
+					Limit:     10,
+				}, url.Values{"engine": []string{"scan"}})
+				querydata.ExpectKeySet(t, scanResp.Keys, tc.want)
+			})
 		}
 	})
 }
@@ -409,6 +464,104 @@ func RunPublicRead(t *testing.T, factory ServerFactory) {
 		}
 		if payload["payload"] != "value" {
 			t.Fatalf("unexpected payload: %+v", payload)
+		}
+	})
+}
+
+// RunFileUploadedFieldQuery seeds state through LeaseSession.MutateLocal using a
+// textfile mutator, then verifies the uploaded field can be queried and
+// retrieved through the document streaming API.
+func RunFileUploadedFieldQuery(t *testing.T, factory ServerFactory) {
+	withServer(t, factory, 20*time.Second, func(ctx context.Context, ts *lockd.TestServer, httpClient *http.Client) {
+		key := "query-file-upload-" + xid.New().String()
+		payload := "payload-from-file"
+		tempDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(tempDir, "blob.txt"), []byte(payload), 0o600); err != nil {
+			t.Fatalf("write text fixture: %v", err)
+		}
+
+		lease, err := ts.Client.Acquire(ctx, api.AcquireRequest{
+			Namespace:  namespaces.Default,
+			Key:        key,
+			Owner:      "query-file-upload",
+			TTLSeconds: 30,
+			BlockSecs:  lockdclient.BlockWaitForever,
+		})
+		if err != nil {
+			t.Fatalf("acquire file-upload key: %v", err)
+		}
+		if _, err := lease.MutateLocal(ctx, []string{
+			`textfile:/content=blob.txt`,
+			`/kind=file-upload`,
+			`/filename=blob.txt`,
+		}, lockdclient.MutateLocalOptions{
+			FileValueBaseDir: tempDir,
+		}); err != nil {
+			t.Fatalf("MutateLocal: %v", err)
+		}
+		if err := lease.Release(ctx); err != nil {
+			t.Fatalf("release file-upload key: %v", err)
+		}
+
+		flushNamespaces(ctx, t, ts.Client, namespaces.Default)
+		if _, err := ts.Client.UpdateNamespaceConfig(ctx, api.NamespaceConfigRequest{
+			Namespace: namespaces.Default,
+			Query: &api.NamespaceQueryConfig{
+				PreferredEngine: "index",
+				FallbackEngine:  "scan",
+			},
+		}, lockdclient.NamespaceConfigOptions{}); err != nil {
+			t.Fatalf("set namespace query config: %v", err)
+		}
+
+		sel, err := lql.ParseSelectorString(`eq{field=/content,value=payload-from-file}`)
+		if err != nil || sel.IsEmpty() {
+			t.Fatalf("parse uploaded-content selector: %v", err)
+		}
+
+		indexResp := doQueryWithParams(t, httpClient, ts.URL(), api.QueryRequest{
+			Namespace: namespaces.Default,
+			Selector:  sel,
+			Limit:     10,
+		}, url.Values{"engine": []string{"index"}})
+		if !slices.Equal(indexResp.Keys, []string{key}) {
+			t.Fatalf("expected index query to return %q, got %v", key, indexResp.Keys)
+		}
+
+		scanResp := doQueryWithParams(t, httpClient, ts.URL(), api.QueryRequest{
+			Namespace: namespaces.Default,
+			Selector:  sel,
+			Limit:     10,
+		}, url.Values{"engine": []string{"scan"}})
+		if !slices.Equal(scanResp.Keys, []string{key}) {
+			t.Fatalf("expected scan query to return %q, got %v", key, scanResp.Keys)
+		}
+
+		docResp := doQueryDocumentsWithParams(t, httpClient, ts.URL(), api.QueryRequest{
+			Namespace: namespaces.Default,
+			Selector:  sel,
+			Limit:     10,
+		}, url.Values{"engine": []string{"index"}})
+		if len(docResp.Rows) != 1 {
+			t.Fatalf("expected 1 document row, got %d", len(docResp.Rows))
+		}
+		row := docResp.Rows[0]
+		if row.Key != key {
+			t.Fatalf("expected document row key %q, got %q", key, row.Key)
+		}
+
+		var body map[string]any
+		if err := json.Unmarshal(row.Doc, &body); err != nil {
+			t.Fatalf("decode document row: %v", err)
+		}
+		if got := body["kind"]; got != "file-upload" {
+			t.Fatalf("unexpected kind %#v", got)
+		}
+		if got := body["filename"]; got != "blob.txt" {
+			t.Fatalf("unexpected filename %#v", got)
+		}
+		if got := body["content"]; got != payload {
+			t.Fatalf("unexpected content %#v", got)
 		}
 	})
 }

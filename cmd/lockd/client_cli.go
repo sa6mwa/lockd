@@ -2031,9 +2031,12 @@ func newClientSetCommand(cfg *clientCLIConfig) *cobra.Command {
 	var txnID string
 	cmd := &cobra.Command{
 		Use:   "set mutation [mutation...]",
-		Short: "Mutate JSON state fields for an active lease",
+		Short: "Mutate JSON state fields locally via streaming for an active lease",
 		Example: `  # Increment a counter and stamp the current time
   lockd client set --key orders /progress/counter++ time:/progress/updated=NOW
+
+  # Stream a file into a state field without buffering the full document
+  lockd client set --key ledger 'textfile:/content=notes.txt' /filename=notes.txt
 
   # Mutate multiple fields with brace shorthand + quoted keys
   lockd client set --key ledger '/data{/hello key="mars traveler",/count++}' /meta/previous=world`,
@@ -2042,10 +2045,6 @@ func newClientSetCommand(cfg *clientCLIConfig) *cobra.Command {
 		Args:          cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			key, err := resolveKeyInput(keyFlag, keyRequireExisting)
-			if err != nil {
-				return err
-			}
-			mutations, err := parseMutations(args, time.Now())
 			if err != nil {
 				return err
 			}
@@ -2071,58 +2070,11 @@ func newClientSetCommand(cfg *clientCLIConfig) *cobra.Command {
 			}
 			cli.RegisterLeaseToken(lease, token)
 			ns := resolveNamespaceInput(namespace)
-			ctx := cmd.Context()
-			resp, err := cli.Get(ctx, key,
-				lockdclient.WithGetNamespace(ns),
-				lockdclient.WithGetLeaseID(lease),
-				lockdclient.WithGetPublicDisabled(true),
-			)
+			baseDir, err := os.Getwd()
 			if err != nil {
-				return err
-			}
-			if resp != nil {
-				defer resp.Close()
-			}
-			var stateBytes []byte
-			if resp != nil {
-				stateBytes, err = resp.Bytes()
-				if err != nil {
-					return err
-				}
-			}
-			etag := ""
-			version := int64(0)
-			if resp != nil {
-				etag = resp.ETag
-				if strings.TrimSpace(resp.Version) != "" {
-					parsedVersion, parseErr := strconv.ParseInt(resp.Version, 10, 64)
-					if parseErr != nil {
-						return fmt.Errorf("parse fetched version %q: %w", resp.Version, parseErr)
-					}
-					version = parsedVersion
-				}
-			}
-			doc, err := parseJSONObject(stateBytes)
-			if err != nil {
-				return fmt.Errorf("parse state: %w", err)
-			}
-			if doc == nil {
-				doc = map[string]any{}
-			}
-			if err := applyMutations(doc, mutations); err != nil {
-				return err
-			}
-			payload, err := marshalCompactJSON(doc)
-			if err != nil {
-				return err
+				return fmt.Errorf("resolve working directory: %w", err)
 			}
 			opts := lockdclient.UpdateOptions{Namespace: ns, FencingToken: lockdclient.Int64(token), TxnID: txn}
-			if !noCAS {
-				if version > 0 {
-					opts.IfVersion = lockdclient.Int64(version)
-				}
-				opts.IfETag = etag
-			}
 			ifVersionValue, err := parseOptionalVersion(ifVersion)
 			if err != nil {
 				return err
@@ -2133,7 +2085,14 @@ func newClientSetCommand(cfg *clientCLIConfig) *cobra.Command {
 			if ifETag != "" {
 				opts.IfETag = ifETag
 			}
-			result, err := cli.UpdateBytes(ctx, key, lease, payload, opts)
+			result, err := cli.MutateLocal(cmd.Context(), lockdclient.MutateLocalRequest{
+				Key:               key,
+				LeaseID:           lease,
+				Mutations:         append([]string(nil), args...),
+				Options:           opts,
+				DisableFetchedCAS: noCAS,
+				FileValueBaseDir:  baseDir,
+			})
 			if err != nil {
 				return err
 			}
@@ -2161,6 +2120,7 @@ func newClientSetCommand(cfg *clientCLIConfig) *cobra.Command {
 	cmd.Flags().StringVar(&txnID, "txn-id", "", "transaction id (xid, 20-char base32; default from "+envTxnID+")")
 	cmd.Flags().StringVar(&output, "output", string(outputJSON), "output format (text|json)")
 	cmd.Flags().StringVarP(&namespace, "namespace", "n", "", "namespace for the key (defaults to server configuration)")
+	cmd.Flags().StringVar(&fencing, "fencing-token", "", "fencing token (default from "+envFencingToken+")")
 	return cmd
 }
 
@@ -2169,15 +2129,19 @@ func newClientMutateCommand(cfg *clientCLIConfig) *cobra.Command {
 	var ifVersion string
 	var ifETag string
 	var fencing string
+	var local bool
 	var output string
 	var keyFlag string
 	var namespace string
 	var txnID string
 	cmd := &cobra.Command{
 		Use:   "mutate mutation [mutation...]",
-		Short: "Apply server-side LQL mutations for an active lease",
+		Short: "Apply LQL mutations for an active lease (server-side by default)",
 		Example: `  # Increment a counter and stamp the current time
   lockd client mutate --key orders /progress/counter++ time:/progress/updated=NOW
+
+  # Opt into client-local streaming mutation for file-backed values
+  lockd client mutate --local --key ledger 'base64file:/payload=blob.bin' /filename=blob.bin
 
   # Mutate multiple fields with brace shorthand + quoted keys
   lockd client mutate --key ledger '/data{/hello key="mars traveler",/count++}' /meta/previous=world`,
@@ -2189,8 +2153,10 @@ func newClientMutateCommand(cfg *clientCLIConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if _, err := parseMutations(args, time.Now()); err != nil {
-				return err
+			if !local {
+				if _, err := parseMutations(args, time.Now()); err != nil {
+					return err
+				}
 			}
 			mutationExprs := make([]string, 0, len(args))
 			for _, raw := range args {
@@ -2229,18 +2195,34 @@ func newClientMutateCommand(cfg *clientCLIConfig) *cobra.Command {
 				return err
 			}
 			ctx, _ := commandContextWithCorrelation(cmd)
-			result, err := cli.Mutate(ctx, lockdclient.MutateRequest{
-				Key:       key,
-				LeaseID:   lease,
-				Mutations: mutationExprs,
-				Options: lockdclient.UpdateOptions{
-					Namespace:    ns,
-					IfVersion:    ifVersionValue,
-					IfETag:       ifETag,
-					FencingToken: lockdclient.Int64(token),
-					TxnID:        txn,
-				},
-			})
+			opts := lockdclient.UpdateOptions{
+				Namespace:    ns,
+				IfVersion:    ifVersionValue,
+				IfETag:       ifETag,
+				FencingToken: lockdclient.Int64(token),
+				TxnID:        txn,
+			}
+			var result *lockdclient.UpdateResult
+			if local {
+				baseDir, cwdErr := os.Getwd()
+				if cwdErr != nil {
+					return fmt.Errorf("resolve working directory: %w", cwdErr)
+				}
+				result, err = cli.MutateLocal(ctx, lockdclient.MutateLocalRequest{
+					Key:              key,
+					LeaseID:          lease,
+					Mutations:        mutationExprs,
+					Options:          opts,
+					FileValueBaseDir: baseDir,
+				})
+			} else {
+				result, err = cli.Mutate(ctx, lockdclient.MutateRequest{
+					Key:       key,
+					LeaseID:   lease,
+					Mutations: mutationExprs,
+					Options:   opts,
+				})
+			}
 			if err != nil {
 				return err
 			}
@@ -2268,6 +2250,7 @@ func newClientMutateCommand(cfg *clientCLIConfig) *cobra.Command {
 	cmd.Flags().StringVar(&output, "output", string(outputJSON), "output format (text|json)")
 	cmd.Flags().StringVarP(&namespace, "namespace", "n", "", "namespace for the key (defaults to server configuration)")
 	cmd.Flags().StringVar(&fencing, "fencing-token", "", "fencing token (default from "+envFencingToken+")")
+	cmd.Flags().BoolVarP(&local, "local", "l", false, "apply mutations locally via streaming (required for file:/textfile:/base64file: values)")
 	return cmd
 }
 

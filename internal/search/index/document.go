@@ -51,7 +51,7 @@ func (d *Document) AddString(field, value string) {
 		return
 	}
 	gramField := containsGramField(field)
-	d.Fields[gramField] = append(d.Fields[gramField], normalizedTrigramsNormalized(trimmed)...)
+	d.Fields[gramField] = append(d.Fields[gramField], uniqueNormalizedTrigramsNormalized(trimmed)...)
 }
 
 // AddStringWithPolicy indexes a string value according to text indexing policy.

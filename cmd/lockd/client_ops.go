@@ -34,10 +34,6 @@ func parseJSONObject(data []byte) (map[string]any, error) {
 	return doc, nil
 }
 
-func marshalCompactJSON(doc map[string]any) ([]byte, error) {
-	return json.Marshal(doc)
-}
-
 func marshalPrettyJSON(doc map[string]any) ([]byte, error) {
 	return json.MarshalIndent(doc, "", "  ")
 }

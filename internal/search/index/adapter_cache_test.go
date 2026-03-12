@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/internal/search"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/memory"
@@ -290,11 +289,9 @@ func TestAdapterPreparedReaderCacheLifecycle(t *testing.T) {
 	}
 	openReq := search.Request{
 		Namespace: namespace,
-		Selector: api.Selector{
-			Eq: &api.Term{Field: "/status", Value: "open"},
-		},
-		Limit:  10,
-		Engine: search.EngineIndex,
+		Selector:  mustParseSelector(t, `eq{field=/status,value=open}`),
+		Limit:     10,
+		Engine:    search.EngineIndex,
 	}
 	resp1, err := adapter.Query(ctx, openReq)
 	if err != nil {
@@ -342,11 +339,9 @@ func TestAdapterPreparedReaderCacheLifecycle(t *testing.T) {
 
 	closedReq := search.Request{
 		Namespace: namespace,
-		Selector: api.Selector{
-			Eq: &api.Term{Field: "/status", Value: "closed"},
-		},
-		Limit:  10,
-		Engine: search.EngineIndex,
+		Selector:  mustParseSelector(t, `eq{field=/status,value=closed}`),
+		Limit:     10,
+		Engine:    search.EngineIndex,
 	}
 	resp3, err := adapter.Query(ctx, closedReq)
 	if err != nil {
@@ -365,11 +360,9 @@ func TestAdapterPreparedReaderCachesWildcardResolution(t *testing.T) {
 	_, adapter := buildSyntheticWildcardBenchIndex(ctx, t, 12, 10)
 	req := search.Request{
 		Namespace: namespaces.Default,
-		Selector: api.Selector{
-			IContains: &api.Term{Field: "/logs/*/message", Value: "TIMEOUT"},
-		},
-		Limit:  1_000,
-		Engine: search.EngineIndex,
+		Selector:  mustParseSelector(t, `icontains{field=/logs/*/message,value=TIMEOUT}`),
+		Limit:     1_000,
+		Engine:    search.EngineIndex,
 	}
 	if _, err := adapter.Query(ctx, req); err != nil {
 		t.Fatalf("query warm wildcard: %v", err)

@@ -44,6 +44,10 @@ func TestNFSQueryResultsSupportPublicRead(t *testing.T) {
 	queriesuite.RunPublicRead(t, startNFSQueryServer)
 }
 
+func TestNFSQueryFileUploadedField(t *testing.T) {
+	queriesuite.RunFileUploadedFieldQuery(t, startNFSQueryServer)
+}
+
 func TestNFSQueryDocumentStreaming(t *testing.T) {
 	queriesuite.RunDocumentStreaming(t, startNFSQueryServer)
 }

@@ -119,6 +119,7 @@ tidy:
 	$(GO) mod tidy
 	cd devenv/assure && $(GO) mod tidy
 	cd ycsb && $(GO) mod tidy
+	cd examples/ && $(GO) mod tidy
 
 $(BIN_PATH):
 	CGO_ENABLED=$(CGO_ENABLED) $(GO) build -o $(BIN_PATH) -trimpath -ldflags '-s -w' ./cmd/lockd

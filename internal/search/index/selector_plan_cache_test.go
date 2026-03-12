@@ -14,9 +14,7 @@ func TestPrepareSelectorExecutionPlanCachesNormalizedAST(t *testing.T) {
 		t.Fatalf("new adapter: %v", err)
 	}
 
-	first, err := adapter.prepareSelectorExecutionPlan(api.Selector{
-		Eq: &api.Term{Field: " /status ", Value: "open"},
-	})
+	first, err := adapter.prepareSelectorExecutionPlan(mustParseSelector(t, `eq{field=" /status ",value=open}`))
 	if err != nil {
 		t.Fatalf("prepare selector plan (first): %v", err)
 	}
@@ -27,9 +25,7 @@ func TestPrepareSelectorExecutionPlanCachesNormalizedAST(t *testing.T) {
 		t.Fatalf("expected cache size=1 after first plan, got %d", got)
 	}
 
-	second, err := adapter.prepareSelectorExecutionPlan(api.Selector{
-		Eq: &api.Term{Field: "/status", Value: "open"},
-	})
+	second, err := adapter.prepareSelectorExecutionPlan(mustParseSelector(t, `eq{field=/status,value=open}`))
 	if err != nil {
 		t.Fatalf("prepare selector plan (second): %v", err)
 	}
@@ -88,9 +84,7 @@ func TestPrepareSelectorExecutionPlanCachesNormalizedDateSelectorAST(t *testing.
 	if err != nil {
 		t.Fatalf("new adapter: %v", err)
 	}
-	first, err := adapter.prepareSelectorExecutionPlan(api.Selector{
-		Date: &api.DateTerm{Field: " /timestamp ", After: "2026-03-05"},
-	})
+	first, err := adapter.prepareSelectorExecutionPlan(mustParseSelector(t, `date{field=" /timestamp ",after=2026-03-05}`))
 	if err != nil {
 		t.Fatalf("prepare date selector plan (first): %v", err)
 	}
@@ -101,9 +95,7 @@ func TestPrepareSelectorExecutionPlanCachesNormalizedDateSelectorAST(t *testing.
 		t.Fatalf("expected cache size=1 after first date plan, got %d", got)
 	}
 
-	second, err := adapter.prepareSelectorExecutionPlan(api.Selector{
-		Date: &api.DateTerm{Field: "/timestamp", After: "2026-03-05"},
-	})
+	second, err := adapter.prepareSelectorExecutionPlan(mustParseSelector(t, `date{field=/timestamp,after=2026-03-05}`))
 	if err != nil {
 		t.Fatalf("prepare date selector plan (second): %v", err)
 	}
@@ -125,12 +117,7 @@ func TestPrepareSelectorExecutionPlanMarksRelativeDateSinceSelectors(t *testing.
 		t.Fatalf("new adapter: %v", err)
 	}
 
-	relative, err := adapter.prepareSelectorExecutionPlan(api.Selector{
-		And: []api.Selector{
-			{Eq: &api.Term{Field: "/status", Value: "open"}},
-			{Date: &api.DateTerm{Field: "/timestamp", Since: "today"}},
-		},
-	})
+	relative, err := adapter.prepareSelectorExecutionPlan(mustParseSelector(t, `and.eq{field=/status,value=open},and.date{field=/timestamp,since=today}`))
 	if err != nil {
 		t.Fatalf("prepare relative selector plan: %v", err)
 	}
@@ -138,9 +125,7 @@ func TestPrepareSelectorExecutionPlanMarksRelativeDateSinceSelectors(t *testing.
 		t.Fatalf("expected relative date selector to disable sorted-key cache, got %+v", relative)
 	}
 
-	absolute, err := adapter.prepareSelectorExecutionPlan(api.Selector{
-		Date: &api.DateTerm{Field: "/timestamp", Since: "2026-03-07T00:00:00Z"},
-	})
+	absolute, err := adapter.prepareSelectorExecutionPlan(mustParseSelector(t, `date{field=/timestamp,since=2026-03-07T00:00:00Z}`))
 	if err != nil {
 		t.Fatalf("prepare absolute selector plan: %v", err)
 	}

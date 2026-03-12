@@ -52,6 +52,10 @@ func TestDiskQueryResultsSupportPublicRead(t *testing.T) {
 	queriesuite.RunPublicRead(t, startDiskQueryServer)
 }
 
+func TestDiskQueryFileUploadedField(t *testing.T) {
+	queriesuite.RunFileUploadedFieldQuery(t, startDiskQueryServer)
+}
+
 func TestDiskQueryDocumentStreaming(t *testing.T) {
 	queriesuite.RunDocumentStreaming(t, startDiskQueryServer)
 }

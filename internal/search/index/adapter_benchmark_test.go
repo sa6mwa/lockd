@@ -19,6 +19,11 @@ var (
 	benchResultSize     int
 )
 
+type benchQueryVariant struct {
+	Name     string
+	Selector api.Selector
+}
+
 type benchDatasetProfile struct {
 	Name string
 
@@ -87,6 +92,52 @@ var benchDatasetProfiles = []benchDatasetProfile{
 	},
 }
 
+func runAdapterQueryBenchmark(b *testing.B, adapter *Adapter, req search.Request) {
+	b.Helper()
+
+	warmResp, warmErr := adapter.Query(context.Background(), req)
+	if warmErr != nil {
+		b.Fatalf("adapter warm query: %v", warmErr)
+	}
+	benchResultSize = len(warmResp.Keys)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		resp, err := adapter.Query(context.Background(), req)
+		if err != nil {
+			b.Fatalf("adapter query: %v", err)
+		}
+		benchResultSize = len(resp.Keys)
+	}
+}
+
+func benchmarkAdapterProfileVariants(
+	b *testing.B,
+	build func(context.Context, testing.TB, benchDatasetProfile) *Adapter,
+	variants []benchQueryVariant,
+	limit int,
+) {
+	ctx := context.Background()
+	for _, profile := range benchDatasetProfiles {
+		profile := profile
+		b.Run(profile.Name, func(b *testing.B) {
+			adapter := build(ctx, b, profile)
+			for _, variant := range variants {
+				variant := variant
+				b.Run(variant.Name, func(b *testing.B) {
+					runAdapterQueryBenchmark(b, adapter, search.Request{
+						Namespace: namespaces.Default,
+						Selector:  variant.Selector,
+						Limit:     limit,
+						Engine:    search.EngineIndex,
+					})
+				})
+			}
+		})
+	}
+}
+
 func BenchmarkSegmentReaderResolveWildcardFields(b *testing.B) {
 	ctx := context.Background()
 	reader, _ := buildSyntheticWildcardBenchIndex(ctx, b, 256, 32)
@@ -145,6 +196,22 @@ func BenchmarkSegmentReaderWildcardContains(b *testing.B) {
 		set, err := reader.docIDsForContains(ctx, term, true)
 		if err != nil {
 			b.Fatalf("docIDsForContains: %v", err)
+		}
+		benchDocIDSetSize = len(set)
+	}
+}
+
+func BenchmarkSegmentReaderWildcardContainsAny(b *testing.B) {
+	ctx := context.Background()
+	reader, _ := buildSyntheticWildcardBenchIndex(ctx, b, 256, 32)
+	term := &api.Term{Field: "/logs/*/message", Any: []string{"timeout", "missing"}}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		set, err := reader.docIDsForContains(ctx, term, true)
+		if err != nil {
+			b.Fatalf("docIDsForContains any: %v", err)
 		}
 		benchDocIDSetSize = len(set)
 	}
@@ -406,6 +473,46 @@ func BenchmarkAdapterQueryWildcardContainsProfiles(b *testing.B) {
 	}
 }
 
+func BenchmarkAdapterQueryWildcardContainsCompareProfiles(b *testing.B) {
+	benchmarkAdapterProfileVariants(b, func(ctx context.Context, tb testing.TB, profile benchDatasetProfile) *Adapter {
+		_, adapter := buildSyntheticWildcardBenchIndex(ctx, tb, profile.WildcardFieldCount, profile.WildcardDocsPerField)
+		return adapter
+	}, []benchQueryVariant{
+		{
+			Name: "value",
+			Selector: api.Selector{
+				Contains: &api.Term{Field: "/logs/*/message", Value: "timeout"},
+			},
+		},
+		{
+			Name: "any",
+			Selector: api.Selector{
+				Contains: &api.Term{Field: "/logs/*/message", Any: []string{"timeout", "missing"}},
+			},
+		},
+	}, 200_000)
+}
+
+func BenchmarkAdapterQueryWildcardIContainsCompareProfiles(b *testing.B) {
+	benchmarkAdapterProfileVariants(b, func(ctx context.Context, tb testing.TB, profile benchDatasetProfile) *Adapter {
+		_, adapter := buildSyntheticWildcardBenchIndex(ctx, tb, profile.WildcardFieldCount, profile.WildcardDocsPerField)
+		return adapter
+	}, []benchQueryVariant{
+		{
+			Name: "value",
+			Selector: api.Selector{
+				IContains: &api.Term{Field: "/logs/*/message", Value: "TIMEOUT"},
+			},
+		},
+		{
+			Name: "any",
+			Selector: api.Selector{
+				IContains: &api.Term{Field: "/logs/*/message", Any: []string{"TIMEOUT", "MISSING"}},
+			},
+		},
+	}, 200_000)
+}
+
 func BenchmarkAdapterQueryRecursiveProfiles(b *testing.B) {
 	ctx := context.Background()
 	for _, profile := range benchDatasetProfiles {
@@ -496,6 +603,46 @@ func BenchmarkAdapterQueryFullTextContainsProfiles(b *testing.B) {
 	}
 }
 
+func BenchmarkAdapterQueryFullTextContainsCompareProfiles(b *testing.B) {
+	benchmarkAdapterProfileVariants(b, func(ctx context.Context, tb testing.TB, profile benchDatasetProfile) *Adapter {
+		_, adapter := buildSyntheticFullTextBenchIndex(ctx, tb, profile.FullTextDocCount, profile.FullTextTemplateSize, profile.FullTextHitModulo)
+		return adapter
+	}, []benchQueryVariant{
+		{
+			Name: "value",
+			Selector: api.Selector{
+				Contains: &api.Term{Field: "/body", Value: "timeout"},
+			},
+		},
+		{
+			Name: "any",
+			Selector: api.Selector{
+				Contains: &api.Term{Field: "/body", Any: []string{"timeout", "missing"}},
+			},
+		},
+	}, 200_000)
+}
+
+func BenchmarkAdapterQueryFullTextIContainsCompareProfiles(b *testing.B) {
+	benchmarkAdapterProfileVariants(b, func(ctx context.Context, tb testing.TB, profile benchDatasetProfile) *Adapter {
+		_, adapter := buildSyntheticFullTextBenchIndex(ctx, tb, profile.FullTextDocCount, profile.FullTextTemplateSize, profile.FullTextHitModulo)
+		return adapter
+	}, []benchQueryVariant{
+		{
+			Name: "value",
+			Selector: api.Selector{
+				IContains: &api.Term{Field: "/body", Value: "TIMEOUT"},
+			},
+		},
+		{
+			Name: "any",
+			Selector: api.Selector{
+				IContains: &api.Term{Field: "/body", Any: []string{"TIMEOUT", "MISSING"}},
+			},
+		},
+	}, 200_000)
+}
+
 func BenchmarkAdapterQueryFullTextAllTextProfiles(b *testing.B) {
 	ctx := context.Background()
 	for _, profile := range benchDatasetProfiles {
@@ -526,6 +673,26 @@ func BenchmarkAdapterQueryFullTextAllTextProfiles(b *testing.B) {
 			}
 		})
 	}
+}
+
+func BenchmarkAdapterQueryFullTextAllTextIContainsCompareProfiles(b *testing.B) {
+	benchmarkAdapterProfileVariants(b, func(ctx context.Context, tb testing.TB, profile benchDatasetProfile) *Adapter {
+		_, adapter := buildSyntheticFullTextBenchIndex(ctx, tb, profile.FullTextDocCount, profile.FullTextTemplateSize, profile.FullTextHitModulo)
+		return adapter
+	}, []benchQueryVariant{
+		{
+			Name: "value",
+			Selector: api.Selector{
+				IContains: &api.Term{Field: "/...", Value: "TIMEOUT"},
+			},
+		},
+		{
+			Name: "any",
+			Selector: api.Selector{
+				IContains: &api.Term{Field: "/...", Any: []string{"TIMEOUT", "MISSING"}},
+			},
+		},
+	}, 200_000)
 }
 
 func buildSyntheticWildcardBenchIndex(

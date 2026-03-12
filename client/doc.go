@@ -142,7 +142,7 @@
 // attached QueueStateHandle in the message. QueueMessage implements io.ReadCloser
 // and supports Ack, Nack, Defer, Extend, WritePayloadTo, and DecodePayloadJSON.
 // QueueStateHandle mirrors lease-state helpers with Get, GetBytes, Load, Update,
-// UpdateBytes, Save, UpdateMetadata, and Remove.
+// UpdateBytes, MutateLocal, Save, UpdateMetadata, and Remove.
 //
 //	msg, err := cli.Dequeue(ctx, "orders", client.DequeueOptions{
 //	    Namespace: "workflows",

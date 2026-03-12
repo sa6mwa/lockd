@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/spf13/viper"
 	"pkt.systems/pslog"
+	"pkt.systems/version"
 )
 
 func TestInvocationTargetsRootCommand(t *testing.T) {
@@ -152,6 +154,30 @@ func TestRootBootstrapCreatesMissingConfigWhenLOCKD_CONFIGIsSet(t *testing.T) {
 	}
 	if _, statErr := os.Stat(cfgPath); statErr != nil {
 		t.Fatalf("expected bootstrap config at %s: %v", cfgPath, statErr)
+	}
+}
+
+func TestRootStartupLogIncludesVersion(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	t.Setenv("LOCKD_CONFIG", "")
+
+	var buf bytes.Buffer
+	root := newRootCommand(pslog.NewStructured(context.Background(), &buf))
+	root.SetArgs([]string{"--store", "invalid://store"})
+	err := root.Execute()
+	if err == nil {
+		t.Fatalf("expected invalid store error")
+	}
+
+	output := buf.String()
+	wantMsg := `"msg":"welcome to lockd ` + version.Current() + `"`
+	if !strings.Contains(output, wantMsg) {
+		t.Fatalf("expected startup log message %q in %q", wantMsg, output)
+	}
+	wantField := `"version":"` + version.Current() + `"`
+	if !strings.Contains(output, wantField) {
+		t.Fatalf("expected startup log version field %q in %q", wantField, output)
 	}
 }
 

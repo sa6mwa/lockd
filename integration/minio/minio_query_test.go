@@ -48,6 +48,10 @@ func TestMinioQueryResultsSupportPublicRead(t *testing.T) {
 	queriesuite.RunPublicRead(t, startMinioQueryServer)
 }
 
+func TestMinioQueryFileUploadedField(t *testing.T) {
+	queriesuite.RunFileUploadedFieldQuery(t, startMinioQueryServer)
+}
+
 func TestMinioQueryDocumentStreaming(t *testing.T) {
 	queriesuite.RunDocumentStreaming(t, startMinioQueryServer)
 }

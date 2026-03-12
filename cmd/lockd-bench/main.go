@@ -90,6 +90,10 @@ type benchConfig struct {
 	httpTimeout      time.Duration
 	keepNamespace    bool
 	namespaceSet     bool
+	baselinePreset   string
+	baselineBackends string
+	baselineHistory  string
+	baselineRunID    string
 }
 
 type stringFlag struct {
@@ -158,8 +162,11 @@ func main() {
 		qrfRecoveryDelay: lockd.DefaultQRFRecoveryDelay,
 		qrfMaxWait:       lockd.DefaultQRFMaxWait,
 		httpTimeout:      lockdclient.DefaultHTTPTimeout,
+		baselinePreset:   defaultBaselinePreset,
+		baselineBackends: strings.Join(defaultBaselineBackends(), ","),
+		baselineHistory:  defaultBaselineHistoryPath,
 	}
-	flag.StringVar(&cfg.mode, "mode", cfg.mode, "bench mode: load, update, acquire")
+	flag.StringVar(&cfg.mode, "mode", cfg.mode, "bench mode: load, update, acquire, baseline, baseline-mark-golden")
 	flag.IntVar(&cfg.ops, "ops", cfg.ops, "number of operations to run")
 	flag.IntVar(&cfg.concurrency, "concurrency", cfg.concurrency, "number of concurrent workers")
 	flag.IntVar(&cfg.payloadBytes, "payload-bytes", cfg.payloadBytes, "payload size in bytes (total across YCSB-style fields for load/update)")
@@ -169,7 +176,8 @@ func main() {
 	flag.StringVar(&cfg.logPath, "log-path", cfg.logPath, "log output path (default stderr)")
 	flag.BoolVar(&cfg.enableCrypto, "crypto", cfg.enableCrypto, "enable storage encryption")
 	flag.BoolVar(&cfg.enableSnappy, "snappy", cfg.enableSnappy, "enable snappy compression for crypto")
-	flag.StringVar(&cfg.haMode, "ha", cfg.haMode, "HA mode (concurrent or failover)")
+	haFlag := &stringFlag{value: cfg.haMode}
+	flag.Var(haFlag, "ha", "HA mode (concurrent or failover)")
 	flag.DurationVar(&cfg.haLeaseTTL, "ha-lease-ttl", cfg.haLeaseTTL, "HA lease TTL (failover mode only)")
 	flag.IntVar(&cfg.commitMaxOps, "commit-max-ops", cfg.commitMaxOps, "max ops per logstore fsync batch")
 	flag.Int64Var(&cfg.segmentSize, "segment-size", cfg.segmentSize, "logstore segment size (0 uses default)")
@@ -214,9 +222,14 @@ func main() {
 	flag.DurationVar(&cfg.qrfRecoveryDelay, "qrf-recovery-delay", cfg.qrfRecoveryDelay, "QRF recovery delay (embedded server only)")
 	flag.DurationVar(&cfg.qrfMaxWait, "qrf-max-wait", cfg.qrfMaxWait, "QRF max wait before throttling (embedded server only)")
 	flag.DurationVar(&cfg.httpTimeout, "http-timeout", cfg.httpTimeout, "HTTP client timeout (0 uses client default)")
+	flag.StringVar(&cfg.baselinePreset, "baseline-preset", cfg.baselinePreset, "named baseline preset for mode=baseline")
+	flag.StringVar(&cfg.baselineBackends, "baseline-backends", cfg.baselineBackends, "comma-separated backend list for mode=baseline")
+	flag.StringVar(&cfg.baselineHistory, "baseline-history", cfg.baselineHistory, "JSONL history path for mode=baseline and baseline-mark-golden")
+	flag.StringVar(&cfg.baselineRunID, "baseline-run-id", cfg.baselineRunID, "run id for mode=baseline-mark-golden")
 	flag.Parse()
 	cfg.namespace = nsFlag.value
 	cfg.namespaceSet = nsFlag.set
+	cfg.haMode = haFlag.value
 
 	if cfg.ops <= 0 {
 		die("ops must be > 0")
@@ -233,6 +246,21 @@ func main() {
 	cfg.backend = strings.ToLower(strings.TrimSpace(cfg.backend))
 	if cfg.backend == "" {
 		cfg.backend = "disk"
+	}
+	switch cfg.mode {
+	case "baseline":
+		if !haFlag.set {
+			cfg.haMode = "failover"
+		}
+		if err := runBaselineMode(cfg); err != nil {
+			die("baseline: %v", err)
+		}
+		return
+	case "baseline-mark-golden":
+		if err := markBaselineGolden(cfg.baselineHistory, cfg.baselineRunID); err != nil {
+			die("baseline-mark-golden: %v", err)
+		}
+		return
 	}
 	switch cfg.backend {
 	case "disk", "minio", "aws", "azure", "mem":

@@ -48,6 +48,10 @@ func TestAzureQueryResultsSupportPublicRead(t *testing.T) {
 	queriesuite.RunPublicRead(t, startAzureQueryServer)
 }
 
+func TestAzureQueryFileUploadedField(t *testing.T) {
+	queriesuite.RunFileUploadedFieldQuery(t, startAzureQueryServer)
+}
+
 func TestAzureQueryDocumentStreaming(t *testing.T) {
 	queriesuite.RunDocumentStreaming(t, startAzureQueryServer)
 }

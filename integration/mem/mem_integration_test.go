@@ -1596,6 +1596,24 @@ func recordFailoverLogs(t testing.TB, rec *testlog.Recorder, primary, backup str
 	}
 }
 
+func TestMemMutateLocalStreamsFileBackedValues(t *testing.T) {
+	locktest.RunMutateLocalFileUpload(t, locktest.MutateLocalFileUploadConfig{
+		Client:       startMemServer(t, buildMemConfig(t)),
+		KeyPrefix:    "mem-local-mutate",
+		OwnerPrefix:  "mem-local-mutate",
+		FixtureName:  "blob.txt",
+		FixtureBytes: []byte("hello\n\"quoted\""),
+		Mutations: []string{
+			`textfile:/content=blob.txt`,
+			`/filename=blob.txt`,
+		},
+		ExpectedFields: map[string]any{
+			"filename": "blob.txt",
+			"content":  "hello\n\"quoted\"",
+		},
+	})
+}
+
 func assertRemoveFailoverLogs(t testing.TB, rec *testlog.Recorder, primary, backup string) {
 	const (
 		completeMsg = "client.remove.success"

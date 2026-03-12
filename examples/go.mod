@@ -98,5 +98,5 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 	pkt.systems/jpact v0.1.0 // indirect
 	pkt.systems/kryptograf v0.6.0 // indirect
-	pkt.systems/lql v0.16.0 // indirect
+	pkt.systems/lql v0.17.0 // indirect
 )

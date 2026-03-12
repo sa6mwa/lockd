@@ -205,3 +205,59 @@ func TestClientMutateLocalRejectsRelativeFileWithoutBaseDir(t *testing.T) {
 		t.Fatal("server should not be called")
 	}
 }
+
+func TestClientMutateLocalExpandsHomeDirFileValue(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+	if err := os.WriteFile(filepath.Join(tempHome, "blob.txt"), []byte("home-text"), 0o600); err != nil {
+		t.Fatalf("write home payload: %v", err)
+	}
+
+	var updateBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/get":
+			w.WriteHeader(http.StatusNoContent)
+		case "/v1/update":
+			if err := json.NewDecoder(r.Body).Decode(&updateBody); err != nil {
+				t.Fatalf("decode update body: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(api.UpdateResponse{
+				NewVersion:   1,
+				NewStateETag: "etag-1",
+				Bytes:        24,
+			})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	cli, err := client.New(srv.URL,
+		client.WithDisableMTLS(true),
+		client.WithEndpointShuffle(false),
+		client.WithHTTPClient(srv.Client()),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	_, err = cli.MutateLocal(context.Background(), client.MutateLocalRequest{
+		Key:       "orders",
+		LeaseID:   "lease-1",
+		Mutations: []string{`textfile:/content=~/blob.txt`, `/filename=blob.txt`},
+		Options: client.UpdateOptions{
+			FencingToken: client.Int64(9),
+		},
+	})
+	if err != nil {
+		t.Fatalf("MutateLocal with ~/ path: %v", err)
+	}
+	if got := updateBody["content"]; got != "home-text" {
+		t.Fatalf("unexpected home content %#v", got)
+	}
+	if got := updateBody["filename"]; got != "blob.txt" {
+		t.Fatalf("unexpected filename %#v", got)
+	}
+}

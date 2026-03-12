@@ -154,10 +154,7 @@ require (
 	golang.org/x/tools v0.42.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260217215200-42d3e9bedb6d // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260217215200-42d3e9bedb6d // indirect
-	pkt.systems/lql v0.16.0
+	pkt.systems/lql v0.17.0
 )
 
-retract (
-	v0.7.0
-	v0.7.0
-)
+retract v0.7.0

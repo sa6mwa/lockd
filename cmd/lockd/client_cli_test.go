@@ -351,6 +351,180 @@ func TestCLIClientMutateLocalStreamsFileMutator(t *testing.T) {
 	}
 }
 
+func TestCLIClientSetExpandsHomeDirFileMutator(t *testing.T) {
+	t.Setenv("LOCKD_CONFIG", "")
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	clk := clock.NewManual(time.Now().UTC())
+	ts := startCLITestServerWithClock(t, clk)
+	serverURL := ts.URL()
+	t.Setenv("LOCKD_CLIENT_SERVER", serverURL)
+	t.Setenv("LOCKD_CLIENT_DISABLE_MTLS", "1")
+
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+	if err := os.WriteFile(filepath.Join(tempHome, "blob.txt"), []byte("hello-from-home"), 0o600); err != nil {
+		t.Fatalf("write home payload: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	key := "cli-home-set-" + uuidv7.NewString()
+	txnID := xid.New().String()
+	acquireOut, _ := runCLICommandOutput(t,
+		"client",
+		"--server", serverURL,
+		"--disable-mtls",
+		"acquire",
+		"--key", key,
+		"--owner", "cli-home-set",
+		"--ttl", "45s",
+		"--txn-id", txnID,
+		"--namespace", namespaces.Default,
+		"--output", "json",
+	)
+	var acquireResp api.AcquireResponse
+	if err := json.Unmarshal([]byte(acquireOut), &acquireResp); err != nil {
+		t.Fatalf("decode acquire response: %v", err)
+	}
+
+	runCLICommand(t,
+		"client",
+		"--server", serverURL,
+		"--disable-mtls",
+		"set",
+		"--key", key,
+		"--namespace", namespaces.Default,
+		"--lease", acquireResp.LeaseID,
+		"--txn-id", txnID,
+		"--fencing-token", strconv.FormatInt(acquireResp.FencingToken, 10),
+		`textfile:/content=~/blob.txt`,
+		`/filename=blob.txt`,
+	)
+
+	runCLICommand(t,
+		"client",
+		"--server", serverURL,
+		"--disable-mtls",
+		"release",
+		"--key", key,
+		"--namespace", namespaces.Default,
+		"--lease", acquireResp.LeaseID,
+		"--txn-id", txnID,
+		"--fencing-token", strconv.FormatInt(acquireResp.FencingToken, 10),
+	)
+
+	verifyLease, err := ts.Client.Acquire(ctx, api.AcquireRequest{
+		Namespace:  namespaces.Default,
+		Key:        key,
+		Owner:      "cli-home-set-verify",
+		TTLSeconds: 30,
+		BlockSecs:  client.BlockNoWait,
+	})
+	if err != nil {
+		t.Fatalf("verify acquire: %v", err)
+	}
+	defer verifyLease.Release(ctx)
+
+	var state map[string]any
+	if err := verifyLease.Load(ctx, &state); err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if got := state["content"]; got != "hello-from-home" {
+		t.Fatalf("unexpected content %#v", got)
+	}
+}
+
+func TestCLIClientMutateLocalExpandsHomeDirFileMutator(t *testing.T) {
+	t.Setenv("LOCKD_CONFIG", "")
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	clk := clock.NewManual(time.Now().UTC())
+	ts := startCLITestServerWithClock(t, clk)
+	serverURL := ts.URL()
+	t.Setenv("LOCKD_CLIENT_SERVER", serverURL)
+	t.Setenv("LOCKD_CLIENT_DISABLE_MTLS", "1")
+
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+	if err := os.WriteFile(filepath.Join(tempHome, "blob.bin"), []byte{0x00, 0x01, 0x02, 'a'}, 0o600); err != nil {
+		t.Fatalf("write home payload: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	key := "cli-home-mutate-" + uuidv7.NewString()
+	txnID := xid.New().String()
+	acquireOut, _ := runCLICommandOutput(t,
+		"client",
+		"--server", serverURL,
+		"--disable-mtls",
+		"acquire",
+		"--key", key,
+		"--owner", "cli-home-mutate",
+		"--ttl", "45s",
+		"--txn-id", txnID,
+		"--namespace", namespaces.Default,
+		"--output", "json",
+	)
+	var acquireResp api.AcquireResponse
+	if err := json.Unmarshal([]byte(acquireOut), &acquireResp); err != nil {
+		t.Fatalf("decode acquire response: %v", err)
+	}
+
+	runCLICommand(t,
+		"client",
+		"--server", serverURL,
+		"--disable-mtls",
+		"mutate",
+		"--local",
+		"--key", key,
+		"--namespace", namespaces.Default,
+		"--lease", acquireResp.LeaseID,
+		"--txn-id", txnID,
+		"--fencing-token", strconv.FormatInt(acquireResp.FencingToken, 10),
+		`base64file:/payload=~/blob.bin`,
+		`/filename=blob.bin`,
+	)
+
+	runCLICommand(t,
+		"client",
+		"--server", serverURL,
+		"--disable-mtls",
+		"release",
+		"--key", key,
+		"--namespace", namespaces.Default,
+		"--lease", acquireResp.LeaseID,
+		"--txn-id", txnID,
+		"--fencing-token", strconv.FormatInt(acquireResp.FencingToken, 10),
+	)
+
+	verifyLease, err := ts.Client.Acquire(ctx, api.AcquireRequest{
+		Namespace:  namespaces.Default,
+		Key:        key,
+		Owner:      "cli-home-mutate-verify",
+		TTLSeconds: 30,
+		BlockSecs:  client.BlockNoWait,
+	})
+	if err != nil {
+		t.Fatalf("verify acquire: %v", err)
+	}
+	defer verifyLease.Release(ctx)
+
+	var state map[string]any
+	if err := verifyLease.Load(ctx, &state); err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if got := state["payload"]; got != "AAECYQ==" {
+		t.Fatalf("unexpected payload %#v", got)
+	}
+	if got := state["filename"]; got != "blob.bin" {
+		t.Fatalf("unexpected filename %#v", got)
+	}
+}
+
 func TestCLIClientMutateRejectsFileBackedMutationWithoutLocalFlag(t *testing.T) {
 	t.Setenv("LOCKD_CONFIG", "")
 	viper.Reset()

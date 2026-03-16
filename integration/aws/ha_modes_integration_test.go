@@ -4,14 +4,17 @@ package awsintegration
 
 import (
 	"context"
+	"path"
 	"testing"
 	"time"
 
 	"pkt.systems/lockd/integration/internal/hatest"
+	"pkt.systems/lockd/internal/uuidv7"
 )
 
 func TestAWSHASingleModeSkipsActiveLease(t *testing.T) {
 	cfg := loadAWSConfig(t)
+	cfg.Store = appendStorePath(t, cfg.Store, path.Join("ha-modes", uuidv7.NewString(), "single"))
 	cfg.HAMode = "single"
 
 	ts := startAWSTestServer(t, cfg)
@@ -21,6 +24,7 @@ func TestAWSHASingleModeSkipsActiveLease(t *testing.T) {
 
 func TestAWSHAAutoPromotesToFailover(t *testing.T) {
 	cfgA := loadAWSConfig(t)
+	cfgA.Store = appendStorePath(t, cfgA.Store, path.Join("ha-modes", uuidv7.NewString(), "auto"))
 	cfgA.HAMode = "auto"
 	cfgA.HALeaseTTL = 5 * time.Second
 	serverA := startAWSTestServer(t, cfgA)

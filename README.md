@@ -295,15 +295,17 @@ Shutdown tuning:
 
 ### HA modes
 
-Lockd defaults to **failover** mode (single active writer per backend). Passive nodes return HTTP 503 so clients can retry another endpoint. Use `--ha concurrent` to enable concurrent multi‑writer semantics when multiple servers share the same backend.
+Lockd defaults to **failover** mode (single active writer per backend). Passive nodes return HTTP 503 so clients can retry another endpoint. Use `--ha concurrent` to enable concurrent multi-writer semantics when multiple servers share the same backend, `--ha single` to disable HA coordination entirely for an operator-managed single-node deployment, or `--ha auto` to start in single mode and promote to failover when another live node is observed. `--ha-lease-ttl` controls failover lease duration and auto heartbeat cadence.
 
 ### Disk / NFS (logstore)
 
 - Uses a **log-structured store** on disk/NFS to minimize small-file churn: writes are append-only into segment files, each segment is recorded in a manifest, and periodic snapshots bound recovery time. Reads consult the in-memory index + manifest to find the newest record for a key, while background compaction rewrites hot data into fewer segments.
 - Optional retention (`--disk-retention`, `LOCKD_DISK_RETENTION`) prunes keys whose metadata `updated_at_unix` is older than the configured duration. Set to `0` (default) to keep data indefinitely.
 - Disk/NFS backends use **durable group commit** driven by natural backpressure. `--logstore-commit-max-ops` caps batch size, and `--logstore-segment-size` rolls segment files at a fixed size.
-- HA: **failover only**. The logstore is single‑writer; requesting `--ha concurrent`
-  is automatically downgraded to failover.
+- HA: the logstore remains **single-writer**. `--ha concurrent` is automatically
+  downgraded to failover. Use `--ha single` for an operator-managed standalone
+  node, `--ha auto` for single-writer startup with promotion to failover on peer
+  detection, or `--ha failover` for explicit lease-based coordination.
 - The janitor sweep interval defaults to half the retention window (clamped between 1 minute and 1 hour). Override via `--disk-janitor-interval`.
 - Configure with `--store disk:///var/lib/lockd-data`. All files live beneath the specified root; lockd creates `logstore/segments`, `logstore/manifest`, and `logstore/snapshots` directories per namespace.
 - For NFS: supported via the same driver with polling (queue watcher disabled on

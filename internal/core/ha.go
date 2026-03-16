@@ -15,8 +15,12 @@ const (
 	haLeaseKey  = "activelease"
 )
 
+func (s *Service) usesHALease() bool {
+	return s != nil && s.haLeaseTTL > 0 && s.haUsesLease.Load()
+}
+
 func (s *Service) startHA() {
-	if s == nil || s.haMode != "failover" || s.haLeaseTTL <= 0 || s.store == nil {
+	if !s.usesHALease() || s.store == nil {
 		return
 	}
 	if s.haStop != nil {
@@ -30,24 +34,40 @@ func (s *Service) startHA() {
 
 // StopHA stops the HA lease refresh loop.
 func (s *Service) StopHA() {
-	if s == nil || s.haStop == nil {
+	if s == nil {
 		return
 	}
-	close(s.haStop)
-	if s.haDone != nil {
-		<-s.haDone
-		s.haDone = nil
+	if s.haAutoStop != nil {
+		close(s.haAutoStop)
+		if s.haAutoDone != nil {
+			<-s.haAutoDone
+			s.haAutoDone = nil
+		}
+		s.haAutoStop = nil
 	}
-	s.haStop = nil
+	if s.haStop != nil {
+		close(s.haStop)
+		if s.haDone != nil {
+			<-s.haDone
+			s.haDone = nil
+		}
+		s.haStop = nil
+	}
 }
 
 // ReleaseHA releases the failover lease held by this node, if present.
 func (s *Service) ReleaseHA(ctx context.Context) {
-	if s == nil || s.store == nil || s.haMode != "failover" {
+	if s == nil || s.store == nil {
 		return
 	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if strings.EqualFold(s.haMode, "auto") {
+		s.releaseHAMember(ctx)
+	}
+	if !s.usesHALease() {
+		return
 	}
 	for attempt := 0; attempt < 2; attempt++ {
 		meta, etag, err := s.loadHALease(ctx)
@@ -104,7 +124,7 @@ func (s *Service) RequireNodeActive() error {
 // NodeActive reports whether this node currently holds the failover lease without
 // attempting to refresh it.
 func (s *Service) NodeActive() bool {
-	if s == nil || s.haMode != "failover" {
+	if !s.usesHALease() {
 		return true
 	}
 	if !s.haActive.Load() {
@@ -120,7 +140,17 @@ func (s *Service) NodeActive() bool {
 }
 
 func (s *Service) ensureNodeActive() error {
-	if s == nil || s.haMode != "failover" {
+	if !s.usesHALease() {
+		if s != nil && strings.EqualFold(s.haMode, "auto") {
+			s.autoHARefresh()
+			if !s.usesHALease() {
+				return nil
+			}
+		} else {
+			return nil
+		}
+	}
+	if s == nil {
 		return nil
 	}
 	if s.NodeActive() {
@@ -146,7 +176,7 @@ func (s *Service) ensureNodeActive() error {
 }
 
 func (s *Service) haRefresh() {
-	if s == nil || s.store == nil {
+	if !s.usesHALease() || s.store == nil {
 		return
 	}
 	s.haRefreshes.Add(1)

@@ -706,8 +706,9 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 			indexManager = indexer.NewManager(indexStore, indexer.WriterOptions{
 				FlushDocs:     flushDocs,
 				FlushInterval: flushInterval,
-				NoSync:        strings.EqualFold(cfg.HAMode, "failover"),
-				Logger:        indexLogger,
+				NoSync: strings.EqualFold(cfg.HAMode, "failover") ||
+					strings.EqualFold(cfg.HAMode, "single"),
+				Logger: indexLogger,
 			})
 			adapter, err := indexer.NewAdapter(indexer.AdapterConfig{
 				Store:  indexStore,

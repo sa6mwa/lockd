@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"pkt.systems/lockd/api"
 	"pkt.systems/lockd/internal/storage"
@@ -85,6 +86,56 @@ func TestLeaseIndexWritesRemainSyncInConcurrentMode(t *testing.T) {
 	_, err := svc.Acquire(context.Background(), AcquireCommand{
 		Namespace:    "default",
 		Key:          "orders/concurrent-sync",
+		Owner:        "owner-a",
+		TTLSeconds:   30,
+		BlockSeconds: api.BlockNoWait,
+	})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+
+	backend.assertLeaseIndexNoSync(t, false)
+}
+
+func TestLeaseIndexWritesUseNoSyncInSingleMode(t *testing.T) {
+	backend := &leaseIndexNoSyncBackend{Backend: memory.New()}
+	svc := New(Config{
+		Store:            backend,
+		DefaultNamespace: "default",
+		BackendHash:      "test-backend",
+		HAMode:           "single",
+		HANodeID:         "single-node",
+	})
+
+	_, err := svc.Acquire(context.Background(), AcquireCommand{
+		Namespace:    "default",
+		Key:          "orders/single-nosync",
+		Owner:        "owner-a",
+		TTLSeconds:   30,
+		BlockSeconds: api.BlockNoWait,
+	})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+
+	backend.assertLeaseIndexNoSync(t, true)
+}
+
+func TestLeaseIndexWritesRemainSyncInAutoModeBeforePromotion(t *testing.T) {
+	backend := &leaseIndexNoSyncBackend{Backend: memory.New()}
+	svc := New(Config{
+		Store:            backend,
+		DefaultNamespace: "default",
+		BackendHash:      "test-backend",
+		HAMode:           "auto",
+		HALeaseTTL:       time.Second,
+		HANodeID:         "auto-node",
+	})
+	t.Cleanup(svc.StopHA)
+
+	_, err := svc.Acquire(context.Background(), AcquireCommand{
+		Namespace:    "default",
+		Key:          "orders/auto-sync",
 		Owner:        "owner-a",
 		TTLSeconds:   30,
 		BlockSeconds: api.BlockNoWait,

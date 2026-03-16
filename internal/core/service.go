@@ -73,6 +73,7 @@ type Service struct {
 	haMode         string
 	haLeaseTTL     time.Duration
 	haNodeID       string
+	haUsesLease    atomic.Bool
 	haActive       atomic.Bool
 	haLeaseExpires atomic.Int64
 	haRefreshes    atomic.Int64
@@ -80,6 +81,8 @@ type Service struct {
 	haTransitions  atomic.Int64
 	haStop         chan struct{}
 	haDone         chan struct{}
+	haAutoStop     chan struct{}
+	haAutoDone     chan struct{}
 
 	leaseBucketCache    sync.Map
 	decisionBucketCache sync.Map
@@ -220,12 +223,20 @@ func New(cfg Config) *Service {
 		sweeperMetrics:            newSweeperMetrics(logger),
 		tcDecider:                 cfg.TCDecider,
 	}
-	if svc.haMode == "failover" && svc.haLeaseTTL > 0 {
+	if !strings.EqualFold(svc.haMode, "concurrent") {
 		if haNodeID == "" {
 			haNodeID = uuidv7.NewString()
 		}
 		svc.haNodeID = haNodeID
+	}
+	switch {
+	case strings.EqualFold(svc.haMode, "failover") && svc.haLeaseTTL > 0:
+		svc.haUsesLease.Store(true)
 		svc.startHA()
+	case strings.EqualFold(svc.haMode, "single"):
+		svc.setNodeActive(true, 0, svc.haNodeID)
+	case strings.EqualFold(svc.haMode, "auto"):
+		svc.startAutoHA()
 	}
 	return svc
 }
@@ -273,7 +284,7 @@ func (s *Service) maybeNoSync(ctx context.Context) context.Context {
 	if s == nil {
 		return ctx
 	}
-	if strings.EqualFold(s.haMode, "failover") {
+	if strings.EqualFold(s.haMode, "failover") || strings.EqualFold(s.haMode, "single") {
 		return storage.ContextWithNoSync(ctx)
 	}
 	return ctx

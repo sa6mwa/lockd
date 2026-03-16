@@ -55,7 +55,7 @@ const (
 	DefaultPprofListen = ""
 	// DefaultStore points the server at the in-memory backend when no store is provided.
 	DefaultStore = "mem://"
-	// DefaultHAMode controls multi-node behaviour when multiple servers share a backend.
+	// DefaultHAMode controls coordination behaviour when multiple servers share a backend.
 	DefaultHAMode = "failover"
 	// DefaultHALeaseTTL controls how long HA failover leases are held in failover mode.
 	DefaultHALeaseTTL = 5 * time.Second
@@ -243,9 +243,9 @@ type Config struct {
 	EnableProfilingMetricsSet bool
 	// Store is the backend DSN (for example mem://, disk://..., s3://..., azure://...).
 	Store string
-	// HAMode controls cluster coordination strategy ("concurrent" or "failover").
+	// HAMode controls cluster coordination strategy ("concurrent", "failover", "single", or "auto").
 	HAMode string
-	// HALeaseTTL controls leader-lease lifetime in failover mode.
+	// HALeaseTTL controls leader-lease lifetime in failover mode and heartbeat cadence in auto mode.
 	HALeaseTTL time.Duration
 	// DefaultNamespace is used when requests omit namespace.
 	DefaultNamespace string
@@ -549,9 +549,9 @@ func (c *Config) Validate() error {
 		c.HAMode = DefaultHAMode
 	}
 	switch c.HAMode {
-	case "concurrent", "failover":
+	case "concurrent", "failover", "single", "auto":
 	default:
-		return fmt.Errorf("config: ha mode must be %q or %q", "concurrent", "failover")
+		return fmt.Errorf("config: ha mode must be %q, %q, %q, or %q", "concurrent", "failover", "single", "auto")
 	}
 	if c.HALeaseTTL == 0 {
 		c.HALeaseTTL = DefaultHALeaseTTL

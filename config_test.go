@@ -58,6 +58,21 @@ func TestConfigValidateDefaults(t *testing.T) {
 	if cfg.DefaultNamespace != DefaultNamespace {
 		t.Fatalf("expected default namespace %q, got %q", DefaultNamespace, cfg.DefaultNamespace)
 	}
+	if cfg.HAMode != DefaultHAMode {
+		t.Fatalf("expected ha mode %q, got %q", DefaultHAMode, cfg.HAMode)
+	}
+}
+
+func TestConfigValidateAcceptsSingleAndAutoHAModes(t *testing.T) {
+	for _, mode := range []string{"single", "auto"} {
+		cfg := Config{Store: "mem://", HAMode: mode}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("validate %s: %v", mode, err)
+		}
+		if cfg.HAMode != mode {
+			t.Fatalf("expected ha mode %q, got %q", mode, cfg.HAMode)
+		}
+	}
 }
 
 func TestConfigHTTP2MaxConcurrentStreamsZero(t *testing.T) {

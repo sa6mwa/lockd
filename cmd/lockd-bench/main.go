@@ -177,7 +177,7 @@ func main() {
 	flag.BoolVar(&cfg.enableCrypto, "crypto", cfg.enableCrypto, "enable storage encryption")
 	flag.BoolVar(&cfg.enableSnappy, "snappy", cfg.enableSnappy, "enable snappy compression for crypto")
 	haFlag := &stringFlag{value: cfg.haMode}
-	flag.Var(haFlag, "ha", "HA mode (concurrent or failover)")
+	flag.Var(haFlag, "ha", "HA mode (concurrent, failover, single, or auto)")
 	flag.DurationVar(&cfg.haLeaseTTL, "ha-lease-ttl", cfg.haLeaseTTL, "HA lease TTL (failover mode only)")
 	flag.IntVar(&cfg.commitMaxOps, "commit-max-ops", cfg.commitMaxOps, "max ops per logstore fsync batch")
 	flag.Int64Var(&cfg.segmentSize, "segment-size", cfg.segmentSize, "logstore segment size (0 uses default)")

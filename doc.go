@@ -57,18 +57,21 @@
 // --logstore-segment-size, --disk-lock-file-cache-size,
 // --state-cache-bytes, and --query-doc-prefetch.
 //
-// # HA modes (concurrent vs failover)
+// # HA modes
 //
 // When multiple lockd servers share the same backend, HAMode controls
-// concurrent vs failover behaviour. HAMode="failover" (default) uses a
+// concurrent vs coordinated behaviour. HAMode="failover" (default) uses a
 // lease stored under the internal .ha/activelease key to elect a single
 // active writer; passive nodes return HTTP 503 so clients can retry another
-// endpoint. HAMode="concurrent" enables multi-writer semantics. HALeaseTTL
-// controls the lease duration and renewal cadence.
+// endpoint. HAMode="concurrent" enables multi-writer semantics. HAMode="single"
+// disables HA coordination entirely and assumes the backend is owned by one
+// server process. HAMode="auto" starts in single-writer mode and promotes to
+// failover when it observes another live node. HALeaseTTL controls the lease
+// duration in failover mode and heartbeat cadence in auto mode.
 //
 //	cfg := lockd.Config{
 //	    Store:      "disk:///var/lib/lockd-data",
-//	    HAMode:     "failover",
+//	    HAMode:     "single",
 //	    HALeaseTTL: 5 * time.Second,
 //	}
 //

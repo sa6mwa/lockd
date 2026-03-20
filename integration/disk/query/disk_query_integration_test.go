@@ -9,10 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -21,6 +17,7 @@ import (
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/integration/internal/cryptotest"
 	"pkt.systems/lockd/integration/internal/hatest"
+	"pkt.systems/lockd/integration/internal/storetest"
 	queriesuite "pkt.systems/lockd/integration/query/suite"
 	"pkt.systems/lockd/internal/core"
 	"pkt.systems/lockd/internal/storage"
@@ -1136,7 +1133,7 @@ func countStagingObjects(ctx context.Context, backend storage.Backend, namespace
 
 func diskQueryConfigWithSweeper(root string, interval time.Duration) lockd.Config {
 	return lockd.Config{
-		Store:           diskStoreURL(root),
+		Store:           storetest.DiskStoreURL(root),
 		Listen:          "127.0.0.1:0",
 		ListenProto:     "tcp",
 		DefaultTTL:      30 * time.Second,
@@ -1199,24 +1196,5 @@ func waitForTxnRecordDecided(ctx context.Context, backend storage.Backend, txnID
 
 func prepareDiskQueryRoot(t testing.TB) string {
 	t.Helper()
-	base := os.Getenv("LOCKD_DISK_ROOT")
-	if base == "" {
-		t.Fatalf("LOCKD_DISK_ROOT must be set (source .env.disk before running disk query tests)")
-	}
-	root := filepath.Join(base, fmt.Sprintf("lockd-query-%d", time.Now().UnixNano()))
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		t.Fatalf("mkdir disk root: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	return root
-}
-
-func diskStoreURL(root string) string {
-	if root == "" {
-		root = "/tmp/lockd-disk"
-	}
-	if !strings.HasPrefix(root, "/") {
-		root = "/" + root
-	}
-	return (&url.URL{Scheme: "disk", Path: root}).String()
+	return storetest.PrepareDiskStoreSubdir(t, "disk", "", "lockd-query")
 }

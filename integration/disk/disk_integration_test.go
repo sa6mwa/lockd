@@ -11,7 +11,6 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -29,6 +28,7 @@ import (
 	"pkt.systems/lockd/integration/internal/hatest"
 	"pkt.systems/lockd/integration/internal/locktest"
 	shutdowntest "pkt.systems/lockd/integration/internal/shutdowntest"
+	"pkt.systems/lockd/integration/internal/storetest"
 	testlog "pkt.systems/lockd/integration/internal/testlog"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/disk"
@@ -87,10 +87,7 @@ func retryableAcquireForUpdateError(err error) bool {
 
 func ensureDiskRootEnv(tb testing.TB) {
 	tb.Helper()
-	if env := os.Getenv("LOCKD_DISK_ROOT"); env != "" {
-		return
-	}
-	tb.Fatalf("LOCKD_DISK_ROOT must be set (source .env.disk before running disk integration tests)")
+	_ = storetest.RequireDiskStoreRoot(tb, "disk")
 }
 
 func TestDiskLockLifecycle(t *testing.T) {
@@ -2338,26 +2335,11 @@ func RunDiskLifecycleScenario(t *testing.T, base, owner string) {
 
 func prepareDiskRoot(tb testing.TB, base string) string {
 	tb.Helper()
-	var root string
-	if base != "" {
-		if info, err := os.Stat(base); err != nil || !info.IsDir() {
-			tb.Fatalf("disk base %q unavailable: %v", base, err)
-		}
-		root = filepath.Join(base, "lockd-"+uuidv7.NewString())
-	} else if env := os.Getenv("LOCKD_DISK_ROOT"); env != "" {
-		root = filepath.Join(env, "lockd-"+uuidv7.NewString())
-	} else {
-		tb.Fatalf("LOCKD_DISK_ROOT must be set (source .env.disk before running disk integration/benchmarks)")
-	}
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		tb.Fatalf("mkdir disk root: %v", err)
-	}
-	tb.Cleanup(func() { _ = os.RemoveAll(root) })
-	return root
+	return storetest.PrepareDiskStoreSubdir(tb, "disk", base, "lockd")
 }
 
 func buildDiskConfig(tb testing.TB, root string, retention time.Duration) lockd.Config {
-	storeURL := diskStoreURL(root)
+	storeURL := storetest.DiskStoreURL(root)
 	cfg := lockd.Config{
 		Store:           storeURL,
 		Listen:          "127.0.0.1:0",
@@ -2376,16 +2358,6 @@ func buildDiskConfig(tb testing.TB, root string, retention time.Duration) lockd.
 		diskEncryptionBundles.Store(root, cfg.BundlePath)
 	}
 	return cfg
-}
-
-func diskStoreURL(root string) string {
-	if root == "" {
-		root = "/tmp/lockd-disk"
-	}
-	if !strings.HasPrefix(root, "/") {
-		root = "/" + root
-	}
-	return (&url.URL{Scheme: "disk", Path: root}).String()
 }
 
 func startDiskServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client {

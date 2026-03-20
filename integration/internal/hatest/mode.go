@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,8 +16,10 @@ import (
 )
 
 const (
-	haNamespace = ".ha"
-	haLeaseKey  = "activelease"
+	haNamespace      = ".ha"
+	haLeaseKey       = "activelease"
+	haMemberPrefix   = "members/"
+	haMemberModeAttr = "ha_mode"
 )
 
 // RequireNoHALease asserts that no active HA lease metadata has been written.
@@ -30,6 +33,100 @@ func RequireNoHALease(t testing.TB, backend storage.Backend) {
 	_, err := backend.LoadMeta(ctx, haNamespace, haLeaseKey)
 	if !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected no %s/%s lease record, got %v", haNamespace, haLeaseKey, err)
+	}
+}
+
+// RequireNoHAMembers asserts that no HA membership records have been written.
+func RequireNoHAMembers(t testing.TB, backend storage.Backend) {
+	t.Helper()
+	if backend == nil {
+		t.Fatalf("require no ha members: nil backend")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	keys, err := backend.ListMetaKeys(ctx, haNamespace)
+	if err != nil && !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("list ha members: %v", err)
+	}
+	for _, key := range keys {
+		if strings.HasPrefix(key, haMemberPrefix) {
+			t.Fatalf("expected no %s membership records, found %q", haNamespace, key)
+		}
+	}
+}
+
+// WaitForHAMemberMode blocks until any live HA membership record advertises the requested mode.
+func WaitForHAMemberMode(t testing.TB, backend storage.Backend, mode string, timeout time.Duration) *storage.Meta {
+	t.Helper()
+	if backend == nil {
+		t.Fatalf("wait for ha member mode: nil backend")
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		keys, err := backend.ListMetaKeys(ctx, haNamespace)
+		cancel()
+		if err != nil && !errors.Is(err, storage.ErrNotFound) {
+			t.Fatalf("list ha members: %v", err)
+		}
+		for _, key := range keys {
+			if !strings.HasPrefix(key, haMemberPrefix) {
+				continue
+			}
+			ctx, cancel = context.WithTimeout(context.Background(), 2*time.Second)
+			res, err := backend.LoadMeta(ctx, haNamespace, key)
+			cancel()
+			if errors.Is(err, storage.ErrNotFound) {
+				continue
+			}
+			if err != nil {
+				t.Fatalf("load ha member %q: %v", key, err)
+			}
+			if res.Meta == nil || res.Meta.Lease == nil || res.Meta.Lease.ExpiresAtUnix <= time.Now().Unix() {
+				continue
+			}
+			got, ok := res.Meta.GetAttribute(haMemberModeAttr)
+			if ok && strings.EqualFold(strings.TrimSpace(got), mode) {
+				return res.Meta
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for live %s membership mode %q", haNamespace, mode)
+	return nil
+}
+
+// RequireNoLiveHAMemberMode asserts that no live HA membership record currently advertises the requested mode.
+func RequireNoLiveHAMemberMode(t testing.TB, backend storage.Backend, mode string) {
+	t.Helper()
+	if backend == nil {
+		t.Fatalf("require no live ha member mode: nil backend")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	keys, err := backend.ListMetaKeys(ctx, haNamespace)
+	if err != nil && !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("list ha members: %v", err)
+	}
+	nowUnix := time.Now().Unix()
+	for _, key := range keys {
+		if !strings.HasPrefix(key, haMemberPrefix) {
+			continue
+		}
+		res, err := backend.LoadMeta(ctx, haNamespace, key)
+		if errors.Is(err, storage.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			t.Fatalf("load ha member %q: %v", key, err)
+		}
+		if res.Meta == nil || res.Meta.Lease == nil || res.Meta.Lease.ExpiresAtUnix <= nowUnix {
+			continue
+		}
+		got, ok := res.Meta.GetAttribute(haMemberModeAttr)
+		if ok && strings.EqualFold(strings.TrimSpace(got), mode) {
+			t.Fatalf("expected no live %s membership mode %q, found %q", haNamespace, mode, key)
+		}
 	}
 }
 

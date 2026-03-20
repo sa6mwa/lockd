@@ -219,6 +219,13 @@ func (b *backend) SupportsConcurrentWrites() bool {
 	return true
 }
 
+func (b *backend) ProbeExclusiveWriter(ctx context.Context) (storage.ExclusiveWriterPresence, error) {
+	if inner, ok := b.inner.(storage.ExclusiveWriterProbe); ok {
+		return inner.ProbeExclusiveWriter(ctx)
+	}
+	return storage.ExclusiveWriterPresence{}, storage.ErrNotImplemented
+}
+
 func (b *backend) Close() error {
 	return b.inner.Close()
 }

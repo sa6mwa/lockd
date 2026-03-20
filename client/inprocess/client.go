@@ -65,7 +65,7 @@ func New(ctx context.Context, cfg lockd.Config, opts ...lockd.Option) (*Client, 
 	}
 	stop := handle.Stop
 
-	cli, err := lockdclient.New("unix://" + cfg.Listen)
+	cli, err := lockdclient.New("unix://"+cfg.Listen, lockdclient.WithDisableMTLS(true))
 	if err != nil {
 		_ = stop(context.Background())
 		cleanup()

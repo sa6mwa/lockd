@@ -9,10 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -21,6 +17,7 @@ import (
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/integration/internal/cryptotest"
 	"pkt.systems/lockd/integration/internal/hatest"
+	"pkt.systems/lockd/integration/internal/storetest"
 	queriesuite "pkt.systems/lockd/integration/query/suite"
 	"pkt.systems/lockd/internal/core"
 	"pkt.systems/lockd/internal/storage"
@@ -899,31 +896,12 @@ func startNFSQueryServer(t testing.TB) *lockd.TestServer {
 
 func prepareNFSQueryRoot(t testing.TB) string {
 	t.Helper()
-	base := strings.TrimSpace(os.Getenv("LOCKD_NFS_ROOT"))
-	if base == "" {
-		t.Fatalf("LOCKD_NFS_ROOT must be set (source .env.nfs before running nfs query tests)")
-	}
-	root := filepath.Join(base, fmt.Sprintf("lockd-query-%d", time.Now().UnixNano()))
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		t.Fatalf("mkdir nfs root: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	return root
-}
-
-func diskStoreURL(root string) string {
-	if root == "" {
-		root = "/tmp/lockd-nfs"
-	}
-	if !strings.HasPrefix(root, "/") {
-		root = "/" + root
-	}
-	return (&url.URL{Scheme: "disk", Path: root}).String()
+	return storetest.PrepareDiskStoreSubdir(t, "nfs", "", "lockd-query")
 }
 
 func nfsQueryConfigWithSweeper(root string, interval time.Duration) lockd.Config {
 	return lockd.Config{
-		Store:           diskStoreURL(root),
+		Store:           storetest.DiskStoreURL(root),
 		Listen:          "127.0.0.1:0",
 		ListenProto:     "tcp",
 		DefaultTTL:      30 * time.Second,

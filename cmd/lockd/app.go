@@ -348,7 +348,8 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 	flags.Bool("enable-profiling-metrics", false, "enable Go runtime profiling metrics on the Prometheus endpoint")
 	flags.String("store", "", "storage backend URL (mem://, s3://host[:port]/bucket, aws://bucket, disk:///path)")
 	flags.String("ha", lockd.DefaultHAMode, "HA mode when multiple servers share a backend (concurrent, failover, single, or auto)")
-	flags.Duration("ha-lease-ttl", lockd.DefaultHALeaseTTL, "lease TTL for HA failover mode and auto heartbeat cadence (ignored in single mode)")
+	flags.Duration("ha-lease-ttl", lockd.DefaultHALeaseTTL, "lease TTL for HA failover mode and auto heartbeat cadence")
+	flags.Duration("ha-single-presence-ttl", lockd.DefaultHASinglePresenceTTL, "presence TTL for single-mode advertisement on backends without native single-writer detection (ignored on disk/nfs)")
 	flags.StringP("default-namespace", "n", lockd.DefaultNamespace, "default namespace applied when callers omit one")
 	jsonMaxDefault := humanizeBytes(lockd.DefaultJSONMaxBytes)
 	spoolDefault := humanizeBytes(lockd.DefaultPayloadSpoolMemoryThreshold)
@@ -478,7 +479,7 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 
 	names := []string{
 		"config",
-		"listen", "listen-proto", "metrics-listen", "pprof-listen", "enable-profiling-metrics", "store", "ha", "ha-lease-ttl", "default-namespace", "json-max", "json-util", "payload-spool-mem", "state-cache-bytes", "default-ttl", "max-ttl", "acquire-block",
+		"listen", "listen-proto", "metrics-listen", "pprof-listen", "enable-profiling-metrics", "store", "ha", "ha-lease-ttl", "ha-single-presence-ttl", "default-namespace", "json-max", "json-util", "payload-spool-mem", "state-cache-bytes", "default-ttl", "max-ttl", "acquire-block",
 		"sweeper-interval", "txn-replay-interval", "queue-decision-cache-ttl", "queue-decision-max-apply", "idle-sweep-grace", "idle-sweep-op-delay", "idle-sweep-max-ops", "idle-sweep-max-runtime", "drain-grace", "shutdown-timeout", "disk-retention", "disk-janitor-interval", "disk-lock-file-cache-size",
 		"logstore-commit-max-ops", "logstore-segment-size",
 		"disable-mtls", "http2-max-concurrent-streams", "bundle", "denylist-path", "tc-trust-dir", "tc-disable-auth", "tc-allow-default-ca",
@@ -538,6 +539,7 @@ func bindConfig(cfg *lockd.Config) error {
 	cfg.Store = viper.GetString("store")
 	cfg.HAMode = viper.GetString("ha")
 	cfg.HALeaseTTL = viper.GetDuration("ha-lease-ttl")
+	cfg.HASinglePresenceTTL = viper.GetDuration("ha-single-presence-ttl")
 	cfg.DefaultNamespace = viper.GetString("default-namespace")
 	maxBytes := viper.GetString("json-max")
 	if maxBytes != "" {

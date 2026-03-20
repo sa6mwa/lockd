@@ -12,9 +12,6 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
-	"net/url"
-	"os"
-	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -30,6 +27,7 @@ import (
 	"pkt.systems/lockd/integration/internal/hatest"
 	"pkt.systems/lockd/integration/internal/locktest"
 	shutdowntest "pkt.systems/lockd/integration/internal/shutdowntest"
+	"pkt.systems/lockd/integration/internal/storetest"
 	testlog "pkt.systems/lockd/integration/internal/testlog"
 	"pkt.systems/lockd/internal/storage/disk"
 	"pkt.systems/lockd/internal/uuidv7"
@@ -79,32 +77,17 @@ func retryableTransportError(err error) bool {
 
 func ensureNFSRootEnv(tb testing.TB) string {
 	tb.Helper()
-	root := os.Getenv("LOCKD_NFS_ROOT")
-	if root == "" {
-		tb.Fatalf("LOCKD_NFS_ROOT must be set (source .env.nfs before running integration/nfs)")
-	}
-	if info, err := os.Stat(root); err != nil || !info.IsDir() {
-		tb.Fatalf("LOCKD_NFS_ROOT %q unavailable: %v", root, err)
-	}
-	return root
+	return storetest.RequireDiskStoreRoot(tb, "nfs")
 }
 
 func prepareNFSRoot(tb testing.TB, base string) string {
 	tb.Helper()
-	if base == "" {
-		base = ensureNFSRootEnv(tb)
-	}
-	root := filepath.Join(base, "lockd-"+uuidv7.NewString())
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		tb.Fatalf("mkdir nfs root: %v", err)
-	}
-	tb.Cleanup(func() { _ = os.RemoveAll(root) })
-	return root
+	return storetest.PrepareDiskStoreSubdir(tb, "nfs", base, "lockd")
 }
 
 func buildNFSConfig(tb testing.TB, root string, retention time.Duration) lockd.Config {
 	tb.Helper()
-	storeURL := diskStoreURL(root)
+	storeURL := storetest.DiskStoreURL(root)
 	cfg := lockd.Config{
 		Store:           storeURL,
 		Listen:          "127.0.0.1:0",
@@ -119,16 +102,6 @@ func buildNFSConfig(tb testing.TB, root string, retention time.Duration) lockd.C
 	}
 	cryptotest.MaybeEnableStorageEncryption(tb, &cfg)
 	return cfg
-}
-
-func diskStoreURL(root string) string {
-	if root == "" {
-		root = "/tmp/lockd-nfs"
-	}
-	if !strings.HasPrefix(root, "/") {
-		root = "/" + root
-	}
-	return (&url.URL{Scheme: "disk", Path: root}).String()
 }
 
 func startNFSServer(tb testing.TB, cfg lockd.Config) *lockdclient.Client {

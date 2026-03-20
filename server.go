@@ -745,6 +745,7 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 		Clock:                      serverClock,
 		HAMode:                     cfg.HAMode,
 		HALeaseTTL:                 cfg.HALeaseTTL,
+		HASinglePresenceTTL:        cfg.HASinglePresenceTTL,
 		SearchAdapter:              searchAdapter,
 		NamespaceConfigs:           namespaceConfigs,
 		DefaultNamespaceConfig:     defaultNamespaceCfg,
@@ -1809,6 +1810,9 @@ func (s *Server) Abort(ctx context.Context) error {
 	if s == nil {
 		return nil
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	s.tcClusterNoLeave.Store(true)
 	s.mu.Lock()
 	if s.shutdown {
@@ -1841,7 +1845,15 @@ func (s *Server) Abort(ctx context.Context) error {
 		_ = s.listener.Close()
 		s.listener = nil
 	}
-	_ = ctx
+	if s.indexManager != nil {
+		s.indexManager.Close(ctx)
+	}
+	if s.backend != nil {
+		if err := s.backend.Close(); err != nil {
+			s.logger.Error("abort.backend.close_error", "error", err)
+			return err
+		}
+	}
 	return nil
 }
 

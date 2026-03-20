@@ -446,6 +446,21 @@ type ConcurrentWriteSupport interface {
 	SupportsConcurrentWrites() bool
 }
 
+// ExclusiveWriterPresence reports whether the backend currently observes a live
+// exclusive writer outside HA lease coordination.
+type ExclusiveWriterPresence struct {
+	Present       bool
+	ExpiresAtUnix int64
+}
+
+// ExclusiveWriterProbe reports whether the backend currently has a live
+// exclusive writer. Backends that can natively detect single-writer ownership
+// can implement this so HA auto mode can fence itself without relying on .ha
+// membership.
+type ExclusiveWriterProbe interface {
+	ProbeExclusiveWriter(ctx context.Context) (ExclusiveWriterPresence, error)
+}
+
 // GetObjectResult captures an object reader with its metadata.
 type GetObjectResult struct {
 	Reader io.ReadCloser

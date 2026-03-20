@@ -106,6 +106,72 @@ format_duration() {
   fi
 }
 
+print_missing_env_help() {
+  local suite=$1
+  local file=$2
+  case "$file" in
+    .env.disk)
+      cat <<'EOF' >&2
+Example setup for disk:
+  cat > .env.disk <<'ENV'
+  export LOCKD_STORE="disk:///absolute/path/to/lockd-disk-root"
+  ENV
+
+Then rerun:
+  ./run-integration-suites.sh disk
+EOF
+      ;;
+    .env.nfs)
+      cat <<'EOF' >&2
+Example setup for nfs:
+  cat > .env.nfs <<'ENV'
+  export LOCKD_STORE="disk:///absolute/path/to/nfs-mount"
+  ENV
+
+Then rerun:
+  ./run-integration-suites.sh nfs
+EOF
+      ;;
+    .env.minio)
+      cat <<'EOF' >&2
+Example setup for minio:
+  cat > .env.minio <<'ENV'
+  export LOCKD_STORE=s3://ACCESS_KEY:SECRET_KEY@127.0.0.1:9000/bucket/prefix?region=us-east-1&s3ForcePathStyle=true&disableSSL=true
+  ENV
+
+Then rerun:
+  ./run-integration-suites.sh minio
+EOF
+      ;;
+    .env.aws)
+      cat <<'EOF' >&2
+Example setup for aws:
+  cat > .env.aws <<'ENV'
+  export LOCKD_STORE=s3://ACCESS_KEY:SECRET_KEY@s3.amazonaws.com/bucket/prefix?region=eu-north-1
+  export LOCKD_AWS_REGION=eu-north-1
+  ENV
+
+Then rerun:
+  ./run-integration-suites.sh aws
+EOF
+      ;;
+    .env.azure)
+      cat <<'EOF' >&2
+Example setup for azure:
+  cat > .env.azure <<'ENV'
+  export LOCKD_STORE=azblob://ACCOUNT:KEY@blob.core.windows.net/container/prefix
+  ENV
+
+Then rerun:
+  ./run-integration-suites.sh azure
+EOF
+      ;;
+    *)
+      echo "Create $file with the required backend environment, then rerun ./run-integration-suites.sh $suite" >&2
+      ;;
+  esac
+}
+
 list_suites() {
   echo "Available suites:"
   for name in "${SUITE_NAMES[@]}"; do
@@ -189,6 +255,7 @@ for suite in "${SUITES_TO_RUN[@]}"; do
     for file in $env_file; do
       if [[ ! -f $file ]]; then
         echo "Missing environment file: $file (suite $suite)" >&2
+        print_missing_env_help "$suite" "$file"
         EXIT_CODE=1
         continue 2
       fi

@@ -295,7 +295,7 @@ Shutdown tuning:
 
 ### HA modes
 
-Lockd defaults to **failover** mode (single active writer per backend). Passive nodes return HTTP 503 so clients can retry another endpoint. Use `--ha concurrent` to enable concurrent multi-writer semantics when multiple servers share the same backend, `--ha single` to disable HA coordination entirely for an operator-managed single-node deployment, or `--ha auto` to start in single mode and promote to failover when another live node is observed. `--ha-lease-ttl` controls failover lease duration and auto heartbeat cadence.
+Lockd defaults to **failover** mode (single active writer per backend). Passive nodes return HTTP 503 so clients can retry another endpoint. Use `--ha concurrent` to enable concurrent multi-writer semantics when multiple servers share the same backend, `--ha single` for an operator-managed single-node deployment, or `--ha auto` to start in single mode and promote to failover when another live node is observed. `--ha-lease-ttl` controls failover lease duration and auto heartbeat cadence. On backends without native single-writer detection, `--ha-single-presence-ttl` controls the long-lived `.ha` advertisement used by `ha=single`.
 
 ### Disk / NFS (logstore)
 
@@ -836,10 +836,10 @@ set -a && source .env.local && set +a && go test -run ^$ -bench BenchmarkLockdDi
 Source `.env.disk` (or export the variables manually) before running; the suite
 fails fast if the required paths are missing:
 
-- `LOCKD_DISK_ROOT` – absolute path on SSD/NVMe for local disk benchmarks.
-- `LOCKD_NFS_ROOT` – absolute path to an NFS mount (optional but required
-  for the NFS benchmark). If both `/mnt/nfs4-lockd` and `/mnt/nfs-lockd` are
-  unset/unavailable the test fails.
+- `LOCKD_STORE=disk:///absolute/path/on/ssd-or-nvme` – disk backend root for
+  local disk benchmarks.
+- `LOCKD_STORE=disk:///absolute/path/to/nfs-mount` – NFS benchmark root when
+  targeting an NFS-backed mount.
 
 ### In-memory queue benchmarks
 
@@ -1321,7 +1321,7 @@ Current backends:
 |---------|-------|----------|
 | `mem`   | Uses the in-memory store; no environment needed. | `go test -tags "integration mem" ./integration/...` (all mem suites) / `go test -tags "integration mem lq" ./integration/...` (queue scenarios only) / `go test -tags "integration mem query" ./integration/...` (query-only scenarios). |
 | `disk`  | Local disk backend. Requires `.env.disk` (see `integration/disk`). | `set -a && source .env.disk && set +a && go test -tags "integration disk" ./integration/...` / `... -tags "integration disk lq" ...` for queue-only coverage. |
-| `nfs`   | Disk backend mounted on NFS. Source `.env.nfs` so `LOCKD_NFS_ROOT` is set. | `set -a && source .env.nfs && set +a && go test -tags "integration nfs lq" ./integration/...`. |
+| `nfs`   | Disk backend mounted on NFS. Source `.env.nfs` so `LOCKD_STORE` points at the NFS mount. | `set -a && source .env.nfs && set +a && go test -tags "integration nfs lq" ./integration/...`. |
 | `aws`   | Real S3 credentials via `.env`. | `set -a && source .env && set +a && go test -tags "integration aws" ./integration/...`. |
 | `minio`, `azure` | S3-compatible / Azure Blob suites. | e.g. `go test -tags "integration minio" ./integration/...` (requires appropriate env). |
 

@@ -59,6 +59,9 @@ const (
 	DefaultHAMode = "failover"
 	// DefaultHALeaseTTL controls how long HA failover leases are held in failover mode.
 	DefaultHALeaseTTL = 5 * time.Second
+	// DefaultHASinglePresenceTTL controls how long single-mode presence records
+	// remain live on backends that require .ha advertisement.
+	DefaultHASinglePresenceTTL = 5 * time.Minute
 	// DefaultJSONMaxBytes bounds incoming JSON payloads.
 	DefaultJSONMaxBytes = 100 * 1024 * 1024
 	// DefaultAttachmentMaxBytes bounds attachment payloads when not specified by the caller.
@@ -247,6 +250,9 @@ type Config struct {
 	HAMode string
 	// HALeaseTTL controls leader-lease lifetime in failover mode and heartbeat cadence in auto mode.
 	HALeaseTTL time.Duration
+	// HASinglePresenceTTL controls how long single-mode presence records remain
+	// live on backends that require .ha advertisement.
+	HASinglePresenceTTL time.Duration
 	// DefaultNamespace is used when requests omit namespace.
 	DefaultNamespace string
 	// JSONMaxBytes caps incoming JSON payload size.
@@ -557,6 +563,11 @@ func (c *Config) Validate() error {
 		c.HALeaseTTL = DefaultHALeaseTTL
 	} else if c.HALeaseTTL < 0 {
 		return fmt.Errorf("config: ha lease ttl must be >= 0")
+	}
+	if c.HASinglePresenceTTL == 0 {
+		c.HASinglePresenceTTL = DefaultHASinglePresenceTTL
+	} else if c.HASinglePresenceTTL < 0 {
+		return fmt.Errorf("config: ha single presence ttl must be >= 0")
 	}
 	ns, err := NormalizeNamespace(c.DefaultNamespace, DefaultNamespace)
 	if err != nil {

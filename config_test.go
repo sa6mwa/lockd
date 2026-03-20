@@ -8,8 +8,17 @@ import (
 	"time"
 )
 
+func writeTestBundleFile(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "server.pem")
+	if err := os.WriteFile(path, []byte("pem"), 0o600); err != nil {
+		t.Fatalf("write test bundle: %v", err)
+	}
+	return path
+}
+
 func TestConfigValidateDefaults(t *testing.T) {
-	cfg := Config{Store: "mem://"}
+	cfg := Config{Store: "mem://", BundlePath: writeTestBundleFile(t)}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
@@ -65,7 +74,7 @@ func TestConfigValidateDefaults(t *testing.T) {
 
 func TestConfigValidateAcceptsSingleAndAutoHAModes(t *testing.T) {
 	for _, mode := range []string{"single", "auto"} {
-		cfg := Config{Store: "mem://", HAMode: mode}
+		cfg := Config{Store: "mem://", HAMode: mode, BundlePath: writeTestBundleFile(t)}
 		if err := cfg.Validate(); err != nil {
 			t.Fatalf("validate %s: %v", mode, err)
 		}
@@ -77,6 +86,7 @@ func TestConfigValidateAcceptsSingleAndAutoHAModes(t *testing.T) {
 
 func TestConfigHTTP2MaxConcurrentStreamsZero(t *testing.T) {
 	cfg := Config{
+		BundlePath:                   writeTestBundleFile(t),
 		Store:                        "mem://",
 		HTTP2MaxConcurrentStreams:    0,
 		HTTP2MaxConcurrentStreamsSet: true,
@@ -127,6 +137,7 @@ func TestConfigValidateErrors(t *testing.T) {
 
 func TestConfigValidateConnguardDisabledForUnix(t *testing.T) {
 	cfg := Config{
+		BundlePath:  writeTestBundleFile(t),
 		Store:       "mem://",
 		ListenProto: "unix",
 	}
@@ -143,6 +154,7 @@ func TestConfigValidateConnguardDisabledForUnix(t *testing.T) {
 
 func TestConfigValidateConnguardExplicitlyDisabledForUnix(t *testing.T) {
 	cfg := Config{
+		BundlePath:          writeTestBundleFile(t),
 		Store:               "mem://",
 		ListenProto:         "unix",
 		ConnguardEnabled:    false,
@@ -158,6 +170,7 @@ func TestConfigValidateConnguardExplicitlyDisabledForUnix(t *testing.T) {
 
 func TestConfigTxnReplayIntervalDefaultsToSweeper(t *testing.T) {
 	cfg := Config{
+		BundlePath:      writeTestBundleFile(t),
 		Store:           "mem://",
 		SweeperInterval: 2 * time.Second,
 	}
@@ -183,10 +196,11 @@ func TestConfigValidateJoinRequiresMTLS(t *testing.T) {
 
 func TestConfigValidateJoinSelfOnlyWithoutMTLS(t *testing.T) {
 	cfg := Config{
-		Store:           "mem://",
-		DisableMTLS:     true,
-		SelfEndpoint:    "http://self",
-		TCJoinEndpoints: []string{"http://self"},
+		Store:                    "mem://",
+		DisableMTLS:              true,
+		DisableStorageEncryption: true,
+		SelfEndpoint:             "http://self",
+		TCJoinEndpoints:          []string{"http://self"},
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("expected tc-join self-only to pass without mTLS, got %v", err)

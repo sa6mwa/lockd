@@ -3,6 +3,7 @@ package disk
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -49,6 +50,12 @@ type Store struct {
 	locks    lockStripes
 	lockDirs sync.Map
 
+	writerPresenceDir    string
+	writerPresencePath   string
+	writerPresenceToggle bool
+	writerPresenceStop   chan struct{}
+	writerPresenceDone   chan struct{}
+
 	stopJanitor chan struct{}
 	doneJanitor chan struct{}
 
@@ -84,6 +91,112 @@ func (s *Store) SetSingleWriter(enabled bool) {
 	if s.logstore != nil {
 		s.logstore.setSingleWriter(enabled)
 	}
+	if enabled {
+		s.startWriterPresence()
+	} else {
+		s.stopWriterPresence()
+	}
+}
+
+// ProbeExclusiveWriter reports whether another live exclusive writer marker is
+// present for this backend root.
+func (s *Store) ProbeExclusiveWriter(ctx context.Context) (storage.ExclusiveWriterPresence, error) {
+	_ = ctx
+	if s == nil {
+		return storage.ExclusiveWriterPresence{}, nil
+	}
+	entries, err := os.ReadDir(s.writerPresenceDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return storage.ExclusiveWriterPresence{}, nil
+		}
+		return storage.ExclusiveWriterPresence{}, err
+	}
+	now := s.now()
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if entry.Name() == "" || filepath.Join(s.writerPresenceDir, entry.Name()) == s.writerPresencePath {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return storage.ExclusiveWriterPresence{}, err
+		}
+		expires := info.ModTime().Add(exclusiveWriterPresenceTTL)
+		if expires.After(now) {
+			return storage.ExclusiveWriterPresence{
+				Present:       true,
+				ExpiresAtUnix: expires.Unix(),
+			}, nil
+		}
+	}
+	return storage.ExclusiveWriterPresence{}, nil
+}
+
+func (s *Store) startWriterPresence() {
+	if s == nil || s.writerPresencePath == "" {
+		return
+	}
+	if s.writerPresenceStop != nil {
+		return
+	}
+	s.writerPresenceStop = make(chan struct{})
+	s.writerPresenceDone = make(chan struct{})
+	s.touchWriterPresence()
+	go s.writerPresenceLoop()
+}
+
+func (s *Store) writerPresenceLoop() {
+	defer close(s.writerPresenceDone)
+	ticker := time.NewTicker(exclusiveWriterTouchEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			s.touchWriterPresence()
+		case <-s.writerPresenceStop:
+			return
+		}
+	}
+}
+
+func (s *Store) stopWriterPresence() {
+	if s == nil {
+		return
+	}
+	if s.writerPresenceStop != nil {
+		close(s.writerPresenceStop)
+		if s.writerPresenceDone != nil {
+			<-s.writerPresenceDone
+		}
+		s.writerPresenceStop = nil
+		s.writerPresenceDone = nil
+	}
+	if s.writerPresencePath != "" {
+		_ = os.Remove(s.writerPresencePath)
+	}
+}
+
+func (s *Store) touchWriterPresence() {
+	if s == nil || s.writerPresencePath == "" {
+		return
+	}
+	if err := os.MkdirAll(s.writerPresenceDir, 0o755); err != nil {
+		return
+	}
+	payload := []byte("0")
+	if s.writerPresenceToggle {
+		payload = []byte("00")
+	}
+	if err := os.WriteFile(s.writerPresencePath, payload, 0o644); err != nil {
+		return
+	}
+	s.writerPresenceToggle = !s.writerPresenceToggle
 }
 
 // DefaultNamespaceConfig returns the preferred namespace settings for disk storage.
@@ -100,9 +213,11 @@ func (s *Store) IndexerFlushDefaults() (int, time.Duration) {
 }
 
 const (
-	defaultLockFileCacheSize = 2048
-	lockStripeCount          = 4096
-	lockStripeMask           = lockStripeCount - 1
+	defaultLockFileCacheSize   = 2048
+	lockStripeCount            = 4096
+	lockStripeMask             = lockStripeCount - 1
+	exclusiveWriterTouchEvery  = time.Second
+	exclusiveWriterPresenceTTL = 3 * time.Second
 )
 
 type lockStripes struct {
@@ -199,6 +314,8 @@ func New(cfg Config) (*Store, error) {
 	}
 	s.lockCache = newLockFileCache(cacheSize)
 	s.logstore = newLogStore(root, s.now, s.crypto, cfg.LogstoreCommitMaxOps, cfg.LogstoreSegmentSize, isNFS(root))
+	s.writerPresenceDir = filepath.Join(root, ".lockd", "exclusive-writers")
+	s.writerPresencePath = filepath.Join(s.writerPresenceDir, fmt.Sprintf("%s.presence", s.logstore.writerID))
 	s.queueWatchMode = "polling"
 	s.queueWatchReason = "config_disabled"
 	if cfg.QueueWatch {
@@ -318,6 +435,7 @@ func (s *Store) acquireFileLock(namespace, key string) (*fileLock, error) {
 
 // Close shuts down the backend and waits for the janitor to finish.
 func (s *Store) Close() error {
+	s.stopWriterPresence()
 	if s.stopJanitor != nil {
 		close(s.stopJanitor)
 		<-s.doneJanitor

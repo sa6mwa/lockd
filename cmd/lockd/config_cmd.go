@@ -87,6 +87,7 @@ type configDefaults struct {
 	Store                     string   `yaml:"store"`
 	HAMode                    string   `yaml:"ha"`
 	HALeaseTTL                string   `yaml:"ha-lease-ttl"`
+	HASinglePresenceTTL       string   `yaml:"ha-single-presence-ttl"`
 	DefaultNamespace          string   `yaml:"default-namespace"`
 	JSONMax                   string   `yaml:"json-max"`
 	JSONUtil                  string   `yaml:"json-util"`
@@ -178,6 +179,7 @@ func defaultConfigYAML(overrides ...func(*configDefaults)) ([]byte, error) {
 		Store:                     lockd.DefaultStore,
 		HAMode:                    lockd.DefaultHAMode,
 		HALeaseTTL:                lockd.DefaultHALeaseTTL.String(),
+		HASinglePresenceTTL:       lockd.DefaultHASinglePresenceTTL.String(),
 		DefaultNamespace:          lockd.DefaultNamespace,
 		JSONMax:                   configHumanizeBytes(lockd.DefaultJSONMaxBytes),
 		JSONUtil:                  lockd.JSONUtilLockd,

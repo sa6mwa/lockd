@@ -75,17 +75,20 @@ func setupDiskBenchmarkEnv(b *testing.B, root string, withLockd bool) *diskBench
 
 func prepareDiskRoot(tb testing.TB, base string) string {
 	tb.Helper()
-	benchenv.LoadEnvFile(tb, ".env.disk")
+	return prepareDiskRootWithEnv(tb, ".env.disk", base)
+}
+
+func prepareDiskRootWithEnv(tb testing.TB, envFile, base string) string {
+	tb.Helper()
+	benchenv.LoadEnvFile(tb, envFile)
 	var root string
 	if base != "" {
 		if info, err := os.Stat(base); err != nil || !info.IsDir() {
 			tb.Fatalf("disk base %q unavailable: %v", base, err)
 		}
 		root = filepath.Join(base, "lockd-"+uuidv7.NewString())
-	} else if env := os.Getenv("LOCKD_DISK_ROOT"); env != "" {
-		root = filepath.Join(env, "lockd-"+uuidv7.NewString())
 	} else {
-		tb.Fatalf("LOCKD_DISK_ROOT must be set (source .env.disk before running disk benchmarks)")
+		root = filepath.Join(diskStoreRoot(tb), "lockd-"+uuidv7.NewString())
 	}
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		tb.Fatalf("mkdir disk root: %v", err)
@@ -95,7 +98,36 @@ func prepareDiskRoot(tb testing.TB, base string) string {
 }
 
 func nfsBasePath() string {
-	return os.Getenv("LOCKD_NFS_ROOT")
+	store := strings.TrimSpace(os.Getenv("LOCKD_STORE"))
+	if store == "" {
+		return ""
+	}
+	parsed, err := url.Parse(store)
+	if err != nil || !strings.EqualFold(parsed.Scheme, "disk") || parsed.Host != "" || !filepath.IsAbs(parsed.Path) {
+		return ""
+	}
+	return filepath.Clean(parsed.Path)
+}
+
+func diskStoreRoot(tb testing.TB) string {
+	tb.Helper()
+	store := strings.TrimSpace(os.Getenv("LOCKD_STORE"))
+	if store == "" {
+		tb.Fatalf("LOCKD_STORE must be set to disk:///absolute/path (source .env.disk before running disk benchmarks)")
+	}
+	parsed, err := url.Parse(store)
+	if err != nil {
+		tb.Fatalf("parse LOCKD_STORE: %v", err)
+	}
+	if !strings.EqualFold(parsed.Scheme, "disk") || parsed.Host != "" || !filepath.IsAbs(parsed.Path) {
+		tb.Fatalf("LOCKD_STORE must be a disk:///absolute/path URL, got %q", store)
+	}
+	root := filepath.Clean(parsed.Path)
+	info, err := os.Stat(root)
+	if err != nil || !info.IsDir() {
+		tb.Fatalf("LOCKD_STORE root %q unavailable: %v", root, err)
+	}
+	return root
 }
 
 func buildDiskConfig(tb testing.TB, root string, retention time.Duration) lockd.Config {
@@ -383,7 +415,7 @@ func BenchmarkLockdDiskConcurrent(b *testing.B) {
 }
 
 func BenchmarkLockdDiskLargeJSONNFS(b *testing.B) {
-	root := prepareDiskRoot(b, nfsBasePath())
+	root := prepareDiskRootWithEnv(b, ".env.nfs", nfsBasePath())
 	if root == "" {
 		b.Skip("nfs root unavailable")
 	}

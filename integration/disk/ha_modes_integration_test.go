@@ -18,6 +18,7 @@ func TestDiskHASingleModeSkipsActiveLease(t *testing.T) {
 
 	ts := startDiskTestServer(t, cfg)
 	hatest.RequireNoHALease(t, ts.Backend())
+	hatest.RequireNoHAMembers(t, ts.Backend())
 	hatest.RequireAcquireRelease(t, ts.Client, "disk-ha-single")
 }
 
@@ -50,4 +51,53 @@ func TestDiskHAAutoPromotesToFailover(t *testing.T) {
 		passive = serverB
 	}
 	hatest.WaitForPassiveNode(t, passive, 15*time.Second)
+}
+
+func TestDiskHASingleModeFencesAutoPeer(t *testing.T) {
+	ensureDiskRootEnv(t)
+	root := prepareDiskRoot(t, "")
+	cfgSingle := buildDiskConfig(t, root, 0)
+	cfgSingle.HAMode = "single"
+	single := startDiskTestServer(t, cfgSingle)
+
+	hatest.RequireNoHALease(t, single.Backend())
+	hatest.RequireNoHAMembers(t, single.Backend())
+
+	cfgAuto := buildDiskConfig(t, root, 0)
+	cfgAuto.HAMode = "auto"
+	cfgAuto.HALeaseTTL = 2 * time.Second
+	auto := startDiskTestServer(t, cfgAuto)
+
+	hatest.WaitForPassiveNode(t, auto, 15*time.Second)
+	hatest.RequireNoHALease(t, auto.Backend())
+	hatest.RequireAcquireRelease(t, single.Client, "disk-ha-single-fence")
+}
+
+func TestDiskHASingleCrashExpiryPromotesAutoAndFencesRejoin(t *testing.T) {
+	ensureDiskRootEnv(t)
+	root := prepareDiskRoot(t, "")
+	cfgSingle := buildDiskConfig(t, root, 0)
+	cfgSingle.HAMode = "single"
+	single := startDiskTestServer(t, cfgSingle)
+
+	cfgAuto := buildDiskConfig(t, root, 0)
+	cfgAuto.HAMode = "auto"
+	cfgAuto.HALeaseTTL = 2 * time.Second
+	auto := startDiskTestServer(t, cfgAuto)
+
+	hatest.WaitForPassiveNode(t, auto, 15*time.Second)
+	if err := single.Abort(context.Background()); err != nil {
+		t.Fatalf("abort single: %v", err)
+	}
+
+	activeCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := hatest.WaitForActive(activeCtx, auto); err != nil {
+		t.Fatalf("wait for auto active: %v", err)
+	}
+
+	rejoin := startDiskTestServer(t, cfgSingle)
+	hatest.WaitForPassiveNode(t, rejoin, 15*time.Second)
+	hatest.RequireNoHAMembers(t, rejoin.Backend())
+	hatest.RequireAcquireRelease(t, auto.Client, "disk-ha-auto-after-crash")
 }

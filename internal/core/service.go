@@ -72,10 +72,12 @@ type Service struct {
 
 	haMode         string
 	haLeaseTTL     time.Duration
+	haSingleTTL    time.Duration
 	haNodeID       string
 	haUsesLease    atomic.Bool
 	haActive       atomic.Bool
 	haLeaseExpires atomic.Int64
+	haPassiveUntil atomic.Int64
 	haRefreshes    atomic.Int64
 	haErrors       atomic.Int64
 	haTransitions  atomic.Int64
@@ -83,6 +85,8 @@ type Service struct {
 	haDone         chan struct{}
 	haAutoStop     chan struct{}
 	haAutoDone     chan struct{}
+	haSingleStop   chan struct{}
+	haSingleDone   chan struct{}
 
 	leaseBucketCache    sync.Map
 	decisionBucketCache sync.Map
@@ -156,10 +160,16 @@ func New(cfg Config) *Service {
 	}
 	haNodeID := strings.TrimSpace(cfg.HANodeID)
 	haLeaseTTL := cfg.HALeaseTTL
+	haSingleTTL := cfg.HASinglePresenceTTL
 	if haLeaseTTL == 0 {
 		haLeaseTTL = 5 * time.Second
 	} else if haLeaseTTL < 0 {
 		haLeaseTTL = 0
+	}
+	if haSingleTTL == 0 {
+		haSingleTTL = 5 * time.Minute
+	} else if haSingleTTL < 0 {
+		haSingleTTL = 0
 	}
 
 	if cfg.Store != nil {
@@ -183,6 +193,7 @@ func New(cfg Config) *Service {
 		crypto:           cfg.Crypto,
 		haMode:           haMode,
 		haLeaseTTL:       haLeaseTTL,
+		haSingleTTL:      haSingleTTL,
 		queueProvider:    cfg.QueueService,
 		queueDispatcher:  cfg.QueueDispatcher,
 		searchAdapter:    cfg.SearchAdapter,
@@ -235,6 +246,7 @@ func New(cfg Config) *Service {
 		svc.startHA()
 	case strings.EqualFold(svc.haMode, "single"):
 		svc.setNodeActive(true, 0, svc.haNodeID)
+		svc.startSinglePresence()
 	case strings.EqualFold(svc.haMode, "auto"):
 		svc.startAutoHA()
 	}

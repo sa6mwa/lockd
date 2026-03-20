@@ -22,6 +22,33 @@ import (
 	"pkt.systems/pslog"
 )
 
+func mustCreateMTLSTestBundles(t *testing.T) ([]byte, []byte) {
+	t.Helper()
+	caBundle, err := CreateCABundle(CreateCABundleRequest{
+		CommonName: "lockd-test-ca",
+	})
+	if err != nil {
+		t.Fatalf("create ca bundle: %v", err)
+	}
+	serverBundle, err := CreateServerBundle(CreateServerBundleRequest{
+		CABundlePEM: caBundle,
+		CommonName:  "lockd-test-server",
+		Hosts:       []string{"127.0.0.1", "localhost"},
+		NodeID:      "test-node",
+	})
+	if err != nil {
+		t.Fatalf("create server bundle: %v", err)
+	}
+	clientBundle, err := CreateClientBundle(CreateClientBundleRequest{
+		CABundlePEM: caBundle,
+		CommonName:  "lockd-test-client",
+	})
+	if err != nil {
+		t.Fatalf("create client bundle: %v", err)
+	}
+	return serverBundle, clientBundle
+}
+
 type sweeperClock struct {
 	mu  sync.Mutex
 	now time.Time
@@ -197,12 +224,14 @@ func TestSweeperClearsExpiredLeases(t *testing.T) {
 		t.Fatalf("store lease index entry: %v", err)
 	}
 	cfg := Config{
-		Store:               "mem://",
-		SweeperInterval:     time.Second,
-		IdleSweepGrace:      time.Nanosecond,
-		IdleSweepOpDelay:    time.Nanosecond,
-		IdleSweepMaxOps:     10,
-		IdleSweepMaxRuntime: time.Second,
+		Store:                    "mem://",
+		DisableMTLS:              true,
+		DisableStorageEncryption: true,
+		SweeperInterval:          time.Second,
+		IdleSweepGrace:           time.Nanosecond,
+		IdleSweepOpDelay:         time.Nanosecond,
+		IdleSweepMaxOps:          10,
+		IdleSweepMaxRuntime:      time.Second,
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("validate config: %v", err)
@@ -231,7 +260,8 @@ func TestSweeperClearsExpiredLeases(t *testing.T) {
 
 func TestShutdownBlocksAcquireDuringDrain(t *testing.T) {
 	ctx := context.Background()
-	cfg := Config{Store: "mem://", Listen: "127.0.0.1:0", DisableMTLS: true}
+	serverBundle, clientBundle := mustCreateMTLSTestBundles(t)
+	cfg := Config{Store: "mem://", Listen: "127.0.0.1:0", BundlePEM: serverBundle}
 	handle, err := StartServer(ctx, cfg)
 	if err != nil {
 		t.Fatalf("start server: %v", err)
@@ -242,7 +272,7 @@ func TestShutdownBlocksAcquireDuringDrain(t *testing.T) {
 	if addr == nil {
 		t.Fatal("listener address not available")
 	}
-	cli, err := client.New("http://"+addr.String(), client.WithDisableMTLS(true))
+	cli, err := client.New("https://"+addr.String(), client.WithBundlePEM(clientBundle))
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -295,7 +325,8 @@ func TestShutdownBlocksAcquireDuringDrain(t *testing.T) {
 
 func TestShutdownAutoReleasesLeases(t *testing.T) {
 	ctx := context.Background()
-	cfg := Config{Store: "mem://", Listen: "127.0.0.1:0", DisableMTLS: true}
+	serverBundle, clientBundle := mustCreateMTLSTestBundles(t)
+	cfg := Config{Store: "mem://", Listen: "127.0.0.1:0", BundlePEM: serverBundle}
 	handle, err := StartServer(ctx, cfg)
 	if err != nil {
 		t.Fatalf("start server: %v", err)
@@ -306,7 +337,7 @@ func TestShutdownAutoReleasesLeases(t *testing.T) {
 	if addr == nil {
 		t.Fatal("listener address not available")
 	}
-	cli, err := client.New("http://"+addr.String(), client.WithDisableMTLS(true))
+	cli, err := client.New("https://"+addr.String(), client.WithBundlePEM(clientBundle))
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}

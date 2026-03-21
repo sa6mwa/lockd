@@ -72,6 +72,11 @@ func loadMinioConfig(tb testing.TB) lockd.Config {
 	return cfg
 }
 
+func appendStorePath(tb testing.TB, store, suffix string) string {
+	tb.Helper()
+	return storepath.Append(tb, store, suffix)
+}
+
 func ensureMinioCredentials(tb testing.TB) {
 	accessKey := strings.TrimSpace(os.Getenv("LOCKD_S3_ACCESS_KEY_ID"))
 	secretKey := strings.TrimSpace(os.Getenv("LOCKD_S3_SECRET_ACCESS_KEY"))

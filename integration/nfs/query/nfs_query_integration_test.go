@@ -527,10 +527,9 @@ func TestNFSQueryTxnDecisionEndpoints(t *testing.T) {
 func TestNFSQueryTxnFanoutAcrossNodes(t *testing.T) {
 	root := prepareNFSQueryRoot(t)
 	cfg := nfsQueryConfigWithSweeper(root, 2*time.Second)
-	cfg.DisableMTLS = true
-	tsA := startNFSQueryServerWithRootAndConfig(t, cfg, lockd.WithoutTestMTLS())
+	tsA := startNFSQueryServerWithRootAndConfig(t, cfg)
 	cfgB := cfg
-	tsB := startNFSQueryServerWithRootAndConfig(t, cfgB, lockd.WithoutTestMTLS())
+	tsB := startNFSQueryServerWithRootAndConfig(t, cfgB)
 
 	t.Run("Commit", func(t *testing.T) {
 		runNFSQueryTxnFanoutAcrossNodes(t, tsA, tsB, true)

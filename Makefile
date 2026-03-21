@@ -13,14 +13,18 @@ LOCKD_VERSION ?= $(shell $(GO) run ./cmd/lockd version --version)
 LOCKD_SEMVER ?= $(shell $(GO) run ./cmd/lockd version --semver)
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-integration bench perf-guard-search fuzz diagrams swagger build container push-container clean install
+.PHONY: help test test-integration bench perf-show-frozen-baselines perf-guard-query-disk perf-freeze-query-disk-baseline perf-guard-disk perf-freeze-disk-baseline fuzz diagrams swagger build container push-container clean install
 
 help:
 	@echo "Available targets:"
 	@echo "  make test                    # run unit tests"
 	@echo "  make test-integration        # run integration suites (pass SUITES=...)"
 	@echo "  make bench                   # run benchmark suites (pass SUITES=...)"
-	@echo "  make perf-guard-search       # run search/index perf regression guard against frozen baseline"
+	@echo "  make perf-show-frozen-baselines # print frozen query-disk and full disk baseline summaries"
+	@echo "  make perf-guard-query-disk   # run disk lockd-bench query perf guard against frozen baseline"
+	@echo "  make perf-freeze-query-disk-baseline # register a new disk query baseline (requires FREEZE=1 or FREEZE_AS_NEW_BASELINE=1)"
+	@echo "  make perf-guard-disk         # run disk lockd-bench baseline comparison without mutating frozen history"
+	@echo "  make perf-freeze-disk-baseline # register a new disk baseline (requires FREEZE=1 or FREEZE_AS_NEW_BASELINE=1)"
 	@echo "  make fuzz                    # run all fuzzers (default 15s each, override FUZZ_TIME=...)"
 	@echo "  make swagger                 # regenerate Swagger/OpenAPI artifacts"
 	@echo "  make diagrams                # render PlantUML sequence diagrams to JPEG"
@@ -72,8 +76,44 @@ bench:
 		./run-benchmark-suites.sh $(SUITES); \
 	fi
 
-perf-guard-search:
-	@./scripts/check_search_perf_regression.sh
+perf-show-frozen-baselines:
+	@$(GO) run ./cmd/lockd-bench -mode baseline-report -baseline-backends disk
+
+perf-guard-query-disk:
+	$(call ENSURE_ENV,.env.disk,DISK_ENV_EXAMPLE)
+	@set -a && source .env.disk && set +a && \
+		./scripts/check_lockd_bench_query_disk_regression.sh
+
+perf-freeze-query-disk-baseline:
+	$(call ENSURE_ENV,.env.disk,DISK_ENV_EXAMPLE)
+	@if [[ "$(FREEZE)" != "1" && "$(FREEZE_AS_NEW_BASELINE)" != "1" ]]; then \
+		echo "Refusing to register a new disk query baseline without FREEZE=1 or FREEZE_AS_NEW_BASELINE=1"; \
+		echo "Use 'make perf-guard-query-disk' for compare-only runs."; \
+		exit 1; \
+	fi
+	@set -a && source .env.disk && set +a && \
+		./scripts/check_lockd_bench_query_disk_regression.sh --freeze
+
+perf-guard-disk:
+	$(call ENSURE_ENV,.env.disk,DISK_ENV_EXAMPLE)
+	@set -a && source .env.disk && set +a && \
+		$(GO) run ./cmd/lockd-bench \
+			-mode baseline \
+			-baseline-backends disk \
+			-baseline-append-history=false
+
+perf-freeze-disk-baseline:
+	$(call ENSURE_ENV,.env.disk,DISK_ENV_EXAMPLE)
+	@if [[ "$(FREEZE)" != "1" && "$(FREEZE_AS_NEW_BASELINE)" != "1" ]]; then \
+		echo "Refusing to register a new disk baseline without FREEZE=1 or FREEZE_AS_NEW_BASELINE=1"; \
+		echo "Use 'make perf-guard-disk' for compare-only runs."; \
+		exit 1; \
+	fi
+	@set -a && source .env.disk && set +a && \
+		$(GO) run ./cmd/lockd-bench \
+			-mode baseline \
+			-baseline-backends disk \
+			-baseline-append-history=true
 
 FUZZ_TIME ?= 15s
 

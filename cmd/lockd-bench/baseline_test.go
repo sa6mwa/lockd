@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -151,6 +155,138 @@ func TestMarkBaselineGolden(t *testing.T) {
 	}
 	if len(got) != 2 || got[1].RunID != "run-b" || !got[1].Golden {
 		t.Fatalf("unexpected history after golden mark: %+v", got)
+	}
+}
+
+func TestMaybeAppendBaselineHistoryDisabled(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	historyPath := filepath.Join(dir, "history.jsonl")
+	initial := []baselineRunRecord{{RunID: "run-a", Preset: defaultBaselinePreset, Backend: "disk"}}
+	if err := rewriteBaselineHistory(historyPath, initial); err != nil {
+		t.Fatalf("rewriteBaselineHistory: %v", err)
+	}
+	infoBefore, err := os.Stat(historyPath)
+	if err != nil {
+		t.Fatalf("Stat before: %v", err)
+	}
+	record := baselineRunRecord{RunID: "run-b", Preset: defaultBaselinePreset, Backend: "disk"}
+	got, err := maybeAppendBaselineHistory(historyPath, append([]baselineRunRecord(nil), initial...), record, false)
+	if err != nil {
+		t.Fatalf("maybeAppendBaselineHistory: %v", err)
+	}
+	if len(got) != len(initial) {
+		t.Fatalf("history len=%d want=%d", len(got), len(initial))
+	}
+	infoAfter, err := os.Stat(historyPath)
+	if err != nil {
+		t.Fatalf("Stat after: %v", err)
+	}
+	if !infoBefore.ModTime().Equal(infoAfter.ModTime()) || infoBefore.Size() != infoAfter.Size() {
+		t.Fatal("history file changed despite appendHistory=false")
+	}
+}
+
+func TestLatestAndPreviousBaselineRecords(t *testing.T) {
+	t.Parallel()
+
+	records := []baselineRunRecord{
+		{RunID: "disk-a", Preset: defaultBaselinePreset, Backend: "disk"},
+		{RunID: "minio-a", Preset: defaultBaselinePreset, Backend: "minio"},
+		{RunID: "disk-b", Preset: defaultBaselinePreset, Backend: "disk"},
+	}
+	current, previous := latestAndPreviousBaselineRecords(records, defaultBaselinePreset, "disk")
+	if current == nil || current.RunID != "disk-b" {
+		t.Fatalf("current=%+v want=disk-b", current)
+	}
+	if previous == nil || previous.RunID != "disk-a" {
+		t.Fatalf("previous=%+v want=disk-a", previous)
+	}
+}
+
+func TestQueryDiskBaselineAsRecord(t *testing.T) {
+	t.Parallel()
+
+	record := queryDiskBaselineAsRecord(queryDiskBaselineFile{
+		Timestamp: "2026-03-21T00:00:00Z",
+		Workloads: map[string]struct {
+			OpsPerSec float64 `json:"ops_per_sec"`
+		}{
+			"query-index": {OpsPerSec: 123.4},
+			"query-scan":  {OpsPerSec: 56.7},
+		},
+	})
+	if record.Backend != "disk" || record.Preset != defaultBaselinePreset {
+		t.Fatalf("unexpected record: %+v", record)
+	}
+	indexCase, ok := findBaselineCase(record.Cases, "query-index", 0)
+	if !ok || indexCase.Phases["total"].OpsPerSec != 123.4 {
+		t.Fatalf("query-index case missing or wrong: %+v", indexCase)
+	}
+	scanCase, ok := findBaselineCase(record.Cases, "query-scan", 0)
+	if !ok || scanCase.Phases["total"].OpsPerSec != 56.7 {
+		t.Fatalf("query-scan case missing or wrong: %+v", scanCase)
+	}
+}
+
+func TestPrintQueryDiskBaselineReportIncludesLastHistory(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "query.json")
+	file := queryDiskBaselineFile{
+		Timestamp: "2026-03-21T00:00:00Z",
+		Store:     "disk:///srv/lockd",
+		Workloads: map[string]struct {
+			OpsPerSec float64 `json:"ops_per_sec"`
+		}{
+			"query-index": {OpsPerSec: 200},
+			"query-scan":  {OpsPerSec: 100},
+		},
+	}
+	data, err := json.Marshal(file)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	history := []baselineRunRecord{{
+		RunID:   "disk-a",
+		Preset:  defaultBaselinePreset,
+		Backend: "disk",
+		Cases: []baselineCaseResult{
+			{Workload: "query-index", Phases: map[string]baselineStatsSnapshot{"total": {OpsPerSec: 150}}},
+			{Workload: "query-scan", Phases: map[string]baselineStatsSnapshot{"total": {OpsPerSec: 80}}},
+		},
+	}}
+	origStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("Pipe: %v", err)
+	}
+	os.Stdout = w
+	printErr := printQueryDiskBaselineReport(path, history)
+	_ = w.Close()
+	os.Stdout = origStdout
+	if printErr != nil {
+		t.Fatalf("printQueryDiskBaselineReport: %v", printErr)
+	}
+	var buf bytes.Buffer
+	if _, err := buf.ReadFrom(r); err != nil {
+		t.Fatalf("ReadFrom: %v", err)
+	}
+	output := buf.String()
+	for _, want := range []string{
+		"query-index",
+		"current=200.0",
+		"last=150.0 (+33.3%)",
+		"query-scan",
+		"current=100.0",
+		"last=80.0 (+25.0%)",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
 	}
 }
 

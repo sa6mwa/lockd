@@ -19,6 +19,7 @@ import (
 const (
 	defaultBaselinePreset      = "embedded-v1"
 	defaultBaselineHistoryPath = "docs/performance/lockd-bench-baseline-history.jsonl"
+	defaultQueryDiskBaselinePath = "docs/performance/lockd-bench-query-disk-baseline.json"
 )
 
 var (
@@ -92,6 +93,15 @@ type baselineRunRecord struct {
 	Cases     []baselineCaseResult `json:"cases"`
 }
 
+type queryDiskBaselineFile struct {
+	Timestamp string `json:"timestamp"`
+	Store     string `json:"store"`
+	DiskRoot  string `json:"disk_root"`
+	Workloads map[string]struct {
+		OpsPerSec float64 `json:"ops_per_sec"`
+	} `json:"workloads"`
+}
+
 func defaultBaselineBackends() []string {
 	return []string{"disk", "minio"}
 }
@@ -132,12 +142,89 @@ func runBaselineMode(cfg benchConfig) error {
 		last := findLatestBaselineRecord(history, record.Preset, record.Backend, false)
 		golden := findLatestBaselineRecord(history, record.Preset, record.Backend, true)
 		printBaselineComparisons(record, last, golden)
-		if err := appendBaselineHistory(cfg.baselineHistory, record); err != nil {
+		history, err = maybeAppendBaselineHistory(cfg.baselineHistory, history, record, cfg.baselineAppendHistory)
+		if err != nil {
 			return err
 		}
-		history = append(history, record)
 	}
 	return nil
+}
+
+func runBaselineReport(cfg benchConfig) error {
+	history, err := loadBaselineHistory(cfg.baselineHistory)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("frozen query baseline: %s\n", cfg.baselineQueryFile)
+	if err := printQueryDiskBaselineReport(cfg.baselineQueryFile, history); err != nil {
+		return err
+	}
+	fmt.Println()
+	fmt.Printf("frozen disk baseline history: %s\n", cfg.baselineHistory)
+	return printLatestBaselineHistoryReport(history, cfg.baselinePreset, "disk")
+}
+
+func printQueryDiskBaselineReport(path string, history []baselineRunRecord) error {
+	file, err := loadQueryDiskBaseline(path)
+	if err != nil {
+		return err
+	}
+	current := queryDiskBaselineAsRecord(file)
+	last := findLatestBaselineRecord(history, defaultBaselinePreset, "disk", false)
+	fmt.Printf("query baseline timestamp=%s store=%s\n", file.Timestamp, file.Store)
+	for _, workload := range []string{"query-index", "query-scan"} {
+		currentCase, ok := findBaselineCase(current.Cases, workload, 0)
+		if !ok {
+			return fmt.Errorf("query baseline missing %s", workload)
+		}
+		currentStats := currentCase.Phases["total"]
+		lastText := "n/a"
+		if lastStats, ok := matchingBaselineStats(last, currentCase); ok {
+			lastText = fmt.Sprintf("%.1f (%s)", lastStats.OpsPerSec, percentDeltaText(currentStats.OpsPerSec, lastStats.OpsPerSec))
+		}
+		fmt.Printf("  %-28s current=%.1f last=%s\n", workload, currentStats.OpsPerSec, lastText)
+	}
+	return nil
+}
+
+func printLatestBaselineHistoryReport(history []baselineRunRecord, preset, backend string) error {
+	current, previous := latestAndPreviousBaselineRecords(history, preset, backend)
+	if current == nil {
+		return fmt.Errorf("no %s baseline records found in history", backend)
+	}
+	fmt.Printf("baseline run: preset=%s backend=%s run_id=%s git=%s-%s\n",
+		current.Preset,
+		current.Backend,
+		current.RunID,
+		current.Git.ShortSHA,
+		dirtySuffix(current.Git.Dirty),
+	)
+	for _, currentCase := range current.Cases {
+		currentTotal, ok := currentCase.Phases["total"]
+		if !ok {
+			continue
+		}
+		label := currentCase.Workload
+		if currentCase.Size > 0 {
+			label = fmt.Sprintf("%s/%d", currentCase.Workload, currentCase.Size)
+		}
+		lastText := "n/a"
+		if lastStats, ok := matchingBaselineStats(previous, currentCase); ok {
+			lastText = fmt.Sprintf("%.1f (%s)", lastStats.OpsPerSec, percentDeltaText(currentTotal.OpsPerSec, lastStats.OpsPerSec))
+		}
+		fmt.Printf("  %-28s current=%.1f last=%s\n", label, currentTotal.OpsPerSec, lastText)
+	}
+	return nil
+}
+
+func maybeAppendBaselineHistory(historyPath string, history []baselineRunRecord, record baselineRunRecord, appendHistory bool) ([]baselineRunRecord, error) {
+	if !appendHistory {
+		return history, nil
+	}
+	if err := appendBaselineHistory(historyPath, record); err != nil {
+		return history, err
+	}
+	return append(history, record), nil
 }
 
 func markBaselineGolden(historyPath, runID string) error {
@@ -545,6 +632,67 @@ func findLatestBaselineRecord(records []baselineRunRecord, preset, backend strin
 		return &records[i]
 	}
 	return nil
+}
+
+func latestAndPreviousBaselineRecords(records []baselineRunRecord, preset, backend string) (*baselineRunRecord, *baselineRunRecord) {
+	var current *baselineRunRecord
+	for i := len(records) - 1; i >= 0; i-- {
+		record := &records[i]
+		if record.Preset != preset || record.Backend != backend {
+			continue
+		}
+		if current == nil {
+			current = record
+			continue
+		}
+		return current, record
+	}
+	return current, nil
+}
+
+func loadQueryDiskBaseline(path string) (queryDiskBaselineFile, error) {
+	var file queryDiskBaselineFile
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return file, err
+	}
+	if err := json.Unmarshal(data, &file); err != nil {
+		return file, fmt.Errorf("query baseline decode: %w", err)
+	}
+	return file, nil
+}
+
+func queryDiskBaselineAsRecord(file queryDiskBaselineFile) baselineRunRecord {
+	record := baselineRunRecord{
+		Timestamp: file.Timestamp,
+		Preset:    defaultBaselinePreset,
+		Backend:   "disk",
+		Cases:     make([]baselineCaseResult, 0, len(file.Workloads)),
+	}
+	for _, workload := range []string{"query-index", "query-scan"} {
+		stats, ok := file.Workloads[workload]
+		if !ok {
+			continue
+		}
+		record.Cases = append(record.Cases, baselineCaseResult{
+			Workload: workload,
+			Phases: map[string]baselineStatsSnapshot{
+				"total": {
+					OpsPerSec: stats.OpsPerSec,
+				},
+			},
+		})
+	}
+	return record
+}
+
+func findBaselineCase(cases []baselineCaseResult, workload string, size int) (baselineCaseResult, bool) {
+	for _, candidate := range cases {
+		if candidate.Workload == workload && candidate.Size == size {
+			return candidate, true
+		}
+	}
+	return baselineCaseResult{}, false
 }
 
 func loadBaselineHistory(path string) ([]baselineRunRecord, error) {

@@ -1,0 +1,26 @@
+{
+  "timestamp": "2026-03-21T19:07:36Z",
+  "store": "disk:///srv/lockd",
+  "disk_root": "/srv/lockd/lockd-bench/root-831136277",
+  "config": {
+    "ha_mode": "failover",
+    "ops": 1000,
+    "concurrency": 8,
+    "warmup": 1,
+    "runs": 3,
+    "query_return": "documents",
+    "log_level": "error"
+  },
+  "thresholds": {
+    "query_index_regression_pct": 10,
+    "query_scan_regression_pct": 15
+  },
+  "workloads": {
+    "query-index": {
+      "ops_per_sec": 7801.4
+    },
+    "query-scan": {
+      "ops_per_sec": 2623.7
+    }
+  }
+}

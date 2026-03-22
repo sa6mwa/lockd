@@ -379,8 +379,16 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 	flags.Bool("disk-queue-watch", true, "enable inotify-based queue events for disk backend (Linux only; falls back to polling on unsupported filesystems)")
 	flags.Int("disk-lock-file-cache-size", lockd.DefaultDiskLockFileCacheSize, "max cached lockfile descriptors for disk/NFS (0 uses default, negative disables)")
 	logstoreSegmentDefault := humanizeBytes(lockd.DefaultLogstoreSegmentSize)
+	logstoreCompactionMinReclaimDefault := humanizeBytes(lockd.DefaultLogstoreCompactionMinReclaimBytes)
+	logstoreCompactionMaxIODefault := humanizeBytes(lockd.DefaultLogstoreCompactionMaxIOBytesPerSec)
 	flags.Int("logstore-commit-max-ops", lockd.DefaultLogstoreCommitMaxOps, "maximum logstore entries per fsync batch (disk/NFS)")
 	flags.String("logstore-segment-size", logstoreSegmentDefault, "maximum logstore segment size before roll (disk/NFS)")
+	flags.Bool("logstore-compaction", lockd.DefaultLogstoreCompactionEnabled, "enable background logstore snapshot compaction (disk/NFS)")
+	flags.Duration("logstore-compaction-interval", lockd.DefaultLogstoreCompactionInterval, "how often background logstore compaction checks for eligible work (disk/NFS)")
+	flags.Int("logstore-compaction-min-segments", lockd.DefaultLogstoreCompactionMinSegments, "minimum sealed logstore snapshot/segment files before compaction runs (disk/NFS)")
+	flags.String("logstore-compaction-min-reclaim-size", logstoreCompactionMinReclaimDefault, "minimum reclaimable sealed logstore bytes before compaction runs (disk/NFS)")
+	flags.Duration("logstore-compaction-delete-grace", lockd.DefaultLogstoreCompactionDeleteGrace, "delay before deleting obsolete compacted logstore files (disk/NFS)")
+	flags.String("logstore-compaction-max-io-bytes-per-sec", logstoreCompactionMaxIODefault, "background compaction IO throttle (0 disables throttling) (disk/NFS)")
 	flags.Bool("disable-mem-queue-watch", false, "disable in-memory queue change notifications")
 	flags.Bool("disable-storage-encryption", false, "disable kryptograf envelope encryption (plaintext at rest)")
 	flags.Bool("storage-encryption-snappy", false, "enable Snappy compression before encrypting objects")
@@ -481,7 +489,7 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 		"config",
 		"listen", "listen-proto", "metrics-listen", "pprof-listen", "enable-profiling-metrics", "store", "ha", "ha-lease-ttl", "ha-single-presence-ttl", "default-namespace", "json-max", "json-util", "payload-spool-mem", "state-cache-bytes", "default-ttl", "max-ttl", "acquire-block",
 		"sweeper-interval", "txn-replay-interval", "queue-decision-cache-ttl", "queue-decision-max-apply", "idle-sweep-grace", "idle-sweep-op-delay", "idle-sweep-max-ops", "idle-sweep-max-runtime", "drain-grace", "shutdown-timeout", "disk-retention", "disk-janitor-interval", "disk-lock-file-cache-size",
-		"logstore-commit-max-ops", "logstore-segment-size",
+		"logstore-commit-max-ops", "logstore-segment-size", "logstore-compaction-interval", "logstore-compaction-min-segments", "logstore-compaction-min-reclaim-size", "logstore-compaction-delete-grace", "logstore-compaction-max-io-bytes-per-sec",
 		"disable-mtls", "http2-max-concurrent-streams", "bundle", "denylist-path", "tc-trust-dir", "tc-disable-auth", "tc-allow-default-ca",
 		"self", "join", "tc-fanout-timeout", "tc-fanout-attempts", "tc-fanout-base-delay", "tc-fanout-max-delay", "tc-fanout-multiplier", "tc-decision-retention", "tc-client-bundle",
 		"s3-sse",
@@ -491,7 +499,7 @@ func newRootCommand(baseLogger pslog.Logger) *cobra.Command {
 		"indexer-flush-docs", "indexer-flush-interval",
 		"query-doc-prefetch",
 		"connguard-enabled", "connguard-failure-threshold", "connguard-failure-window", "connguard-block-duration", "connguard-probe-timeout",
-		"disk-queue-watch", "disable-mem-queue-watch", "disable-storage-encryption", "storage-encryption-snappy", "disable-krypto-pool",
+		"disk-queue-watch", "logstore-compaction", "disable-mem-queue-watch", "disable-storage-encryption", "storage-encryption-snappy", "disable-krypto-pool",
 		"lsf-sample-interval", "lsf-log-interval",
 		"qrf-disabled", "qrf-queue-soft-limit", "qrf-queue-hard-limit", "qrf-queue-consumer-soft-limit", "qrf-queue-consumer-hard-limit", "qrf-lock-soft-limit", "qrf-lock-hard-limit", "qrf-query-soft-limit", "qrf-query-hard-limit",
 		"qrf-memory-soft-limit", "qrf-memory-hard-limit", "qrf-memory-soft-limit-percent", "qrf-memory-hard-limit-percent",
@@ -591,6 +599,25 @@ func bindConfig(cfg *lockd.Config) error {
 			return fmt.Errorf("parse logstore-segment-size: %w", err)
 		}
 		cfg.LogstoreSegmentSize = int64(size)
+	}
+	cfg.LogstoreCompactionEnabled = viper.GetBool("logstore-compaction")
+	cfg.LogstoreCompactionEnabledSet = viper.IsSet("logstore-compaction")
+	cfg.LogstoreCompactionInterval = viper.GetDuration("logstore-compaction-interval")
+	cfg.LogstoreCompactionMinSegments = viper.GetInt("logstore-compaction-min-segments")
+	if reclaim := viper.GetString("logstore-compaction-min-reclaim-size"); reclaim != "" {
+		size, err := humanize.ParseBytes(reclaim)
+		if err != nil {
+			return fmt.Errorf("parse logstore-compaction-min-reclaim-size: %w", err)
+		}
+		cfg.LogstoreCompactionMinReclaimBytes = int64(size)
+	}
+	cfg.LogstoreCompactionDeleteGrace = viper.GetDuration("logstore-compaction-delete-grace")
+	if limit := viper.GetString("logstore-compaction-max-io-bytes-per-sec"); limit != "" {
+		size, err := humanize.ParseBytes(limit)
+		if err != nil {
+			return fmt.Errorf("parse logstore-compaction-max-io-bytes-per-sec: %w", err)
+		}
+		cfg.LogstoreCompactionMaxIOBytesPerSec = int64(size)
 	}
 	cfg.DisableMTLS = viper.GetBool("disable-mtls")
 	if viper.IsSet("mtls") {

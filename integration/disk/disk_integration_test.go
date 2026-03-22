@@ -101,6 +101,188 @@ func TestDiskLockLifecycle(t *testing.T) {
 	runLifecycleTest(t, ctx, cli, key, "disk-worker")
 }
 
+func TestDiskLogstoreCompactionPreservesState(t *testing.T) {
+	ensureDiskRootEnv(t)
+	root := prepareDiskRoot(t, "")
+	backend, err := disk.New(disk.Config{
+		Root:                             root,
+		LogstoreSegmentSize:              512,
+		LogstoreCompactionEnabled:        true,
+		LogstoreCompactionInterval:       time.Hour,
+		LogstoreCompactionMinSegments:    1,
+		LogstoreCompactionMinReclaimSize: 1,
+		LogstoreCompactionDeleteGrace:    150 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("new disk backend: %v", err)
+	}
+	t.Cleanup(func() { _ = backend.Close() })
+
+	ctx := context.Background()
+	key := "disk-compaction-" + uuidv7.NewString()
+	pad := []byte(strings.Repeat("x", 2048))
+	for i := 0; i < 4; i++ {
+		if _, err := backend.WriteState(ctx, namespaces.Default, key, bytes.NewReader(pad), storage.PutStateOptions{}); err != nil {
+			t.Fatalf("write state %d: %v", i, err)
+		}
+	}
+
+	segmentsDir := filepath.Join(root, namespaces.Default, "logstore", "segments")
+	snapshotsDir := filepath.Join(root, namespaces.Default, "logstore", "snapshots")
+	initialSegments := countMatchingFiles(t, filepath.Join(segmentsDir, "seg-*.log"))
+	if initialSegments == 0 {
+		t.Fatalf("expected written logstore segments")
+	}
+
+	if err := backend.CompactLogstore(ctx, namespaces.Default); err != nil {
+		t.Fatalf("compact logstore: %v", err)
+	}
+	if got := countMatchingFiles(t, filepath.Join(snapshotsDir, "snap-*.log")); got == 0 {
+		t.Fatalf("expected compaction snapshot, initial segments=%d current segments=%d", initialSegments, countMatchingFiles(t, filepath.Join(segmentsDir, "seg-*.log")))
+	}
+
+	resp, err := backend.ReadState(ctx, namespaces.Default, key)
+	if err != nil {
+		t.Fatalf("read compacted key: %v", err)
+	}
+	defer resp.Reader.Close()
+	body, err := io.ReadAll(resp.Reader)
+	if err != nil {
+		t.Fatalf("read compacted body: %v", err)
+	}
+	if !bytes.Equal(body, pad) {
+		t.Fatalf("unexpected compacted payload")
+	}
+}
+
+func TestDiskLogstoreCompactionDisabledProducesNoSnapshot(t *testing.T) {
+	ensureDiskRootEnv(t)
+	root := prepareDiskRoot(t, "")
+	backend, err := disk.New(disk.Config{
+		Root:                             root,
+		LogstoreSegmentSize:              512,
+		LogstoreCompactionEnabled:        false,
+		LogstoreCompactionInterval:       time.Hour,
+		LogstoreCompactionMinSegments:    1,
+		LogstoreCompactionMinReclaimSize: 1,
+	})
+	if err != nil {
+		t.Fatalf("new disk backend: %v", err)
+	}
+	defer backend.Close()
+
+	ctx := context.Background()
+	key := "disk-compaction-disabled-" + uuidv7.NewString()
+	payload := []byte(strings.Repeat("y", 2048))
+	for i := 0; i < 3; i++ {
+		if _, err := backend.WriteState(ctx, namespaces.Default, key, bytes.NewReader(payload), storage.PutStateOptions{}); err != nil {
+			t.Fatalf("write state %d: %v", i, err)
+		}
+	}
+	if err := backend.CompactLogstore(ctx, namespaces.Default); err != nil {
+		t.Fatalf("compact disabled backend: %v", err)
+	}
+	snapshotsDir := filepath.Join(root, namespaces.Default, "logstore", "snapshots")
+	if got := countMatchingFiles(t, filepath.Join(snapshotsDir, "snap-*.log")); got != 0 {
+		t.Fatalf("expected no snapshots with compaction disabled, got %d", got)
+	}
+}
+
+func TestDiskLogstoreCompactionCleanupRemovesObsoleteFilesAfterGrace(t *testing.T) {
+	ensureDiskRootEnv(t)
+	root := prepareDiskRoot(t, "")
+	now := time.Unix(1_700_000_000, 0).UTC()
+	backend, err := disk.New(disk.Config{
+		Root:                             root,
+		Now:                              func() time.Time { return now },
+		LogstoreSegmentSize:              512,
+		LogstoreCompactionEnabled:        true,
+		LogstoreCompactionInterval:       10 * time.Millisecond,
+		LogstoreCompactionMinSegments:    1,
+		LogstoreCompactionMinReclaimSize: 1,
+		LogstoreCompactionDeleteGrace:    time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("new disk backend: %v", err)
+	}
+	defer backend.Close()
+
+	ctx := context.Background()
+	key := "disk-compaction-cleanup-" + uuidv7.NewString()
+	payload := []byte(strings.Repeat("z", 2048))
+	for i := 0; i < 3; i++ {
+		if _, err := backend.WriteState(ctx, namespaces.Default, key, bytes.NewReader(payload), storage.PutStateOptions{}); err != nil {
+			t.Fatalf("write state %d: %v", i, err)
+		}
+	}
+	segmentsDir := filepath.Join(root, namespaces.Default, "logstore", "segments")
+	snapshotsDir := filepath.Join(root, namespaces.Default, "logstore", "snapshots")
+	waitForDiskSnapshot(t, 2*time.Second, snapshotsDir)
+	initialSegments := countMatchingFiles(t, filepath.Join(segmentsDir, "seg-*.log"))
+	if initialSegments == 0 {
+		t.Fatalf("expected remaining segments before cleanup")
+	}
+	now = now.Add(2 * time.Minute)
+	waitForDiskCompactionReduction(t, 2*time.Second, segmentsDir, initialSegments)
+}
+
+func TestDiskLogstoreCompactionPreservesConcurrentReads(t *testing.T) {
+	ensureDiskRootEnv(t)
+	root := prepareDiskRoot(t, "")
+	backend, err := disk.New(disk.Config{
+		Root:                               root,
+		LogstoreSegmentSize:                512,
+		LogstoreCompactionEnabled:          true,
+		LogstoreCompactionInterval:         time.Hour,
+		LogstoreCompactionMinSegments:      1,
+		LogstoreCompactionMinReclaimSize:   1,
+		LogstoreCompactionMaxIOBytesPerSec: 1 << 20,
+	})
+	if err != nil {
+		t.Fatalf("new disk backend: %v", err)
+	}
+	defer backend.Close()
+
+	ctx := context.Background()
+	key := "disk-compaction-read-" + uuidv7.NewString()
+	payload := []byte(strings.Repeat("r", 64<<10))
+	for i := 0; i < 2; i++ {
+		if _, err := backend.WriteState(ctx, namespaces.Default, key, bytes.NewReader(payload), storage.PutStateOptions{}); err != nil {
+			t.Fatalf("write state %d: %v", i, err)
+		}
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		for i := 0; i < 50; i++ {
+			res, err := backend.ReadState(ctx, namespaces.Default, key)
+			if err != nil {
+				done <- err
+				return
+			}
+			body, err := io.ReadAll(res.Reader)
+			res.Reader.Close()
+			if err != nil {
+				done <- err
+				return
+			}
+			if !bytes.Equal(body, payload) {
+				done <- fmt.Errorf("payload mismatch")
+				return
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+		done <- nil
+	}()
+
+	if err := backend.CompactLogstore(ctx, namespaces.Default); err != nil {
+		t.Fatalf("compact backend: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("concurrent reads failed: %v", err)
+	}
+}
+
 func TestDiskAcquireNoWaitReturnsWaiting(t *testing.T) {
 	ensureDiskRootEnv(t)
 	root := prepareDiskRoot(t, "")
@@ -2336,6 +2518,39 @@ func RunDiskLifecycleScenario(t *testing.T, base, owner string) {
 func prepareDiskRoot(tb testing.TB, base string) string {
 	tb.Helper()
 	return storetest.PrepareDiskStoreSubdir(tb, "disk", base, "lockd")
+}
+
+func countMatchingFiles(tb testing.TB, pattern string) int {
+	tb.Helper()
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		tb.Fatalf("glob %q: %v", pattern, err)
+	}
+	return len(matches)
+}
+
+func waitForDiskSnapshot(tb testing.TB, timeout time.Duration, snapshotsDir string) {
+	tb.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if countMatchingFiles(tb, filepath.Join(snapshotsDir, "snap-*.log")) > 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	tb.Fatalf("snapshot not created within %s", timeout)
+}
+
+func waitForDiskCompactionReduction(tb testing.TB, timeout time.Duration, segmentsDir string, baseline int) {
+	tb.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if countMatchingFiles(tb, filepath.Join(segmentsDir, "seg-*.log")) < baseline {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	tb.Fatalf("segment count did not drop below %d within %s", baseline, timeout)
 }
 
 func buildDiskConfig(tb testing.TB, root string, retention time.Duration) lockd.Config {

@@ -12,6 +12,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -29,8 +30,10 @@ import (
 	shutdowntest "pkt.systems/lockd/integration/internal/shutdowntest"
 	"pkt.systems/lockd/integration/internal/storetest"
 	testlog "pkt.systems/lockd/integration/internal/testlog"
+	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/disk"
 	"pkt.systems/lockd/internal/uuidv7"
+	"pkt.systems/lockd/namespaces"
 	"pkt.systems/pslog"
 )
 
@@ -148,6 +151,216 @@ func startNFSTestServer(tb testing.TB, cfg lockd.Config) *lockd.TestServer {
 func TestNFSAutoKeyAcquire(t *testing.T) {
 	base := ensureNFSRootEnv(t)
 	runAutoKeyAcquireScenario(t, base, "nfs-auto")
+}
+
+func TestNFSLogstoreCompactionPreservesState(t *testing.T) {
+	base := ensureNFSRootEnv(t)
+	root := prepareNFSRoot(t, base)
+	backend, err := disk.New(disk.Config{
+		Root:                             root,
+		LogstoreSegmentSize:              512,
+		LogstoreCompactionEnabled:        true,
+		LogstoreCompactionInterval:       time.Hour,
+		LogstoreCompactionMinSegments:    1,
+		LogstoreCompactionMinReclaimSize: 1,
+		LogstoreCompactionDeleteGrace:    150 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("new nfs backend: %v", err)
+	}
+	defer backend.Close()
+
+	ctx := context.Background()
+	key := "nfs-compaction-" + uuidv7.NewString()
+	payload := []byte(strings.Repeat("n", 2048))
+	for i := 0; i < 4; i++ {
+		if _, err := backend.WriteState(ctx, namespaces.Default, key, bytes.NewReader(payload), storage.PutStateOptions{}); err != nil {
+			t.Fatalf("write state %d: %v", i, err)
+		}
+	}
+	segmentsDir := filepath.Join(root, namespaces.Default, "logstore", "segments")
+	snapshotsDir := filepath.Join(root, namespaces.Default, "logstore", "snapshots")
+	initialSegments := countNFSMatchingFiles(t, filepath.Join(segmentsDir, "seg-*.log"))
+	if initialSegments == 0 {
+		t.Fatalf("expected written logstore segments")
+	}
+	if err := backend.CompactLogstore(ctx, namespaces.Default); err != nil {
+		t.Fatalf("compact backend: %v", err)
+	}
+	if got := countNFSMatchingFiles(t, filepath.Join(snapshotsDir, "snap-*.log")); got == 0 {
+		t.Fatalf("expected compaction snapshot, initial segments=%d current segments=%d", initialSegments, countNFSMatchingFiles(t, filepath.Join(segmentsDir, "seg-*.log")))
+	}
+	res, err := backend.ReadState(ctx, namespaces.Default, key)
+	if err != nil {
+		t.Fatalf("read compacted key: %v", err)
+	}
+	defer res.Reader.Close()
+	body, err := io.ReadAll(res.Reader)
+	if err != nil {
+		t.Fatalf("read compacted body: %v", err)
+	}
+	if !bytes.Equal(body, payload) {
+		t.Fatalf("unexpected compacted payload")
+	}
+}
+
+func TestNFSLogstoreCompactionDisabledProducesNoSnapshot(t *testing.T) {
+	base := ensureNFSRootEnv(t)
+	root := prepareNFSRoot(t, base)
+	backend, err := disk.New(disk.Config{
+		Root:                             root,
+		LogstoreSegmentSize:              512,
+		LogstoreCompactionEnabled:        false,
+		LogstoreCompactionInterval:       time.Hour,
+		LogstoreCompactionMinSegments:    1,
+		LogstoreCompactionMinReclaimSize: 1,
+	})
+	if err != nil {
+		t.Fatalf("new nfs backend: %v", err)
+	}
+	defer backend.Close()
+
+	ctx := context.Background()
+	key := "nfs-compaction-disabled-" + uuidv7.NewString()
+	payload := []byte(strings.Repeat("d", 2048))
+	for i := 0; i < 3; i++ {
+		if _, err := backend.WriteState(ctx, namespaces.Default, key, bytes.NewReader(payload), storage.PutStateOptions{}); err != nil {
+			t.Fatalf("write state %d: %v", i, err)
+		}
+	}
+	if err := backend.CompactLogstore(ctx, namespaces.Default); err != nil {
+		t.Fatalf("compact disabled backend: %v", err)
+	}
+	snapshotsDir := filepath.Join(root, namespaces.Default, "logstore", "snapshots")
+	if got := countNFSMatchingFiles(t, filepath.Join(snapshotsDir, "snap-*.log")); got != 0 {
+		t.Fatalf("expected no snapshots with compaction disabled, got %d", got)
+	}
+}
+
+func TestNFSLogstoreCompactionCleanupRemovesObsoleteFilesAfterGrace(t *testing.T) {
+	base := ensureNFSRootEnv(t)
+	root := prepareNFSRoot(t, base)
+	now := time.Unix(1_700_000_000, 0).UTC()
+	backend, err := disk.New(disk.Config{
+		Root:                             root,
+		Now:                              func() time.Time { return now },
+		LogstoreSegmentSize:              512,
+		LogstoreCompactionEnabled:        true,
+		LogstoreCompactionInterval:       10 * time.Millisecond,
+		LogstoreCompactionMinSegments:    1,
+		LogstoreCompactionMinReclaimSize: 1,
+		LogstoreCompactionDeleteGrace:    time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("new nfs backend: %v", err)
+	}
+	defer backend.Close()
+
+	ctx := context.Background()
+	key := "nfs-compaction-cleanup-" + uuidv7.NewString()
+	payload := []byte(strings.Repeat("c", 2048))
+	for i := 0; i < 3; i++ {
+		if _, err := backend.WriteState(ctx, namespaces.Default, key, bytes.NewReader(payload), storage.PutStateOptions{}); err != nil {
+			t.Fatalf("write state %d: %v", i, err)
+		}
+	}
+	segmentsDir := filepath.Join(root, namespaces.Default, "logstore", "segments")
+	snapshotsDir := filepath.Join(root, namespaces.Default, "logstore", "snapshots")
+	waitForNFSSnapshot(t, 2*time.Second, snapshotsDir)
+	initialSegments := countNFSMatchingFiles(t, filepath.Join(segmentsDir, "seg-*.log"))
+	if initialSegments == 0 {
+		t.Fatalf("expected remaining segments before cleanup")
+	}
+	now = now.Add(2 * time.Minute)
+	waitForNFSCompactionReduction(t, 2*time.Second, segmentsDir, initialSegments)
+}
+
+func TestNFSLogstoreCompactionPreservesConcurrentReads(t *testing.T) {
+	base := ensureNFSRootEnv(t)
+	root := prepareNFSRoot(t, base)
+	backend, err := disk.New(disk.Config{
+		Root:                               root,
+		LogstoreSegmentSize:                512,
+		LogstoreCompactionEnabled:          true,
+		LogstoreCompactionInterval:         time.Hour,
+		LogstoreCompactionMinSegments:      1,
+		LogstoreCompactionMinReclaimSize:   1,
+		LogstoreCompactionMaxIOBytesPerSec: 1 << 20,
+	})
+	if err != nil {
+		t.Fatalf("new nfs backend: %v", err)
+	}
+	defer backend.Close()
+
+	ctx := context.Background()
+	key := "nfs-compaction-read-" + uuidv7.NewString()
+	payload := []byte(strings.Repeat("r", 64<<10))
+	for i := 0; i < 2; i++ {
+		if _, err := backend.WriteState(ctx, namespaces.Default, key, bytes.NewReader(payload), storage.PutStateOptions{}); err != nil {
+			t.Fatalf("write state %d: %v", i, err)
+		}
+	}
+	done := make(chan error, 1)
+	go func() {
+		for i := 0; i < 50; i++ {
+			res, err := backend.ReadState(ctx, namespaces.Default, key)
+			if err != nil {
+				done <- err
+				return
+			}
+			body, err := io.ReadAll(res.Reader)
+			res.Reader.Close()
+			if err != nil {
+				done <- err
+				return
+			}
+			if !bytes.Equal(body, payload) {
+				done <- fmt.Errorf("payload mismatch")
+				return
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+		done <- nil
+	}()
+	if err := backend.CompactLogstore(ctx, namespaces.Default); err != nil {
+		t.Fatalf("compact backend: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("concurrent reads failed: %v", err)
+	}
+}
+
+func countNFSMatchingFiles(tb testing.TB, pattern string) int {
+	tb.Helper()
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		tb.Fatalf("glob %q: %v", pattern, err)
+	}
+	return len(matches)
+}
+
+func waitForNFSSnapshot(tb testing.TB, timeout time.Duration, snapshotsDir string) {
+	tb.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if countNFSMatchingFiles(tb, filepath.Join(snapshotsDir, "snap-*.log")) > 0 {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	tb.Fatalf("timed out waiting for nfs compaction snapshot in %s", snapshotsDir)
+}
+
+func waitForNFSCompactionReduction(tb testing.TB, timeout time.Duration, segmentsDir string, baseline int) {
+	tb.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if countNFSMatchingFiles(tb, filepath.Join(segmentsDir, "seg-*.log")) < baseline {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	tb.Fatalf("timed out waiting for nfs segment cleanup in %s", segmentsDir)
 }
 
 func TestNFSShutdownDrainingBlocksAcquire(t *testing.T) {

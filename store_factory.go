@@ -411,13 +411,19 @@ func BuildDiskConfig(cfg Config) (DiskConfigResult, error) {
 	}
 	root := filepath.Clean(pathPart)
 	cfgDisk := disk.Config{
-		Root:                 root,
-		Retention:            cfg.DiskRetention,
-		JanitorInterval:      cfg.DiskJanitorInterval,
-		QueueWatch:           cfg.DiskQueueWatch,
-		LockFileCacheSize:    cfg.DiskLockFileCacheSize,
-		LogstoreCommitMaxOps: cfg.LogstoreCommitMaxOps,
-		LogstoreSegmentSize:  cfg.LogstoreSegmentSize,
+		Root:                               root,
+		Retention:                          cfg.DiskRetention,
+		JanitorInterval:                    cfg.DiskJanitorInterval,
+		QueueWatch:                         cfg.DiskQueueWatch,
+		LockFileCacheSize:                  cfg.DiskLockFileCacheSize,
+		LogstoreCommitMaxOps:               cfg.LogstoreCommitMaxOps,
+		LogstoreSegmentSize:                cfg.LogstoreSegmentSize,
+		LogstoreCompactionEnabled:          cfg.LogstoreCompactionEnabled,
+		LogstoreCompactionInterval:         cfg.LogstoreCompactionInterval,
+		LogstoreCompactionMinSegments:      cfg.LogstoreCompactionMinSegments,
+		LogstoreCompactionMinReclaimSize:   cfg.LogstoreCompactionMinReclaimBytes,
+		LogstoreCompactionDeleteGrace:      cfg.LogstoreCompactionDeleteGrace,
+		LogstoreCompactionMaxIOBytesPerSec: cfg.LogstoreCompactionMaxIOBytesPerSec,
 	}
 	return DiskConfigResult{Config: cfgDisk, Root: root}, nil
 }

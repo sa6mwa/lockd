@@ -55,6 +55,24 @@ func TestConfigValidateDefaults(t *testing.T) {
 	if cfg.LogstoreCommitMaxOps != DefaultLogstoreCommitMaxOps {
 		t.Fatalf("expected logstore commit max ops default %d, got %d", DefaultLogstoreCommitMaxOps, cfg.LogstoreCommitMaxOps)
 	}
+	if !cfg.LogstoreCompactionEnabled {
+		t.Fatal("expected logstore compaction enabled by default")
+	}
+	if cfg.LogstoreCompactionInterval != DefaultLogstoreCompactionInterval {
+		t.Fatalf("expected logstore compaction interval %s, got %s", DefaultLogstoreCompactionInterval, cfg.LogstoreCompactionInterval)
+	}
+	if cfg.LogstoreCompactionMinSegments != DefaultLogstoreCompactionMinSegments {
+		t.Fatalf("expected logstore compaction min segments %d, got %d", DefaultLogstoreCompactionMinSegments, cfg.LogstoreCompactionMinSegments)
+	}
+	if cfg.LogstoreCompactionMinReclaimBytes != DefaultLogstoreCompactionMinReclaimBytes {
+		t.Fatalf("expected logstore compaction min reclaim bytes %d, got %d", DefaultLogstoreCompactionMinReclaimBytes, cfg.LogstoreCompactionMinReclaimBytes)
+	}
+	if cfg.LogstoreCompactionDeleteGrace != DefaultLogstoreCompactionDeleteGrace {
+		t.Fatalf("expected logstore compaction delete grace %s, got %s", DefaultLogstoreCompactionDeleteGrace, cfg.LogstoreCompactionDeleteGrace)
+	}
+	if cfg.LogstoreCompactionMaxIOBytesPerSec != DefaultLogstoreCompactionMaxIOBytesPerSec {
+		t.Fatalf("expected logstore compaction max io bytes/sec %d, got %d", DefaultLogstoreCompactionMaxIOBytesPerSec, cfg.LogstoreCompactionMaxIOBytesPerSec)
+	}
 	if cfg.S3MaxPartSize <= 0 {
 		t.Fatal("expected s3 max part size default")
 	}
@@ -123,6 +141,26 @@ func TestConfigValidateErrors(t *testing.T) {
 	cfg = Config{Store: "mem://", TxnReplayInterval: -1}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected error for negative txn replay interval")
+	}
+	cfg = Config{Store: "mem://", BundlePath: writeTestBundleFile(t), LogstoreCompactionInterval: -1}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for negative logstore compaction interval")
+	}
+	cfg = Config{Store: "mem://", BundlePath: writeTestBundleFile(t), LogstoreCompactionMinSegments: -1}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for negative logstore compaction min segments")
+	}
+	cfg = Config{Store: "mem://", BundlePath: writeTestBundleFile(t), LogstoreCompactionMinReclaimBytes: -1}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for negative logstore compaction min reclaim bytes")
+	}
+	cfg = Config{Store: "mem://", BundlePath: writeTestBundleFile(t), LogstoreCompactionDeleteGrace: -1}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for negative logstore compaction delete grace")
+	}
+	cfg = Config{Store: "mem://", BundlePath: writeTestBundleFile(t), LogstoreCompactionMaxIOBytesPerSec: -1}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for negative logstore compaction max io bytes/sec")
 	}
 	cfg = Config{
 		Store:               "mem://",

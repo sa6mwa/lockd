@@ -25,15 +25,21 @@ import (
 
 // Config captures the tunables for the disk backend.
 type Config struct {
-	Root                 string
-	Retention            time.Duration
-	JanitorInterval      time.Duration
-	Now                  func() time.Time
-	QueueWatch           bool
-	LockFileCacheSize    int
-	Crypto               *storage.Crypto
-	LogstoreCommitMaxOps int
-	LogstoreSegmentSize  int64
+	Root                               string
+	Retention                          time.Duration
+	JanitorInterval                    time.Duration
+	Now                                func() time.Time
+	QueueWatch                         bool
+	LockFileCacheSize                  int
+	Crypto                             *storage.Crypto
+	LogstoreCommitMaxOps               int
+	LogstoreSegmentSize                int64
+	LogstoreCompactionEnabled          bool
+	LogstoreCompactionInterval         time.Duration
+	LogstoreCompactionMinSegments      int
+	LogstoreCompactionMinReclaimSize   int64
+	LogstoreCompactionDeleteGrace      time.Duration
+	LogstoreCompactionMaxIOBytesPerSec int64
 }
 
 // Store implements storage.Backend backed by the local filesystem.
@@ -314,6 +320,14 @@ func New(cfg Config) (*Store, error) {
 	}
 	s.lockCache = newLockFileCache(cacheSize)
 	s.logstore = newLogStore(root, s.now, s.crypto, cfg.LogstoreCommitMaxOps, cfg.LogstoreSegmentSize, isNFS(root))
+	s.logstore.setCompactionConfig(logCompactionConfig{
+		enabled:          cfg.LogstoreCompactionEnabled,
+		interval:         cfg.LogstoreCompactionInterval,
+		minSegments:      cfg.LogstoreCompactionMinSegments,
+		minReclaimBytes:  cfg.LogstoreCompactionMinReclaimSize,
+		deleteGrace:      cfg.LogstoreCompactionDeleteGrace,
+		maxIOBytesPerSec: cfg.LogstoreCompactionMaxIOBytesPerSec,
+	})
 	s.writerPresenceDir = filepath.Join(root, ".lockd", "exclusive-writers")
 	s.writerPresencePath = filepath.Join(s.writerPresenceDir, fmt.Sprintf("%s.presence", s.logstore.writerID))
 	s.queueWatchMode = "polling"
@@ -439,6 +453,9 @@ func (s *Store) Close() error {
 	if s.stopJanitor != nil {
 		close(s.stopJanitor)
 		<-s.doneJanitor
+	}
+	if s.logstore != nil {
+		s.logstore.Close()
 	}
 	if s.lockCache != nil {
 		s.lockCache.close()

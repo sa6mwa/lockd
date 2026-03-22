@@ -82,86 +82,92 @@ func newConfigGenCommand() *cobra.Command {
 }
 
 type configDefaults struct {
-	Listen                    string   `yaml:"listen"`
-	ListenProto               string   `yaml:"listen-proto"`
-	Store                     string   `yaml:"store"`
-	HAMode                    string   `yaml:"ha"`
-	HALeaseTTL                string   `yaml:"ha-lease-ttl"`
-	HASinglePresenceTTL       string   `yaml:"ha-single-presence-ttl"`
-	DefaultNamespace          string   `yaml:"default-namespace"`
-	JSONMax                   string   `yaml:"json-max"`
-	JSONUtil                  string   `yaml:"json-util"`
-	PayloadSpoolMem           string   `yaml:"payload-spool-mem"`
-	DefaultTTL                string   `yaml:"default-ttl"`
-	MaxTTL                    string   `yaml:"max-ttl"`
-	AcquireBlock              string   `yaml:"acquire-block"`
-	SweeperInterval           string   `yaml:"sweeper-interval"`
-	TxnReplayInterval         string   `yaml:"txn-replay-interval"`
-	QueueDecisionCacheTTL     string   `yaml:"queue-decision-cache-ttl"`
-	QueueDecisionMaxApply     int      `yaml:"queue-decision-max-apply"`
-	QueueDecisionApplyTimeout string   `yaml:"queue-decision-apply-timeout"`
-	IdleSweepGrace            string   `yaml:"idle-sweep-grace"`
-	IdleSweepOpDelay          string   `yaml:"idle-sweep-op-delay"`
-	IdleSweepMaxOps           int      `yaml:"idle-sweep-max-ops"`
-	IdleSweepMaxRuntime       string   `yaml:"idle-sweep-max-runtime"`
-	DrainGrace                string   `yaml:"drain-grace"`
-	ShutdownTimeout           string   `yaml:"shutdown-timeout"`
-	DisableMTLS               bool     `yaml:"disable-mtls"`
-	HTTP2MaxConcurrentStreams int      `yaml:"http2-max-concurrent-streams"`
-	DisableStorageEncryption  bool     `yaml:"disable-storage-encryption"`
-	StorageEncryptionSnappy   bool     `yaml:"storage-encryption-snappy"`
-	Bundle                    string   `yaml:"bundle"`
-	DenylistPath              string   `yaml:"denylist-path"`
-	LogstoreCommitMaxOps      int      `yaml:"logstore-commit-max-ops"`
-	LogstoreSegmentSize       string   `yaml:"logstore-segment-size"`
-	DiskLockFileCacheSize     int      `yaml:"disk-lock-file-cache-size"`
-	DisableMemQueueWatch      bool     `yaml:"disable-mem-queue-watch"`
-	TCTrustDir                string   `yaml:"tc-trust-dir"`
-	TCDisableAuth             bool     `yaml:"tc-disable-auth"`
-	TCAllowDefaultCA          bool     `yaml:"tc-allow-default-ca"`
-	SelfEndpoint              string   `yaml:"self"`
-	TCJoinEndpoints           []string `yaml:"tc-join"`
-	TCFanoutTimeout           string   `yaml:"tc-fanout-timeout"`
-	TCFanoutAttempts          int      `yaml:"tc-fanout-attempts"`
-	TCFanoutBaseDelay         string   `yaml:"tc-fanout-base-delay"`
-	TCFanoutMaxDelay          string   `yaml:"tc-fanout-max-delay"`
-	TCFanoutMultiplier        float64  `yaml:"tc-fanout-multiplier"`
-	TCDecisionRetention       string   `yaml:"tc-decision-retention"`
-	TCClientBundle            string   `yaml:"tc-client-bundle"`
-	MCPListen                 string   `yaml:"mcp.listen"`
-	MCPServer                 string   `yaml:"mcp.server"`
-	MCPClientBundle           string   `yaml:"mcp.client-bundle"`
-	MCPBundle                 string   `yaml:"mcp.bundle"`
-	MCPDisableTLS             bool     `yaml:"mcp.disable-tls"`
-	MCPBaseURL                string   `yaml:"mcp.base-url"`
-	MCPAllowHTTP              bool     `yaml:"mcp.allow-http"`
-	MCPDisableMTLS            bool     `yaml:"mcp.disable-mtls"`
-	MCPInlineMaxBytes         int64    `yaml:"mcp.inline-max-bytes"`
-	MCPDefaultNamespace       string   `yaml:"mcp.default-namespace"`
-	MCPAgentBusQueue          string   `yaml:"mcp.agent-bus-queue"`
-	MCPStateFile              string   `yaml:"mcp.state-file"`
-	MCPTokenStore             string   `yaml:"mcp.token-store"`
-	MCPIssuer                 string   `yaml:"mcp.issuer"`
-	MCPPath                   string   `yaml:"mcp.path"`
-	MCPOAuthResourceURL       string   `yaml:"mcp.oauth-resource-url"`
-	StoreSSE                  string   `yaml:"s3-sse"`
-	StoreKMSKeyID             string   `yaml:"s3-kms-key-id"`
-	StoreMaxPartSize          string   `yaml:"s3-max-part-size"`
-	StoreEncryptBufferBudget  string   `yaml:"s3-encrypt-buffer-budget"`
-	AWSRegion                 string   `yaml:"aws-region"`
-	AWSKMSKeyID               string   `yaml:"aws-kms-key-id"`
-	StorageRetryMaxAttempts   int      `yaml:"storage-retry-attempts"`
-	StorageRetryBaseDelay     string   `yaml:"storage-retry-base-delay"`
-	StorageRetryMaxDelay      string   `yaml:"storage-retry-max-delay"`
-	StorageRetryMultiplier    float64  `yaml:"storage-retry-multiplier"`
-	ConnguardEnabled          bool     `yaml:"connguard-enabled"`
-	ConnguardFailureThreshold int      `yaml:"connguard-failure-threshold"`
-	ConnguardFailureWindow    string   `yaml:"connguard-failure-window"`
-	ConnguardBlockDuration    string   `yaml:"connguard-block-duration"`
-	ConnguardProbeTimeout     string   `yaml:"connguard-probe-timeout"`
-	LSFSampleInterval         string   `yaml:"lsf-sample-interval"`
-	LSFLogInterval            string   `yaml:"lsf-log-interval"`
-	LogLevel                  string   `yaml:"log-level"`
+	Listen                             string   `yaml:"listen"`
+	ListenProto                        string   `yaml:"listen-proto"`
+	Store                              string   `yaml:"store"`
+	HAMode                             string   `yaml:"ha"`
+	HALeaseTTL                         string   `yaml:"ha-lease-ttl"`
+	HASinglePresenceTTL                string   `yaml:"ha-single-presence-ttl"`
+	DefaultNamespace                   string   `yaml:"default-namespace"`
+	JSONMax                            string   `yaml:"json-max"`
+	JSONUtil                           string   `yaml:"json-util"`
+	PayloadSpoolMem                    string   `yaml:"payload-spool-mem"`
+	DefaultTTL                         string   `yaml:"default-ttl"`
+	MaxTTL                             string   `yaml:"max-ttl"`
+	AcquireBlock                       string   `yaml:"acquire-block"`
+	SweeperInterval                    string   `yaml:"sweeper-interval"`
+	TxnReplayInterval                  string   `yaml:"txn-replay-interval"`
+	QueueDecisionCacheTTL              string   `yaml:"queue-decision-cache-ttl"`
+	QueueDecisionMaxApply              int      `yaml:"queue-decision-max-apply"`
+	QueueDecisionApplyTimeout          string   `yaml:"queue-decision-apply-timeout"`
+	IdleSweepGrace                     string   `yaml:"idle-sweep-grace"`
+	IdleSweepOpDelay                   string   `yaml:"idle-sweep-op-delay"`
+	IdleSweepMaxOps                    int      `yaml:"idle-sweep-max-ops"`
+	IdleSweepMaxRuntime                string   `yaml:"idle-sweep-max-runtime"`
+	DrainGrace                         string   `yaml:"drain-grace"`
+	ShutdownTimeout                    string   `yaml:"shutdown-timeout"`
+	DisableMTLS                        bool     `yaml:"disable-mtls"`
+	HTTP2MaxConcurrentStreams          int      `yaml:"http2-max-concurrent-streams"`
+	DisableStorageEncryption           bool     `yaml:"disable-storage-encryption"`
+	StorageEncryptionSnappy            bool     `yaml:"storage-encryption-snappy"`
+	Bundle                             string   `yaml:"bundle"`
+	DenylistPath                       string   `yaml:"denylist-path"`
+	LogstoreCommitMaxOps               int      `yaml:"logstore-commit-max-ops"`
+	LogstoreSegmentSize                string   `yaml:"logstore-segment-size"`
+	LogstoreCompaction                 bool     `yaml:"logstore-compaction"`
+	LogstoreCompactionInterval         string   `yaml:"logstore-compaction-interval"`
+	LogstoreCompactionMinSegments      int      `yaml:"logstore-compaction-min-segments"`
+	LogstoreCompactionMinReclaimSize   string   `yaml:"logstore-compaction-min-reclaim-size"`
+	LogstoreCompactionDeleteGrace      string   `yaml:"logstore-compaction-delete-grace"`
+	LogstoreCompactionMaxIOBytesPerSec string   `yaml:"logstore-compaction-max-io-bytes-per-sec"`
+	DiskLockFileCacheSize              int      `yaml:"disk-lock-file-cache-size"`
+	DisableMemQueueWatch               bool     `yaml:"disable-mem-queue-watch"`
+	TCTrustDir                         string   `yaml:"tc-trust-dir"`
+	TCDisableAuth                      bool     `yaml:"tc-disable-auth"`
+	TCAllowDefaultCA                   bool     `yaml:"tc-allow-default-ca"`
+	SelfEndpoint                       string   `yaml:"self"`
+	TCJoinEndpoints                    []string `yaml:"tc-join"`
+	TCFanoutTimeout                    string   `yaml:"tc-fanout-timeout"`
+	TCFanoutAttempts                   int      `yaml:"tc-fanout-attempts"`
+	TCFanoutBaseDelay                  string   `yaml:"tc-fanout-base-delay"`
+	TCFanoutMaxDelay                   string   `yaml:"tc-fanout-max-delay"`
+	TCFanoutMultiplier                 float64  `yaml:"tc-fanout-multiplier"`
+	TCDecisionRetention                string   `yaml:"tc-decision-retention"`
+	TCClientBundle                     string   `yaml:"tc-client-bundle"`
+	MCPListen                          string   `yaml:"mcp.listen"`
+	MCPServer                          string   `yaml:"mcp.server"`
+	MCPClientBundle                    string   `yaml:"mcp.client-bundle"`
+	MCPBundle                          string   `yaml:"mcp.bundle"`
+	MCPDisableTLS                      bool     `yaml:"mcp.disable-tls"`
+	MCPBaseURL                         string   `yaml:"mcp.base-url"`
+	MCPAllowHTTP                       bool     `yaml:"mcp.allow-http"`
+	MCPDisableMTLS                     bool     `yaml:"mcp.disable-mtls"`
+	MCPInlineMaxBytes                  int64    `yaml:"mcp.inline-max-bytes"`
+	MCPDefaultNamespace                string   `yaml:"mcp.default-namespace"`
+	MCPAgentBusQueue                   string   `yaml:"mcp.agent-bus-queue"`
+	MCPStateFile                       string   `yaml:"mcp.state-file"`
+	MCPTokenStore                      string   `yaml:"mcp.token-store"`
+	MCPIssuer                          string   `yaml:"mcp.issuer"`
+	MCPPath                            string   `yaml:"mcp.path"`
+	MCPOAuthResourceURL                string   `yaml:"mcp.oauth-resource-url"`
+	StoreSSE                           string   `yaml:"s3-sse"`
+	StoreKMSKeyID                      string   `yaml:"s3-kms-key-id"`
+	StoreMaxPartSize                   string   `yaml:"s3-max-part-size"`
+	StoreEncryptBufferBudget           string   `yaml:"s3-encrypt-buffer-budget"`
+	AWSRegion                          string   `yaml:"aws-region"`
+	AWSKMSKeyID                        string   `yaml:"aws-kms-key-id"`
+	StorageRetryMaxAttempts            int      `yaml:"storage-retry-attempts"`
+	StorageRetryBaseDelay              string   `yaml:"storage-retry-base-delay"`
+	StorageRetryMaxDelay               string   `yaml:"storage-retry-max-delay"`
+	StorageRetryMultiplier             float64  `yaml:"storage-retry-multiplier"`
+	ConnguardEnabled                   bool     `yaml:"connguard-enabled"`
+	ConnguardFailureThreshold          int      `yaml:"connguard-failure-threshold"`
+	ConnguardFailureWindow             string   `yaml:"connguard-failure-window"`
+	ConnguardBlockDuration             string   `yaml:"connguard-block-duration"`
+	ConnguardProbeTimeout              string   `yaml:"connguard-probe-timeout"`
+	LSFSampleInterval                  string   `yaml:"lsf-sample-interval"`
+	LSFLogInterval                     string   `yaml:"lsf-log-interval"`
+	LogLevel                           string   `yaml:"log-level"`
 }
 
 func configHumanizeBytes(n int64) string {
@@ -174,86 +180,92 @@ func defaultConfigYAML(overrides ...func(*configDefaults)) ([]byte, error) {
 		tcTrustDir = dir
 	}
 	defaults := configDefaults{
-		Listen:                    lockd.DefaultListen,
-		ListenProto:               lockd.DefaultListenProto,
-		Store:                     lockd.DefaultStore,
-		HAMode:                    lockd.DefaultHAMode,
-		HALeaseTTL:                lockd.DefaultHALeaseTTL.String(),
-		HASinglePresenceTTL:       lockd.DefaultHASinglePresenceTTL.String(),
-		DefaultNamespace:          lockd.DefaultNamespace,
-		JSONMax:                   configHumanizeBytes(lockd.DefaultJSONMaxBytes),
-		JSONUtil:                  lockd.JSONUtilLockd,
-		PayloadSpoolMem:           configHumanizeBytes(lockd.DefaultPayloadSpoolMemoryThreshold),
-		DefaultTTL:                lockd.DefaultDefaultTTL.String(),
-		MaxTTL:                    lockd.DefaultMaxTTL.String(),
-		AcquireBlock:              lockd.DefaultAcquireBlock.String(),
-		SweeperInterval:           lockd.DefaultSweeperInterval.String(),
-		TxnReplayInterval:         lockd.DefaultTxnReplayInterval.String(),
-		QueueDecisionCacheTTL:     lockd.DefaultQueueDecisionCacheTTL.String(),
-		QueueDecisionMaxApply:     lockd.DefaultQueueDecisionMaxApply,
-		QueueDecisionApplyTimeout: lockd.DefaultQueueDecisionApplyTimeout.String(),
-		IdleSweepGrace:            lockd.DefaultIdleSweepGrace.String(),
-		IdleSweepOpDelay:          lockd.DefaultIdleSweepOpDelay.String(),
-		IdleSweepMaxOps:           lockd.DefaultIdleSweepMaxOps,
-		IdleSweepMaxRuntime:       lockd.DefaultIdleSweepMaxRuntime.String(),
-		DrainGrace:                lockd.DefaultDrainGrace.String(),
-		ShutdownTimeout:           lockd.DefaultShutdownTimeout.String(),
-		DisableMTLS:               false,
-		HTTP2MaxConcurrentStreams: lockd.DefaultMaxConcurrentStreams,
-		DisableStorageEncryption:  false,
-		StorageEncryptionSnappy:   false,
-		Bundle:                    "",
-		DenylistPath:              "",
-		LogstoreCommitMaxOps:      lockd.DefaultLogstoreCommitMaxOps,
-		LogstoreSegmentSize:       configHumanizeBytes(lockd.DefaultLogstoreSegmentSize),
-		DiskLockFileCacheSize:     lockd.DefaultDiskLockFileCacheSize,
-		DisableMemQueueWatch:      false,
-		TCTrustDir:                tcTrustDir,
-		TCDisableAuth:             false,
-		TCAllowDefaultCA:          false,
-		SelfEndpoint:              "",
-		TCJoinEndpoints:           nil,
-		TCFanoutTimeout:           lockd.DefaultTCFanoutTimeout.String(),
-		TCFanoutAttempts:          lockd.DefaultTCFanoutMaxAttempts,
-		TCFanoutBaseDelay:         lockd.DefaultTCFanoutBaseDelay.String(),
-		TCFanoutMaxDelay:          lockd.DefaultTCFanoutMaxDelay.String(),
-		TCFanoutMultiplier:        lockd.DefaultTCFanoutMultiplier,
-		TCDecisionRetention:       lockd.DefaultTCDecisionRetention.String(),
-		TCClientBundle:            "",
-		MCPListen:                 "127.0.0.1:19341",
-		MCPServer:                 "https://127.0.0.1:9341",
-		MCPClientBundle:           "",
-		MCPBundle:                 "",
-		MCPDisableTLS:             false,
-		MCPBaseURL:                "",
-		MCPAllowHTTP:              false,
-		MCPDisableMTLS:            false,
-		MCPInlineMaxBytes:         2 * 1024 * 1024,
-		MCPDefaultNamespace:       "mcp",
-		MCPAgentBusQueue:          "lockd.agent.bus",
-		MCPStateFile:              "",
-		MCPTokenStore:             "",
-		MCPIssuer:                 "",
-		MCPPath:                   "/",
-		MCPOAuthResourceURL:       "",
-		StoreSSE:                  "",
-		StoreKMSKeyID:             "",
-		StoreMaxPartSize:          configHumanizeBytes(lockd.DefaultS3MaxPartSize),
-		StoreEncryptBufferBudget:  configHumanizeBytes(lockd.DefaultS3SmallEncryptBufferBudget),
-		AWSRegion:                 "",
-		AWSKMSKeyID:               "",
-		StorageRetryMaxAttempts:   lockd.DefaultStorageRetryMaxAttempts,
-		StorageRetryBaseDelay:     lockd.DefaultStorageRetryBaseDelay.String(),
-		StorageRetryMaxDelay:      lockd.DefaultStorageRetryMaxDelay.String(),
-		StorageRetryMultiplier:    lockd.DefaultStorageRetryMultiplier,
-		ConnguardEnabled:          true,
-		ConnguardFailureThreshold: lockd.DefaultConnguardFailureThreshold,
-		ConnguardFailureWindow:    lockd.DefaultConnguardFailureWindow.String(),
-		ConnguardBlockDuration:    lockd.DefaultConnguardBlockDuration.String(),
-		ConnguardProbeTimeout:     lockd.DefaultConnguardProbeTimeout.String(),
-		LSFSampleInterval:         lockd.DefaultLSFSampleInterval.String(),
-		LSFLogInterval:            lockd.DefaultLSFLogInterval.String(),
-		LogLevel:                  "info",
+		Listen:                             lockd.DefaultListen,
+		ListenProto:                        lockd.DefaultListenProto,
+		Store:                              lockd.DefaultStore,
+		HAMode:                             lockd.DefaultHAMode,
+		HALeaseTTL:                         lockd.DefaultHALeaseTTL.String(),
+		HASinglePresenceTTL:                lockd.DefaultHASinglePresenceTTL.String(),
+		DefaultNamespace:                   lockd.DefaultNamespace,
+		JSONMax:                            configHumanizeBytes(lockd.DefaultJSONMaxBytes),
+		JSONUtil:                           lockd.JSONUtilLockd,
+		PayloadSpoolMem:                    configHumanizeBytes(lockd.DefaultPayloadSpoolMemoryThreshold),
+		DefaultTTL:                         lockd.DefaultDefaultTTL.String(),
+		MaxTTL:                             lockd.DefaultMaxTTL.String(),
+		AcquireBlock:                       lockd.DefaultAcquireBlock.String(),
+		SweeperInterval:                    lockd.DefaultSweeperInterval.String(),
+		TxnReplayInterval:                  lockd.DefaultTxnReplayInterval.String(),
+		QueueDecisionCacheTTL:              lockd.DefaultQueueDecisionCacheTTL.String(),
+		QueueDecisionMaxApply:              lockd.DefaultQueueDecisionMaxApply,
+		QueueDecisionApplyTimeout:          lockd.DefaultQueueDecisionApplyTimeout.String(),
+		IdleSweepGrace:                     lockd.DefaultIdleSweepGrace.String(),
+		IdleSweepOpDelay:                   lockd.DefaultIdleSweepOpDelay.String(),
+		IdleSweepMaxOps:                    lockd.DefaultIdleSweepMaxOps,
+		IdleSweepMaxRuntime:                lockd.DefaultIdleSweepMaxRuntime.String(),
+		DrainGrace:                         lockd.DefaultDrainGrace.String(),
+		ShutdownTimeout:                    lockd.DefaultShutdownTimeout.String(),
+		DisableMTLS:                        false,
+		HTTP2MaxConcurrentStreams:          lockd.DefaultMaxConcurrentStreams,
+		DisableStorageEncryption:           false,
+		StorageEncryptionSnappy:            false,
+		Bundle:                             "",
+		DenylistPath:                       "",
+		LogstoreCommitMaxOps:               lockd.DefaultLogstoreCommitMaxOps,
+		LogstoreSegmentSize:                configHumanizeBytes(lockd.DefaultLogstoreSegmentSize),
+		LogstoreCompaction:                 lockd.DefaultLogstoreCompactionEnabled,
+		LogstoreCompactionInterval:         lockd.DefaultLogstoreCompactionInterval.String(),
+		LogstoreCompactionMinSegments:      lockd.DefaultLogstoreCompactionMinSegments,
+		LogstoreCompactionMinReclaimSize:   configHumanizeBytes(lockd.DefaultLogstoreCompactionMinReclaimBytes),
+		LogstoreCompactionDeleteGrace:      lockd.DefaultLogstoreCompactionDeleteGrace.String(),
+		LogstoreCompactionMaxIOBytesPerSec: configHumanizeBytes(lockd.DefaultLogstoreCompactionMaxIOBytesPerSec),
+		DiskLockFileCacheSize:              lockd.DefaultDiskLockFileCacheSize,
+		DisableMemQueueWatch:               false,
+		TCTrustDir:                         tcTrustDir,
+		TCDisableAuth:                      false,
+		TCAllowDefaultCA:                   false,
+		SelfEndpoint:                       "",
+		TCJoinEndpoints:                    nil,
+		TCFanoutTimeout:                    lockd.DefaultTCFanoutTimeout.String(),
+		TCFanoutAttempts:                   lockd.DefaultTCFanoutMaxAttempts,
+		TCFanoutBaseDelay:                  lockd.DefaultTCFanoutBaseDelay.String(),
+		TCFanoutMaxDelay:                   lockd.DefaultTCFanoutMaxDelay.String(),
+		TCFanoutMultiplier:                 lockd.DefaultTCFanoutMultiplier,
+		TCDecisionRetention:                lockd.DefaultTCDecisionRetention.String(),
+		TCClientBundle:                     "",
+		MCPListen:                          "127.0.0.1:19341",
+		MCPServer:                          "https://127.0.0.1:9341",
+		MCPClientBundle:                    "",
+		MCPBundle:                          "",
+		MCPDisableTLS:                      false,
+		MCPBaseURL:                         "",
+		MCPAllowHTTP:                       false,
+		MCPDisableMTLS:                     false,
+		MCPInlineMaxBytes:                  2 * 1024 * 1024,
+		MCPDefaultNamespace:                "mcp",
+		MCPAgentBusQueue:                   "lockd.agent.bus",
+		MCPStateFile:                       "",
+		MCPTokenStore:                      "",
+		MCPIssuer:                          "",
+		MCPPath:                            "/",
+		MCPOAuthResourceURL:                "",
+		StoreSSE:                           "",
+		StoreKMSKeyID:                      "",
+		StoreMaxPartSize:                   configHumanizeBytes(lockd.DefaultS3MaxPartSize),
+		StoreEncryptBufferBudget:           configHumanizeBytes(lockd.DefaultS3SmallEncryptBufferBudget),
+		AWSRegion:                          "",
+		AWSKMSKeyID:                        "",
+		StorageRetryMaxAttempts:            lockd.DefaultStorageRetryMaxAttempts,
+		StorageRetryBaseDelay:              lockd.DefaultStorageRetryBaseDelay.String(),
+		StorageRetryMaxDelay:               lockd.DefaultStorageRetryMaxDelay.String(),
+		StorageRetryMultiplier:             lockd.DefaultStorageRetryMultiplier,
+		ConnguardEnabled:                   true,
+		ConnguardFailureThreshold:          lockd.DefaultConnguardFailureThreshold,
+		ConnguardFailureWindow:             lockd.DefaultConnguardFailureWindow.String(),
+		ConnguardBlockDuration:             lockd.DefaultConnguardBlockDuration.String(),
+		ConnguardProbeTimeout:              lockd.DefaultConnguardProbeTimeout.String(),
+		LSFSampleInterval:                  lockd.DefaultLSFSampleInterval.String(),
+		LSFLogInterval:                     lockd.DefaultLSFLogInterval.String(),
+		LogLevel:                           "info",
 	}
 	for _, fn := range overrides {
 		if fn != nil {

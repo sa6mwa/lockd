@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"pkt.systems/lockd/internal/storage"
+	"pkt.systems/lockd/internal/storage/logging"
 	"pkt.systems/lockd/internal/storage/memory"
 	"pkt.systems/lockd/internal/storage/retry"
 	"pkt.systems/lockd/namespaces"
@@ -52,6 +53,8 @@ type stubBackend struct {
 	putObjectErrs   []error
 	putObjectCalls  int
 	putObjectBodies []string
+
+	abortCalls int
 }
 
 func (s *stubBackend) LoadMeta(ctx context.Context, namespace, key string) (storage.LoadMetaResult, error) {
@@ -159,11 +162,51 @@ func (s *stubBackend) BackendHash(context.Context) (string, error) {
 
 func (s *stubBackend) Close() error { return nil }
 
+func (s *stubBackend) Abort() error {
+	s.abortCalls++
+	return nil
+}
+
 func TestWrapReturnsNilOnNilInner(t *testing.T) {
 	t.Parallel()
 
 	if retry.Wrap(nil, pslog.NoopLogger(), &fakeClock{}, retry.Config{}) != nil {
 		t.Fatal("expected nil backend when inner is nil")
+	}
+}
+
+func TestWrapForwardsAbort(t *testing.T) {
+	t.Parallel()
+
+	back := &stubBackend{}
+	wrapped := retry.Wrap(back, pslog.NoopLogger(), &fakeClock{}, retry.Config{})
+	aborter, ok := wrapped.(interface{ Abort() error })
+	if !ok {
+		t.Fatal("expected wrapped backend to expose Abort when inner backend supports it")
+	}
+	if err := aborter.Abort(); err != nil {
+		t.Fatalf("abort: %v", err)
+	}
+	if back.abortCalls != 1 {
+		t.Fatalf("expected inner abort to be called once, got %d", back.abortCalls)
+	}
+}
+
+func TestWrapForwardsAbortThroughLoggingWrapper(t *testing.T) {
+	t.Parallel()
+
+	back := &stubBackend{}
+	logged := logging.Wrap(back, pslog.NoopLogger(), "test")
+	wrapped := retry.Wrap(logged, pslog.NoopLogger(), &fakeClock{}, retry.Config{})
+	aborter, ok := wrapped.(interface{ Abort() error })
+	if !ok {
+		t.Fatal("expected wrapped backend to expose Abort through logging wrapper")
+	}
+	if err := aborter.Abort(); err != nil {
+		t.Fatalf("abort: %v", err)
+	}
+	if back.abortCalls != 1 {
+		t.Fatalf("expected inner abort to be called once through wrapper chain, got %d", back.abortCalls)
 	}
 }
 

@@ -21,6 +21,7 @@ import (
 	"pkt.systems/lockd"
 	"pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
+	"pkt.systems/lockd/internal/qrf"
 	"pkt.systems/pslog"
 )
 
@@ -72,8 +73,11 @@ func runWorkloadBench(cfg benchConfig) {
 	ctx := context.Background()
 	logger, closeLogger := newBenchLogger(cfg)
 	defer closeLogger()
-	root, cleanup := prepareRoot(cfg.root, cfg.keepRoot)
+	root, cleanup := prepareBenchRoot(cfg)
 	defer cleanup()
+	if strings.TrimSpace(cfg.endpoint) == "" && strings.EqualFold(cfg.backend, "disk") {
+		fmt.Printf("bench disk root: %s\n", root)
+	}
 
 	runID := time.Now().UTC().Format("20060102T150405.000000000Z")
 	totalRuns := cfg.warmupRuns + cfg.runs
@@ -162,6 +166,9 @@ func runWorkloadBench(cfg benchConfig) {
 				status.Snapshot.QueueProducerInflight+status.Snapshot.QueueConsumerInflight+status.Snapshot.QueueAckInflight,
 				status.Snapshot.QueryInflight,
 			)
+			if err := validateBenchQRFStatus(status); err != nil {
+				die("bench qrf: %v", err)
+			}
 		}
 		if !warmup {
 			results = append(results, run)
@@ -206,6 +213,15 @@ func runWorkloadBench(cfg benchConfig) {
 	}
 }
 
+func validateBenchQRFStatus(status qrf.Status) error {
+	switch status.State {
+	case qrf.StateSoftArm, qrf.StateEngaged:
+		return fmt.Errorf("benchmark invalidated by qrf state=%s reason=%s", status.State.String(), status.Reason)
+	default:
+		return nil
+	}
+}
+
 func startBenchClient(ctx context.Context, cfg benchConfig, root string, logger pslog.Logger) (*benchClient, error) {
 	endpoint := strings.TrimSpace(cfg.endpoint)
 	if endpoint != "" {
@@ -238,6 +254,11 @@ func startBenchClient(ctx context.Context, cfg benchConfig, root string, logger 
 	srvCfg.ListenProto = "unix"
 	srvCfg.Listen = socketPath
 	srvCfg.DisableMTLS = true
+	if err := prepareEmbeddedBenchServerBundle(&cfg); err != nil {
+		cleanup()
+		return nil, err
+	}
+	srvCfg.BundlePEM = cfg.serverBundlePEM
 	srvCfg.HAMode = cfg.haMode
 	srvCfg.HALeaseTTL = cfg.haLeaseTTL
 	srvCfg.DefaultNamespace = cfg.namespace

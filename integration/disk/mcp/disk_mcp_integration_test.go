@@ -3,17 +3,13 @@
 package diskmcp
 
 import (
-	"net/url"
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
 	"pkt.systems/lockd"
 	"pkt.systems/lockd/integration/internal/cryptotest"
+	"pkt.systems/lockd/integration/internal/storetest"
 	mcpsuite "pkt.systems/lockd/integration/mcp/suite"
-	"pkt.systems/lockd/internal/uuidv7"
 	"pkt.systems/pslog"
 )
 
@@ -28,18 +24,10 @@ func TestDiskMCPE2E(t *testing.T) {
 
 func startDiskServer(tb testing.TB) *lockd.TestServer {
 	tb.Helper()
-	base := strings.TrimSpace(os.Getenv("LOCKD_DISK_ROOT"))
-	if base == "" {
-		tb.Fatalf("LOCKD_DISK_ROOT must be set (source .env.disk before running disk/mcp integration tests)")
-	}
-	root := filepath.Join(base, "lockd-mcp-"+uuidv7.NewString())
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		tb.Fatalf("mkdir disk root: %v", err)
-	}
-	tb.Cleanup(func() { _ = os.RemoveAll(root) })
+	root := storetest.PrepareDiskStoreSubdir(tb, "disk", "", "lockd-mcp")
 
 	cfg := lockd.Config{
-		Store:           (&url.URL{Scheme: "disk", Path: root}).String(),
+		Store:           storetest.DiskStoreURL(root),
 		Listen:          "127.0.0.1:0",
 		ListenProto:     "tcp",
 		DefaultTTL:      30 * time.Second,

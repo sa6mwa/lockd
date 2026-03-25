@@ -461,3 +461,7 @@ func (s *stubStore) BackendHash(context.Context) (string, error) {
 func (s *stubStore) Close() error {
 	return nil
 }
+
+func (s *stubStore) Abort() error {
+	return s.Close()
+}

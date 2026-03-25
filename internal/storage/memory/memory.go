@@ -124,6 +124,10 @@ func (s *Store) Close() error {
 	return nil
 }
 
+func (s *Store) Abort() error {
+	return s.Close()
+}
+
 // BackendHash returns the stable identity hash for this backend.
 func (s *Store) BackendHash(ctx context.Context) (string, error) {
 	result, err := storage.ResolveBackendHash(ctx, s, "", s.crypto)

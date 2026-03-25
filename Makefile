@@ -9,18 +9,32 @@ SUDO ?= sudo
 SHELL := /bin/bash
 CONTAINER_BUILDER ?= $(shell command -v podman || command -v nerdctl || command -v docker)
 IMAGE ?= docker.io/pktsystems/lockd
-LOCKD_VERSION ?= $(shell $(GO) run ./cmd/lockd version --version)
-LOCKD_SEMVER ?= $(shell $(GO) run ./cmd/lockd version --semver)
+LOCKD_VERSION ?= $(shell $(GO) run -buildvcs=true ./cmd/lockd version --version)
+LOCKD_SEMVER ?= $(shell $(GO) run -buildvcs=true ./cmd/lockd version --semver)
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-integration bench perf-guard-search fuzz diagrams swagger build container push-container clean install
+PERF_FAST_PRESET := fast-v1
+PERF_FAST_BASELINE_HISTORY := docs/performance/lockd-bench-fast-baseline-history.jsonl
+PERF_FAST_RUN_HISTORY := docs/performance/lockd-bench-fast-run-history.jsonl
+PERF_FULL_PRESET := full-v1
+PERF_FULL_BASELINE_HISTORY := docs/performance/lockd-bench-full-baseline-history.jsonl
+PERF_FULL_RUN_HISTORY := docs/performance/lockd-bench-full-run-history.jsonl
+
+.PHONY: help test test-integration bench perf-show-frozen-fast perf-show-run-history-fast perf-guard-fast perf-freeze-fast-baseline perf-show-frozen-full perf-show-run-history-full perf-guard-full perf-freeze-full-baseline fuzz diagrams swagger build container push-container clean install
 
 help:
 	@echo "Available targets:"
 	@echo "  make test                    # run unit tests"
 	@echo "  make test-integration        # run integration suites (pass SUITES=...)"
 	@echo "  make bench                   # run benchmark suites (pass SUITES=...)"
-	@echo "  make perf-guard-search       # run search/index perf regression guard against frozen baseline"
+	@echo "  make perf-show-frozen-fast   # print frozen fast perf baseline summary"
+	@echo "  make perf-show-run-history-fast # print recent fast perf run history (override LIMIT=3)"
+	@echo "  make perf-guard-fast         # run the daily fast disk perf guard and append fast run-history"
+	@echo "  make perf-freeze-fast-baseline # freeze the latest recorded fast run as the new baseline"
+	@echo "  make perf-show-frozen-full   # print frozen full perf baseline summary"
+	@echo "  make perf-show-run-history-full # print recent full perf run history (override LIMIT=3)"
+	@echo "  make perf-guard-full         # run the full disk perf comparison and append full run-history"
+	@echo "  make perf-freeze-full-baseline # freeze the latest recorded full run as the new baseline"
 	@echo "  make fuzz                    # run all fuzzers (default 15s each, override FUZZ_TIME=...)"
 	@echo "  make swagger                 # regenerate Swagger/OpenAPI artifacts"
 	@echo "  make diagrams                # render PlantUML sequence diagrams to JPEG"
@@ -33,7 +47,7 @@ help:
 # Example environment file contents shown when missing
 AWS_ENV_EXAMPLE := AWS_ACCESS_KEY_ID=your-access-key\nAWS_SECRET_ACCESS_KEY=your-secret\nAWS_REGION=us-west-2\nLOCKD_STORE=aws://your-bucket/prefix
 MINIO_ENV_EXAMPLE := MINIO_ROOT_USER=minioadmin\nMINIO_ROOT_PASSWORD=minioadmin\nMINIO_ACCESS_KEY=minioadmin\nMINIO_SECRET_KEY=minioadmin\nLOCKD_S3_ACCESS_KEY_ID=minioadmin\nLOCKD_S3_SECRET_ACCESS_KEY=minioadmin\nLOCKD_STORE=s3://localhost:9000/lockd-integration?insecure=1
-DISK_ENV_EXAMPLE := LOCKD_STORE=disk:///mnt/nfs4-lockd\nLOCKD_DISK_ROOT=/mnt/nfs4-lockd
+DISK_ENV_EXAMPLE := LOCKD_STORE=disk:///mnt/nfs4-lockd
 AZURE_ENV_EXAMPLE := LOCKD_STORE=azure://youraccount/container/prefix\nLOCKD_AZURE_ACCOUNT_KEY=yourkey
 OTLP_ENV_EXAMPLE := LOCKD_OTLP_ENDPOINT=localhost:4317\nLOCKD_STORE=s3://localhost:9000/lockd-integration-test?insecure=1\nMINIO_ROOT_USER=minioadmin\nMINIO_ROOT_PASSWORD=minioadmin\nLOCKD_S3_ACCESS_KEY_ID=minioadmin\nLOCKD_S3_SECRET_ACCESS_KEY=minioadmin
 
@@ -52,7 +66,7 @@ endef
 test:
 	go test -v -count=1 -cover ./...
 	cd ycsb && go test -v -count=1 -cover ./...
-	cd exmaples && -v -count=1 -cover ./...
+	cd examples && go test -v -count=1 -cover ./...
 
 test-integration:
 	@if [[ -z "$(SUITES)" ]]; then \
@@ -72,8 +86,91 @@ bench:
 		./run-benchmark-suites.sh $(SUITES); \
 	fi
 
-perf-guard-search:
-	@./scripts/check_search_perf_regression.sh
+perf-show-frozen-fast:
+	$(call ENSURE_ENV,.env.disk,DISK_ENV_EXAMPLE)
+	@set -a && source .env.disk && set +a && \
+		$(GO) run ./cmd/lockd-bench \
+			-mode baseline-report \
+			-baseline-preset $(PERF_FAST_PRESET) \
+			-baseline-history $(PERF_FAST_BASELINE_HISTORY)
+
+perf-show-run-history-fast:
+	$(call ENSURE_ENV,.env.disk,DISK_ENV_EXAMPLE)
+	@set -a && source .env.disk && set +a && \
+		$(GO) run ./cmd/lockd-bench \
+			-mode baseline-run-report \
+			-baseline-preset $(PERF_FAST_PRESET) \
+			-baseline-run-history $(PERF_FAST_RUN_HISTORY) \
+			-baseline-report-limit $(or $(LIMIT),3)
+
+perf-guard-fast:
+	$(call ENSURE_ENV,.env.disk,DISK_ENV_EXAMPLE)
+	@SECONDS=0; \
+	status=0; \
+	set -a && source .env.disk && set +a || status=$$?; \
+	if [[ $$status -eq 0 ]]; then \
+		$(GO) run ./cmd/lockd-bench \
+			-mode baseline \
+			-baseline-preset $(PERF_FAST_PRESET) \
+			-baseline-backends disk \
+			-baseline-history $(PERF_FAST_BASELINE_HISTORY) \
+			-baseline-run-history $(PERF_FAST_RUN_HISTORY) \
+			-baseline-append-history=false || status=$$?; \
+	fi; \
+	printf 'Elapsed: %02d:%02d\n' $$((SECONDS/60)) $$((SECONDS%60)); \
+	exit $$status
+
+perf-freeze-fast-baseline:
+	$(call ENSURE_ENV,.env.disk,DISK_ENV_EXAMPLE)
+	@set -a && source .env.disk && set +a && \
+		$(GO) run ./cmd/lockd-bench \
+			-mode baseline-freeze-latest \
+			-baseline-preset $(PERF_FAST_PRESET) \
+			-baseline-history $(PERF_FAST_BASELINE_HISTORY) \
+			-baseline-run-history $(PERF_FAST_RUN_HISTORY)
+
+perf-show-frozen-full:
+	$(call ENSURE_ENV,.env.disk,DISK_ENV_EXAMPLE)
+	@set -a && source .env.disk && set +a && \
+		$(GO) run ./cmd/lockd-bench \
+			-mode baseline-report \
+			-baseline-preset $(PERF_FULL_PRESET) \
+			-baseline-history $(PERF_FULL_BASELINE_HISTORY)
+
+perf-show-run-history-full:
+	$(call ENSURE_ENV,.env.disk,DISK_ENV_EXAMPLE)
+	@set -a && source .env.disk && set +a && \
+		$(GO) run ./cmd/lockd-bench \
+			-mode baseline-run-report \
+			-baseline-preset $(PERF_FULL_PRESET) \
+			-baseline-run-history $(PERF_FULL_RUN_HISTORY) \
+			-baseline-report-limit $(or $(LIMIT),3)
+
+perf-guard-full:
+	$(call ENSURE_ENV,.env.disk,DISK_ENV_EXAMPLE)
+	@SECONDS=0; \
+	status=0; \
+	set -a && source .env.disk && set +a || status=$$?; \
+	if [[ $$status -eq 0 ]]; then \
+		$(GO) run ./cmd/lockd-bench \
+			-mode baseline \
+			-baseline-preset $(PERF_FULL_PRESET) \
+			-baseline-backends disk \
+			-baseline-history $(PERF_FULL_BASELINE_HISTORY) \
+			-baseline-run-history $(PERF_FULL_RUN_HISTORY) \
+			-baseline-append-history=false || status=$$?; \
+	fi; \
+	printf 'Elapsed: %02d:%02d\n' $$((SECONDS/60)) $$((SECONDS%60)); \
+	exit $$status
+
+perf-freeze-full-baseline:
+	$(call ENSURE_ENV,.env.disk,DISK_ENV_EXAMPLE)
+	@set -a && source .env.disk && set +a && \
+		$(GO) run ./cmd/lockd-bench \
+			-mode baseline-freeze-latest \
+			-baseline-preset $(PERF_FULL_PRESET) \
+			-baseline-history $(PERF_FULL_BASELINE_HISTORY) \
+			-baseline-run-history $(PERF_FULL_RUN_HISTORY)
 
 FUZZ_TIME ?= 15s
 
@@ -113,6 +210,7 @@ diagrams: $(PLANTUML_SOURCES)
 
 swagger:
 	@echo "Generating Swagger/OpenAPI documentation"
+	@echo "(requires swag, install with: go install github.com/swaggo/swag/v2/cmd/swag@latest)"
 	$(GO) generate ./swagger
 
 tidy:

@@ -233,6 +233,8 @@ func isContainerExists(err error) bool {
 // Close satisfies storage.Backend by releasing resources held by Store (no-op for Azure).
 func (s *Store) Close() error { return nil }
 
+func (s *Store) Abort() error { return s.Close() }
+
 // BackendHash returns the stable identity hash for this backend.
 func (s *Store) BackendHash(ctx context.Context) (string, error) {
 	endpoint := strings.TrimSpace(s.endpoint)

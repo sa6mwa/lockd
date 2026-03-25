@@ -15,8 +15,23 @@ const (
 	haLeaseKey  = "activelease"
 )
 
+func haRefreshInterval(ttl time.Duration) time.Duration {
+	if ttl <= 0 {
+		return 500 * time.Millisecond
+	}
+	interval := ttl * 7 / 10
+	if interval < 500*time.Millisecond {
+		return 500 * time.Millisecond
+	}
+	return interval
+}
+
+func (s *Service) usesHALease() bool {
+	return s != nil && s.haLeaseTTL > 0 && s.haUsesLease.Load()
+}
+
 func (s *Service) startHA() {
-	if s == nil || s.haMode != "failover" || s.haLeaseTTL <= 0 || s.store == nil {
+	if !s.usesHALease() || s.store == nil {
 		return
 	}
 	if s.haStop != nil {
@@ -30,24 +45,48 @@ func (s *Service) startHA() {
 
 // StopHA stops the HA lease refresh loop.
 func (s *Service) StopHA() {
-	if s == nil || s.haStop == nil {
+	if s == nil {
 		return
 	}
-	close(s.haStop)
-	if s.haDone != nil {
-		<-s.haDone
-		s.haDone = nil
+	if s.haAutoStop != nil {
+		close(s.haAutoStop)
+		if s.haAutoDone != nil {
+			<-s.haAutoDone
+			s.haAutoDone = nil
+		}
+		s.haAutoStop = nil
 	}
-	s.haStop = nil
+	if s.haSingleStop != nil {
+		close(s.haSingleStop)
+		if s.haSingleDone != nil {
+			<-s.haSingleDone
+			s.haSingleDone = nil
+		}
+		s.haSingleStop = nil
+	}
+	if s.haStop != nil {
+		close(s.haStop)
+		if s.haDone != nil {
+			<-s.haDone
+			s.haDone = nil
+		}
+		s.haStop = nil
+	}
 }
 
 // ReleaseHA releases the failover lease held by this node, if present.
 func (s *Service) ReleaseHA(ctx context.Context) {
-	if s == nil || s.store == nil || s.haMode != "failover" {
+	if s == nil || s.store == nil {
 		return
 	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if strings.EqualFold(s.haMode, "auto") || strings.EqualFold(s.haMode, "single") {
+		s.releaseHAMember(ctx)
+	}
+	if !s.usesHALease() {
+		return
 	}
 	for attempt := 0; attempt < 2; attempt++ {
 		meta, etag, err := s.loadHALease(ctx)
@@ -80,10 +119,7 @@ func (s *Service) ReleaseHA(ctx context.Context) {
 
 func (s *Service) haLoop() {
 	defer close(s.haDone)
-	interval := s.haLeaseTTL / 2
-	if interval < 500*time.Millisecond {
-		interval = 500 * time.Millisecond
-	}
+	interval := haRefreshInterval(s.haLeaseTTL)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -104,7 +140,16 @@ func (s *Service) RequireNodeActive() error {
 // NodeActive reports whether this node currently holds the failover lease without
 // attempting to refresh it.
 func (s *Service) NodeActive() bool {
-	if s == nil || s.haMode != "failover" {
+	if s != nil && (strings.EqualFold(s.haMode, "auto") || strings.EqualFold(s.haMode, "single")) && !s.usesHALease() {
+		if !s.haActive.Load() {
+			return false
+		}
+		if expires := s.haPassiveUntil.Load(); expires > s.clock.Now().Unix() {
+			return false
+		}
+		return true
+	}
+	if !s.usesHALease() {
 		return true
 	}
 	if !s.haActive.Load() {
@@ -120,7 +165,21 @@ func (s *Service) NodeActive() bool {
 }
 
 func (s *Service) ensureNodeActive() error {
-	if s == nil || s.haMode != "failover" {
+	if !s.usesHALease() {
+		if s != nil && (strings.EqualFold(s.haMode, "auto") || strings.EqualFold(s.haMode, "single")) {
+			if strings.EqualFold(s.haMode, "auto") {
+				s.autoHARefresh()
+			} else {
+				s.singleModeRefresh()
+			}
+			if !s.usesHALease() && s.NodeActive() {
+				return nil
+			}
+		} else {
+			return nil
+		}
+	}
+	if s == nil {
 		return nil
 	}
 	if s.NodeActive() {
@@ -131,7 +190,11 @@ func (s *Service) ensureNodeActive() error {
 		return nil
 	}
 	retryAfter := int64(1)
-	if expires := s.haLeaseExpires.Load(); expires > 0 {
+	expires := s.haLeaseExpires.Load()
+	if !s.usesHALease() && strings.EqualFold(s.haMode, "auto") {
+		expires = s.haPassiveUntil.Load()
+	}
+	if expires > 0 {
 		now := s.clock.Now().Unix()
 		if expires > now {
 			retryAfter = expires - now
@@ -146,7 +209,7 @@ func (s *Service) ensureNodeActive() error {
 }
 
 func (s *Service) haRefresh() {
-	if s == nil || s.store == nil {
+	if !s.usesHALease() || s.store == nil {
 		return
 	}
 	s.haRefreshes.Add(1)

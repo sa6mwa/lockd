@@ -25,10 +25,11 @@ func ExampleClient_Acquire() {
 	defer os.RemoveAll(dir)
 	socketPath := filepath.Join(dir, "lockd.sock")
 	cfg := lockd.Config{
-		Store:       "mem://",
-		ListenProto: "unix",
-		Listen:      socketPath,
-		DisableMTLS: true,
+		Store:                    "mem://",
+		ListenProto:              "unix",
+		Listen:                   socketPath,
+		DisableMTLS:              true,
+		DisableStorageEncryption: true,
 	}
 	handle, err := lockd.StartServer(ctx, cfg)
 	if err != nil {
@@ -37,7 +38,7 @@ func ExampleClient_Acquire() {
 	}
 	stop := handle.Stop
 	defer stop(context.Background(), lockd.WithDrainLeases(0), lockd.WithShutdownTimeout(500*time.Millisecond))
-	cli, err := client.New("unix://" + socketPath)
+	cli, err := client.New("unix://"+socketPath, client.WithDisableMTLS(true))
 	if err != nil {
 		fmt.Println("error:", err)
 		return
@@ -82,10 +83,11 @@ func ExampleClient_Get_public() {
 	defer os.RemoveAll(dir)
 	socketPath := filepath.Join(dir, "lockd.sock")
 	cfg := lockd.Config{
-		Store:       "mem://",
-		ListenProto: "unix",
-		Listen:      socketPath,
-		DisableMTLS: true,
+		Store:                    "mem://",
+		ListenProto:              "unix",
+		Listen:                   socketPath,
+		DisableMTLS:              true,
+		DisableStorageEncryption: true,
 	}
 	handle, err := lockd.StartServer(ctx, cfg)
 	if err != nil {
@@ -94,7 +96,7 @@ func ExampleClient_Get_public() {
 	}
 	stop := handle.Stop
 	defer stop(context.Background(), lockd.WithDrainLeases(0), lockd.WithShutdownTimeout(500*time.Millisecond))
-	cli, err := client.New("unix://" + socketPath)
+	cli, err := client.New("unix://"+socketPath, client.WithDisableMTLS(true))
 	if err != nil {
 		fmt.Println("error:", err)
 		return
@@ -149,10 +151,11 @@ func ExampleClient_AcquireForUpdate() {
 	defer os.RemoveAll(dir)
 	socketPath := filepath.Join(dir, "lockd.sock")
 	cfg := lockd.Config{
-		Store:       "mem://",
-		ListenProto: "unix",
-		Listen:      socketPath,
-		DisableMTLS: true,
+		Store:                    "mem://",
+		ListenProto:              "unix",
+		Listen:                   socketPath,
+		DisableMTLS:              true,
+		DisableStorageEncryption: true,
 	}
 	handle, err := lockd.StartServer(ctx, cfg)
 	if err != nil {
@@ -161,7 +164,7 @@ func ExampleClient_AcquireForUpdate() {
 	}
 	stop := handle.Stop
 	defer stop(context.Background(), lockd.WithDrainLeases(0), lockd.WithShutdownTimeout(500*time.Millisecond))
-	cli, err := client.New("unix://" + socketPath)
+	cli, err := client.New("unix://"+socketPath, client.WithDisableMTLS(true))
 	if err != nil {
 		fmt.Println("error:", err)
 		return
@@ -198,10 +201,11 @@ func ExampleClient_Query() {
 	defer os.RemoveAll(dir)
 	socketPath := filepath.Join(dir, "lockd.sock")
 	cfg := lockd.Config{
-		Store:       "mem://",
-		ListenProto: "unix",
-		Listen:      socketPath,
-		DisableMTLS: true,
+		Store:                    "mem://",
+		ListenProto:              "unix",
+		Listen:                   socketPath,
+		DisableMTLS:              true,
+		DisableStorageEncryption: true,
 	}
 	handle, err := lockd.StartServer(ctx, cfg)
 	if err != nil {
@@ -210,7 +214,7 @@ func ExampleClient_Query() {
 	}
 	stop := handle.Stop
 	defer stop(context.Background(), lockd.WithDrainLeases(0), lockd.WithShutdownTimeout(500*time.Millisecond))
-	cli, err := client.New("unix://" + socketPath)
+	cli, err := client.New("unix://"+socketPath, client.WithDisableMTLS(true))
 	if err != nil {
 		fmt.Println("error:", err)
 		return

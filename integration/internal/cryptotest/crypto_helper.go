@@ -38,7 +38,14 @@ var (
 	sharedTCCredsOnce sync.Once
 	sharedTCCreds     tcCredentials
 	sharedTCCredsErr  error
+
+	httpClientCache sync.Map
 )
+
+type httpClientCacheKey struct {
+	server *lockd.TestServer
+	kind   string
+}
 
 type sharedMTLSState struct {
 	ca           *tlsutil.CA
@@ -231,13 +238,16 @@ func RequireTCHTTPClient(t testing.TB, ts *lockd.TestServer) *http.Client {
 	if ts == nil {
 		t.Fatalf("cryptotest: nil test server")
 	}
+	if client := cachedHTTPClient(ts, "tc"); client != nil {
+		return client
+	}
 	serverCreds := ts.TestMTLSCredentials()
 	if !TestMTLSEnabled() || !serverCreds.Valid() {
 		client, err := ts.NewHTTPClient()
 		if err != nil {
 			t.Fatalf("cryptotest: http client: %v", err)
 		}
-		return client
+		return storeCachedHTTPClient(ts, "tc", client)
 	}
 	tcCreds := sharedTCCredentials(t)
 	if tcCreds.clientParsed == nil {
@@ -265,10 +275,11 @@ func RequireTCHTTPClient(t testing.TB, ts *lockd.TestServer) *http.Client {
 	transport.IdleConnTimeout = 90 * time.Second
 	transport.DisableCompression = true
 
-	return &http.Client{
+	client := &http.Client{
 		Transport: transport,
 		Timeout:   0,
 	}
+	return storeCachedHTTPClient(ts, "tc", client)
 }
 
 // RequireServerHTTPClient constructs an HTTP client that presents the server certificate.
@@ -277,13 +288,16 @@ func RequireServerHTTPClient(t testing.TB, ts *lockd.TestServer) *http.Client {
 	if ts == nil {
 		t.Fatalf("cryptotest: nil test server")
 	}
+	if client := cachedHTTPClient(ts, "server"); client != nil {
+		return client
+	}
 	serverCreds := ts.TestMTLSCredentials()
 	if !TestMTLSEnabled() || !serverCreds.Valid() {
 		client, err := ts.NewHTTPClient()
 		if err != nil {
 			t.Fatalf("cryptotest: http client: %v", err)
 		}
-		return client
+		return storeCachedHTTPClient(ts, "server", client)
 	}
 	bundle, err := tlsutil.LoadBundleFromBytes(serverCreds.ServerBundle())
 	if err != nil {
@@ -307,10 +321,11 @@ func RequireServerHTTPClient(t testing.TB, ts *lockd.TestServer) *http.Client {
 	transport.IdleConnTimeout = 90 * time.Second
 	transport.DisableCompression = true
 
-	return &http.Client{
+	client := &http.Client{
 		Transport: transport,
 		Timeout:   0,
 	}
+	return storeCachedHTTPClient(ts, "server", client)
 }
 
 // RegisterRM registers the RM endpoint with the supplied TC endpoint.
@@ -408,6 +423,32 @@ func RequireTCClient(t testing.TB, ts *lockd.TestServer, opts ...lockdclient.Opt
 		t.Fatalf("cryptotest: tc client: %v", err)
 	}
 	return cli
+}
+
+func cachedHTTPClient(ts *lockd.TestServer, kind string) *http.Client {
+	if ts == nil {
+		return nil
+	}
+	if cached, ok := httpClientCache.Load(httpClientCacheKey{server: ts, kind: kind}); ok {
+		if client, ok := cached.(*http.Client); ok {
+			return client
+		}
+	}
+	return nil
+}
+
+func storeCachedHTTPClient(ts *lockd.TestServer, kind string, client *http.Client) *http.Client {
+	if ts == nil || client == nil {
+		return client
+	}
+	key := httpClientCacheKey{server: ts, kind: kind}
+	actual, loaded := httpClientCache.LoadOrStore(key, client)
+	if loaded {
+		if cached, ok := actual.(*http.Client); ok && cached != nil {
+			return cached
+		}
+	}
+	return client
 }
 
 // MaybeEnableStorageEncryption toggles storage encryption for the supplied config when the

@@ -23,12 +23,14 @@ import (
 	"pkt.systems/kryptograf"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/uuidv7"
+	"pkt.systems/pslog"
 )
 
 type logStore struct {
 	root             string
 	now              func() time.Time
 	crypto           *storage.Crypto
+	logger           pslog.Logger
 	writerID         string
 	commitMaxOps     int
 	segmentSize      int64
@@ -43,6 +45,10 @@ type logStore struct {
 	readFileLRU      *list.List
 	readFiles        map[string]*cachedReadFile
 	readFileMax      int
+	compaction       logCompactionConfig
+	stopCompaction   chan struct{}
+	doneCompaction   chan struct{}
+	closeOnce        sync.Once
 	mu               sync.Mutex
 	namespaces       map[string]*logNamespace
 }
@@ -85,6 +91,13 @@ func (s *logStore) FsyncStats() FsyncBatchStats {
 	}
 }
 
+func (s *logStore) compactionLogger() pslog.Logger {
+	if s == nil || s.logger == nil {
+		return pslog.NoopLogger()
+	}
+	return s.logger
+}
+
 func (s *logStore) setSingleWriter(enabled bool) {
 	if s == nil {
 		return
@@ -118,11 +131,16 @@ type logNamespace struct {
 	markerSelf   string
 	markerPath   string
 
-	mu       sync.Mutex
-	segments map[string]*logSegment
-	active   *logSegment
-	nextSeq  int
-	manifest *manifestState
+	mu                sync.Mutex
+	segments          map[string]*logSegment
+	snapshots         map[string]*logSegment
+	active            *logSegment
+	nextSeq           int
+	manifest          *manifestState
+	installedSnapshot *logSegment
+	obsoleteSegments  map[string]time.Time
+	obsoleteSnapshots map[string]time.Time
+	compacting        bool
 
 	metaIndex   map[string]*recordRef
 	stateIndex  map[string]*recordRef
@@ -227,6 +245,15 @@ type markerInfo struct {
 	size    int64
 }
 
+type logCompactionConfig struct {
+	enabled          bool
+	interval         time.Duration
+	minSegments      int
+	minReclaimBytes  int64
+	deleteGrace      time.Duration
+	maxIOBytesPerSec int64
+}
+
 const (
 	maxInlinePayload        = 1 << 20
 	payloadWriteBufferSize  = 128 << 10
@@ -240,12 +267,16 @@ const (
 	defaultReadFileCache    = 64
 )
 
-func newLogStore(root string, now func() time.Time, crypto *storage.Crypto, commitMaxOps int, segmentSize int64, closeAfterCommit bool) *logStore {
+func newLogStore(root string, now func() time.Time, crypto *storage.Crypto, logger pslog.Logger, commitMaxOps int, segmentSize int64, closeAfterCommit bool) *logStore {
+	if logger == nil {
+		logger = pslog.NoopLogger()
+	}
 	writerID := strings.ReplaceAll(uuidv7.NewString(), "-", "")
 	return &logStore{
 		root:             root,
 		now:              now,
 		crypto:           crypto,
+		logger:           logger,
 		writerID:         writerID,
 		commitMaxOps:     commitMaxOps,
 		segmentSize:      segmentSize,
@@ -434,6 +465,7 @@ func (s *logStore) namespace(ns string) (*logNamespace, error) {
 		markerSelf:    markerSelf,
 		markerPath:    filepath.Join(markerDir, markerSelf),
 		segments:      make(map[string]*logSegment),
+		snapshots:     make(map[string]*logSegment),
 		metaIndex:     make(map[string]*recordRef),
 		stateIndex:    make(map[string]*recordRef),
 		objectIndex:   make(map[string]*recordRef),
@@ -483,6 +515,9 @@ func (n *logNamespace) refreshWithMode(force bool) error {
 		n.mu.Lock()
 		defer n.mu.Unlock()
 		if err := n.loadManifestLocked(); err != nil {
+			return err
+		}
+		if err := n.scanSnapshotsLocked(); err != nil {
 			return err
 		}
 		if err := n.scanSegmentsLocked(); err != nil {
@@ -536,6 +571,9 @@ func (n *logNamespace) refreshWithMode(force bool) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	if err := n.loadManifestLocked(); err != nil {
+		return err
+	}
+	if err := n.scanSnapshotsLocked(); err != nil {
 		return err
 	}
 	if err := n.scanSegmentsLocked(); err != nil {
@@ -749,17 +787,53 @@ func (n *logNamespace) loadManifestLocked() error {
 			path: filepath.Join(n.manifestDir, "manifest.log"),
 		}
 	}
-	segments, err := n.manifest.readNewSegments()
+	changes, err := n.manifest.readChanges()
 	if err != nil {
 		return err
 	}
-	for _, name := range segments {
-		if _, ok := n.segments[name]; ok {
-			continue
+	for name, sealed := range changes.segmentStates {
+		seg, ok := n.segments[name]
+		if !ok {
+			seg = &logSegment{
+				name: name,
+				path: filepath.Join(n.segmentsDir, name),
+			}
+			n.segments[name] = seg
 		}
-		n.segments[name] = &logSegment{
-			name: name,
-			path: filepath.Join(n.segmentsDir, name),
+		seg.sealed = sealed
+	}
+	if n.manifest != nil {
+		n.manifest.sawSegmentOpen = changes.sawSegmentOpen
+		n.manifest.sawSegmentSeal = changes.sawSegmentSeal
+	}
+	n.obsoleteSegments = changes.obsoleteSegments
+	n.obsoleteSnapshots = changes.obsoleteSnapshots
+	if changes.currentSnapshot != "" {
+		snapshot, ok := n.snapshots[changes.currentSnapshot]
+		if !ok {
+			snapshot = &logSegment{
+				name:   changes.currentSnapshot,
+				path:   filepath.Join(n.snapshotsDir, changes.currentSnapshot),
+				sealed: true,
+			}
+			n.snapshots[changes.currentSnapshot] = snapshot
+		}
+		n.installedSnapshot = snapshot
+	}
+	if changes.currentSnapshot == "" {
+		n.installedSnapshot = nil
+	}
+	if changes.snapshotChanged || changes.obsoleteChanged {
+		n.resetReplayStateLocked()
+		for _, seg := range n.segments {
+			if seg != nil {
+				seg.readOffset = 0
+			}
+		}
+		for _, seg := range n.snapshots {
+			if seg != nil {
+				seg.readOffset = 0
+			}
 		}
 	}
 	return nil
@@ -782,20 +856,131 @@ func (n *logNamespace) scanSegmentsLocked() error {
 			continue
 		}
 		n.segments[name] = &logSegment{
-			name: name,
-			path: filepath.Join(n.segmentsDir, name),
+			name:   name,
+			path:   filepath.Join(n.segmentsDir, name),
+			sealed: true,
+		}
+	}
+	return n.upgradeLegacyOpenOnlyManifestLocked()
+}
+
+func (n *logNamespace) upgradeLegacyOpenOnlyManifestLocked() error {
+	if n == nil || n.manifest == nil {
+		return nil
+	}
+	if !n.manifest.sawSegmentOpen || n.manifest.sawSegmentSeal {
+		return nil
+	}
+	var entries []manifestEntry
+	if n.manifest.segmentSealed == nil {
+		n.manifest.segmentSealed = make(map[string]bool)
+	}
+	for name, seg := range n.segments {
+		if seg == nil {
+			continue
+		}
+		if seg == n.active {
+			seg.sealed = false
+			n.manifest.segmentSealed[name] = false
+			continue
+		}
+		if n.manifest.segmentSealed[name] {
+			seg.sealed = true
+			continue
+		}
+		seg.sealed = true
+		n.manifest.segmentSealed[name] = true
+		entries = append(entries, manifestEntry{op: "seal", name: name})
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+	if err := n.manifest.appendEntries(entries...); err != nil {
+		return fmt.Errorf("disk: upgrade legacy open-only manifest: %w", err)
+	}
+	n.manifest.sawSegmentSeal = true
+	n.store.compactionLogger().Info("logstore.compaction.legacy_manifest_migrated",
+		"namespace", n.namespace,
+		"segments", len(n.segments),
+		"sealed_segments", len(entries),
+		"open_segments", len(n.segments)-len(entries),
+		"manifest_open_entries", len(n.manifest.segmentSealed),
+	)
+	return nil
+}
+
+func (n *logNamespace) scanSnapshotsLocked() error {
+	entries, err := os.ReadDir(n.snapshotsDir)
+	if err != nil {
+		return fmt.Errorf("disk: logstore scan snapshots: %w", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, "snap-") || !strings.HasSuffix(name, ".log") {
+			continue
+		}
+		if _, ok := n.snapshots[name]; ok {
+			continue
+		}
+		n.snapshots[name] = &logSegment{
+			name:   name,
+			path:   filepath.Join(n.snapshotsDir, name),
+			sealed: true,
 		}
 	}
 	return nil
 }
 
 func (n *logNamespace) orderedSegmentsLocked() []*logSegment {
-	segments := make([]*logSegment, 0, len(n.segments))
+	segments := make([]*logSegment, 0, len(n.segments)+1)
+	if n.installedSnapshot != nil && !n.isObsoleteSnapshotLocked(n.installedSnapshot.name) {
+		segments = append(segments, n.installedSnapshot)
+	}
 	for _, seg := range n.segments {
+		if seg == nil || n.isObsoleteSegmentLocked(seg.name) {
+			continue
+		}
 		segments = append(segments, seg)
 	}
-	sort.Slice(segments, func(i, j int) bool { return segments[i].name < segments[j].name })
+	sort.SliceStable(segments, func(i, j int) bool {
+		if n.installedSnapshot != nil {
+			if segments[i] == n.installedSnapshot {
+				return true
+			}
+			if segments[j] == n.installedSnapshot {
+				return false
+			}
+		}
+		return segments[i].name < segments[j].name
+	})
 	return segments
+}
+
+func (n *logNamespace) resetReplayStateLocked() {
+	n.metaIndex = make(map[string]*recordRef)
+	n.stateIndex = make(map[string]*recordRef)
+	n.objectIndex = make(map[string]*recordRef)
+	n.sortedMeta = nil
+	n.sortedObjects = nil
+}
+
+func (n *logNamespace) isObsoleteSegmentLocked(name string) bool {
+	if len(n.obsoleteSegments) == 0 {
+		return false
+	}
+	_, ok := n.obsoleteSegments[name]
+	return ok
+}
+
+func (n *logNamespace) isObsoleteSnapshotLocked(name string) bool {
+	if len(n.obsoleteSnapshots) == 0 {
+		return false
+	}
+	_, ok := n.obsoleteSnapshots[name]
+	return ok
 }
 
 func (n *logNamespace) readSegmentLocked(seg *logSegment) error {
@@ -887,8 +1072,12 @@ func (n *logNamespace) readSegmentLocked(seg *logSegment) error {
 				if derr != nil {
 					break
 				}
+				linkPath := filepath.Join(n.segmentsDir, decoded.segment)
+				if snap := n.snapshots[decoded.segment]; snap != nil && snap.path != "" {
+					linkPath = snap.path
+				}
 				link = &recordLink{
-					path:   filepath.Join(n.segmentsDir, decoded.segment),
+					path:   linkPath,
 					offset: decoded.offset,
 					length: decoded.length,
 				}

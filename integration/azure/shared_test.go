@@ -5,7 +5,9 @@ package azureintegration
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
+	"path"
 	"strings"
 	"sync"
 	"testing"
@@ -155,4 +157,20 @@ func directClient(t testing.TB, ts *lockd.TestServer) *lockdclient.Client {
 
 func cleanupAzure(t *testing.T, cfg lockd.Config, key string) {
 	azuretest.CleanupKey(t, cfg, namespaces.Default, key)
+}
+
+func appendStorePath(tb testing.TB, store, suffix string) string {
+	tb.Helper()
+	parsed, err := url.Parse(store)
+	if err != nil {
+		tb.Fatalf("parse store: %v", err)
+	}
+	pathPart := strings.Trim(strings.TrimPrefix(parsed.Path, "/"), "/")
+	if pathPart == "" {
+		pathPart = suffix
+	} else {
+		pathPart = path.Join(pathPart, suffix)
+	}
+	parsed.Path = "/" + pathPart
+	return parsed.String()
 }

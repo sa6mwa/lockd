@@ -337,6 +337,10 @@ type Backend interface {
 
 	// Close releases backend resources.
 	Close() error
+	// Abort stops backend-owned background work abruptly without graceful
+	// cleanup of crash-detectable fencing state. Used for in-process crash
+	// simulation in tests and HA verification.
+	Abort() error
 }
 
 // NamespaceLister reports all namespaces stored in the backend, when supported.
@@ -444,6 +448,21 @@ type SingleWriterControl interface {
 // against the same backend root without risking corruption.
 type ConcurrentWriteSupport interface {
 	SupportsConcurrentWrites() bool
+}
+
+// ExclusiveWriterPresence reports whether the backend currently observes a live
+// exclusive writer outside HA lease coordination.
+type ExclusiveWriterPresence struct {
+	Present       bool
+	ExpiresAtUnix int64
+}
+
+// ExclusiveWriterProbe reports whether the backend currently has a live
+// exclusive writer. Backends that can natively detect single-writer ownership
+// can implement this so HA auto mode can fence itself without relying on .ha
+// membership.
+type ExclusiveWriterProbe interface {
+	ProbeExclusiveWriter(ctx context.Context) (ExclusiveWriterPresence, error)
 }
 
 // GetObjectResult captures an object reader with its metadata.

@@ -3406,6 +3406,8 @@ func TestClientSubscribeNamespaceOverride(t *testing.T) {
 			}
 		case "/v1/queue/ack":
 			_ = json.NewEncoder(w).Encode(map[string]any{"acked": true})
+		case "/v1/queue/nack":
+			_ = json.NewEncoder(w).Encode(map[string]any{"nacked": true})
 		default:
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}

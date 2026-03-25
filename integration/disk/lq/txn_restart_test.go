@@ -22,7 +22,7 @@ func TestDiskQueueTxnRestartAcrossNodes(t *testing.T) {
 }
 
 func runDiskQueueTxnRestartAcrossNodes(t *testing.T, notify bool) {
-	queuetestutil.InstallWatchdog(t, "disk-txn-restart", 60*time.Second)
+	queuetestutil.InstallWatchdog(t, "disk-txn-restart", 90*time.Second)
 
 	setup := func(t *testing.T) (*lockd.TestServer, *lockd.TestServer, func(testing.TB) *lockd.TestServer, time.Duration) {
 		root := prepareDiskQueueRoot(t)

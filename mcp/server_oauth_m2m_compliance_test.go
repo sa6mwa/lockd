@@ -270,7 +270,8 @@ func postTokenForm(t testing.TB, httpClient *http.Client, tokenURL, clientID, cl
 func startM2MComplianceServer(t testing.TB, baseURLFn func(string) string, mcpPath string) (*http.Client, string, string, mcpadmin.BootstrapResponse) {
 	t.Helper()
 	upstream := lockd.StartTestServer(t, lockd.WithoutTestMTLS())
-	listen := reserveLoopbackAddr(t)
+	listener := reserveLoopbackListener(t)
+	listen := listener.Addr().String()
 	baseURL := baseURLFn(listen)
 	tmp := t.TempDir()
 
@@ -319,7 +320,8 @@ func startM2MComplianceServer(t testing.TB, baseURLFn func(string) string, mcpPa
 			OAuthTokenStorePath: tokenStorePath,
 			MCPPath:             mcpPath,
 		},
-		Logger: pslog.NewStructured(context.Background(), io.Discard),
+		Logger:   pslog.NewStructured(context.Background(), io.Discard),
+		Listener: listener,
 	})
 	if err != nil {
 		t.Fatalf("new mcp server: %v", err)

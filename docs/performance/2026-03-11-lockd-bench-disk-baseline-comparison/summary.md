@@ -5,9 +5,9 @@ Date: 2026-03-11
 ## Scope
 - Current canonical disk baseline:
   - run id: `20260311T160449Z-8711b95-clean-disk`
-  - source: [`docs/performance/lockd-bench-baseline-history.jsonl`](/home/mike/g/lockd/docs/performance/lockd-bench-baseline-history.jsonl)
+  - source: [`docs/performance/lockd-bench-baseline-history.jsonl`](../lockd-bench-baseline-history.jsonl)
 - Historical disk reference:
-  - source: [`docs/performance/2026-01-24-lockd-bench-baseline-rerun/summary.csv`](/home/mike/g/lockd/docs/performance/2026-01-24-lockd-bench-baseline-rerun/summary.csv)
+  - source: [`docs/performance/2026-01-24-lockd-bench-baseline-rerun/summary.csv`](../2026-01-24-lockd-bench-baseline-rerun/summary.csv)
 
 ## Comparison stance
 

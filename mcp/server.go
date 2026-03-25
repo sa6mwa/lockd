@@ -59,6 +59,9 @@ type Server interface {
 type NewServerRequest struct {
 	Config Config
 	Logger pslog.Logger
+	// Listener optionally injects a pre-bound listener, primarily for tests that
+	// need to avoid reserve-then-bind races on ephemeral loopback ports.
+	Listener net.Listener
 }
 
 type server struct {
@@ -76,6 +79,7 @@ type server struct {
 	writeStreams       *writeStreamManager
 	transfers          *transferManager
 	httpServer         *http.Server
+	listener           net.Listener
 	tlsBundlePath      string
 	resourceID         string
 	metadataPath       string
@@ -115,6 +119,7 @@ func NewServer(req NewServerRequest) (Server, error) {
 		subscribeLog:   svcfields.WithSubsystem(logger, "mcp.queue.subscriptions"),
 		writeStreamLog: svcfields.WithSubsystem(logger, "mcp.write.streams"),
 		mcpHTTPPath:    cleanHTTPPath(cfg.MCPPath),
+		listener:       req.Listener,
 	}
 	baseURL, err := parseBaseURL(cfg.BaseURL, cfg.AllowHTTP)
 	if err != nil {
@@ -219,6 +224,10 @@ func (s *server) Run(ctx context.Context) error {
 	errCh := make(chan error, 1)
 	go func() {
 		if s.cfg.DisableTLS {
+			if s.listener != nil {
+				errCh <- s.httpServer.Serve(s.listener)
+				return
+			}
 			errCh <- s.httpServer.ListenAndServe()
 			return
 		}
@@ -232,10 +241,14 @@ func (s *server) Run(ctx context.Context) error {
 			MinVersion:   tls.VersionTLS12,
 			Certificates: []tls.Certificate{bundle.ServerCertificate},
 		}
-		ln, err := net.Listen("tcp", s.cfg.Listen)
-		if err != nil {
-			errCh <- fmt.Errorf("listen %s: %w", s.cfg.Listen, err)
-			return
+		ln := s.listener
+		if ln == nil {
+			var err error
+			ln, err = net.Listen("tcp", s.cfg.Listen)
+			if err != nil {
+				errCh <- fmt.Errorf("listen %s: %w", s.cfg.Listen, err)
+				return
+			}
 		}
 		errCh <- s.httpServer.Serve(tls.NewListener(ln, tlsConfig))
 	}()

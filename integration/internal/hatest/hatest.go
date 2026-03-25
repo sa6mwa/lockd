@@ -54,6 +54,30 @@ func FindActiveServer(ctx context.Context, servers ...*lockd.TestServer) (*lockd
 		return nil, nil, fmt.Errorf("no servers provided")
 	}
 	key := "ha-probe-" + uuidv7.NewString()
+	clients := make(map[*lockd.TestServer]*lockdclient.Client, len(servers))
+	for _, ts := range servers {
+		if ts == nil {
+			continue
+		}
+		cli, err := ts.NewClient(lockdclient.WithEndpointShuffle(false))
+		if err != nil {
+			for _, existing := range clients {
+				if existing != nil {
+					_ = existing.Close()
+				}
+			}
+			return nil, nil, err
+		}
+		clients[ts] = cli
+	}
+	defer func() {
+		for _, cli := range clients {
+			if cli != nil {
+				_ = cli.Close()
+			}
+		}
+	}()
+
 	var lastErr error
 	for {
 		if ctx.Err() != nil {
@@ -66,15 +90,12 @@ func FindActiveServer(ctx context.Context, servers ...*lockd.TestServer) (*lockd
 			if ts == nil {
 				continue
 			}
-			cli, err := ts.NewClient(lockdclient.WithEndpointShuffle(false))
-			if err != nil {
-				return nil, nil, err
-			}
+			cli := clients[ts]
 			active, err := probeActive(ctx, cli, key)
 			if err == nil && active {
+				delete(clients, ts)
 				return ts, cli, nil
 			}
-			_ = cli.Close()
 			if err != nil && !IsNodePassive(err) && !isRetryableProbeError(err) && !IsTransportError(err) {
 				return nil, nil, err
 			}

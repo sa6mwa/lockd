@@ -484,6 +484,7 @@ type Config struct {
 	Clock                      clock.Clock
 	HAMode                     string
 	HALeaseTTL                 time.Duration
+	HASinglePresenceTTL        time.Duration
 	DefaultNamespace           string
 	JSONMaxBytes               int64
 	AttachmentMaxBytes         int64
@@ -679,6 +680,7 @@ func New(cfg Config) *Handler {
 		Crypto:                    crypto,
 		HAMode:                    cfg.HAMode,
 		HALeaseTTL:                cfg.HALeaseTTL,
+		HASinglePresenceTTL:       cfg.HASinglePresenceTTL,
 		HANodeID:                  strings.TrimSpace(cfg.SelfEndpoint),
 		QueueService:              queueSvc,
 		QueueDispatcher:           queueDisp,

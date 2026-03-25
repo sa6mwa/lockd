@@ -36,6 +36,13 @@
 // Batching is driven by natural backpressure: fsync occurs for each batch and
 // the queue builds only while prior fsyncs are in-flight. LogstoreCommitMaxOps
 // caps batch size. LogstoreSegmentSize controls when segment files roll.
+// Background snapshot compaction is enabled by default on disk/NFS. It compacts
+// sealed history only, installs snapshots atomically, and deletes obsolete
+// files after a grace period. Tune it with LogstoreCompactionEnabled,
+// LogstoreCompactionInterval, LogstoreCompactionMinSegments,
+// LogstoreCompactionMinReclaimBytes, LogstoreCompactionDeleteGrace,
+// LogstoreCompactionMaxIOBytesPerSec, and
+// DisableLogstoreCompactionThrottling.
 // DiskLockFileCacheSize caps cached lockfile descriptors for disk/NFS (default
 // 2048; set negative to disable caching).
 // Hot state reads can be cached in-process via StateCacheBytes (default 64 MiB;
@@ -45,34 +52,49 @@
 // In HA concurrent mode, single-writer optimizations are disabled.
 //
 //	cfg := lockd.Config{
-//	    Store:      "disk:///var/lib/lockd-data",
-//	    LogstoreCommitMaxOps:   128,                // disk/NFS only
-//	    LogstoreSegmentSize:    64 << 20,           // disk/NFS only (bytes)
-//	    DiskLockFileCacheSize:  2048,               // disk/NFS only
-//	    StateCacheBytes:        64 << 20,           // cache hot state payloads
-//	    QueryDocPrefetch:       8,                  // return=documents prefetch depth
+//	    Store:                              "disk:///var/lib/lockd-data",
+//	    LogstoreCommitMaxOps:               128,                // disk/NFS only
+//	    LogstoreSegmentSize:                64 << 20,           // disk/NFS only (bytes)
+//	    LogstoreCompactionInterval:         30 * time.Minute,   // disk/NFS only
+//	    LogstoreCompactionDeleteGrace:      15 * time.Minute,   // disk/NFS only
+//	    LogstoreCompactionMaxIOBytesPerSec: 8 << 20,            // disk/NFS only
+//	    DiskLockFileCacheSize:              2048,               // disk/NFS only
+//	    StateCacheBytes:                    64 << 20,           // cache hot state payloads
+//	    QueryDocPrefetch:                   8,                  // return=documents prefetch depth
 //	}
 //
 // The CLI mirrors this with --logstore-commit-max-ops,
-// --logstore-segment-size, --disk-lock-file-cache-size,
-// --state-cache-bytes, and --query-doc-prefetch.
+// --logstore-segment-size, --logstore-compaction,
+// --logstore-compaction-interval, --logstore-compaction-min-segments,
+// --logstore-compaction-min-reclaim-size, --logstore-compaction-delete-grace,
+// --logstore-compaction-max-io-bytes-per-sec,
+// --disable-logstore-compaction-throttling,
+// --disk-lock-file-cache-size, --state-cache-bytes, and
+// --query-doc-prefetch.
 //
-// # HA modes (concurrent vs failover)
+// # HA modes
 //
 // When multiple lockd servers share the same backend, HAMode controls
-// concurrent vs failover behaviour. HAMode="failover" (default) uses a
+// concurrent vs coordinated behaviour. HAMode="failover" (default) uses a
 // lease stored under the internal .ha/activelease key to elect a single
 // active writer; passive nodes return HTTP 503 so clients can retry another
-// endpoint. HAMode="concurrent" enables multi-writer semantics. HALeaseTTL
-// controls the lease duration and renewal cadence.
+// endpoint. HAMode="concurrent" enables multi-writer semantics. HAMode="single"
+// disables HA coordination entirely and assumes the backend is owned by one
+// server process. HAMode="auto" starts in single-writer mode and promotes to
+// failover when it observes another live node. HALeaseTTL controls the lease
+// duration in failover mode and heartbeat cadence in auto mode. On backends
+// without native single-writer detection, HASinglePresenceTTL controls how
+// long a single-mode presence record fences peers.
 //
 //	cfg := lockd.Config{
-//	    Store:      "disk:///var/lib/lockd-data",
-//	    HAMode:     "failover",
-//	    HALeaseTTL: 5 * time.Second,
+//	    Store:               "disk:///var/lib/lockd-data",
+//	    HAMode:              "failover",
+//	    HALeaseTTL:          10 * time.Second,
+//	    HASinglePresenceTTL: 5 * time.Minute, // object-store style backends only
 //	}
 //
-// The CLI mirrors this with --ha and --ha-lease-ttl.
+// The CLI mirrors this with --ha, --ha-lease-ttl, and
+// --ha-single-presence-ttl.
 //
 // Namespaces partition keys and metadata. When callers omit the namespace, the
 // server falls back to Config.DefaultNamespace (default "default"). Setting

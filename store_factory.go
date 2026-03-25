@@ -18,6 +18,8 @@ import (
 	"pkt.systems/lockd/internal/storage/disk"
 	"pkt.systems/lockd/internal/storage/memory"
 	"pkt.systems/lockd/internal/storage/s3"
+	"pkt.systems/lockd/internal/svcfields"
+	"pkt.systems/pslog"
 )
 
 // CredentialSummary describes which credentials were selected for object storage.
@@ -45,7 +47,10 @@ type DiskConfigResult struct {
 	Root   string
 }
 
-func openBackend(cfg Config, crypto *storage.Crypto) (storage.Backend, error) {
+func openBackend(cfg Config, crypto *storage.Crypto, logger pslog.Logger) (storage.Backend, error) {
+	if logger == nil {
+		logger = pslog.NoopLogger()
+	}
 	if cfg.StorageEncryptionEnabled() && (crypto == nil || !crypto.Enabled()) {
 		return nil, fmt.Errorf("config: storage encryption enabled but crypto material missing")
 	}
@@ -92,6 +97,7 @@ func openBackend(cfg Config, crypto *storage.Crypto) (storage.Backend, error) {
 			return nil, err
 		}
 		diskResult.Config.Crypto = crypto
+		diskResult.Config.Logger = svcfields.WithSubsystem(logger, "storage.logstore.compaction")
 		checks := disk.Verify(context.Background(), diskResult.Config)
 		for _, check := range checks {
 			if check.Err != nil {
@@ -114,7 +120,7 @@ func openBackend(cfg Config, crypto *storage.Crypto) (storage.Backend, error) {
 // OpenBackend constructs a storage backend from the supplied config and crypto.
 // Intended for server-side tooling; callers must Close() the returned backend.
 func OpenBackend(cfg Config, crypto *storage.Crypto) (storage.Backend, error) {
-	return openBackend(cfg, crypto)
+	return openBackend(cfg, crypto, pslog.NoopLogger())
 }
 
 // BuildGenericS3Config parses s3:// URLs that target generic S3-compatible services (MinIO, etc.).
@@ -411,13 +417,19 @@ func BuildDiskConfig(cfg Config) (DiskConfigResult, error) {
 	}
 	root := filepath.Clean(pathPart)
 	cfgDisk := disk.Config{
-		Root:                 root,
-		Retention:            cfg.DiskRetention,
-		JanitorInterval:      cfg.DiskJanitorInterval,
-		QueueWatch:           cfg.DiskQueueWatch,
-		LockFileCacheSize:    cfg.DiskLockFileCacheSize,
-		LogstoreCommitMaxOps: cfg.LogstoreCommitMaxOps,
-		LogstoreSegmentSize:  cfg.LogstoreSegmentSize,
+		Root:                               root,
+		Retention:                          cfg.DiskRetention,
+		JanitorInterval:                    cfg.DiskJanitorInterval,
+		QueueWatch:                         cfg.DiskQueueWatch,
+		LockFileCacheSize:                  cfg.DiskLockFileCacheSize,
+		LogstoreCommitMaxOps:               cfg.LogstoreCommitMaxOps,
+		LogstoreSegmentSize:                cfg.LogstoreSegmentSize,
+		LogstoreCompactionEnabled:          cfg.LogstoreCompactionEnabled,
+		LogstoreCompactionInterval:         cfg.LogstoreCompactionInterval,
+		LogstoreCompactionMinSegments:      cfg.LogstoreCompactionMinSegments,
+		LogstoreCompactionMinReclaimSize:   cfg.LogstoreCompactionMinReclaimBytes,
+		LogstoreCompactionDeleteGrace:      cfg.LogstoreCompactionDeleteGrace,
+		LogstoreCompactionMaxIOBytesPerSec: cfg.LogstoreCompactionMaxIOBytesPerSec,
 	}
 	return DiskConfigResult{Config: cfgDisk, Root: root}, nil
 }

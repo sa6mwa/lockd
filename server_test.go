@@ -7,6 +7,8 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/url"
+	"path/filepath"
 	"path"
 	"strings"
 	"sync"
@@ -21,6 +23,33 @@ import (
 	"pkt.systems/lockd/namespaces"
 	"pkt.systems/pslog"
 )
+
+func mustCreateMTLSTestBundles(t *testing.T) ([]byte, []byte) {
+	t.Helper()
+	caBundle, err := CreateCABundle(CreateCABundleRequest{
+		CommonName: "lockd-test-ca",
+	})
+	if err != nil {
+		t.Fatalf("create ca bundle: %v", err)
+	}
+	serverBundle, err := CreateServerBundle(CreateServerBundleRequest{
+		CABundlePEM: caBundle,
+		CommonName:  "lockd-test-server",
+		Hosts:       []string{"127.0.0.1", "localhost"},
+		NodeID:      "test-node",
+	})
+	if err != nil {
+		t.Fatalf("create server bundle: %v", err)
+	}
+	clientBundle, err := CreateClientBundle(CreateClientBundleRequest{
+		CABundlePEM: caBundle,
+		CommonName:  "lockd-test-client",
+	})
+	if err != nil {
+		t.Fatalf("create client bundle: %v", err)
+	}
+	return serverBundle, clientBundle
+}
 
 type sweeperClock struct {
 	mu  sync.Mutex
@@ -120,6 +149,11 @@ type listenerCloseCapture struct {
 	closeCalls int
 }
 
+type backendCloseCapture struct {
+	storage.Backend
+	closeCalls int
+}
+
 func (l *listenerCloseCapture) Accept() (net.Conn, error) {
 	return nil, errors.New("accept not supported in test listener")
 }
@@ -131,6 +165,14 @@ func (l *listenerCloseCapture) Close() error {
 
 func (l *listenerCloseCapture) Addr() net.Addr {
 	return &net.TCPAddr{}
+}
+
+func (b *backendCloseCapture) Close() error {
+	b.closeCalls++
+	if b.Backend != nil {
+		return b.Backend.Close()
+	}
+	return nil
 }
 
 func newShutdownHarness(t *testing.T) (*Server, *drainCapture, *httpShutdownCapture) {
@@ -150,6 +192,88 @@ func newShutdownHarness(t *testing.T) (*Server, *drainCapture, *httpShutdownCapt
 	httpCap := &httpShutdownCapture{}
 	srv.httpShutdown = httpCap.fn
 	return srv, drainCap, httpCap
+}
+
+func TestAbortDoesNotCloseBackend(t *testing.T) {
+	backend := &backendCloseCapture{Backend: memory.New()}
+	t.Cleanup(func() { _ = backend.Backend.Close() })
+
+	srv := &Server{
+		logger:  pslog.NoopLogger(),
+		backend: backend,
+		readyCh: make(chan struct{}),
+		clock:   clock.Real{},
+	}
+	close(srv.readyCh)
+
+	if err := srv.Abort(context.Background()); err != nil {
+		t.Fatalf("abort: %v", err)
+	}
+	if backend.closeCalls != 0 {
+		t.Fatalf("expected abort to avoid closing backend, got %d close calls", backend.closeCalls)
+	}
+}
+
+func TestAbortPreservesCrashExpiryForDiskSingleToAuto(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "store")
+
+	cfgSingle := Config{
+		Store:                    (&url.URL{Scheme: "disk", Path: root}).String(),
+		ListenProto:              "tcp",
+		Listen:                   "127.0.0.1:0",
+		DisableMTLS:              true,
+		DisableStorageEncryption: true,
+		HAMode:                   "single",
+	}
+	single := StartTestServer(t, WithTestConfig(cfgSingle), WithoutTestMTLS())
+
+	cfgAuto := cfgSingle
+	cfgAuto.HAMode = "auto"
+	cfgAuto.HALeaseTTL = 5 * time.Second
+	auto := StartTestServer(t, WithTestConfig(cfgAuto), WithoutTestMTLS())
+
+	passiveDeadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(passiveDeadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		lease, err := auto.Client.Acquire(ctx, api.AcquireRequest{
+			Key:        "abort-crash-passive",
+			Owner:      "probe",
+			TTLSeconds: 5,
+			BlockSecs:  client.BlockNoWait,
+		})
+		cancel()
+		if err != nil {
+			var apiErr *client.APIError
+			if errors.As(err, &apiErr) && apiErr.Response.ErrorCode == "node_passive" {
+				break
+			}
+		} else {
+			_ = lease.Release(context.Background())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	if err := single.Abort(context.Background()); err != nil {
+		t.Fatalf("abort single server: %v", err)
+	}
+
+	activeDeadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(activeDeadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		lease, err := auto.Client.Acquire(ctx, api.AcquireRequest{
+			Key:        "abort-crash-active",
+			Owner:      "probe",
+			TTLSeconds: 5,
+			BlockSecs:  client.BlockNoWait,
+		})
+		cancel()
+		if err == nil {
+			_ = lease.Release(context.Background())
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("expected auto server to become active after abrupt single-server abort")
 }
 
 func durationAlmostEqual(t *testing.T, got, want, tolerance time.Duration) {
@@ -197,12 +321,14 @@ func TestSweeperClearsExpiredLeases(t *testing.T) {
 		t.Fatalf("store lease index entry: %v", err)
 	}
 	cfg := Config{
-		Store:               "mem://",
-		SweeperInterval:     time.Second,
-		IdleSweepGrace:      time.Nanosecond,
-		IdleSweepOpDelay:    time.Nanosecond,
-		IdleSweepMaxOps:     10,
-		IdleSweepMaxRuntime: time.Second,
+		Store:                    "mem://",
+		DisableMTLS:              true,
+		DisableStorageEncryption: true,
+		SweeperInterval:          time.Second,
+		IdleSweepGrace:           time.Nanosecond,
+		IdleSweepOpDelay:         time.Nanosecond,
+		IdleSweepMaxOps:          10,
+		IdleSweepMaxRuntime:      time.Second,
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("validate config: %v", err)
@@ -231,7 +357,8 @@ func TestSweeperClearsExpiredLeases(t *testing.T) {
 
 func TestShutdownBlocksAcquireDuringDrain(t *testing.T) {
 	ctx := context.Background()
-	cfg := Config{Store: "mem://", Listen: "127.0.0.1:0", DisableMTLS: true}
+	serverBundle, clientBundle := mustCreateMTLSTestBundles(t)
+	cfg := Config{Store: "mem://", Listen: "127.0.0.1:0", BundlePEM: serverBundle}
 	handle, err := StartServer(ctx, cfg)
 	if err != nil {
 		t.Fatalf("start server: %v", err)
@@ -242,7 +369,7 @@ func TestShutdownBlocksAcquireDuringDrain(t *testing.T) {
 	if addr == nil {
 		t.Fatal("listener address not available")
 	}
-	cli, err := client.New("http://"+addr.String(), client.WithDisableMTLS(true))
+	cli, err := client.New("https://"+addr.String(), client.WithBundlePEM(clientBundle))
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -295,7 +422,8 @@ func TestShutdownBlocksAcquireDuringDrain(t *testing.T) {
 
 func TestShutdownAutoReleasesLeases(t *testing.T) {
 	ctx := context.Background()
-	cfg := Config{Store: "mem://", Listen: "127.0.0.1:0", DisableMTLS: true}
+	serverBundle, clientBundle := mustCreateMTLSTestBundles(t)
+	cfg := Config{Store: "mem://", Listen: "127.0.0.1:0", BundlePEM: serverBundle}
 	handle, err := StartServer(ctx, cfg)
 	if err != nil {
 		t.Fatalf("start server: %v", err)
@@ -306,7 +434,7 @@ func TestShutdownAutoReleasesLeases(t *testing.T) {
 	if addr == nil {
 		t.Fatal("listener address not available")
 	}
-	cli, err := client.New("http://"+addr.String(), client.WithDisableMTLS(true))
+	cli, err := client.New("https://"+addr.String(), client.WithBundlePEM(clientBundle))
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}

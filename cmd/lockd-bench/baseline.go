@@ -17,8 +17,11 @@ import (
 )
 
 const (
-	defaultBaselinePreset      = "embedded-v1"
-	defaultBaselineHistoryPath = "docs/performance/lockd-bench-baseline-history.jsonl"
+	defaultFullBaselinePreset     = "full-v1"
+	defaultFastBaselinePreset     = "fast-v1"
+	defaultBaselinePreset         = defaultFullBaselinePreset
+	defaultBaselineHistoryPath    = "docs/performance/lockd-bench-full-baseline-history.jsonl"
+	defaultBaselineRunHistoryPath = "docs/performance/lockd-bench-full-run-history.jsonl"
 )
 
 var (
@@ -73,23 +76,26 @@ type baselineStatsSnapshot struct {
 }
 
 type baselineCaseResult struct {
-	Workload        string                             `json:"workload"`
-	Size            int                                `json:"size,omitempty"`
-	Ops             int                                `json:"ops"`
-	PayloadBytes    int                                `json:"payload_bytes,omitempty"`
-	AttachmentBytes int                                `json:"attachment_bytes,omitempty"`
-	Phases          map[string]baselineStatsSnapshot   `json:"phases"`
+	Workload        string                           `json:"workload"`
+	Size            int                              `json:"size,omitempty"`
+	Ops             int                              `json:"ops"`
+	PayloadBytes    int                              `json:"payload_bytes,omitempty"`
+	AttachmentBytes int                              `json:"attachment_bytes,omitempty"`
+	Phases          map[string]baselineStatsSnapshot `json:"phases"`
 }
 
 type baselineRunRecord struct {
-	RunID     string              `json:"run_id"`
-	Timestamp string              `json:"timestamp"`
-	Preset    string              `json:"preset"`
-	Backend   string              `json:"backend"`
-	Git       baselineGitInfo     `json:"git"`
-	Golden    bool                `json:"golden,omitempty"`
-	Config    baselineRunConfig   `json:"config"`
-	Cases     []baselineCaseResult `json:"cases"`
+	RunID         string               `json:"run_id"`
+	Timestamp     string               `json:"timestamp"`
+	HistoryBranch string               `json:"history_branch,omitempty"`
+	Preset        string               `json:"preset"`
+	Backend       string               `json:"backend"`
+	Store         string               `json:"store,omitempty"`
+	DiskRoot      string               `json:"disk_root,omitempty"`
+	Git           baselineGitInfo      `json:"git"`
+	Golden        bool                 `json:"golden,omitempty"`
+	Config        baselineRunConfig    `json:"config"`
+	Cases         []baselineCaseResult `json:"cases"`
 }
 
 func defaultBaselineBackends() []string {
@@ -98,6 +104,17 @@ func defaultBaselineBackends() []string {
 
 func supportedBaselineBackends() []string {
 	return []string{"disk", "mem", "minio", "aws", "azure"}
+}
+
+func historyBranchForPreset(preset string) string {
+	switch strings.TrimSpace(strings.ToLower(preset)) {
+	case defaultFastBaselinePreset:
+		return "fast"
+	case defaultFullBaselinePreset:
+		return "full"
+	default:
+		return strings.TrimSpace(strings.ToLower(preset))
+	}
 }
 
 func runBaselineMode(cfg benchConfig) error {
@@ -109,6 +126,10 @@ func runBaselineMode(cfg benchConfig) error {
 		return fmt.Errorf("-env-file and -store are only supported with a single baseline backend")
 	}
 	history, err := loadBaselineHistory(cfg.baselineHistory)
+	if err != nil {
+		return err
+	}
+	runHistory, err := loadBaselineHistory(cfg.baselineRunHistory)
 	if err != nil {
 		return err
 	}
@@ -124,7 +145,7 @@ func runBaselineMode(cfg benchConfig) error {
 		if err != nil {
 			return err
 		}
-		runID := fmt.Sprintf("%s-%s-%s-%s", runTS, gitInfo.ShortSHA, dirtySuffix(gitInfo.Dirty), backend)
+		runID := fmt.Sprintf("%s-%s-%s-%s-%s", runTS, gitInfo.ShortSHA, dirtySuffix(gitInfo.Dirty), historyBranchForPreset(cfg.baselinePreset), backend)
 		record, err := executeBaselineBackend(cfg, backend, runID, gitInfo, profile, presetCases)
 		if err != nil {
 			return err
@@ -132,12 +153,144 @@ func runBaselineMode(cfg benchConfig) error {
 		last := findLatestBaselineRecord(history, record.Preset, record.Backend, false)
 		golden := findLatestBaselineRecord(history, record.Preset, record.Backend, true)
 		printBaselineComparisons(record, last, golden)
-		if err := appendBaselineHistory(cfg.baselineHistory, record); err != nil {
+		history, err = maybeAppendBaselineHistory(cfg.baselineHistory, history, record, cfg.baselineAppendHistory)
+		if err != nil {
 			return err
 		}
-		history = append(history, record)
+		runHistory, err = maybeAppendBaselineHistory(cfg.baselineRunHistory, runHistory, record, cfg.baselineAppendRunHistory)
+		if err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+func runBaselineReport(cfg benchConfig) error {
+	history, err := loadBaselineHistory(cfg.baselineHistory)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("frozen %s baseline history: %s\n", historyBranchForPreset(cfg.baselinePreset), cfg.baselineHistory)
+	return printLatestBaselineHistoryReport(history, cfg.baselinePreset, "disk")
+}
+
+func runBaselineRunReport(cfg benchConfig) error {
+	history, err := loadBaselineHistory(cfg.baselineRunHistory)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%s run history: %s\n", historyBranchForPreset(cfg.baselinePreset), cfg.baselineRunHistory)
+	if err := printRecentBaselineRunHistoryReport(history, cfg.baselinePreset, historyBranchForPreset(cfg.baselinePreset), cfg.baselineReportLimit); err != nil {
+		if strings.HasPrefix(err.Error(), "no ") {
+			fmt.Println(err.Error())
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func printLatestBaselineHistoryReport(history []baselineRunRecord, preset, backend string) error {
+	current, previous := latestAndPreviousBaselineRecords(history, preset, backend)
+	if current == nil {
+		return fmt.Errorf("no %s baseline records found in history", backend)
+	}
+	fmt.Printf("baseline run: branch=%s preset=%s backend=%s run_id=%s git=%s-%s\n",
+		recordHistoryBranch(*current),
+		current.Preset,
+		current.Backend,
+		current.RunID,
+		current.Git.ShortSHA,
+		dirtySuffix(current.Git.Dirty),
+	)
+	for _, currentCase := range current.Cases {
+		currentTotal, ok := currentCase.Phases["total"]
+		if !ok {
+			continue
+		}
+		label := currentCase.Workload
+		if currentCase.Size > 0 {
+			label = fmt.Sprintf("%s/%d", currentCase.Workload, currentCase.Size)
+		}
+		lastText := "n/a"
+		if lastStats, ok := matchingBaselineStats(previous, currentCase); ok {
+			lastText = fmt.Sprintf("%.1f (%s)", lastStats.OpsPerSec, percentDeltaText(currentTotal.OpsPerSec, lastStats.OpsPerSec))
+		}
+		fmt.Printf("  %-28s current=%.1f last=%s\n", label, currentTotal.OpsPerSec, lastText)
+	}
+	return nil
+}
+
+func printRecentBaselineRunHistoryReport(history []baselineRunRecord, preset, branch string, limit int) error {
+	if limit <= 0 {
+		limit = 3
+	}
+	filtered := make([]baselineRunRecord, 0, len(history))
+	for _, record := range history {
+		if record.Preset == preset && matchesHistoryBranch(record, branch) {
+			filtered = append(filtered, record)
+		}
+	}
+	if len(filtered) == 0 {
+		return fmt.Errorf("no %s run records found in history", branch)
+	}
+	start := 0
+	if len(filtered) > limit {
+		start = len(filtered) - limit
+	}
+	for _, record := range filtered[start:] {
+		fmt.Printf("run: branch=%s timestamp=%s run_id=%s git=%s-%s\n",
+			recordHistoryBranch(record),
+			record.Timestamp,
+			record.RunID,
+			record.Git.ShortSHA,
+			dirtySuffix(record.Git.Dirty),
+		)
+		for _, currentCase := range record.Cases {
+			currentTotal, ok := currentCase.Phases["total"]
+			if !ok {
+				continue
+			}
+			label := currentCase.Workload
+			if currentCase.Size > 0 {
+				label = fmt.Sprintf("%s/%d", currentCase.Workload, currentCase.Size)
+			}
+			fmt.Printf("  %-28s ops/s=%.1f\n", label, currentTotal.OpsPerSec)
+		}
+	}
+	return nil
+}
+
+func freezeLatestBaselineRun(cfg benchConfig) error {
+	record, err := loadLatestRunRecord(cfg.baselineRunHistory, historyBranchForPreset(cfg.baselinePreset), cfg.baselinePreset)
+	if err != nil {
+		return err
+	}
+	history, err := loadBaselineHistory(cfg.baselineHistory)
+	if err != nil {
+		return err
+	}
+	for _, existing := range history {
+		if existing.RunID == record.RunID {
+			fmt.Printf("disk baseline already frozen: run_id=%s history=%s\n", record.RunID, cfg.baselineHistory)
+			return nil
+		}
+	}
+	if err := appendBaselineHistory(cfg.baselineHistory, record); err != nil {
+		return err
+	}
+	fmt.Printf("disk baseline frozen from latest run-history: run_id=%s history=%s\n", record.RunID, cfg.baselineHistory)
+	return nil
+}
+
+func maybeAppendBaselineHistory(historyPath string, history []baselineRunRecord, record baselineRunRecord, appendHistory bool) ([]baselineRunRecord, error) {
+	if !appendHistory {
+		return history, nil
+	}
+	if err := appendBaselineHistory(historyPath, record); err != nil {
+		return history, err
+	}
+	return append(history, record), nil
 }
 
 func markBaselineGolden(historyPath, runID string) error {
@@ -198,7 +351,7 @@ func parseBaselineBackends(raw string) ([]string, error) {
 
 func baselineProfileForBackend(preset, backend string) (baselineBackendProfile, error) {
 	switch strings.TrimSpace(strings.ToLower(preset)) {
-	case defaultBaselinePreset:
+	case defaultFullBaselinePreset:
 		switch strings.TrimSpace(strings.ToLower(backend)) {
 		case "disk", "mem":
 			return baselineBackendProfile{
@@ -225,6 +378,22 @@ func baselineProfileForBackend(preset, backend string) (baselineBackendProfile, 
 		default:
 			return baselineBackendProfile{}, fmt.Errorf("unsupported baseline backend %q", backend)
 		}
+	case defaultFastBaselinePreset:
+		switch strings.TrimSpace(strings.ToLower(backend)) {
+		case "disk":
+			return baselineBackendProfile{
+				Concurrency:           8,
+				Runs:                  1,
+				Warmup:                1,
+				AttachmentTargetBytes: 0,
+				LockTargetBytes:       0,
+				MinOps:                0,
+				MaxOps:                0,
+				FixedOps:              500,
+			}, nil
+		default:
+			return baselineBackendProfile{}, fmt.Errorf("unsupported fast baseline backend %q", backend)
+		}
 	default:
 		return baselineBackendProfile{}, fmt.Errorf("unsupported baseline preset %q", preset)
 	}
@@ -232,7 +401,7 @@ func baselineProfileForBackend(preset, backend string) (baselineBackendProfile, 
 
 func baselinePresetCases(preset, backend string) ([]baselineCasePlan, error) {
 	switch strings.TrimSpace(strings.ToLower(preset)) {
-	case defaultBaselinePreset:
+	case defaultFullBaselinePreset:
 		profile, err := baselineProfileForBackend(preset, backend)
 		if err != nil {
 			return nil, err
@@ -253,6 +422,21 @@ func baselinePresetCases(preset, backend string) ([]baselineCasePlan, error) {
 			cases = append(cases, baselineCasePlan{Workload: workload, Ops: profile.FixedOps})
 		}
 		return cases, nil
+	case defaultFastBaselinePreset:
+		if strings.TrimSpace(strings.ToLower(backend)) != "disk" {
+			return nil, fmt.Errorf("unsupported fast baseline backend %q", backend)
+		}
+		return []baselineCasePlan{
+			{Workload: "attachments", Size: 4096, Ops: 4000, PayloadBytes: 4096, AttachmentBytes: 4096},
+			{Workload: "attachments", Size: 1048576, Ops: 128, PayloadBytes: 1048576, AttachmentBytes: 1048576},
+			{Workload: "lock", Size: 4096, Ops: 4000, PayloadBytes: 4096},
+			{Workload: "lock", Size: 1048576, Ops: 128, PayloadBytes: 1048576},
+			{Workload: "public-read", Ops: 1000},
+			{Workload: "query-index", Ops: 500},
+			{Workload: "query-scan", Ops: 500},
+			{Workload: "xa-commit", Ops: 500},
+			{Workload: "xa-rollback", Ops: 500},
+		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported baseline preset %q", preset)
 	}
@@ -291,11 +475,13 @@ func attachmentBytesForWorkload(workload string, size int) int {
 
 func executeBaselineBackend(cfg benchConfig, backend, runID string, gitInfo baselineGitInfo, profile baselineBackendProfile, cases []baselineCasePlan) (baselineRunRecord, error) {
 	record := baselineRunRecord{
-		RunID:     runID,
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		Preset:    cfg.baselinePreset,
-		Backend:   backend,
-		Git:       gitInfo,
+		RunID:         runID,
+		Timestamp:     time.Now().UTC().Format(time.RFC3339),
+		HistoryBranch: historyBranchForPreset(cfg.baselinePreset),
+		Preset:        cfg.baselinePreset,
+		Backend:       backend,
+		Store:         effectiveStoreURL(cfg),
+		Git:           gitInfo,
 		Config: baselineRunConfig{
 			HAMode:      cfg.haMode,
 			Concurrency: profile.Concurrency,
@@ -323,6 +509,9 @@ func executeBaselineBackend(cfg benchConfig, backend, runID string, gitInfo base
 		}
 		if err := validateBaselineCaseResult(caseResult); err != nil {
 			return baselineRunRecord{}, fmt.Errorf("baseline case backend=%s workload=%s size=%d: %w", backend, plan.Workload, plan.Size, err)
+		}
+		if record.DiskRoot == "" {
+			record.DiskRoot = extractBenchDiskRoot(out)
 		}
 		record.Cases = append(record.Cases, caseResult)
 	}
@@ -545,6 +734,82 @@ func findLatestBaselineRecord(records []baselineRunRecord, preset, backend strin
 		return &records[i]
 	}
 	return nil
+}
+
+func latestAndPreviousBaselineRecords(records []baselineRunRecord, preset, backend string) (*baselineRunRecord, *baselineRunRecord) {
+	var current *baselineRunRecord
+	for i := len(records) - 1; i >= 0; i-- {
+		record := &records[i]
+		if record.Preset != preset || record.Backend != backend {
+			continue
+		}
+		if current == nil {
+			current = record
+			continue
+		}
+		return current, record
+	}
+	return current, nil
+}
+
+func findBaselineCase(cases []baselineCaseResult, workload string, size int) (baselineCaseResult, bool) {
+	for _, candidate := range cases {
+		if candidate.Workload == workload && candidate.Size == size {
+			return candidate, true
+		}
+	}
+	return baselineCaseResult{}, false
+}
+
+func recordHistoryBranch(record baselineRunRecord) string {
+	if strings.TrimSpace(record.HistoryBranch) != "" {
+		return record.HistoryBranch
+	}
+	return record.Backend
+}
+
+func matchesHistoryBranch(record baselineRunRecord, branch string) bool {
+	actual := recordHistoryBranch(record)
+	if actual == branch {
+		return true
+	}
+	return branch == "full" && strings.TrimSpace(record.HistoryBranch) == "" && record.Backend == "disk"
+}
+
+func effectiveStoreURL(cfg benchConfig) string {
+	if strings.TrimSpace(cfg.storeURL) != "" {
+		return strings.TrimSpace(cfg.storeURL)
+	}
+	return strings.TrimSpace(os.Getenv("LOCKD_STORE"))
+}
+
+func extractBenchDiskRoot(output []byte) string {
+	scanner := bufio.NewScanner(bytes.NewReader(output))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "bench disk root: ") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "bench disk root: "))
+		}
+	}
+	return ""
+}
+
+func loadLatestRunRecord(path, branch, preset string) (baselineRunRecord, error) {
+	records, err := loadBaselineHistory(path)
+	if err != nil {
+		return baselineRunRecord{}, err
+	}
+	for i := len(records) - 1; i >= 0; i-- {
+		record := records[i]
+		if record.Preset != preset {
+			continue
+		}
+		if !matchesHistoryBranch(record, branch) {
+			continue
+		}
+		return record, nil
+	}
+	return baselineRunRecord{}, fmt.Errorf("no %s run records found in %s", branch, path)
 }
 
 func loadBaselineHistory(path string) ([]baselineRunRecord, error) {

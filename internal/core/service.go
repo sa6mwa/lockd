@@ -72,14 +72,21 @@ type Service struct {
 
 	haMode         string
 	haLeaseTTL     time.Duration
+	haSingleTTL    time.Duration
 	haNodeID       string
+	haUsesLease    atomic.Bool
 	haActive       atomic.Bool
 	haLeaseExpires atomic.Int64
+	haPassiveUntil atomic.Int64
 	haRefreshes    atomic.Int64
 	haErrors       atomic.Int64
 	haTransitions  atomic.Int64
 	haStop         chan struct{}
 	haDone         chan struct{}
+	haAutoStop     chan struct{}
+	haAutoDone     chan struct{}
+	haSingleStop   chan struct{}
+	haSingleDone   chan struct{}
 
 	leaseBucketCache    sync.Map
 	decisionBucketCache sync.Map
@@ -153,10 +160,16 @@ func New(cfg Config) *Service {
 	}
 	haNodeID := strings.TrimSpace(cfg.HANodeID)
 	haLeaseTTL := cfg.HALeaseTTL
+	haSingleTTL := cfg.HASinglePresenceTTL
 	if haLeaseTTL == 0 {
 		haLeaseTTL = 5 * time.Second
 	} else if haLeaseTTL < 0 {
 		haLeaseTTL = 0
+	}
+	if haSingleTTL == 0 {
+		haSingleTTL = 5 * time.Minute
+	} else if haSingleTTL < 0 {
+		haSingleTTL = 0
 	}
 
 	if cfg.Store != nil {
@@ -180,6 +193,7 @@ func New(cfg Config) *Service {
 		crypto:           cfg.Crypto,
 		haMode:           haMode,
 		haLeaseTTL:       haLeaseTTL,
+		haSingleTTL:      haSingleTTL,
 		queueProvider:    cfg.QueueService,
 		queueDispatcher:  cfg.QueueDispatcher,
 		searchAdapter:    cfg.SearchAdapter,
@@ -220,12 +234,22 @@ func New(cfg Config) *Service {
 		sweeperMetrics:            newSweeperMetrics(logger),
 		tcDecider:                 cfg.TCDecider,
 	}
-	if svc.haMode == "failover" && svc.haLeaseTTL > 0 {
+	if !strings.EqualFold(svc.haMode, "concurrent") {
 		if haNodeID == "" {
 			haNodeID = uuidv7.NewString()
 		}
 		svc.haNodeID = haNodeID
+	}
+	switch {
+	case strings.EqualFold(svc.haMode, "failover") && svc.haLeaseTTL > 0:
+		svc.haUsesLease.Store(true)
 		svc.startHA()
+	case strings.EqualFold(svc.haMode, "single"):
+		svc.setNodeActive(false, 0, "")
+		svc.startSinglePresence()
+	case strings.EqualFold(svc.haMode, "auto"):
+		svc.setNodeActive(false, 0, "")
+		svc.startAutoHA()
 	}
 	return svc
 }
@@ -273,7 +297,7 @@ func (s *Service) maybeNoSync(ctx context.Context) context.Context {
 	if s == nil {
 		return ctx
 	}
-	if strings.EqualFold(s.haMode, "failover") {
+	if strings.EqualFold(s.haMode, "failover") || strings.EqualFold(s.haMode, "single") {
 		return storage.ContextWithNoSync(ctx)
 	}
 	return ctx

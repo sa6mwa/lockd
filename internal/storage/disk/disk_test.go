@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -88,6 +89,126 @@ func TestDiskStoreRoundTrip(t *testing.T) {
 
 	if _, err := store.ReadState(ctx, testNamespace, key); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected not found, got %v", err)
+	}
+}
+
+func TestAbortStopsWriterPresenceWithoutRemovingMarker(t *testing.T) {
+	t.Parallel()
+
+	root := filepath.Join(t.TempDir(), "store")
+	store, err := New(Config{Root: root})
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	store.SetSingleWriter(true)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		info, statErr := os.Stat(store.writerPresencePath)
+		if statErr == nil {
+			firstMod := info.ModTime()
+			time.Sleep(exclusiveWriterTouchEvery + 300*time.Millisecond)
+			info2, statErr := os.Stat(store.writerPresencePath)
+			if statErr != nil {
+				t.Fatalf("stat writer presence after touch: %v", statErr)
+			}
+			if !info2.ModTime().After(firstMod) {
+				t.Fatalf("expected writer presence marker to refresh before abort")
+			}
+			if err := store.Abort(); err != nil {
+				t.Fatalf("abort store: %v", err)
+			}
+			info3, statErr := os.Stat(store.writerPresencePath)
+			if statErr != nil {
+				t.Fatalf("expected writer presence marker to remain after abort: %v", statErr)
+			}
+			postAbortMod := info3.ModTime()
+			time.Sleep(exclusiveWriterTouchEvery + 300*time.Millisecond)
+			info4, statErr := os.Stat(store.writerPresencePath)
+			if statErr != nil {
+				t.Fatalf("stat writer presence after abort: %v", statErr)
+			}
+			if !info4.ModTime().Equal(postAbortMod) {
+				t.Fatalf("expected writer presence marker refresh to stop after abort")
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("writer presence marker not created: %v", statErr)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func TestProbeExclusiveWriterPrefersHeartbeatPayloadOverFutureModTime(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1_700_000_100, 0)
+	root := filepath.Join(t.TempDir(), "store")
+	store, err := New(Config{
+		Root: root,
+		Now:  func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	foreignPath := filepath.Join(store.writerPresenceDir, "foreign.presence")
+	if err := os.MkdirAll(store.writerPresenceDir, 0o755); err != nil {
+		t.Fatalf("mkdir writer presence dir: %v", err)
+	}
+	staleHeartbeat := now.Add(-2 * exclusiveWriterPresenceTTL)
+	if err := os.WriteFile(foreignPath, []byte(strconv.FormatInt(staleHeartbeat.UnixNano(), 10)), 0o644); err != nil {
+		t.Fatalf("write foreign marker: %v", err)
+	}
+	future := now.Add(10 * time.Minute)
+	if err := os.Chtimes(foreignPath, future, future); err != nil {
+		t.Fatalf("chtimes foreign marker: %v", err)
+	}
+
+	status, err := store.ProbeExclusiveWriter(context.Background())
+	if err != nil {
+		t.Fatalf("probe exclusive writer: %v", err)
+	}
+	if status.Present {
+		t.Fatalf("expected stale heartbeat payload to override future modtime, got %+v", status)
+	}
+}
+
+func TestProbeExclusiveWriterFallsBackToLegacyModTime(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1_700_000_200, 0)
+	root := filepath.Join(t.TempDir(), "store")
+	store, err := New(Config{
+		Root: root,
+		Now:  func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	foreignPath := filepath.Join(store.writerPresenceDir, "legacy.presence")
+	if err := os.MkdirAll(store.writerPresenceDir, 0o755); err != nil {
+		t.Fatalf("mkdir writer presence dir: %v", err)
+	}
+	if err := os.WriteFile(foreignPath, []byte("0"), 0o644); err != nil {
+		t.Fatalf("write legacy marker: %v", err)
+	}
+	recent := now.Add(-time.Second)
+	if err := os.Chtimes(foreignPath, recent, recent); err != nil {
+		t.Fatalf("chtimes legacy marker: %v", err)
+	}
+
+	status, err := store.ProbeExclusiveWriter(context.Background())
+	if err != nil {
+		t.Fatalf("probe exclusive writer: %v", err)
+	}
+	if !status.Present {
+		t.Fatalf("expected legacy marker modtime fallback to remain present, got %+v", status)
 	}
 }
 

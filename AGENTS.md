@@ -121,6 +121,14 @@ linters:
 | Full sweep | `./run-integration-suites.sh` | Required before releases or large refactors. |
 | Benchmarks | `run-benchmark-suites.sh` / `ycsb` | Record results in `docs/performance/`. |
 
+### Benchmark Workflow
+
+- Benchmark and perf-guard work must go through the supported repo entrypoints first, with `Makefile` targets as the default interface when they exist.
+- Prefer `make perf-guard-*`, `make perf-freeze-*`, `make perf-show-frozen-baselines`, `make bench`, `run-benchmark-suites.sh`, and the documented `ycsb/` make targets over ad hoc benchmark commands.
+- Do not invent one-off benchmark invocations when a supported target already exists.
+- Only run `go run ./cmd/lockd-bench ...` or similarly direct benchmark commands when debugging the benchmark harness itself or when no supported entrypoint exists; in that case, state explicitly that you are stepping outside the normal interface and why.
+- If a perf target fails, inspect and trace the exact `Makefile`/script path before attempting any manual reproduction.
+
 ### CLI & SDK Changes
 
 - Single source of truth. CLI commands must exercise real SDK calls; unit tests (e.g. `cmd/lockd/client_cli_test.go`) ensure Cobra wiring doesn’t drift.

@@ -295,15 +295,22 @@ Shutdown tuning:
 
 ### HA modes
 
-Lockd defaults to **failover** mode (single active writer per backend). Passive nodes return HTTP 503 so clients can retry another endpoint. Use `--ha concurrent` to enable concurrent multi‑writer semantics when multiple servers share the same backend.
+Lockd defaults to **failover** mode (single active writer per backend). Passive nodes return HTTP 503 so clients can retry another endpoint. Use `--ha concurrent` to enable concurrent multi-writer semantics when multiple servers share the same backend, `--ha single` for an operator-managed single-node deployment, or `--ha auto` to start in single mode and promote to failover when another live node is observed.
+
+- `--ha-lease-ttl` controls failover lease duration and auto heartbeat cadence. Default is `10s`; values below `5s` are rejected.
+- `--ha-single-presence-ttl` controls the long-lived `.ha` advertisement used by `ha=single` on backends without native single-writer detection. Default is `5m`.
+- On disk/NFS, `ha=single` does **not** write `.ha` single-presence heartbeats; mixed `single`/`auto` fencing uses native single-writer markers instead.
 
 ### Disk / NFS (logstore)
 
 - Uses a **log-structured store** on disk/NFS to minimize small-file churn: writes are append-only into segment files, each segment is recorded in a manifest, and periodic snapshots bound recovery time. Reads consult the in-memory index + manifest to find the newest record for a key, while background compaction rewrites hot data into fewer segments.
 - Optional retention (`--disk-retention`, `LOCKD_DISK_RETENTION`) prunes keys whose metadata `updated_at_unix` is older than the configured duration. Set to `0` (default) to keep data indefinitely.
 - Disk/NFS backends use **durable group commit** driven by natural backpressure. `--logstore-commit-max-ops` caps batch size, and `--logstore-segment-size` rolls segment files at a fixed size.
-- HA: **failover only**. The logstore is single‑writer; requesting `--ha concurrent`
-  is automatically downgraded to failover.
+- Background snapshot compaction is enabled by default. Tune it with `--logstore-compaction`, `--logstore-compaction-interval` (default `30m`), `--logstore-compaction-min-segments` (default `2`), `--logstore-compaction-min-reclaim-size` (default `64MiB`), `--logstore-compaction-delete-grace` (default `15m`), `--logstore-compaction-max-io-bytes-per-sec` (default `8MiB/s`; `0` uses the default throttle), and `--disable-logstore-compaction-throttling`.
+- HA: the logstore remains **single-writer**. `--ha concurrent` is automatically
+  downgraded to failover. Use `--ha single` for an operator-managed standalone
+  node, `--ha auto` for single-writer startup with promotion to failover on peer
+  detection, or `--ha failover` for explicit lease-based coordination.
 - The janitor sweep interval defaults to half the retention window (clamped between 1 minute and 1 hour). Override via `--disk-janitor-interval`.
 - Configure with `--store disk:///var/lib/lockd-data`. All files live beneath the specified root; lockd creates `logstore/segments`, `logstore/manifest`, and `logstore/snapshots` directories per namespace.
 - For NFS: supported via the same driver with polling (queue watcher disabled on
@@ -834,10 +841,10 @@ set -a && source .env.local && set +a && go test -run ^$ -bench BenchmarkLockdDi
 Source `.env.disk` (or export the variables manually) before running; the suite
 fails fast if the required paths are missing:
 
-- `LOCKD_DISK_ROOT` – absolute path on SSD/NVMe for local disk benchmarks.
-- `LOCKD_NFS_ROOT` – absolute path to an NFS mount (optional but required
-  for the NFS benchmark). If both `/mnt/nfs4-lockd` and `/mnt/nfs-lockd` are
-  unset/unavailable the test fails.
+- `LOCKD_STORE=disk:///absolute/path/on/ssd-or-nvme` – disk backend root for
+  local disk benchmarks.
+- `LOCKD_STORE=disk:///absolute/path/to/nfs-mount` – NFS benchmark root when
+  targeting an NFS-backed mount.
 
 ### In-memory queue benchmarks
 
@@ -1319,7 +1326,7 @@ Current backends:
 |---------|-------|----------|
 | `mem`   | Uses the in-memory store; no environment needed. | `go test -tags "integration mem" ./integration/...` (all mem suites) / `go test -tags "integration mem lq" ./integration/...` (queue scenarios only) / `go test -tags "integration mem query" ./integration/...` (query-only scenarios). |
 | `disk`  | Local disk backend. Requires `.env.disk` (see `integration/disk`). | `set -a && source .env.disk && set +a && go test -tags "integration disk" ./integration/...` / `... -tags "integration disk lq" ...` for queue-only coverage. |
-| `nfs`   | Disk backend mounted on NFS. Source `.env.nfs` so `LOCKD_NFS_ROOT` is set. | `set -a && source .env.nfs && set +a && go test -tags "integration nfs lq" ./integration/...`. |
+| `nfs`   | Disk backend mounted on NFS. Source `.env.nfs` so `LOCKD_STORE` points at the NFS mount. | `set -a && source .env.nfs && set +a && go test -tags "integration nfs lq" ./integration/...`. |
 | `aws`   | Real S3 credentials via `.env`. | `set -a && source .env && set +a && go test -tags "integration aws" ./integration/...`. |
 | `minio`, `azure` | S3-compatible / Azure Blob suites. | e.g. `go test -tags "integration minio" ./integration/...` (requires appropriate env). |
 

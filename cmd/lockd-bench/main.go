@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -35,66 +36,73 @@ import (
 )
 
 type benchConfig struct {
-	mode             string
-	ops              int
-	concurrency      int
-	payloadBytes     int
-	root             string
-	keepRoot         bool
-	logLevel         string
-	logPath          string
-	enableCrypto     bool
-	enableSnappy     bool
-	haMode           string
-	haLeaseTTL       time.Duration
-	commitMaxOps     int
-	segmentSize      int64
-	gomaxprocs       int
-	cpuProfile       string
-	memProfile       string
-	warmupRuns       int
-	runs             int
-	backend          string
-	envFile          string
-	storeURL         string
-	workload         string
-	workloadMix      string
-	endpoint         string
-	disableMTLS      bool
-	clientBundle     string
-	namespace        string
-	queueName        string
-	keyCount         int
-	attachBytes      int
-	queueBytes       int
-	queryExpr        string
-	queryLimit       int
-	queryReturn      string
-	querySeed        bool
-	queryFlush       bool
-	qrfDisabled      bool
-	qrfCPUSoft       float64
-	qrfCPUHard       float64
-	qrfMemSoftPct    float64
-	qrfMemHardPct    float64
-	qrfMemHeadroom   float64
-	qrfMemSoftBytes  uint64
-	qrfMemHardBytes  uint64
-	qrfSwapSoft      float64
-	qrfSwapHard      float64
-	qrfSoftDelay     time.Duration
-	qrfEngagedDelay  time.Duration
-	qrfRecoveryDelay time.Duration
-	qrfMaxWait       time.Duration
-	queryDocPrefetch int
-	httpTimeout      time.Duration
-	keepNamespace    bool
-	namespaceSet     bool
-	baselinePreset   string
-	baselineBackends string
-	baselineHistory  string
-	baselineRunID    string
+	mode                     string
+	ops                      int
+	concurrency              int
+	payloadBytes             int
+	root                     string
+	keepRoot                 bool
+	logLevel                 string
+	logPath                  string
+	enableCrypto             bool
+	enableSnappy             bool
+	haMode                   string
+	haLeaseTTL               time.Duration
+	commitMaxOps             int
+	segmentSize              int64
+	gomaxprocs               int
+	cpuProfile               string
+	memProfile               string
+	warmupRuns               int
+	runs                     int
+	backend                  string
+	envFile                  string
+	storeURL                 string
+	workload                 string
+	workloadMix              string
+	endpoint                 string
+	disableMTLS              bool
+	clientBundle             string
+	namespace                string
+	queueName                string
+	keyCount                 int
+	attachBytes              int
+	queueBytes               int
+	queryExpr                string
+	queryLimit               int
+	queryReturn              string
+	querySeed                bool
+	queryFlush               bool
+	qrfDisabled              bool
+	qrfCPUSoft               float64
+	qrfCPUHard               float64
+	qrfMemSoftPct            float64
+	qrfMemHardPct            float64
+	qrfMemHeadroom           float64
+	qrfMemSoftBytes          uint64
+	qrfMemHardBytes          uint64
+	qrfSwapSoft              float64
+	qrfSwapHard              float64
+	qrfSoftDelay             time.Duration
+	qrfEngagedDelay          time.Duration
+	qrfRecoveryDelay         time.Duration
+	qrfMaxWait               time.Duration
+	queryDocPrefetch         int
+	httpTimeout              time.Duration
+	keepNamespace            bool
+	namespaceSet             bool
+	baselinePreset           string
+	baselineBackends         string
+	baselineHistory          string
+	baselineRunHistory       string
+	baselineRunID            string
+	baselineAppendHistory    bool
+	baselineAppendRunHistory bool
+	baselineReportLimit      int
+	serverBundlePEM          []byte
 }
+
+const benchScopedDiskRootDir = "lockd-bench"
 
 type stringFlag struct {
 	value string
@@ -125,48 +133,52 @@ type benchSummary struct {
 
 func main() {
 	cfg := benchConfig{
-		mode:             "load",
-		ops:              10000,
-		concurrency:      8,
-		payloadBytes:     1000,
-		enableCrypto:     true,
-		enableSnappy:     false,
-		logLevel:         "error",
-		haMode:           "concurrent",
-		haLeaseTTL:       5 * time.Second,
-		commitMaxOps:     lockd.DefaultLogstoreCommitMaxOps,
-		segmentSize:      0,
-		warmupRuns:       1,
-		runs:             3,
-		backend:          "disk",
-		namespace:        "default",
-		queueName:        "bench",
-		attachBytes:      1024,
-		queueBytes:       512,
-		queryExpr:        "eq{field=/status,value=open}",
-		queryLimit:       50,
-		queryReturn:      "documents",
-		querySeed:        true,
-		queryFlush:       true,
-		workloadMix:      "lock=30,read=20,attach=15,queue=15,query-index=10,query-scan=10",
-		queryDocPrefetch: lockd.DefaultQueryDocPrefetch,
-		qrfCPUSoft:       lockd.DefaultQRFCPUPercentSoftLimit,
-		qrfCPUHard:       lockd.DefaultQRFCPUPercentHardLimit,
-		qrfMemSoftPct:    75.0,
-		qrfMemHardPct:    85.0,
-		qrfMemHeadroom:   lockd.DefaultQRFMemoryStrictHeadroomPercent,
-		qrfSwapSoft:      lockd.DefaultQRFSwapSoftLimitPercent,
-		qrfSwapHard:      lockd.DefaultQRFSwapHardLimitPercent,
-		qrfSoftDelay:     lockd.DefaultQRFSoftDelay,
-		qrfEngagedDelay:  lockd.DefaultQRFEngagedDelay,
-		qrfRecoveryDelay: lockd.DefaultQRFRecoveryDelay,
-		qrfMaxWait:       lockd.DefaultQRFMaxWait,
-		httpTimeout:      lockdclient.DefaultHTTPTimeout,
-		baselinePreset:   defaultBaselinePreset,
-		baselineBackends: strings.Join(defaultBaselineBackends(), ","),
-		baselineHistory:  defaultBaselineHistoryPath,
+		mode:                     "load",
+		ops:                      10000,
+		concurrency:              8,
+		payloadBytes:             1000,
+		enableCrypto:             true,
+		enableSnappy:             false,
+		logLevel:                 "error",
+		haMode:                   "concurrent",
+		haLeaseTTL:               5 * time.Second,
+		commitMaxOps:             lockd.DefaultLogstoreCommitMaxOps,
+		segmentSize:              0,
+		warmupRuns:               1,
+		runs:                     3,
+		backend:                  "disk",
+		namespace:                "default",
+		queueName:                "bench",
+		attachBytes:              1024,
+		queueBytes:               512,
+		queryExpr:                "eq{field=/status,value=open}",
+		queryLimit:               50,
+		queryReturn:              "documents",
+		querySeed:                true,
+		queryFlush:               true,
+		workloadMix:              "lock=30,read=20,attach=15,queue=15,query-index=10,query-scan=10",
+		queryDocPrefetch:         lockd.DefaultQueryDocPrefetch,
+		qrfCPUSoft:               90.0,
+		qrfCPUHard:               95.0,
+		qrfMemSoftPct:            90.0,
+		qrfMemHardPct:            95.0,
+		qrfMemHeadroom:           5.0,
+		qrfSwapSoft:              lockd.DefaultQRFSwapSoftLimitPercent,
+		qrfSwapHard:              lockd.DefaultQRFSwapHardLimitPercent,
+		qrfSoftDelay:             lockd.DefaultQRFSoftDelay,
+		qrfEngagedDelay:          lockd.DefaultQRFEngagedDelay,
+		qrfRecoveryDelay:         lockd.DefaultQRFRecoveryDelay,
+		qrfMaxWait:               lockd.DefaultQRFMaxWait,
+		httpTimeout:              lockdclient.DefaultHTTPTimeout,
+		baselinePreset:           defaultBaselinePreset,
+		baselineBackends:         strings.Join(defaultBaselineBackends(), ","),
+		baselineHistory:          defaultBaselineHistoryPath,
+		baselineRunHistory:       defaultBaselineRunHistoryPath,
+		baselineAppendHistory:    true,
+		baselineAppendRunHistory: true,
+		baselineReportLimit:      3,
 	}
-	flag.StringVar(&cfg.mode, "mode", cfg.mode, "bench mode: load, update, acquire, baseline, baseline-mark-golden")
+	flag.StringVar(&cfg.mode, "mode", cfg.mode, "bench mode: load, update, acquire, baseline, baseline-freeze-latest, baseline-mark-golden, baseline-report, baseline-run-report")
 	flag.IntVar(&cfg.ops, "ops", cfg.ops, "number of operations to run")
 	flag.IntVar(&cfg.concurrency, "concurrency", cfg.concurrency, "number of concurrent workers")
 	flag.IntVar(&cfg.payloadBytes, "payload-bytes", cfg.payloadBytes, "payload size in bytes (total across YCSB-style fields for load/update)")
@@ -177,7 +189,7 @@ func main() {
 	flag.BoolVar(&cfg.enableCrypto, "crypto", cfg.enableCrypto, "enable storage encryption")
 	flag.BoolVar(&cfg.enableSnappy, "snappy", cfg.enableSnappy, "enable snappy compression for crypto")
 	haFlag := &stringFlag{value: cfg.haMode}
-	flag.Var(haFlag, "ha", "HA mode (concurrent or failover)")
+	flag.Var(haFlag, "ha", "HA mode (concurrent, failover, single, or auto)")
 	flag.DurationVar(&cfg.haLeaseTTL, "ha-lease-ttl", cfg.haLeaseTTL, "HA lease TTL (failover mode only)")
 	flag.IntVar(&cfg.commitMaxOps, "commit-max-ops", cfg.commitMaxOps, "max ops per logstore fsync batch")
 	flag.Int64Var(&cfg.segmentSize, "segment-size", cfg.segmentSize, "logstore segment size (0 uses default)")
@@ -193,7 +205,7 @@ func main() {
 	flag.StringVar(&cfg.workloadMix, "workload-mix", cfg.workloadMix, "mixed workload weights (e.g. lock=30,read=20,attach=10,queue=10,query-index=20,query-scan=10)")
 	flag.StringVar(&cfg.endpoint, "endpoint", "", "lockd endpoint (when set, uses existing server instead of in-process)")
 	flag.BoolVar(&cfg.disableMTLS, "disable-mtls", false, "disable mTLS expectations for client endpoints")
-	flag.StringVar(&cfg.clientBundle, "bundle", "", "path to client bundle PEM (default auto-discover under $HOME/.lockd)")
+	flag.StringVar(&cfg.clientBundle, "bundle", "", "path to client bundle PEM (required for -endpoint with mTLS enabled)")
 	nsFlag := &stringFlag{value: cfg.namespace}
 	flag.Var(nsFlag, "namespace", "namespace used for workload keys (auto-generated when omitted)")
 	flag.BoolVar(&cfg.keepNamespace, "keep-namespace", false, "keep namespace data after benchmark runs (embedded server only)")
@@ -225,7 +237,11 @@ func main() {
 	flag.StringVar(&cfg.baselinePreset, "baseline-preset", cfg.baselinePreset, "named baseline preset for mode=baseline")
 	flag.StringVar(&cfg.baselineBackends, "baseline-backends", cfg.baselineBackends, "comma-separated backend list for mode=baseline")
 	flag.StringVar(&cfg.baselineHistory, "baseline-history", cfg.baselineHistory, "JSONL history path for mode=baseline and baseline-mark-golden")
+	flag.StringVar(&cfg.baselineRunHistory, "baseline-run-history", cfg.baselineRunHistory, "JSONL history path for all mode=baseline runs")
 	flag.StringVar(&cfg.baselineRunID, "baseline-run-id", cfg.baselineRunID, "run id for mode=baseline-mark-golden")
+	flag.BoolVar(&cfg.baselineAppendHistory, "baseline-append-history", cfg.baselineAppendHistory, "append baseline runs to history (disable for compare-only runs)")
+	flag.BoolVar(&cfg.baselineAppendRunHistory, "baseline-append-run-history", cfg.baselineAppendRunHistory, "append all baseline runs to run history")
+	flag.IntVar(&cfg.baselineReportLimit, "baseline-report-limit", cfg.baselineReportLimit, "number of recent runs to print for mode=baseline-run-report")
 	flag.Parse()
 	cfg.namespace = nsFlag.value
 	cfg.namespaceSet = nsFlag.set
@@ -256,9 +272,24 @@ func main() {
 			die("baseline: %v", err)
 		}
 		return
+	case "baseline-freeze-latest":
+		if err := freezeLatestBaselineRun(cfg); err != nil {
+			die("baseline-freeze-latest: %v", err)
+		}
+		return
 	case "baseline-mark-golden":
 		if err := markBaselineGolden(cfg.baselineHistory, cfg.baselineRunID); err != nil {
 			die("baseline-mark-golden: %v", err)
+		}
+		return
+	case "baseline-report":
+		if err := runBaselineReport(cfg); err != nil {
+			die("baseline-report: %v", err)
+		}
+		return
+	case "baseline-run-report":
+		if err := runBaselineRunReport(cfg); err != nil {
+			die("baseline-run-report: %v", err)
 		}
 		return
 	}
@@ -320,8 +351,11 @@ func main() {
 		_ = cpuProfileFile.Close()
 	}()
 
-	root, cleanup := prepareRoot(cfg.root, cfg.keepRoot)
+	root, cleanup := prepareBenchRoot(cfg)
 	defer cleanup()
+	if strings.TrimSpace(cfg.endpoint) == "" && strings.EqualFold(cfg.backend, "disk") {
+		fmt.Printf("bench disk root: %s\n", root)
+	}
 
 	if strings.TrimSpace(cfg.endpoint) == "" && strings.EqualFold(cfg.backend, "disk") && strings.EqualFold(cfg.haMode, "concurrent") {
 		die("ha=concurrent is not supported for disk/nfs backends; use ha=failover")
@@ -549,6 +583,73 @@ func prepareRoot(root string, keep bool) (string, func()) {
 			fmt.Printf("bench root: %s (kept)\n", abs)
 		}
 	}
+}
+
+func prepareBenchRoot(cfg benchConfig) (string, func()) {
+	if !strings.EqualFold(cfg.backend, "disk") {
+		return prepareRoot(cfg.root, cfg.keepRoot)
+	}
+	if strings.TrimSpace(cfg.root) != "" {
+		return prepareRoot(cfg.root, cfg.keepRoot)
+	}
+	baseRoot, ok, err := diskBenchBaseRoot(cfg)
+	if err != nil {
+		die("disk bench root: %v", err)
+	}
+	if !ok {
+		return prepareRoot("", cfg.keepRoot)
+	}
+	parent := filepath.Join(baseRoot, benchScopedDiskRootDir)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		die("disk bench root mkdir: %v", err)
+	}
+	dir, err := os.MkdirTemp(parent, "root-")
+	if err != nil {
+		die("disk bench root tempdir: %v", err)
+	}
+	return dir, func() {
+		if cfg.keepRoot {
+			fmt.Printf("bench root: %s (kept)\n", dir)
+			return
+		}
+		_ = os.RemoveAll(dir)
+	}
+}
+
+func diskBenchBaseRoot(cfg benchConfig) (string, bool, error) {
+	store := strings.TrimSpace(cfg.storeURL)
+	if store == "" {
+		store = strings.TrimSpace(os.Getenv("LOCKD_STORE"))
+	}
+	if store == "" {
+		return "", false, nil
+	}
+	root, err := diskStoreRoot(store)
+	if err != nil {
+		return "", false, err
+	}
+	return root, true, nil
+}
+
+func diskStoreRoot(store string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(store))
+	if err != nil {
+		return "", fmt.Errorf("parse LOCKD_STORE: %w", err)
+	}
+	if !strings.EqualFold(parsed.Scheme, "disk") {
+		return "", fmt.Errorf("expected disk:// store URL, got %q", parsed.Scheme)
+	}
+	if parsed.Host != "" {
+		return "", fmt.Errorf("expected disk:///absolute/path, found host %q", parsed.Host)
+	}
+	if parsed.Path == "" || !filepath.IsAbs(parsed.Path) {
+		return "", fmt.Errorf("expected disk:///absolute/path, got %q", store)
+	}
+	root := filepath.Clean(parsed.Path)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return "", fmt.Errorf("mkdir disk root: %w", err)
+	}
+	return root, nil
 }
 
 func benchTempBase() string {
@@ -1675,7 +1776,7 @@ func buildBenchHTTPClient(cfg benchConfig) (*http.Client, error) {
 		tr.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 		return &http.Client{Transport: tr}, nil
 	}
-	bundlePath, err := lockd.ResolveClientBundlePath(lockd.ClientBundleRoleSDK, cfg.clientBundle)
+	bundlePath, err := resolveBenchClientBundlePath(cfg)
 	if err != nil {
 		return nil, err
 	}

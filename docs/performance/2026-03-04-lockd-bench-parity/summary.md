@@ -33,10 +33,10 @@ Reference sources:
 
 ### Endpoint load command drift
 - Historical endpoint load doc used:
-  - `-bundle /home/mike/g/lockd/devenv/volumes/lockd-config/client.pem`
+  - `-bundle ./devenv/volumes/lockd-config/client.pem`
 - Under current namespace ACL semantics this now returns `namespace_forbidden` for generated `bench-*` namespaces.
 - Current valid benchmark bundle is:
-  - `-bundle /home/mike/g/lockd/devenv/volumes/lockd-config/bench-client.pem`
+  - `-bundle ./devenv/volumes/lockd-config/bench-client.pem`
 - With `bench-client.pem`, endpoint `mode=load` measured `861.3 ops/s` in this pass; this is lower than the January `1052.1` reference and should be treated as a separate endpoint-load follow-up rather than a blocker for embedded lockd-bench parity.
 
 ## Follow-up iteration: release fast-path (no staged changes)

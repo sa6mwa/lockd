@@ -3,17 +3,13 @@
 package disklq
 
 import (
-	"net/url"
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
 	"pkt.systems/lockd"
 	"pkt.systems/lockd/integration/internal/cryptotest"
+	"pkt.systems/lockd/integration/internal/storetest"
 	queuetestutil "pkt.systems/lockd/integration/queue/testutil"
-	"pkt.systems/lockd/internal/uuidv7"
 	"pkt.systems/pslog"
 )
 
@@ -26,26 +22,13 @@ type diskQueueOptions struct {
 
 func prepareDiskQueueRoot(t testing.TB) string {
 	t.Helper()
-	base := strings.TrimSpace(os.Getenv("LOCKD_DISK_ROOT"))
-	if base == "" {
-		t.Fatalf("LOCKD_DISK_ROOT must be set (source .env.disk before running disk queue integration tests)")
-	}
-	info, err := os.Stat(base)
-	if err != nil || !info.IsDir() {
-		t.Fatalf("LOCKD_DISK_ROOT %q unavailable: %v", base, err)
-	}
-	root := filepath.Join(base, "lockd-queue-"+uuidv7.NewString())
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		t.Fatalf("mkdir %s: %v", root, err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	return root
+	return storetest.PrepareDiskStoreSubdir(t, "disk", "", "lockd-queue")
 }
 
 func buildDiskQueueConfig(t testing.TB, root string, opts diskQueueOptions) lockd.Config {
 	t.Helper()
 	cfg := lockd.Config{
-		Store:           diskStoreURL(root),
+		Store:           storetest.DiskStoreURL(root),
 		ListenProto:     "tcp",
 		Listen:          "127.0.0.1:0",
 		DefaultTTL:      30 * time.Second,
@@ -102,12 +85,4 @@ func startDiskQueueServerWithCapture(t testing.TB, cfg lockd.Config) (*lockd.Tes
 	t.Helper()
 	capture := queuetestutil.NewLogCapture(t)
 	return startDiskQueueServerWithLogger(t, cfg, capture.Logger()), capture
-}
-
-func diskStoreURL(root string) string {
-	clean := filepath.Clean(root)
-	if !strings.HasPrefix(clean, "/") {
-		clean = "/" + clean
-	}
-	return (&url.URL{Scheme: "disk", Path: clean}).String()
 }

@@ -207,6 +207,8 @@ func defaultTransport(insecure bool) http.RoundTripper {
 // Close satisfies storage.Backend and is a no-op for the AWS client.
 func (s *Store) Close() error { return nil }
 
+func (s *Store) Abort() error { return s.Close() }
+
 // BackendHash returns the stable identity hash for this backend.
 func (s *Store) BackendHash(ctx context.Context) (string, error) {
 	endpoint := strings.TrimSpace(s.cfg.Endpoint)

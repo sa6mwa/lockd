@@ -579,6 +579,13 @@ func (b *backend) SupportsConcurrentWrites() bool {
 	return true
 }
 
+func (b *backend) ProbeExclusiveWriter(ctx context.Context) (storage.ExclusiveWriterPresence, error) {
+	if inner, ok := b.inner.(storage.ExclusiveWriterProbe); ok {
+		return inner.ProbeExclusiveWriter(ctx)
+	}
+	return storage.ExclusiveWriterPresence{}, storage.ErrNotImplemented
+}
+
 func (b *backend) Close() error {
 	_, span, _, verbose, begin, finish := b.start(context.Background(), "close")
 	defer span.End()
@@ -592,6 +599,22 @@ func (b *backend) Close() error {
 	}
 	finish("ok", nil)
 	verbose.Debug("storage.close.success", "elapsed", time.Since(begin))
+	return nil
+}
+
+func (b *backend) Abort() error {
+	_, span, _, verbose, begin, finish := b.start(context.Background(), "abort")
+	defer span.End()
+
+	verbose.Trace("storage.abort.begin")
+	err := b.inner.Abort()
+	if err != nil {
+		finish("error", err)
+		verbose.Debug("storage.abort.error", "error", err, "elapsed", time.Since(begin))
+		return err
+	}
+	finish("ok", nil)
+	verbose.Debug("storage.abort.success", "elapsed", time.Since(begin))
 	return nil
 }
 

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"pkt.systems/lockd/internal/storage/memory"
+	"pkt.systems/pslog"
 )
 
 func TestOpenBackendMemory(t *testing.T) {
@@ -11,7 +12,7 @@ func TestOpenBackendMemory(t *testing.T) {
 		Store:                    "mem://",
 		DisableStorageEncryption: true, // memory backend has no bundle, so opt out of crypto
 	}
-	backend, err := openBackend(cfg, nil)
+	backend, err := openBackend(cfg, nil, pslog.NoopLogger())
 	if err != nil {
 		t.Fatalf("open backend: %v", err)
 	}

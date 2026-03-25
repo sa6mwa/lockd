@@ -8,8 +8,17 @@ import (
 	"time"
 )
 
+func writeTestBundleFile(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "server.pem")
+	if err := os.WriteFile(path, []byte("pem"), 0o600); err != nil {
+		t.Fatalf("write test bundle: %v", err)
+	}
+	return path
+}
+
 func TestConfigValidateDefaults(t *testing.T) {
-	cfg := Config{Store: "mem://"}
+	cfg := Config{Store: "mem://", BundlePath: writeTestBundleFile(t)}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
@@ -46,6 +55,24 @@ func TestConfigValidateDefaults(t *testing.T) {
 	if cfg.LogstoreCommitMaxOps != DefaultLogstoreCommitMaxOps {
 		t.Fatalf("expected logstore commit max ops default %d, got %d", DefaultLogstoreCommitMaxOps, cfg.LogstoreCommitMaxOps)
 	}
+	if !cfg.LogstoreCompactionEnabled {
+		t.Fatal("expected logstore compaction enabled by default")
+	}
+	if cfg.LogstoreCompactionInterval != DefaultLogstoreCompactionInterval {
+		t.Fatalf("expected logstore compaction interval %s, got %s", DefaultLogstoreCompactionInterval, cfg.LogstoreCompactionInterval)
+	}
+	if cfg.LogstoreCompactionMinSegments != DefaultLogstoreCompactionMinSegments {
+		t.Fatalf("expected logstore compaction min segments %d, got %d", DefaultLogstoreCompactionMinSegments, cfg.LogstoreCompactionMinSegments)
+	}
+	if cfg.LogstoreCompactionMinReclaimBytes != DefaultLogstoreCompactionMinReclaimBytes {
+		t.Fatalf("expected logstore compaction min reclaim bytes %d, got %d", DefaultLogstoreCompactionMinReclaimBytes, cfg.LogstoreCompactionMinReclaimBytes)
+	}
+	if cfg.LogstoreCompactionDeleteGrace != DefaultLogstoreCompactionDeleteGrace {
+		t.Fatalf("expected logstore compaction delete grace %s, got %s", DefaultLogstoreCompactionDeleteGrace, cfg.LogstoreCompactionDeleteGrace)
+	}
+	if cfg.LogstoreCompactionMaxIOBytesPerSec != DefaultLogstoreCompactionMaxIOBytesPerSec {
+		t.Fatalf("expected logstore compaction max io bytes/sec %d, got %d", DefaultLogstoreCompactionMaxIOBytesPerSec, cfg.LogstoreCompactionMaxIOBytesPerSec)
+	}
 	if cfg.S3MaxPartSize <= 0 {
 		t.Fatal("expected s3 max part size default")
 	}
@@ -58,10 +85,72 @@ func TestConfigValidateDefaults(t *testing.T) {
 	if cfg.DefaultNamespace != DefaultNamespace {
 		t.Fatalf("expected default namespace %q, got %q", DefaultNamespace, cfg.DefaultNamespace)
 	}
+	if cfg.HAMode != DefaultHAMode {
+		t.Fatalf("expected ha mode %q, got %q", DefaultHAMode, cfg.HAMode)
+	}
+	if cfg.HALeaseTTL != DefaultHALeaseTTL {
+		t.Fatalf("expected ha lease ttl %s, got %s", DefaultHALeaseTTL, cfg.HALeaseTTL)
+	}
+	if cfg.HASinglePresenceTTL != DefaultHASinglePresenceTTL {
+		t.Fatalf("expected ha single presence ttl %s, got %s", DefaultHASinglePresenceTTL, cfg.HASinglePresenceTTL)
+	}
+}
+
+func TestConfigValidateAcceptsSingleAndAutoHAModes(t *testing.T) {
+	for _, mode := range []string{"single", "auto"} {
+		cfg := Config{Store: "mem://", HAMode: mode, BundlePath: writeTestBundleFile(t)}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("validate %s: %v", mode, err)
+		}
+		if cfg.HAMode != mode {
+			t.Fatalf("expected ha mode %q, got %q", mode, cfg.HAMode)
+		}
+	}
+}
+
+func TestConfigValidateHALeaseTTLMinimum(t *testing.T) {
+	cfg := Config{
+		Listen:     "127.0.0.1:0",
+		Store:      "mem://",
+		BundlePath: writeTestBundleFile(t),
+		HALeaseTTL: 4 * time.Second,
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "ha lease ttl must be >= 5s") {
+		t.Fatalf("expected ha lease ttl minimum error, got %v", err)
+	}
+
+	cfg = Config{
+		Listen:     "127.0.0.1:0",
+		Store:      "mem://",
+		BundlePath: writeTestBundleFile(t),
+		HALeaseTTL: 5 * time.Second,
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if cfg.HALeaseTTL != 5*time.Second {
+		t.Fatalf("expected ha lease ttl to remain 5s, got %s", cfg.HALeaseTTL)
+	}
+}
+
+func TestConfigValidateDisableCompactionThrottlingSetsZeroIOLimit(t *testing.T) {
+	cfg := Config{
+		Listen:                              "127.0.0.1:0",
+		Store:                               "mem://",
+		BundlePath:                          writeTestBundleFile(t),
+		DisableLogstoreCompactionThrottling: true,
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if cfg.LogstoreCompactionMaxIOBytesPerSec != 0 {
+		t.Fatalf("expected disabled compaction throttling to force 0 io limit, got %d", cfg.LogstoreCompactionMaxIOBytesPerSec)
+	}
 }
 
 func TestConfigHTTP2MaxConcurrentStreamsZero(t *testing.T) {
 	cfg := Config{
+		BundlePath:                   writeTestBundleFile(t),
 		Store:                        "mem://",
 		HTTP2MaxConcurrentStreams:    0,
 		HTTP2MaxConcurrentStreamsSet: true,
@@ -91,6 +180,10 @@ func TestConfigValidateErrors(t *testing.T) {
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected error for invalid json util")
 	}
+	cfg = Config{Store: "mem://", BundlePath: writeTestBundleFile(t), HALeaseTTL: 4 * time.Second}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for ha lease ttl below minimum")
+	}
 	cfg = Config{Store: "mem://", DefaultNamespace: "Invalid Space"}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected error for invalid default namespace")
@@ -98,6 +191,26 @@ func TestConfigValidateErrors(t *testing.T) {
 	cfg = Config{Store: "mem://", TxnReplayInterval: -1}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected error for negative txn replay interval")
+	}
+	cfg = Config{Store: "mem://", BundlePath: writeTestBundleFile(t), LogstoreCompactionInterval: -1}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for negative logstore compaction interval")
+	}
+	cfg = Config{Store: "mem://", BundlePath: writeTestBundleFile(t), LogstoreCompactionMinSegments: -1}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for negative logstore compaction min segments")
+	}
+	cfg = Config{Store: "mem://", BundlePath: writeTestBundleFile(t), LogstoreCompactionMinReclaimBytes: -1}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for negative logstore compaction min reclaim bytes")
+	}
+	cfg = Config{Store: "mem://", BundlePath: writeTestBundleFile(t), LogstoreCompactionDeleteGrace: -1}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for negative logstore compaction delete grace")
+	}
+	cfg = Config{Store: "mem://", BundlePath: writeTestBundleFile(t), LogstoreCompactionMaxIOBytesPerSec: -1}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for negative logstore compaction max io bytes/sec")
 	}
 	cfg = Config{
 		Store:               "mem://",
@@ -112,6 +225,7 @@ func TestConfigValidateErrors(t *testing.T) {
 
 func TestConfigValidateConnguardDisabledForUnix(t *testing.T) {
 	cfg := Config{
+		BundlePath:  writeTestBundleFile(t),
 		Store:       "mem://",
 		ListenProto: "unix",
 	}
@@ -128,6 +242,7 @@ func TestConfigValidateConnguardDisabledForUnix(t *testing.T) {
 
 func TestConfigValidateConnguardExplicitlyDisabledForUnix(t *testing.T) {
 	cfg := Config{
+		BundlePath:          writeTestBundleFile(t),
 		Store:               "mem://",
 		ListenProto:         "unix",
 		ConnguardEnabled:    false,
@@ -143,6 +258,7 @@ func TestConfigValidateConnguardExplicitlyDisabledForUnix(t *testing.T) {
 
 func TestConfigTxnReplayIntervalDefaultsToSweeper(t *testing.T) {
 	cfg := Config{
+		BundlePath:      writeTestBundleFile(t),
 		Store:           "mem://",
 		SweeperInterval: 2 * time.Second,
 	}
@@ -168,10 +284,11 @@ func TestConfigValidateJoinRequiresMTLS(t *testing.T) {
 
 func TestConfigValidateJoinSelfOnlyWithoutMTLS(t *testing.T) {
 	cfg := Config{
-		Store:           "mem://",
-		DisableMTLS:     true,
-		SelfEndpoint:    "http://self",
-		TCJoinEndpoints: []string{"http://self"},
+		Store:                    "mem://",
+		DisableMTLS:              true,
+		DisableStorageEncryption: true,
+		SelfEndpoint:             "http://self",
+		TCJoinEndpoints:          []string{"http://self"},
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("expected tc-join self-only to pass without mTLS, got %v", err)

@@ -72,7 +72,8 @@ func TestOAuthClientCredentialsFlowWithBaseURLVariants(t *testing.T) {
 			t.Parallel()
 
 			upstream := lockd.StartTestServer(t, lockd.WithoutTestMTLS())
-			listen := reserveLoopbackAddr(t)
+			listener := reserveLoopbackListener(t)
+			listen := listener.Addr().String()
 			baseURL := "https://" + listen + tc.path
 			tmp := t.TempDir()
 
@@ -121,7 +122,8 @@ func TestOAuthClientCredentialsFlowWithBaseURLVariants(t *testing.T) {
 					OAuthTokenStorePath: tokenStorePath,
 					MCPPath:             tc.mcpPath,
 				},
-				Logger: pslog.NewStructured(context.Background(), io.Discard),
+				Logger:   pslog.NewStructured(context.Background(), io.Discard),
+				Listener: listener,
 			})
 			if err != nil {
 				t.Fatalf("new mcp server: %v", err)
@@ -210,7 +212,8 @@ func TestOAuthClientCredentialsFlowWithBaseURLVariants(t *testing.T) {
 
 func TestOAuthAccessTokenSurvivesMCPServerRestart(t *testing.T) {
 	upstream := lockd.StartTestServer(t, lockd.WithoutTestMTLS())
-	listen := reserveLoopbackAddr(t)
+	listener := reserveLoopbackListener(t)
+	listen := listener.Addr().String()
 	baseURL := "https://" + listen
 	tmp := t.TempDir()
 
@@ -249,6 +252,8 @@ func TestOAuthAccessTokenSurvivesMCPServerRestart(t *testing.T) {
 
 	startServer := func() (context.CancelFunc, chan error) {
 		t.Helper()
+		currentListener := listener
+		listener = nil
 		srv, err := NewServer(NewServerRequest{
 			Config: Config{
 				Listen:                    listen,
@@ -262,7 +267,8 @@ func TestOAuthAccessTokenSurvivesMCPServerRestart(t *testing.T) {
 				MCPPath:                   "/",
 				OAuthProtectedResourceURL: "",
 			},
-			Logger: pslog.NewStructured(context.Background(), io.Discard),
+			Logger:   pslog.NewStructured(context.Background(), io.Discard),
+			Listener: currentListener,
 		})
 		if err != nil {
 			t.Fatalf("new mcp server: %v", err)
@@ -326,6 +332,7 @@ func TestOAuthAccessTokenSurvivesMCPServerRestart(t *testing.T) {
 	}
 	assertProtectedWithToken(issued.AccessToken)
 	stopServer(cancelFirst, doneFirst)
+	listener = reserveLoopbackListenerAt(t, listen)
 
 	cancelSecond, doneSecond := startServer()
 	defer stopServer(cancelSecond, doneSecond)
@@ -334,7 +341,8 @@ func TestOAuthAccessTokenSurvivesMCPServerRestart(t *testing.T) {
 
 func TestOAuthDynamicRegistrationAndAuthorizationCodeFlow(t *testing.T) {
 	upstream := lockd.StartTestServer(t, lockd.WithoutTestMTLS())
-	listen := reserveLoopbackAddr(t)
+	listener := reserveLoopbackListener(t)
+	listen := listener.Addr().String()
 	baseURL := "https://" + listen
 	tmp := t.TempDir()
 
@@ -382,7 +390,8 @@ func TestOAuthDynamicRegistrationAndAuthorizationCodeFlow(t *testing.T) {
 			OAuthTokenStorePath: tokenStorePath,
 			MCPPath:             "/",
 		},
-		Logger: pslog.NewStructured(context.Background(), io.Discard),
+		Logger:   pslog.NewStructured(context.Background(), io.Discard),
+		Listener: listener,
 	})
 	if err != nil {
 		t.Fatalf("new mcp server: %v", err)
@@ -522,14 +531,28 @@ func TestOAuthDynamicRegistrationAndAuthorizationCodeFlow(t *testing.T) {
 	}
 }
 
-func reserveLoopbackAddr(t testing.TB) string {
+func reserveLoopbackListener(t testing.TB) net.Listener {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("reserve loopback addr: %v", err)
+		t.Fatalf("reserve loopback listener: %v", err)
 	}
-	defer ln.Close()
-	return ln.Addr().String()
+	t.Cleanup(func() {
+		_ = ln.Close()
+	})
+	return ln
+}
+
+func reserveLoopbackListenerAt(t testing.TB, addr string) net.Listener {
+	t.Helper()
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatalf("reserve loopback listener at %s: %v", addr, err)
+	}
+	t.Cleanup(func() {
+		_ = ln.Close()
+	})
+	return ln
 }
 
 func trustedHTTPClientFromServerBundle(t testing.TB, serverBundlePath string) *http.Client {

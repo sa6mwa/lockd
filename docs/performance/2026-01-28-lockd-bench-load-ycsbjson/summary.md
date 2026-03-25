@@ -12,7 +12,7 @@ Generated on 2026-01-28.
 - Command:
 
 ```bash
-go run ./cmd/lockd-bench -backend disk -mode load -ops 2000 -runs 1 -warmup 0 --ha failover -concurrency 8 -endpoint localhost:9341 -bundle /home/mike/g/lockd/devenv/volumes/lockd-config/client.pem
+go run ./cmd/lockd-bench -backend disk -mode load -ops 2000 -runs 1 -warmup 0 --ha failover -concurrency 8 -endpoint localhost:9341 -bundle ./devenv/volumes/lockd-config/client.pem
 ```
 
 ## Results

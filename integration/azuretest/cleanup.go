@@ -5,6 +5,8 @@ package azuretest
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
 	"os"
 	"path"
 	"strings"
@@ -12,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 
@@ -24,8 +27,8 @@ import (
 )
 
 var (
-	cleanupOnce sync.Once
-	cleanupErr  error
+	cleanupMu   sync.Mutex
+	cleanupDone = map[string]bool{}
 )
 
 // ResetContainerForCrypto removes leftover integration objects when storage encryption is enabled.
@@ -33,12 +36,41 @@ func ResetContainerForCrypto(tb testing.TB, cfg lockd.Config) {
 	if os.Getenv(cryptotest.EnvVar) != "1" {
 		return
 	}
-	cleanupOnce.Do(func() {
-		cleanupErr = cleanAzureContainer(cfg)
-	})
-	if cleanupErr != nil {
-		tb.Fatalf("azure cleanup: %v", cleanupErr)
+	key, err := cleanupScopeKey(cfg)
+	if err != nil {
+		tb.Fatalf("azure cleanup: %v", err)
 	}
+	if err := runScopedCleanupOnce(key, func() error {
+		return cleanAzureContainer(cfg)
+	}); err != nil {
+		tb.Fatalf("azure cleanup: %v", err)
+	}
+}
+
+func cleanupScopeKey(cfg lockd.Config) (string, error) {
+	azureCfg, err := lockd.BuildAzureConfig(cfg)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s/%s/%s", azureCfg.Account, azureCfg.Container, strings.Trim(azureCfg.Prefix, "/")), nil
+}
+
+func runScopedCleanupOnce(key string, fn func() error) error {
+	cleanupMu.Lock()
+	if cleanupDone[key] {
+		cleanupMu.Unlock()
+		return nil
+	}
+	cleanupMu.Unlock()
+
+	if err := fn(); err != nil {
+		return err
+	}
+
+	cleanupMu.Lock()
+	cleanupDone[key] = true
+	cleanupMu.Unlock()
+	return nil
 }
 
 func cleanAzureContainer(cfg lockd.Config) error {
@@ -53,13 +85,7 @@ func cleanAzureContainer(cfg lockd.Config) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	client := store.Client()
-	trimmed := strings.Trim(azureCfg.Prefix, "/")
-	var prefixes []*string
-	if trimmed != "" {
-		pref := trimmed + "/"
-		prefixes = append(prefixes, &pref)
-	}
-	prefixes = append(prefixes, nil)
+	prefixes := cleanupBlobPrefixes(strings.Trim(azureCfg.Prefix, "/"))
 	deleteSnapshots := azblob.DeleteSnapshotsOptionTypeInclude
 	deleteOpts := azblob.DeleteBlobOptions{DeleteSnapshots: to.Ptr(deleteSnapshots)}
 	for _, prefix := range prefixes {
@@ -73,25 +99,32 @@ func cleanAzureContainer(cfg lockd.Config) error {
 				if item.Name == nil {
 					continue
 				}
-				if _, err := client.DeleteBlob(ctx, azureCfg.Container, *item.Name, &deleteOpts); err != nil {
+				if _, err := client.DeleteBlob(ctx, azureCfg.Container, *item.Name, &deleteOpts); err != nil && !azureCleanupIgnoreDeleteError(err) {
 					return err
 				}
 			}
 		}
 	}
-	if keys, err := store.ListMetaKeys(ctx, locknamespaces.Default); err == nil {
-		for _, key := range keys {
-			if err := store.Remove(ctx, locknamespaces.Default, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
-				return err
-			}
-			if err := store.DeleteMeta(ctx, locknamespaces.Default, key, ""); err != nil && !errors.Is(err, storage.ErrNotFound) {
-				return err
-			}
-		}
-	} else {
-		return err
-	}
 	return nil
+}
+
+func cleanupBlobPrefixes(trimmedPrefix string) []*string {
+	if trimmedPrefix == "" {
+		return []*string{nil}
+	}
+	prefix := trimmedPrefix + "/"
+	return []*string{&prefix}
+}
+
+func azureCleanupIgnoreDeleteError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var respErr *azcore.ResponseError
+	if errors.As(err, &respErr) {
+		return respErr.StatusCode == http.StatusNotFound
+	}
+	return false
 }
 
 // CleanupQueryNamespaces removes seeded query documents for configured namespaces.

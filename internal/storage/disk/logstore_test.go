@@ -14,13 +14,14 @@ import (
 	"github.com/google/uuid"
 
 	"pkt.systems/lockd/internal/storage"
+	"pkt.systems/pslog"
 )
 
 func TestLogstoreRefreshSeesState(t *testing.T) {
 	root := t.TempDir()
 	ctx := context.Background()
 
-	store1 := newLogStore(root, time.Now, nil, 0, 0, false)
+	store1 := newLogStore(root, time.Now, nil, pslog.NoopLogger(), 0, 0, false)
 	ns1, err := store1.namespace("default")
 	if err != nil {
 		t.Fatalf("namespace store1: %v", err)
@@ -32,7 +33,7 @@ func TestLogstoreRefreshSeesState(t *testing.T) {
 		t.Fatalf("append record: %v", err)
 	}
 
-	store2 := newLogStore(root, time.Now, nil, 0, 0, false)
+	store2 := newLogStore(root, time.Now, nil, pslog.NoopLogger(), 0, 0, false)
 	ns2, err := store2.namespace("default")
 	if err != nil {
 		t.Fatalf("namespace store2: %v", err)
@@ -49,7 +50,7 @@ func TestLogstoreCloseAfterCommit(t *testing.T) {
 	root := t.TempDir()
 	ctx := context.Background()
 
-	store := newLogStore(root, time.Now, nil, 0, 0, true)
+	store := newLogStore(root, time.Now, nil, pslog.NoopLogger(), 0, 0, true)
 	ns, err := store.namespace("default")
 	if err != nil {
 		t.Fatalf("namespace: %v", err)
@@ -72,7 +73,7 @@ func TestLogstoreSingleWriterRefreshesMarkers(t *testing.T) {
 	root := t.TempDir()
 	ctx := context.Background()
 
-	writer := newLogStore(root, time.Now, nil, 0, 0, false)
+	writer := newLogStore(root, time.Now, nil, pslog.NoopLogger(), 0, 0, false)
 	writer.setSingleWriter(true)
 	writerNS, err := writer.namespace("default")
 	if err != nil {
@@ -82,7 +83,7 @@ func TestLogstoreSingleWriterRefreshesMarkers(t *testing.T) {
 		t.Fatalf("refresh writer: %v", err)
 	}
 
-	reader := newLogStore(root, time.Now, nil, 0, 0, false)
+	reader := newLogStore(root, time.Now, nil, pslog.NoopLogger(), 0, 0, false)
 	readerNS, err := reader.namespace("default")
 	if err != nil {
 		t.Fatalf("namespace reader: %v", err)
@@ -104,7 +105,7 @@ func TestLogstoreSingleWriterRefreshesMarkers(t *testing.T) {
 
 func TestLogstoreFlushAppendsSingle(t *testing.T) {
 	root := t.TempDir()
-	store := newLogStore(root, time.Now, nil, 0, 0, false)
+	store := newLogStore(root, time.Now, nil, pslog.NoopLogger(), 0, 0, false)
 	ns, err := store.namespace("default")
 	if err != nil {
 		t.Fatalf("namespace: %v", err)
@@ -183,7 +184,7 @@ func TestLogstoreAppendRecordStatePutETag(t *testing.T) {
 	root := t.TempDir()
 	ctx := context.Background()
 
-	store := newLogStore(root, time.Now, nil, 0, 0, false)
+	store := newLogStore(root, time.Now, nil, pslog.NoopLogger(), 0, 0, false)
 	ns, err := store.namespace("default")
 	if err != nil {
 		t.Fatalf("namespace: %v", err)

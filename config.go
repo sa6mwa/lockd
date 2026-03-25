@@ -55,10 +55,13 @@ const (
 	DefaultPprofListen = ""
 	// DefaultStore points the server at the in-memory backend when no store is provided.
 	DefaultStore = "mem://"
-	// DefaultHAMode controls multi-node behaviour when multiple servers share a backend.
+	// DefaultHAMode controls coordination behaviour when multiple servers share a backend.
 	DefaultHAMode = "failover"
 	// DefaultHALeaseTTL controls how long HA failover leases are held in failover mode.
-	DefaultHALeaseTTL = 5 * time.Second
+	DefaultHALeaseTTL = 10 * time.Second
+	// DefaultHASinglePresenceTTL controls how long single-mode presence records
+	// remain live on backends that require .ha advertisement.
+	DefaultHASinglePresenceTTL = 5 * time.Minute
 	// DefaultJSONMaxBytes bounds incoming JSON payloads.
 	DefaultJSONMaxBytes = 100 * 1024 * 1024
 	// DefaultAttachmentMaxBytes bounds attachment payloads when not specified by the caller.
@@ -97,6 +100,18 @@ const (
 	DefaultLogstoreCommitMaxOps = 4096
 	// DefaultLogstoreSegmentSize caps the size of a single logstore segment before rolling.
 	DefaultLogstoreSegmentSize = int64(64 << 20)
+	// DefaultLogstoreCompactionEnabled enables background logstore compaction on disk/NFS.
+	DefaultLogstoreCompactionEnabled = true
+	// DefaultLogstoreCompactionInterval controls how often the background compactor checks for eligible work.
+	DefaultLogstoreCompactionInterval = 30 * time.Minute
+	// DefaultLogstoreCompactionMinSegments requires at least this many sealed snapshot/segment files before compacting.
+	DefaultLogstoreCompactionMinSegments = 2
+	// DefaultLogstoreCompactionMinReclaimBytes requires at least this many bytes of reclaimable sealed data before compacting.
+	DefaultLogstoreCompactionMinReclaimBytes = int64(64 << 20)
+	// DefaultLogstoreCompactionDeleteGrace delays deletion of obsolete compacted files so in-flight readers can finish.
+	DefaultLogstoreCompactionDeleteGrace = 15 * time.Minute
+	// DefaultLogstoreCompactionMaxIOBytesPerSec throttles background compaction IO on constrained systems.
+	DefaultLogstoreCompactionMaxIOBytesPerSec = int64(8 << 20)
 	// DefaultQueryDocPrefetch caps the number of in-flight document fetches for query return=documents.
 	// A conservative default avoids over-saturating local disk backends; callers can raise this explicitly.
 	DefaultQueryDocPrefetch = 1
@@ -243,10 +258,13 @@ type Config struct {
 	EnableProfilingMetricsSet bool
 	// Store is the backend DSN (for example mem://, disk://..., s3://..., azure://...).
 	Store string
-	// HAMode controls cluster coordination strategy ("concurrent" or "failover").
+	// HAMode controls cluster coordination strategy ("concurrent", "failover", "single", or "auto").
 	HAMode string
-	// HALeaseTTL controls leader-lease lifetime in failover mode.
+	// HALeaseTTL controls leader-lease lifetime in failover mode and heartbeat cadence in auto mode.
 	HALeaseTTL time.Duration
+	// HASinglePresenceTTL controls how long single-mode presence records remain
+	// live on backends that require .ha advertisement.
+	HASinglePresenceTTL time.Duration
 	// DefaultNamespace is used when requests omit namespace.
 	DefaultNamespace string
 	// JSONMaxBytes caps incoming JSON payload size.
@@ -269,6 +287,22 @@ type Config struct {
 	LogstoreCommitMaxOps int
 	// LogstoreSegmentSize caps logstore segment size before rolling.
 	LogstoreSegmentSize int64
+	// LogstoreCompactionEnabled enables background logstore compaction on disk/NFS.
+	LogstoreCompactionEnabled bool
+	// LogstoreCompactionEnabledSet reports whether LogstoreCompactionEnabled was explicitly set.
+	LogstoreCompactionEnabledSet bool
+	// LogstoreCompactionInterval controls how often the background compactor checks for eligible work.
+	LogstoreCompactionInterval time.Duration
+	// LogstoreCompactionMinSegments requires at least this many sealed snapshot/segment files before compacting.
+	LogstoreCompactionMinSegments int
+	// LogstoreCompactionMinReclaimBytes requires at least this many bytes of reclaimable sealed data before compacting.
+	LogstoreCompactionMinReclaimBytes int64
+	// LogstoreCompactionDeleteGrace delays deletion of obsolete compacted files after cutover.
+	LogstoreCompactionDeleteGrace time.Duration
+	// LogstoreCompactionMaxIOBytesPerSec throttles background compaction IO (0 uses the default throttle).
+	LogstoreCompactionMaxIOBytesPerSec int64
+	// DisableLogstoreCompactionThrottling disables background compaction IO throttling entirely.
+	DisableLogstoreCompactionThrottling bool
 	// DisableMemQueueWatch disables in-memory queue watch hints (poll-only fallback).
 	DisableMemQueueWatch bool
 	// DefaultTTL is the default lease TTL for acquire/dequeue operations.
@@ -549,14 +583,19 @@ func (c *Config) Validate() error {
 		c.HAMode = DefaultHAMode
 	}
 	switch c.HAMode {
-	case "concurrent", "failover":
+	case "concurrent", "failover", "single", "auto":
 	default:
-		return fmt.Errorf("config: ha mode must be %q or %q", "concurrent", "failover")
+		return fmt.Errorf("config: ha mode must be %q, %q, %q, or %q", "concurrent", "failover", "single", "auto")
 	}
 	if c.HALeaseTTL == 0 {
 		c.HALeaseTTL = DefaultHALeaseTTL
-	} else if c.HALeaseTTL < 0 {
-		return fmt.Errorf("config: ha lease ttl must be >= 0")
+	} else if c.HALeaseTTL < 5*time.Second {
+		return fmt.Errorf("config: ha lease ttl must be >= 5s")
+	}
+	if c.HASinglePresenceTTL == 0 {
+		c.HASinglePresenceTTL = DefaultHASinglePresenceTTL
+	} else if c.HASinglePresenceTTL < 0 {
+		return fmt.Errorf("config: ha single presence ttl must be >= 0")
 	}
 	ns, err := NormalizeNamespace(c.DefaultNamespace, DefaultNamespace)
 	if err != nil {
@@ -682,6 +721,41 @@ func (c *Config) Validate() error {
 	}
 	if c.LogstoreSegmentSize <= 0 {
 		c.LogstoreSegmentSize = DefaultLogstoreSegmentSize
+	}
+	if !c.LogstoreCompactionEnabledSet {
+		c.LogstoreCompactionEnabled = DefaultLogstoreCompactionEnabled
+	}
+	if c.LogstoreCompactionInterval < 0 {
+		return fmt.Errorf("config: logstore compaction interval must be >= 0")
+	}
+	if c.LogstoreCompactionMinSegments < 0 {
+		return fmt.Errorf("config: logstore compaction min segments must be >= 0")
+	}
+	if c.LogstoreCompactionMinReclaimBytes < 0 {
+		return fmt.Errorf("config: logstore compaction min reclaim bytes must be >= 0")
+	}
+	if c.LogstoreCompactionDeleteGrace < 0 {
+		return fmt.Errorf("config: logstore compaction delete grace must be >= 0")
+	}
+	if c.LogstoreCompactionMaxIOBytesPerSec < 0 {
+		return fmt.Errorf("config: logstore compaction max io bytes/sec must be >= 0")
+	}
+	if c.LogstoreCompactionInterval == 0 {
+		c.LogstoreCompactionInterval = DefaultLogstoreCompactionInterval
+	}
+	if c.LogstoreCompactionMinSegments == 0 {
+		c.LogstoreCompactionMinSegments = DefaultLogstoreCompactionMinSegments
+	}
+	if c.LogstoreCompactionMinReclaimBytes == 0 {
+		c.LogstoreCompactionMinReclaimBytes = DefaultLogstoreCompactionMinReclaimBytes
+	}
+	if c.LogstoreCompactionDeleteGrace == 0 {
+		c.LogstoreCompactionDeleteGrace = DefaultLogstoreCompactionDeleteGrace
+	}
+	if c.DisableLogstoreCompactionThrottling {
+		c.LogstoreCompactionMaxIOBytesPerSec = 0
+	} else if c.LogstoreCompactionMaxIOBytesPerSec == 0 {
+		c.LogstoreCompactionMaxIOBytesPerSec = DefaultLogstoreCompactionMaxIOBytesPerSec
 	}
 	if c.S3MaxPartSize <= 0 {
 		c.S3MaxPartSize = DefaultS3MaxPartSize

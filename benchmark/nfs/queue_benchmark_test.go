@@ -43,13 +43,10 @@ func BenchmarkNFSQueueAckLease(b *testing.B) {
 func prepareNFSRoot(tb testing.TB) string {
 	tb.Helper()
 	benchenv.LoadEnvFile(tb, ".env.nfs")
-	base := strings.TrimSpace(os.Getenv("LOCKD_NFS_ROOT"))
-	if base == "" {
-		tb.Fatalf("LOCKD_NFS_ROOT must be set (source .env.nfs before running nfs benchmarks)")
-	}
+	base := nfsStoreRoot(tb)
 	info, err := os.Stat(base)
 	if err != nil || !info.IsDir() {
-		tb.Fatalf("LOCKD_NFS_ROOT %q unavailable: %v", base, err)
+		tb.Fatalf("LOCKD_STORE root %q unavailable: %v", base, err)
 	}
 	root := filepath.Join(base, "lockd-"+uuidv7.NewString())
 	if err := os.MkdirAll(root, 0o755); err != nil {
@@ -57,6 +54,22 @@ func prepareNFSRoot(tb testing.TB) string {
 	}
 	tb.Cleanup(func() { _ = os.RemoveAll(root) })
 	return root
+}
+
+func nfsStoreRoot(tb testing.TB) string {
+	tb.Helper()
+	store := strings.TrimSpace(os.Getenv("LOCKD_STORE"))
+	if store == "" {
+		tb.Fatalf("LOCKD_STORE must be set to disk:///absolute/path (source .env.nfs before running nfs benchmarks)")
+	}
+	parsed, err := url.Parse(store)
+	if err != nil {
+		tb.Fatalf("parse LOCKD_STORE: %v", err)
+	}
+	if !strings.EqualFold(parsed.Scheme, "disk") || parsed.Host != "" || !filepath.IsAbs(parsed.Path) {
+		tb.Fatalf("LOCKD_STORE must be a disk:///absolute/path URL, got %q", store)
+	}
+	return filepath.Clean(parsed.Path)
 }
 
 func buildNFSConfig(tb testing.TB, root string) lockd.Config {

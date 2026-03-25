@@ -89,21 +89,21 @@ to busy polling or skips the watch fallback entirely.
 ## Disk integration environment
 
 Disk-backed suites now **require** real filesystem roots. Populate
-`LOCKD_DISK_ROOT` (local disk, from `.env.disk`) and `LOCKD_NFS_ROOT`
-(NFS mount, from `.env.nfs`) before running any disk or NFS tests—for example:
+`LOCKD_STORE` with a `disk:///absolute/path` URL before running any disk or NFS
+tests. Use `.env.disk` for local disk and `.env.nfs` for NFS mounts, for example:
 
 ```
 set -a
-source .env.disk   # sets LOCKD_DISK_ROOT
-source .env.nfs    # sets LOCKD_NFS_ROOT
+source .env.disk   # sets LOCKD_STORE=disk:///absolute/path/to/local-root
+source .env.nfs    # sets LOCKD_STORE=disk:///absolute/path/to/nfs-mount
 set +a
 go test -tags 'integration disk' ./integration/...
 ```
 
 If either variable is missing the suite fails immediately; we no longer fall
-back to temporary directories. This guarantees the “disk” subtests operate on
-`LOCKD_DISK_ROOT` while the NFS subtests operate on `LOCKD_NFS_ROOT`,
-matching the environment you provisioned.
+back to temporary directories. The helpers now derive per-test subdirectories
+directly from `LOCKD_STORE`, so disk and NFS each operate on the exact backing
+root you provisioned without a second parallel environment variable.
 
 ## Disk AcquireForUpdate Failover Tests
 

@@ -572,7 +572,7 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 	backend := o.Backend
 	ownedBackend := false
 	if backend == nil {
-		backend, err = openBackend(cfg, crypto)
+		backend, err = openBackend(cfg, crypto, logger)
 		if err != nil {
 			if telemetry != nil {
 				shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -706,8 +706,9 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 			indexManager = indexer.NewManager(indexStore, indexer.WriterOptions{
 				FlushDocs:     flushDocs,
 				FlushInterval: flushInterval,
-				NoSync:        strings.EqualFold(cfg.HAMode, "failover"),
-				Logger:        indexLogger,
+				NoSync: strings.EqualFold(cfg.HAMode, "failover") ||
+					strings.EqualFold(cfg.HAMode, "single"),
+				Logger: indexLogger,
 			})
 			adapter, err := indexer.NewAdapter(indexer.AdapterConfig{
 				Store:  indexStore,
@@ -744,6 +745,7 @@ func NewServer(cfg Config, opts ...Option) (*Server, error) {
 		Clock:                      serverClock,
 		HAMode:                     cfg.HAMode,
 		HALeaseTTL:                 cfg.HALeaseTTL,
+		HASinglePresenceTTL:        cfg.HASinglePresenceTTL,
 		SearchAdapter:              searchAdapter,
 		NamespaceConfigs:           namespaceConfigs,
 		DefaultNamespaceConfig:     defaultNamespaceCfg,
@@ -1808,6 +1810,9 @@ func (s *Server) Abort(ctx context.Context) error {
 	if s == nil {
 		return nil
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	s.tcClusterNoLeave.Store(true)
 	s.mu.Lock()
 	if s.shutdown {
@@ -1840,7 +1845,15 @@ func (s *Server) Abort(ctx context.Context) error {
 		_ = s.listener.Close()
 		s.listener = nil
 	}
-	_ = ctx
+	if s.indexManager != nil {
+		s.indexManager.Close(ctx)
+	}
+	if s.backend != nil {
+		if err := s.backend.Abort(); err != nil {
+			s.logger.Error("abort.backend.abort_error", "error", err)
+			return err
+		}
+	}
 	return nil
 }
 

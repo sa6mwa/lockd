@@ -516,6 +516,19 @@ definitions:
         description: Version is the lockd monotonic version for the target object.
         type: integer
     type: object
+  api.MutateRequest:
+    properties:
+      mutations:
+        description: Mutations contains one or more LQL mutation expressions in execution
+          order.
+        items:
+          type: string
+        type: array
+      namespace:
+        description: Namespace scopes the request to a lockd namespace. Empty uses
+          the server default.
+        type: string
+    type: object
   api.NackIntent:
     enum:
     - failure
@@ -1334,7 +1347,6 @@ paths:
         name: content_type
         type: string
       - description: Maximum attachment size (0 = unlimited)
-        format: int64
         in: query
         name: max_bytes
         type: integer
@@ -1410,7 +1422,6 @@ paths:
         name: content_type
         type: string
       - description: Maximum attachment size (0 = unlimited)
-        format: int64
         in: query
         name: max_bytes
         type: integer
@@ -1486,7 +1497,6 @@ paths:
         name: content_type
         type: string
       - description: Maximum attachment size (0 = unlimited)
-        format: int64
         in: query
         name: max_bytes
         type: integer
@@ -1793,6 +1803,83 @@ paths:
       summary: Update lock metadata
       tags:
       - lease
+  /v1/mutate:
+    post:
+      consumes:
+      - application/json
+      description: Loads lease-visible state for the key, applies LQL mutations server-side
+        via streaming, then stages the mutated JSON as an update. Optional CAS headers
+        guard against concurrent updates.
+      parameters:
+      - description: Namespace override (defaults to server setting)
+        in: query
+        name: namespace
+        type: string
+      - description: Lease key
+        in: query
+        name: key
+        required: true
+        type: string
+      - description: Lease identifier (xid from Acquire, 20-char lowercase base32)
+        in: header
+        name: X-Lease-ID
+        required: true
+        type: string
+      - description: Transaction identifier (xid from Acquire)
+        in: header
+        name: X-Txn-ID
+        required: true
+        type: string
+      - description: Optional fencing token proof
+        in: header
+        name: X-Fencing-Token
+        type: string
+      - description: Conditionally update when the current version matches
+        in: header
+        name: X-If-Version
+        type: string
+      - description: Conditionally update when the state ETag matches
+        in: header
+        name: X-If-State-ETag
+        type: string
+      - description: LQL mutation request payload
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/api.MutateRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.UpdateResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "413":
+          description: Request Entity Too Large
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - mTLS: []
+      summary: Atomically mutate JSON state for a key using LQL
+      tags:
+      - lease
   /v1/namespace:
     get:
       description: Returns query engine preferences for the namespace.
@@ -1862,7 +1949,8 @@ paths:
       - application/json
       description: Executes a selector-based search within a namespace. When return=keys,
         responds with a JSON envelope containing keys + cursor. When return=documents,
-        streams NDJSON rows (one document per line).
+        streams NDJSON rows (one document per line) and emits query cursor/index metadata
+        in response trailers.
       parameters:
       - description: Namespace override (defaults to server setting)
         in: query
@@ -3045,6 +3133,15 @@ paths:
       - description: Conditionally update when the state ETag matches
         in: header
         name: X-If-State-ETag
+        type: string
+      - description: Optional lowercase hex SHA-256 checksum for the submitted JSON
+          bytes (pre-compaction)
+        in: header
+        name: X-Expected-SHA256
+        type: string
+      - description: Optional exact byte length for the submitted JSON bytes (pre-compaction)
+        in: header
+        name: X-Expected-Bytes
         type: string
       - description: New JSON state payload
         in: body

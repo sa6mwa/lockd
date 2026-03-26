@@ -848,9 +848,9 @@ func TestMCPPresetCommandListsAndExportsBuiltIns(t *testing.T) {
 	root := newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
 	var stdout bytes.Buffer
 	root.SetOut(&stdout)
-	root.SetArgs([]string{"mcp", "preset", "--list"})
+	root.SetArgs([]string{"mcp", "preset", "list"})
 	if err := root.Execute(); err != nil {
-		t.Fatalf("execute mcp preset --list: %v", err)
+		t.Fatalf("execute mcp preset list: %v", err)
 	}
 	if !strings.Contains(stdout.String(), "memory") {
 		t.Fatalf("expected memory in preset list, got %q", stdout.String())
@@ -859,9 +859,9 @@ func TestMCPPresetCommandListsAndExportsBuiltIns(t *testing.T) {
 	root = newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
 	stdout.Reset()
 	root.SetOut(&stdout)
-	root.SetArgs([]string{"mcp", "preset", "memory"})
+	root.SetArgs([]string{"mcp", "preset", "get", "memory"})
 	if err := root.Execute(); err != nil {
-		t.Fatalf("execute mcp preset memory: %v", err)
+		t.Fatalf("execute mcp preset get memory: %v", err)
 	}
 	defs, err := preset.ParseYAML(stdout.Bytes())
 	if err != nil {
@@ -875,9 +875,9 @@ func TestMCPPresetCommandListsAndExportsBuiltIns(t *testing.T) {
 	root = newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
 	stdout.Reset()
 	root.SetOut(&stdout)
-	root.SetArgs([]string{"mcp", "preset", "--out", outPath})
+	root.SetArgs([]string{"mcp", "preset", "get", "memory", "--out", outPath})
 	if err := root.Execute(); err != nil {
-		t.Fatalf("execute mcp preset --out: %v", err)
+		t.Fatalf("execute mcp preset get --out: %v", err)
 	}
 	data, err := os.ReadFile(outPath)
 	if err != nil {
@@ -885,6 +885,29 @@ func TestMCPPresetCommandListsAndExportsBuiltIns(t *testing.T) {
 	}
 	if !bytes.Contains(data, []byte("preset: memory")) {
 		t.Fatalf("expected memory preset in written yaml, got %q", string(data))
+	}
+}
+
+func TestMCPPresetCommandHelpUsesSubcommands(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	root := newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetArgs([]string{"mcp", "preset", "--help"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute mcp preset --help: %v", err)
+	}
+	output := stdout.String()
+	if !strings.Contains(output, "list") || !strings.Contains(output, "get") {
+		t.Fatalf("expected list/get in help output, got %q", output)
+	}
+	if strings.Contains(output, "  -l, --list ") || strings.Contains(output, "\n      --list ") {
+		t.Fatalf("did not expect legacy --list flag in help output, got %q", output)
+	}
+	if strings.Contains(output, "DisableFlagParsing") {
+		t.Fatalf("did not expect custom parser artifacts in help output, got %q", output)
 	}
 }
 

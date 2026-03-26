@@ -561,29 +561,28 @@ func newMCPClientCommand() *cobra.Command {
 
 func newMCPPresetCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:                "preset [name]",
-		Short:              "List or export built-in MCP preset templates",
-		DisableFlagParsing: true,
+		Use:   "preset",
+		Short: "List or export built-in MCP preset templates",
+	}
+	cmd.AddCommand(&cobra.Command{
+		Use:   "list",
+		Short: "List built-in MCP preset templates",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			listOnly, outPath, target, err := parseMCPPresetCommandArgs(args)
-			if err != nil {
-				return err
+			for _, name := range preset.BuiltInNames() {
+				fmt.Fprintln(cmd.OutOrStdout(), name)
 			}
-			if listOnly {
-				for _, name := range preset.BuiltInNames() {
-					fmt.Fprintln(cmd.OutOrStdout(), name)
-				}
-				return nil
-			}
-			if target == "" && strings.TrimSpace(outPath) == "" {
-				return fmt.Errorf("provide a preset name, --list, or --out")
-			}
-			var payload []byte
-			if target == "" {
-				payload, err = preset.AllBuiltInYAML()
-			} else {
-				payload, err = preset.BuiltInYAML(strings.ToLower(target))
-			}
+			return nil
+		},
+	})
+	var outPath string
+	getCmd := &cobra.Command{
+		Use:   "get <name>",
+		Short: "Print one built-in MCP preset template",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			target := strings.ToLower(strings.TrimSpace(args[0]))
+			payload, err := preset.BuiltInYAML(target)
 			if err != nil {
 				return err
 			}
@@ -598,6 +597,8 @@ func newMCPPresetCommand() *cobra.Command {
 			return err
 		},
 	}
+	getCmd.Flags().StringVarP(&outPath, "out", "o", "", "write preset YAML to a file instead of stdout")
+	cmd.AddCommand(getCmd)
 	return cmd
 }
 
@@ -723,51 +724,6 @@ func enabledClientPresetNames(client mcpadmin.Client) []string {
 	}
 	sort.Strings(names)
 	return names
-}
-
-func parseMCPPresetCommandArgs(args []string) (bool, string, string, error) {
-	listOnly := false
-	outPath := ""
-	target := ""
-	for i := 0; i < len(args); i++ {
-		arg := strings.TrimSpace(args[i])
-		switch arg {
-		case "-l", "--list":
-			listOnly = true
-		case "-o", "--out":
-			if i+1 >= len(args) {
-				return false, "", "", fmt.Errorf("%s requires a value", arg)
-			}
-			i++
-			outPath = strings.TrimSpace(args[i])
-			if outPath == "" {
-				return false, "", "", fmt.Errorf("%s requires a non-empty value", arg)
-			}
-		default:
-			if strings.HasPrefix(arg, "--out=") {
-				outPath = strings.TrimSpace(strings.TrimPrefix(arg, "--out="))
-				if outPath == "" {
-					return false, "", "", fmt.Errorf("--out requires a non-empty value")
-				}
-				continue
-			}
-			if strings.HasPrefix(arg, "-o=") {
-				outPath = strings.TrimSpace(strings.TrimPrefix(arg, "-o="))
-				if outPath == "" {
-					return false, "", "", fmt.Errorf("-o requires a non-empty value")
-				}
-				continue
-			}
-			if strings.HasPrefix(arg, "-") {
-				return false, "", "", fmt.Errorf("unknown preset flag %q", arg)
-			}
-			if target != "" {
-				return false, "", "", fmt.Errorf("expected at most one preset name")
-			}
-			target = arg
-		}
-	}
-	return listOnly, outPath, target, nil
 }
 
 func explainMCPAdminStateError(err error) error {

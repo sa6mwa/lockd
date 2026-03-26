@@ -954,6 +954,168 @@ func TestMCPClientToolsListWritesOutputFile(t *testing.T) {
 	}
 }
 
+func TestMCPClientCommandsAcceptNameReference(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	statePath, tokenStorePath, _ := bootstrapMCPStateForClientTests(t)
+	clientID := addMCPClientForTests(t, statePath, tokenStorePath, "memory-client")
+
+	origPrettyX := mcpPrettyXRunner
+	t.Cleanup(func() { mcpPrettyXRunner = origPrettyX })
+	mcpPrettyXRunner = func(_ context.Context, payload []byte, out io.Writer) error {
+		_, err := out.Write(payload)
+		return err
+	}
+
+	testCases := []struct {
+		name  string
+		args  []string
+		check func(t *testing.T, output string)
+	}{
+		{
+			name: "show",
+			args: []string{"client", "show", "memory-client"},
+			check: func(t *testing.T, output string) {
+				t.Helper()
+				if !strings.Contains(output, "client_id: "+clientID) {
+					t.Fatalf("expected show output to include client id %q, got %q", clientID, output)
+				}
+			},
+		},
+		{
+			name: "credentials",
+			args: []string{"client", "credentials", "memory-client"},
+			check: func(t *testing.T, output string) {
+				t.Helper()
+				if !strings.Contains(output, "LOCKD_MCP_OAUTH_CLIENT_ID="+clientID) {
+					t.Fatalf("expected credentials output to include client id %q, got %q", clientID, output)
+				}
+			},
+		},
+		{
+			name: "tools-list",
+			args: []string{"client", "tools-list", "memory-client"},
+			check: func(t *testing.T, output string) {
+				t.Helper()
+				if !strings.Contains(output, `"jsonrpc":"2.0"`) {
+					t.Fatalf("expected tools-list json output, got %q", output)
+				}
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
+			var stdout bytes.Buffer
+			root.SetOut(&stdout)
+			root.SetArgs(append([]string{
+				"mcp",
+				"--state-file", statePath,
+				"--token-store", tokenStorePath,
+			}, tc.args...))
+			if err := root.Execute(); err != nil {
+				t.Fatalf("execute %s by name: %v", tc.name, err)
+			}
+			tc.check(t, stdout.String())
+		})
+	}
+}
+
+func TestMCPClientMutatingCommandsAcceptNameReference(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	t.Run("update", func(t *testing.T) {
+		statePath, tokenStorePath, _ := bootstrapMCPStateForClientTests(t)
+		clientID := addMCPClientForTests(t, statePath, tokenStorePath, "memory-client")
+		root := newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
+		root.SetArgs([]string{
+			"mcp", "--state-file", statePath, "--token-store", tokenStorePath,
+			"client", "update", "memory-client", "--name", "memory-renamed",
+		})
+		if err := root.Execute(); err != nil {
+			t.Fatalf("update by name: %v", err)
+		}
+		data, err := mcpstate.Load(statePath)
+		if err != nil {
+			t.Fatalf("load state: %v", err)
+		}
+		client, ok := findClientByID(data.Clients, clientID)
+		if !ok || client.Name != "memory-renamed" {
+			t.Fatalf("updated client name=%q want memory-renamed", client.Name)
+		}
+	})
+
+	t.Run("revoke-restore", func(t *testing.T) {
+		statePath, tokenStorePath, _ := bootstrapMCPStateForClientTests(t)
+		clientID := addMCPClientForTests(t, statePath, tokenStorePath, "memory-client")
+		root := newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
+		root.SetArgs([]string{
+			"mcp", "--state-file", statePath, "--token-store", tokenStorePath,
+			"client", "revoke", "memory-client",
+		})
+		if err := root.Execute(); err != nil {
+			t.Fatalf("revoke by name: %v", err)
+		}
+		root = newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
+		root.SetArgs([]string{
+			"mcp", "--state-file", statePath, "--token-store", tokenStorePath,
+			"client", "restore", "memory-client",
+		})
+		if err := root.Execute(); err != nil {
+			t.Fatalf("restore by name: %v", err)
+		}
+		data, err := mcpstate.Load(statePath)
+		if err != nil {
+			t.Fatalf("load state: %v", err)
+		}
+		client, ok := findClientByID(data.Clients, clientID)
+		if !ok || client.Revoked {
+			t.Fatalf("expected restored client active, got %#v", client)
+		}
+	})
+
+	t.Run("rotate-secret", func(t *testing.T) {
+		statePath, tokenStorePath, _ := bootstrapMCPStateForClientTests(t)
+		clientID := addMCPClientForTests(t, statePath, tokenStorePath, "memory-client")
+		root := newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
+		var stdout bytes.Buffer
+		root.SetOut(&stdout)
+		root.SetArgs([]string{
+			"mcp", "--state-file", statePath, "--token-store", tokenStorePath,
+			"client", "rotate-secret", "memory-client",
+		})
+		if err := root.Execute(); err != nil {
+			t.Fatalf("rotate-secret by name: %v", err)
+		}
+		if !strings.Contains(stdout.String(), "client_id: "+clientID) {
+			t.Fatalf("expected rotate-secret output to include client id %q, got %q", clientID, stdout.String())
+		}
+	})
+
+	t.Run("remove", func(t *testing.T) {
+		statePath, tokenStorePath, _ := bootstrapMCPStateForClientTests(t)
+		clientID := addMCPClientForTests(t, statePath, tokenStorePath, "memory-client")
+		root := newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
+		root.SetArgs([]string{
+			"mcp", "--state-file", statePath, "--token-store", tokenStorePath,
+			"client", "remove", "memory-client",
+		})
+		if err := root.Execute(); err != nil {
+			t.Fatalf("remove by name: %v", err)
+		}
+		data, err := mcpstate.Load(statePath)
+		if err != nil {
+			t.Fatalf("load state: %v", err)
+		}
+		if _, ok := findClientByID(data.Clients, clientID); ok {
+			t.Fatalf("expected client %s removed", clientID)
+		}
+	})
+}
+
 func TestMCPPresetCommandListsAndExportsBuiltIns(t *testing.T) {
 	viper.Reset()
 	t.Cleanup(viper.Reset)
@@ -1222,7 +1384,7 @@ func TestMCPClientAddAutoInitializesState(t *testing.T) {
 	}
 }
 
-func TestMCPClientAddUsesDefaultNameWhenEmpty(t *testing.T) {
+func TestMCPClientAddAutoGeneratesNameWhenEmpty(t *testing.T) {
 	viper.Reset()
 	t.Cleanup(viper.Reset)
 
@@ -1246,6 +1408,16 @@ func TestMCPClientAddUsesDefaultNameWhenEmpty(t *testing.T) {
 	}
 	if len(data.Clients) != 2 {
 		t.Fatalf("expected bootstrap+added clients, got %d", len(data.Clients))
+	}
+	var foundGenerated bool
+	for _, client := range data.Clients {
+		if client.Name == "client" {
+			foundGenerated = true
+			break
+		}
+	}
+	if !foundGenerated {
+		t.Fatalf("expected generated client name %q in state: %#v", "client", data.Clients)
 	}
 }
 
@@ -1540,6 +1712,28 @@ func bootstrapMCPStateForClientTests(t *testing.T) (statePath, tokenStorePath, c
 		t.Fatalf("bootstrap state: %v", err)
 	}
 	return statePath, tokenStorePath, bootstrap.ClientID
+}
+
+func addMCPClientForTests(t *testing.T, statePath, tokenStorePath, name string) string {
+	t.Helper()
+	root := newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetArgs([]string{
+		"mcp",
+		"--state-file", statePath,
+		"--token-store", tokenStorePath,
+		"client", "add",
+		"--name", name,
+	})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("add client for test: %v", err)
+	}
+	clientID := parseOutputField(stdout.String(), "client_id:")
+	if clientID == "" {
+		t.Fatalf("expected client_id in add output, got %q", stdout.String())
+	}
+	return clientID
 }
 
 func findClientByID(clients map[string]mcpstate.Client, clientID string) (mcpstate.Client, bool) {

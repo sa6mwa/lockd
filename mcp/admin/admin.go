@@ -136,12 +136,28 @@ func (s *Service) GetClient(clientID string) (Client, error) {
 		return Client{}, err
 	}
 	target := strings.TrimSpace(clientID)
+	if target == "" {
+		return Client{}, fmt.Errorf("oauth client reference required")
+	}
 	for _, client := range clients {
 		if client.ID == target {
 			return client, nil
 		}
 	}
-	return Client{}, fmt.Errorf("oauth client %s not found", target)
+	var matches []Client
+	for _, client := range clients {
+		if strings.EqualFold(strings.TrimSpace(client.Name), target) {
+			matches = append(matches, client)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return Client{}, fmt.Errorf("oauth client %q not found", target)
+	case 1:
+		return matches[0], nil
+	default:
+		return Client{}, fmt.Errorf("oauth client name %q is ambiguous", target)
+	}
 }
 
 // AddClient creates a new confidential OAuth client.
@@ -169,39 +185,55 @@ func (s *Service) AddClient(req AddClientRequest) (AddClientResponse, error) {
 
 // RemoveClient removes a client from state.
 func (s *Service) RemoveClient(clientID string) error {
+	client, err := s.GetClient(clientID)
+	if err != nil {
+		return err
+	}
 	mgr, err := s.manager()
 	if err != nil {
 		return err
 	}
-	return mgr.RemoveClient(strings.TrimSpace(clientID))
+	return mgr.RemoveClient(client.ID)
 }
 
 // SetClientRevoked toggles revocation state.
 func (s *Service) SetClientRevoked(clientID string, revoked bool) error {
+	client, err := s.GetClient(clientID)
+	if err != nil {
+		return err
+	}
 	mgr, err := s.manager()
 	if err != nil {
 		return err
 	}
-	return mgr.RevokeClient(strings.TrimSpace(clientID), revoked)
+	return mgr.RevokeClient(client.ID, revoked)
 }
 
 // RotateClientSecret rotates and returns a new secret.
 func (s *Service) RotateClientSecret(clientID string) (string, error) {
+	client, err := s.GetClient(clientID)
+	if err != nil {
+		return "", err
+	}
 	mgr, err := s.manager()
 	if err != nil {
 		return "", err
 	}
-	return mgr.RotateClientSecret(strings.TrimSpace(clientID))
+	return mgr.RotateClientSecret(client.ID)
 }
 
 // UpdateClient updates mutable fields for one client.
 func (s *Service) UpdateClient(req UpdateClientRequest) error {
+	client, err := s.GetClient(req.ClientID)
+	if err != nil {
+		return err
+	}
 	mgr, err := s.manager()
 	if err != nil {
 		return err
 	}
 	return mgr.UpdateClient(oauth.UpdateClientRequest{
-		ClientID:     strings.TrimSpace(req.ClientID),
+		ClientID:     client.ID,
 		Name:         req.Name,
 		Namespace:    req.Namespace,
 		LockdPreset:  req.LockdPreset,

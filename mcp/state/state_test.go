@@ -1,6 +1,7 @@
 package state
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -243,5 +244,43 @@ func TestUpdateClientPresetsRejectsEmptySurface(t *testing.T) {
 	}
 	if err := data.UpdateClientPresets(client.ID, false, nil, now); err == nil {
 		t.Fatalf("expected empty surface update to fail")
+	}
+}
+
+func TestAddClientRejectsDuplicateNameCaseInsensitive(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	data := NewData("https://issuer.example", now)
+	if _, _, err := data.AddClient("Memory", "", true, nil, []string{"read"}, nil, now); err != nil {
+		t.Fatalf("add client: %v", err)
+	}
+	if _, _, err := data.AddClient("memory", "", true, nil, []string{"read"}, nil, now); err == nil {
+		t.Fatalf("expected duplicate client name to fail")
+	} else if !errors.Is(err, ErrClientNameConflict) {
+		t.Fatalf("expected ErrClientNameConflict, got %v", err)
+	}
+}
+
+func TestUpdateClientNameRejectsDuplicateRevokedName(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	data := NewData("https://issuer.example", now)
+	first, _, err := data.AddClient("first", "", true, nil, []string{"read"}, nil, now)
+	if err != nil {
+		t.Fatalf("add first client: %v", err)
+	}
+	second, _, err := data.AddClient("second", "", true, nil, []string{"read"}, nil, now)
+	if err != nil {
+		t.Fatalf("add second client: %v", err)
+	}
+	if err := data.RevokeClient(first.ID, true, now); err != nil {
+		t.Fatalf("revoke first client: %v", err)
+	}
+	if err := data.UpdateClientName(second.ID, "FIRST", now); err == nil {
+		t.Fatalf("expected duplicate revoked client name to fail")
+	} else if !errors.Is(err, ErrClientNameConflict) {
+		t.Fatalf("expected ErrClientNameConflict, got %v", err)
 	}
 }

@@ -391,7 +391,10 @@ func newMCPClientCommand() *cobra.Command {
 			}
 			name := strings.TrimSpace(addName)
 			if name == "" {
-				name = mcpAutoBootstrapClientName
+				name, err = nextAvailableMCPClientName(adminSvc, "client")
+				if err != nil {
+					return err
+				}
 			}
 			lockdPreset, presets, err := resolveMCPPresetFlags(addPresetFlags)
 			if err != nil {
@@ -413,7 +416,7 @@ func newMCPClientCommand() *cobra.Command {
 			return nil
 		},
 	}
-	addCmd.Flags().StringVar(&addName, "name", mcpAutoBootstrapClientName, "client display name")
+	addCmd.Flags().StringVar(&addName, "name", "", "client display name (default auto-generated)")
 	addCmd.Flags().StringVarP(&addNamespace, "namespace", "n", "", "default namespace override for this client")
 	addCmd.Flags().StringSliceVarP(&addPresetFlags, "preset", "p", nil, "enable preset(s): lockd or preset YAML file path(s)")
 	addCmd.Flags().StringSliceVar(&addScopes, "scope", nil, "allowed scope(s)")
@@ -430,11 +433,14 @@ func newMCPClientCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			rmID := strings.TrimSpace(args[0])
-			if err := adminSvc.RemoveClient(rmID); err != nil {
+			client, err := adminSvc.GetClient(strings.TrimSpace(args[0]))
+			if err != nil {
 				return explainMCPAdminStateError(err)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "removed client %s\n", rmID)
+			if err := adminSvc.RemoveClient(client.ID); err != nil {
+				return explainMCPAdminStateError(err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "removed client %s\n", client.ID)
 			return nil
 		},
 	}
@@ -450,11 +456,14 @@ func newMCPClientCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			revokeID := strings.TrimSpace(args[0])
-			if err := adminSvc.SetClientRevoked(revokeID, true); err != nil {
+			client, err := adminSvc.GetClient(strings.TrimSpace(args[0]))
+			if err != nil {
 				return explainMCPAdminStateError(err)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "revoked client %s\n", revokeID)
+			if err := adminSvc.SetClientRevoked(client.ID, true); err != nil {
+				return explainMCPAdminStateError(err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "revoked client %s\n", client.ID)
 			return nil
 		},
 	}
@@ -470,11 +479,14 @@ func newMCPClientCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			restoreID := strings.TrimSpace(args[0])
-			if err := adminSvc.SetClientRevoked(restoreID, false); err != nil {
+			client, err := adminSvc.GetClient(strings.TrimSpace(args[0]))
+			if err != nil {
 				return explainMCPAdminStateError(err)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "restored client %s\n", restoreID)
+			if err := adminSvc.SetClientRevoked(client.ID, false); err != nil {
+				return explainMCPAdminStateError(err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "restored client %s\n", client.ID)
 			return nil
 		},
 	}
@@ -490,12 +502,15 @@ func newMCPClientCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			rotateID := strings.TrimSpace(args[0])
-			secret, err := adminSvc.RotateClientSecret(rotateID)
+			client, err := adminSvc.GetClient(strings.TrimSpace(args[0]))
 			if err != nil {
 				return explainMCPAdminStateError(err)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "client_id: %s\n", rotateID)
+			secret, err := adminSvc.RotateClientSecret(client.ID)
+			if err != nil {
+				return explainMCPAdminStateError(err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "client_id: %s\n", client.ID)
 			fmt.Fprintf(cmd.OutOrStdout(), "client_secret: %s\n", secret)
 			return nil
 		},
@@ -559,7 +574,10 @@ func newMCPClientCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			updateID := strings.TrimSpace(args[0])
+			client, err := adminSvc.GetClient(strings.TrimSpace(args[0]))
+			if err != nil {
+				return explainMCPAdminStateError(err)
+			}
 			var namespacePtr *string
 			if namespaceSet {
 				trimmedNamespace := strings.TrimSpace(updateNamespace)
@@ -576,7 +594,7 @@ func newMCPClientCommand() *cobra.Command {
 				presets = resolvedPresets
 			}
 			if err := adminSvc.UpdateClient(mcpadmin.UpdateClientRequest{
-				ClientID:     updateID,
+				ClientID:     client.ID,
 				Name:         updateName,
 				Namespace:    namespacePtr,
 				LockdPreset:  lockdPresetPtr,
@@ -586,7 +604,7 @@ func newMCPClientCommand() *cobra.Command {
 			}); err != nil {
 				return explainMCPAdminStateError(err)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "updated client %s\n", updateID)
+			fmt.Fprintf(cmd.OutOrStdout(), "updated client %s\n", client.ID)
 			return nil
 		},
 	}
@@ -765,6 +783,35 @@ func enabledClientPresetNames(client mcpadmin.Client) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+func nextAvailableMCPClientName(adminSvc *mcpadmin.Service, base string) (string, error) {
+	base = strings.TrimSpace(base)
+	if base == "" {
+		base = "client"
+	}
+	clients, err := adminSvc.ListClients()
+	if err != nil {
+		return "", explainMCPAdminStateError(err)
+	}
+	used := make(map[string]struct{}, len(clients))
+	for _, client := range clients {
+		name := strings.ToLower(strings.TrimSpace(client.Name))
+		if name == "" {
+			continue
+		}
+		used[name] = struct{}{}
+	}
+	candidate := base
+	if _, ok := used[strings.ToLower(candidate)]; !ok {
+		return candidate, nil
+	}
+	for i := 2; ; i++ {
+		candidate = fmt.Sprintf("%s-%d", base, i)
+		if _, ok := used[strings.ToLower(candidate)]; !ok {
+			return candidate, nil
+		}
+	}
 }
 
 func explainMCPAdminStateError(err error) error {

@@ -41,6 +41,8 @@ var (
 	ErrNotBootstrapped = errors.New("mcp state not bootstrapped")
 	// ErrClientNotFound indicates a requested OAuth client ID was not found.
 	ErrClientNotFound = errors.New("oauth client not found")
+	// ErrClientNameConflict indicates a requested client name is already in use.
+	ErrClientNameConflict = errors.New("oauth client name already exists")
 )
 
 // Data is the persisted MCP OAuth state payload.
@@ -236,6 +238,9 @@ func (d *Data) AddClient(name string, namespace string, lockdPreset bool, preset
 	if name == "" {
 		return Client{}, "", fmt.Errorf("client name required")
 	}
+	if existingID, ok := d.findClientIDByName(name); ok {
+		return Client{}, "", fmt.Errorf("%w: %s", ErrClientNameConflict, d.Clients[existingID].Name)
+	}
 	if !lockdPreset && len(presets) == 0 {
 		lockdPreset = true
 	}
@@ -380,6 +385,9 @@ func (d *Data) UpdateClientName(clientID, name string, now time.Time) error {
 	if !ok {
 		return ErrClientNotFound
 	}
+	if existingID, ok := d.findClientIDByName(name); ok && existingID != clientID {
+		return fmt.Errorf("%w: %s", ErrClientNameConflict, d.Clients[existingID].Name)
+	}
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
@@ -388,6 +396,19 @@ func (d *Data) UpdateClientName(clientID, name string, now time.Time) error {
 	d.Clients[clientID] = client
 	d.UpdatedAt = now.UTC()
 	return nil
+}
+
+func (d *Data) findClientIDByName(name string) (string, bool) {
+	target := strings.TrimSpace(name)
+	if target == "" {
+		return "", false
+	}
+	for id, client := range d.Clients {
+		if strings.EqualFold(strings.TrimSpace(client.Name), target) {
+			return id, true
+		}
+	}
+	return "", false
 }
 
 // UpdateClientScopes replaces client scopes.

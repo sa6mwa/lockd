@@ -21,6 +21,7 @@ const (
 	maxSchemaObjectDepth = 1
 )
 
+// DefaultOperations is the default preset kind operation set.
 var DefaultOperations = []Operation{
 	OperationQuery,
 	OperationStatePut,
@@ -61,11 +62,17 @@ type GeneratedTool struct {
 type Operation string
 
 const (
-	OperationQuery          Operation = "query"
-	OperationStatePut       Operation = "state.put"
-	OperationStateGet       Operation = "state.get"
-	OperationStateDelete    Operation = "state.delete"
-	OperationQueueEnqueue   Operation = "queue.enqueue"
+	// OperationQuery exposes keys-only preset queries.
+	OperationQuery Operation = "query"
+	// OperationStatePut writes a schema-backed preset document by key.
+	OperationStatePut Operation = "state.put"
+	// OperationStateGet reads a schema-backed preset document by key.
+	OperationStateGet Operation = "state.get"
+	// OperationStateDelete removes a schema-backed preset document by key.
+	OperationStateDelete Operation = "state.delete"
+	// OperationQueueEnqueue enqueues a schema-backed preset payload.
+	OperationQueueEnqueue Operation = "queue.enqueue"
+	// OperationAttachmentsGet retrieves an attachment for a preset document.
 	OperationAttachmentsGet Operation = "attachments.get"
 )
 

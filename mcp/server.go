@@ -273,15 +273,11 @@ func (s *server) buildMux() (*http.ServeMux, error) {
 	mcpSrv := mcpsdk.NewServer(&mcpsdk.Implementation{
 		Name:    "lockd-mcp-facade",
 		Version: "0.1.0",
-	}, &mcpsdk.ServerOptions{
-		Instructions:       defaultServerInstructions(s.cfg),
-		InitializedHandler: s.handleInitialized,
-	})
-	s.registerResources(mcpSrv)
-	s.registerTools(mcpSrv)
+	}, &mcpsdk.ServerOptions{})
 
-	streamable := mcpsdk.NewStreamableHTTPHandler(func(_ *http.Request) *mcpsdk.Server {
-		return mcpSrv
+	streamable := mcpsdk.NewStreamableHTTPHandler(func(r *http.Request) *mcpsdk.Server {
+		_ = mcpSrv
+		return s.newMCPServerForSurface(s.toolSurfaceForRequest(r))
 	}, nil)
 
 	var mcpHandler http.Handler = streamable
@@ -316,6 +312,10 @@ func (s *server) handleProtectedResourceMetadata(w http.ResponseWriter, r *http.
 }
 
 func (s *server) registerTools(srv *mcpsdk.Server) {
+	s.registerToolsForSurface(srv, defaultToolSurface())
+}
+
+func (s *server) registerLockdTools(srv *mcpsdk.Server) {
 	descriptions := buildToolDescriptions(s.cfg)
 	desc := func(name string) string {
 		description, ok := descriptions[name]

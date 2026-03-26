@@ -19,11 +19,13 @@ import (
 	"testing"
 	"time"
 
+	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/clientcredentials"
 
 	"pkt.systems/lockd"
 	mcpadmin "pkt.systems/lockd/mcp/admin"
+	presetcfg "pkt.systems/lockd/mcp/preset"
 	"pkt.systems/lockd/tlsutil"
 	"pkt.systems/pslog"
 )
@@ -210,6 +212,150 @@ func TestOAuthClientCredentialsFlowWithBaseURLVariants(t *testing.T) {
 	}
 }
 
+func TestOAuthToolsListUsesClientPresetSurface(t *testing.T) {
+	t.Parallel()
+
+	upstream := lockd.StartTestServer(t, lockd.WithoutTestMTLS())
+	listener := reserveLoopbackListener(t)
+	listen := listener.Addr().String()
+	baseURL := "https://" + listen
+	tmp := t.TempDir()
+
+	caBundle, err := lockd.CreateCABundle(lockd.CreateCABundleRequest{})
+	if err != nil {
+		t.Fatalf("create ca bundle: %v", err)
+	}
+	serverBundle, err := lockd.CreateServerBundle(lockd.CreateServerBundleRequest{
+		CABundlePEM: caBundle,
+		Hosts:       []string{"127.0.0.1", "localhost"},
+	})
+	if err != nil {
+		t.Fatalf("create server bundle: %v", err)
+	}
+	serverBundlePath := filepath.Join(tmp, "mcp-server.pem")
+	if err := os.WriteFile(serverBundlePath, serverBundle, 0o600); err != nil {
+		t.Fatalf("write mcp server bundle: %v", err)
+	}
+	httpClient := trustedHTTPClientFromServerBundle(t, serverBundlePath)
+
+	statePath := filepath.Join(tmp, "mcp.pem")
+	tokenStorePath := filepath.Join(tmp, "mcp-token-store.enc.json")
+	admin := mcpadmin.New(mcpadmin.Config{
+		StatePath:  statePath,
+		TokenStore: tokenStorePath,
+	})
+	boot, err := admin.Bootstrap(mcpadmin.BootstrapRequest{
+		Path:              statePath,
+		Issuer:            baseURL,
+		InitialClientName: "preset-client",
+		InitialScopes:     []string{"read"},
+	})
+	if err != nil {
+		t.Fatalf("bootstrap oauth state: %v", err)
+	}
+	lockdPreset := false
+	if err := admin.UpdateClient(mcpadmin.UpdateClientRequest{
+		ClientID:    boot.ClientID,
+		LockdPreset: &lockdPreset,
+		Presets: []presetcfg.Definition{{
+			Name: "memory",
+			Kinds: []presetcfg.Kind{{
+				Name:      "note",
+				Namespace: "agents",
+				Schema: presetcfg.Schema{
+					Type: "object",
+					Properties: map[string]presetcfg.Schema{
+						"text": {Type: "string"},
+					},
+				},
+			}},
+		}},
+	}); err != nil {
+		t.Fatalf("update client presets: %v", err)
+	}
+
+	srv, err := NewServer(NewServerRequest{
+		Config: Config{
+			Listen:              listen,
+			DisableTLS:          false,
+			BaseURL:             baseURL,
+			BundlePath:          serverBundlePath,
+			UpstreamServer:      upstream.URL(),
+			UpstreamDisableMTLS: true,
+			OAuthStatePath:      statePath,
+			OAuthTokenStorePath: tokenStorePath,
+			MCPPath:             "/",
+		},
+		Logger:   pslog.NewStructured(context.Background(), io.Discard),
+		Listener: listener,
+	})
+	if err != nil {
+		t.Fatalf("new mcp server: %v", err)
+	}
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- srv.Run(runCtx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil && !strings.Contains(err.Error(), "context canceled") {
+				t.Fatalf("mcp run returned error: %v", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("timed out waiting for mcp shutdown")
+		}
+	})
+
+	waitForHTTPStatusOK(t, httpClient, wellKnownURLForScopedResource(baseURL, "oauth-protected-resource", baseURL))
+	tokenBody := postTokenForm(t, httpClient, joinURL(baseURL, "/token"), boot.ClientID, boot.ClientSecret, url.Values{
+		"grant_type": []string{"client_credentials"},
+		"scope":      []string{"read"},
+	})
+	if tokenBody.status != http.StatusOK {
+		t.Fatalf("token status=%d body=%q", tokenBody.status, string(tokenBody.body))
+	}
+	var issued oauth2.Token
+	if err := json.Unmarshal(tokenBody.body, &issued); err != nil {
+		t.Fatalf("decode token response: %v body=%q", err, string(tokenBody.body))
+	}
+
+	authClient := &http.Client{
+		Transport: &bearerAuthTransport{
+			base:  httpClient.Transport,
+			token: issued.AccessToken,
+		},
+	}
+	mcpClient := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "e2e-client", Version: "0.0.1"}, nil)
+	session, err := mcpClient.Connect(context.Background(), &mcpsdk.StreamableClientTransport{
+		Endpoint:   baseURL,
+		HTTPClient: authClient,
+	}, nil)
+	if err != nil {
+		t.Fatalf("connect mcp client: %v", err)
+	}
+	defer session.Close()
+
+	tools, err := session.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("list tools: %v", err)
+	}
+	names := make([]string, 0, len(tools.Tools))
+	for _, tool := range tools.Tools {
+		names = append(names, tool.Name)
+	}
+	joined := strings.Join(names, ",")
+	if strings.Contains(joined, "lockd.help") {
+		t.Fatalf("unexpected lockd tool in preset-only oauth surface: %s", joined)
+	}
+	if !strings.Contains(joined, "memory.note.state.get") {
+		t.Fatalf("missing preset state.get tool in %s", joined)
+	}
+}
+
 func TestOAuthAccessTokenSurvivesMCPServerRestart(t *testing.T) {
 	upstream := lockd.StartTestServer(t, lockd.WithoutTestMTLS())
 	listener := reserveLoopbackListener(t)
@@ -337,6 +483,22 @@ func TestOAuthAccessTokenSurvivesMCPServerRestart(t *testing.T) {
 	cancelSecond, doneSecond := startServer()
 	defer stopServer(cancelSecond, doneSecond)
 	assertProtectedWithToken(issued.AccessToken)
+}
+
+type bearerAuthTransport struct {
+	base  http.RoundTripper
+	token string
+}
+
+func (t *bearerAuthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	cloned := req.Clone(req.Context())
+	cloned.Header = req.Header.Clone()
+	cloned.Header.Set("Authorization", "Bearer "+t.token)
+	return base.RoundTrip(cloned)
 }
 
 func TestOAuthDynamicRegistrationAndAuthorizationCodeFlow(t *testing.T) {

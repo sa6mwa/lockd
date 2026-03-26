@@ -64,20 +64,15 @@ func newSnapshotServer(cfg Config) *server {
 
 func withSnapshotClient(ctx context.Context, cfg Config, fn func(*server, *mcpsdk.ClientSession) error) error {
 	s := newSnapshotServer(cfg)
+	return withSnapshotClientForSurface(ctx, s, defaultToolSurface(), fn)
+}
 
+func withSnapshotClientForSurface(ctx context.Context, s *server, surface toolSurface, fn func(*server, *mcpsdk.ClientSession) error) error {
 	client := mcpsdk.NewClient(&mcpsdk.Implementation{
 		Name:    "lockd-mcp-tools-list",
 		Version: "0.1.0",
 	}, nil)
-	mcpSrv := mcpsdk.NewServer(&mcpsdk.Implementation{
-		Name:    "lockd-mcp-facade",
-		Version: "0.1.0",
-	}, &mcpsdk.ServerOptions{
-		Instructions:       defaultServerInstructions(s.cfg),
-		InitializedHandler: s.handleInitialized,
-	})
-	s.registerResources(mcpSrv)
-	s.registerTools(mcpSrv)
+	mcpSrv := s.newMCPServerForSurface(surface)
 
 	t1, t2 := mcpsdk.NewInMemoryTransports()
 	ss, err := mcpSrv.Connect(ctx, t1, nil)

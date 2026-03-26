@@ -205,7 +205,7 @@ func (d *Data) Normalize() {
 		normalizedPresets, err := preset.NormalizeCollection(c.Presets)
 		switch {
 		case len(c.Presets) == 0:
-			normalizedPresets = nil
+			c.Presets = nil
 		case err != nil:
 			c.Presets = nil
 		default:

@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
+	presetcfg "pkt.systems/lockd/mcp/preset"
 )
 
 func TestBuildToolsListResponseJSON(t *testing.T) {
@@ -160,5 +162,78 @@ func TestBuildFullMCPSpecJSONL(t *testing.T) {
 	}
 	if !foundHelpLQL {
 		t.Fatalf("missing lockd.help lql topic call record")
+	}
+}
+
+func TestBuildFullMCPSpecJSONLForClientSurface(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	out, err := BuildFullMCPSpecJSONLForClientSurface(ctx, Config{}, false, []presetcfg.Definition{
+		{
+			Name: "memory",
+			Kinds: []presetcfg.Kind{
+				{
+					Name:      "note",
+					Namespace: "memory",
+					Schema: presetcfg.Schema{
+						Type: "object",
+						Properties: map[string]presetcfg.Schema{
+							"text": {Type: "string"},
+						},
+						Required: []string{"text"},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("build client full mcp spec jsonl: %v", err)
+	}
+	lines := bytes.Split(bytes.TrimSpace(out), []byte("\n"))
+	if len(lines) < 2 {
+		t.Fatalf("expected multiple jsonl lines, got %d", len(lines))
+	}
+
+	var first ToolsListResponse
+	if err := json.Unmarshal(lines[0], &first); err != nil {
+		t.Fatalf("decode first line tools/list response: %v", err)
+	}
+	toolNames := make([]string, 0, len(first.Result.Tools))
+	for _, tool := range first.Result.Tools {
+		if tool == nil {
+			continue
+		}
+		toolNames = append(toolNames, tool.Name)
+	}
+	if len(toolNames) == 0 {
+		t.Fatalf("expected client surface tools")
+	}
+	for _, name := range toolNames {
+		if strings.HasPrefix(name, "lockd.") {
+			t.Fatalf("did not expect lockd tool in memory-only surface: %q", name)
+		}
+	}
+	for _, want := range []string{
+		"memory.help",
+		"memory.note.query",
+		"memory.note.state.put",
+		"memory.note.state.get",
+		"memory.note.state.delete",
+		"memory.note.queue.enqueue",
+		"memory.note.attachments.get",
+	} {
+		found := false
+		for _, name := range toolNames {
+			if name == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing preset tool %q in client surface: %v", want, toolNames)
+		}
 	}
 }

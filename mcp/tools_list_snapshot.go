@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
+	presetcfg "pkt.systems/lockd/mcp/preset"
 	"pkt.systems/pslog"
 )
 
@@ -65,6 +66,14 @@ func newSnapshotServer(cfg Config) *server {
 func withSnapshotClient(ctx context.Context, cfg Config, fn func(*server, *mcpsdk.ClientSession) error) error {
 	s := newSnapshotServer(cfg)
 	return withSnapshotClientForSurface(ctx, s, defaultToolSurface(), fn)
+}
+
+func withSnapshotClientForClientSurface(ctx context.Context, cfg Config, lockdPreset bool, presets []presetcfg.Definition, fn func(*server, *mcpsdk.ClientSession) error) error {
+	s := newSnapshotServer(cfg)
+	return withSnapshotClientForSurface(ctx, s, toolSurface{
+		Lockd:   lockdPreset,
+		Presets: presets,
+	}, fn)
 }
 
 func withSnapshotClientForSurface(ctx context.Context, s *server, surface toolSurface, fn func(*server, *mcpsdk.ClientSession) error) error {
@@ -198,11 +207,25 @@ func BuildToolsListResponseJSON(ctx context.Context, cfg Config) ([]byte, error)
 // resources (and their contents), prompt/resource-template registries, and
 // lockd.help topic outputs.
 func BuildFullMCPSpecJSONL(ctx context.Context, cfg Config) ([]byte, error) {
+	return buildFullMCPSpecJSONLWith(ctx, func(ctx context.Context, fn func(*server, *mcpsdk.ClientSession) error) error {
+		return withSnapshotClient(ctx, cfg, fn)
+	})
+}
+
+// BuildFullMCPSpecJSONLForClientSurface returns newline-delimited JSON for one
+// effective client tool surface.
+func BuildFullMCPSpecJSONLForClientSurface(ctx context.Context, cfg Config, lockdPreset bool, presets []presetcfg.Definition) ([]byte, error) {
+	return buildFullMCPSpecJSONLWith(ctx, func(ctx context.Context, fn func(*server, *mcpsdk.ClientSession) error) error {
+		return withSnapshotClientForClientSurface(ctx, cfg, lockdPreset, presets, fn)
+	})
+}
+
+func buildFullMCPSpecJSONLWith(ctx context.Context, connect func(context.Context, func(*server, *mcpsdk.ClientSession) error) error) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
 
-	if err := withSnapshotClient(ctx, cfg, func(s *server, cs *mcpsdk.ClientSession) error {
+	if err := connect(ctx, func(s *server, cs *mcpsdk.ClientSession) error {
 		tools, err := listAllTools(ctx, cs)
 		if err != nil {
 			return fmt.Errorf("list tools: %w", err)
@@ -336,21 +359,30 @@ func BuildFullMCPSpecJSONL(ctx context.Context, cfg Config) ([]byte, error) {
 			}
 		}
 
-		for _, topic := range []string{"overview", "locks", "messaging", "sync", "lql"} {
-			callResult, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{
-				Name:      "lockd.help",
-				Arguments: map[string]any{"topic": topic},
-			})
-			if err != nil {
-				return fmt.Errorf("call lockd.help topic %q: %w", topic, err)
+		hasLockdHelp := false
+		for _, tool := range tools {
+			if tool != nil && tool.Name == "lockd.help" {
+				hasLockdHelp = true
+				break
 			}
-			if err := enc.Encode(fullMCPSpecRecord{
-				Kind:  "tool/call",
-				Name:  "lockd.help",
-				Topic: topic,
-				Data:  callResult,
-			}); err != nil {
-				return err
+		}
+		if hasLockdHelp {
+			for _, topic := range []string{"overview", "locks", "messaging", "sync", "lql"} {
+				callResult, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{
+					Name:      "lockd.help",
+					Arguments: map[string]any{"topic": topic},
+				})
+				if err != nil {
+					return fmt.Errorf("call lockd.help topic %q: %w", topic, err)
+				}
+				if err := enc.Encode(fullMCPSpecRecord{
+					Kind:  "tool/call",
+					Name:  "lockd.help",
+					Topic: topic,
+					Data:  callResult,
+				}); err != nil {
+					return err
+				}
 			}
 		}
 

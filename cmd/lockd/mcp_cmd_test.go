@@ -841,6 +841,119 @@ kinds:
 	}
 }
 
+func TestMCPClientToolsListUsesClientSurface(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	statePath, tokenStorePath, _ := bootstrapMCPStateForClientTests(t)
+	presetPath := writeTestMCPPresetFile(t, `
+preset: memory
+kinds:
+  - name: note
+    namespace: memory
+    schema:
+      type: object
+      properties:
+        text:
+          type: string
+`)
+
+	root := newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
+	var addOut bytes.Buffer
+	root.SetOut(&addOut)
+	root.SetArgs([]string{
+		"mcp",
+		"--state-file", statePath,
+		"--token-store", tokenStorePath,
+		"client", "add",
+		"--name", "memory-client",
+		"--preset", presetPath,
+	})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute mcp client add: %v", err)
+	}
+	clientID := parseOutputField(addOut.String(), "client_id:")
+	if clientID == "" {
+		t.Fatalf("expected client_id in add output, got %q", addOut.String())
+	}
+
+	origPrettyX := mcpPrettyXRunner
+	t.Cleanup(func() { mcpPrettyXRunner = origPrettyX })
+	mcpPrettyXRunner = func(_ context.Context, payload []byte, out io.Writer) error {
+		_, err := out.Write(payload)
+		return err
+	}
+
+	root = newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetArgs([]string{
+		"mcp",
+		"--state-file", statePath,
+		"--token-store", tokenStorePath,
+		"client", "tools-list", clientID,
+	})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute mcp client tools-list: %v", err)
+	}
+
+	lines := bytes.Split(bytes.TrimSpace(stdout.Bytes()), []byte("\n"))
+	if len(lines) < 2 {
+		t.Fatalf("expected multiple jsonl lines, got %d", len(lines))
+	}
+	var first lockdmcp.ToolsListResponse
+	if err := json.Unmarshal(lines[0], &first); err != nil {
+		t.Fatalf("decode first line tools/list response: %v", err)
+	}
+	if len(first.Result.Tools) == 0 {
+		t.Fatalf("expected tools in tools-list output")
+	}
+	for _, tool := range first.Result.Tools {
+		if tool == nil {
+			continue
+		}
+		if strings.HasPrefix(tool.Name, "lockd.") {
+			t.Fatalf("did not expect lockd tool in memory-only client surface: %q", tool.Name)
+		}
+	}
+	if !bytes.Contains(stdout.Bytes(), []byte(`"name":"memory.help"`)) {
+		t.Fatalf("expected memory.help tool record in output, got %q", stdout.String())
+	}
+}
+
+func TestMCPClientToolsListWritesOutputFile(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	statePath, tokenStorePath, clientID := bootstrapMCPStateForClientTests(t)
+	origPrettyX := mcpPrettyXRunner
+	t.Cleanup(func() { mcpPrettyXRunner = origPrettyX })
+	mcpPrettyXRunner = func(_ context.Context, payload []byte, out io.Writer) error {
+		_, err := out.Write(payload)
+		return err
+	}
+
+	outPath := filepath.Join(t.TempDir(), "tools.jsonl")
+	root := newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
+	root.SetArgs([]string{
+		"mcp",
+		"--state-file", statePath,
+		"--token-store", tokenStorePath,
+		"client", "tools-list", clientID,
+		"--out", outPath,
+	})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute mcp client tools-list --out: %v", err)
+	}
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read tools-list output file: %v", err)
+	}
+	if !bytes.Contains(data, []byte(`"jsonrpc":"2.0"`)) {
+		t.Fatalf("expected tools/list envelope in file output, got %q", string(data))
+	}
+}
+
 func TestMCPPresetCommandListsAndExportsBuiltIns(t *testing.T) {
 	viper.Reset()
 	t.Cleanup(viper.Reset)

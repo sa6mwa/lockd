@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -45,6 +48,7 @@ const (
 )
 
 var mcpNewServer = lockdmcp.NewServer
+var mcpPrettyXRunner = runPrettyX
 
 const mcpAutoBootstrapClientName = "default"
 
@@ -498,6 +502,43 @@ func newMCPClientCommand() *cobra.Command {
 	}
 	cmd.AddCommand(rotateCmd)
 
+	var toolsListOutPath string
+	toolsListCmd := &cobra.Command{
+		Use:               "tools-list <id>",
+		Short:             "Dump the effective MCP tool snapshot for one OAuth client",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: completeMCPOAuthClientIDArg,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			adminSvc, err := openMCPAdmin()
+			if err != nil {
+				return err
+			}
+			clientID := strings.TrimSpace(args[0])
+			client, err := adminSvc.GetClient(clientID)
+			if err != nil {
+				return explainMCPAdminStateError(err)
+			}
+			cfg, err := mcpConfigFromViper()
+			if err != nil {
+				return err
+			}
+			ctx := cmd.Context()
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			payload, err := lockdmcp.BuildFullMCPSpecJSONLForClientSurface(ctx, cfg, client.LockdPreset, client.Presets)
+			if err != nil {
+				return fmt.Errorf("build client tool snapshot: %w", err)
+			}
+			if strings.TrimSpace(toolsListOutPath) != "" {
+				return writePrettyXOutput(ctx, payload, toolsListOutPath)
+			}
+			return writePrettyXOutputTo(ctx, payload, cmd.OutOrStdout())
+		},
+	}
+	toolsListCmd.Flags().StringVarP(&toolsListOutPath, "out", "o", "", "write pretty JSONL output to a file instead of stdout")
+	cmd.AddCommand(toolsListCmd)
+
 	var updateName string
 	var updateNamespace string
 	var updatePresetFlags []string
@@ -739,6 +780,51 @@ func openMCPAdmin() (*mcpadmin.Service, error) {
 		return nil, err
 	}
 	return newMCPAdminService(cfg), nil
+}
+
+func writePrettyXOutput(ctx context.Context, payload []byte, outPath string) error {
+	outPath = strings.TrimSpace(outPath)
+	if outPath == "" {
+		return fmt.Errorf("output path is required")
+	}
+	outPath, err := expandPath(outPath)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+		return fmt.Errorf("create output dir: %w", err)
+	}
+	f, err := os.Create(outPath)
+	if err != nil {
+		return fmt.Errorf("create output file %s: %w", outPath, err)
+	}
+	defer f.Close()
+	if err := writePrettyXOutputTo(ctx, payload, f); err != nil {
+		return err
+	}
+	return nil
+}
+
+func writePrettyXOutputTo(ctx context.Context, payload []byte, out io.Writer) error {
+	if err := mcpPrettyXRunner(ctx, payload, out); err != nil {
+		return fmt.Errorf("format jsonl with prettyx: %w", err)
+	}
+	return nil
+}
+
+func runPrettyX(ctx context.Context, payload []byte, out io.Writer) error {
+	cmd := exec.CommandContext(ctx, "prettyx")
+	cmd.Stdin = bytes.NewReader(payload)
+	cmd.Stdout = out
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if strings.TrimSpace(stderr.String()) != "" {
+			return fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+		}
+		return err
+	}
+	return nil
 }
 
 func oauthResourceURLOverrideFromConfig() string {

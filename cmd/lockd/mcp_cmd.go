@@ -20,6 +20,7 @@ import (
 	"pkt.systems/lockd"
 	lockdmcp "pkt.systems/lockd/mcp"
 	mcpadmin "pkt.systems/lockd/mcp/admin"
+	"pkt.systems/lockd/mcp/preset"
 	"pkt.systems/lockd/tlsutil"
 	"pkt.systems/pslog"
 )
@@ -120,6 +121,7 @@ func newMCPCommand(baseLogger pslog.Logger, inheritedServerFlag, inheritedBundle
 
 	serveCmd.AddCommand(newMCPIssuerCommand())
 	serveCmd.AddCommand(newMCPClientCommand())
+	serveCmd.AddCommand(newMCPPresetCommand())
 	serveCmd.AddCommand(newMCPExportCACommand())
 	return serveCmd
 }
@@ -260,13 +262,13 @@ func newMCPClientCommand() *cobra.Command {
 			}
 			sort.Slice(clients, func(i, j int) bool { return clients[i].ID < clients[j].ID })
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "ID\tNAME\tDEFAULT_NS\tSTATUS\tSCOPES\tREDIRECT_URIS")
+			fmt.Fprintln(w, "ID\tNAME\tDEFAULT_NS\tPRESETS\tSTATUS\tSCOPES\tREDIRECT_URIS")
 			for _, c := range clients {
 				status := "active"
 				if c.Revoked {
 					status = "revoked"
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", c.ID, c.Name, c.Namespace, status, strings.Join(c.Scopes, ","), strings.Join(c.RedirectURIs, ","))
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", c.ID, c.Name, c.Namespace, strings.Join(enabledClientPresetNames(c), ","), status, strings.Join(c.Scopes, ","), strings.Join(c.RedirectURIs, ","))
 			}
 			return w.Flush()
 		},
@@ -301,6 +303,7 @@ func newMCPClientCommand() *cobra.Command {
 			fmt.Fprintf(cmd.OutOrStdout(), "client_id: %s\n", client.ID)
 			fmt.Fprintf(cmd.OutOrStdout(), "name: %s\n", client.Name)
 			fmt.Fprintf(cmd.OutOrStdout(), "namespace: %s\n", client.Namespace)
+			fmt.Fprintf(cmd.OutOrStdout(), "presets: %s\n", strings.Join(enabledClientPresetNames(client), ","))
 			fmt.Fprintf(cmd.OutOrStdout(), "status: %s\n", status)
 			fmt.Fprintf(cmd.OutOrStdout(), "scopes: %s\n", strings.Join(client.Scopes, ","))
 			fmt.Fprintf(cmd.OutOrStdout(), "redirect_uris: %s\n", strings.Join(client.RedirectURIs, ","))
@@ -367,6 +370,7 @@ func newMCPClientCommand() *cobra.Command {
 
 	var addName string
 	var addNamespace string
+	var addPresetFlags []string
 	var addScopes []string
 	var addRedirectURIs []string
 	addCmd := &cobra.Command{
@@ -385,9 +389,15 @@ func newMCPClientCommand() *cobra.Command {
 			if name == "" {
 				name = mcpAutoBootstrapClientName
 			}
+			lockdPreset, presets, err := resolveMCPPresetFlags(addPresetFlags)
+			if err != nil {
+				return err
+			}
 			resp, err := adminSvc.AddClient(mcpadmin.AddClientRequest{
 				Name:         name,
 				Namespace:    strings.TrimSpace(addNamespace),
+				LockdPreset:  lockdPreset,
+				Presets:      presets,
 				Scopes:       addScopes,
 				RedirectURIs: addRedirectURIs,
 			})
@@ -401,6 +411,7 @@ func newMCPClientCommand() *cobra.Command {
 	}
 	addCmd.Flags().StringVar(&addName, "name", mcpAutoBootstrapClientName, "client display name")
 	addCmd.Flags().StringVarP(&addNamespace, "namespace", "n", "", "default namespace override for this client")
+	addCmd.Flags().StringSliceVarP(&addPresetFlags, "preset", "p", nil, "enable preset(s): lockd or preset YAML file path(s)")
 	addCmd.Flags().StringSliceVar(&addScopes, "scope", nil, "allowed scope(s)")
 	addCmd.Flags().StringSliceVar(&addRedirectURIs, "redirect-uri", nil, "allowed redirect URI(s) for authorization_code flow")
 	cmd.AddCommand(addCmd)
@@ -489,6 +500,7 @@ func newMCPClientCommand() *cobra.Command {
 
 	var updateName string
 	var updateNamespace string
+	var updatePresetFlags []string
 	var updateScopes []string
 	var updateRedirectURIs []string
 	updateCmd := &cobra.Command{
@@ -498,8 +510,9 @@ func newMCPClientCommand() *cobra.Command {
 		ValidArgsFunction: completeMCPOAuthClientIDArg,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			namespaceSet := cmd.Flags().Changed("namespace")
-			if strings.TrimSpace(updateName) == "" && updateScopes == nil && updateRedirectURIs == nil && !namespaceSet {
-				return fmt.Errorf("at least one of --name, --namespace, --scope, or --redirect-uri must be set")
+			presetSet := cmd.Flags().Changed("preset")
+			if strings.TrimSpace(updateName) == "" && updateScopes == nil && updateRedirectURIs == nil && !namespaceSet && !presetSet {
+				return fmt.Errorf("at least one of --name, --namespace, --preset, --scope, or --redirect-uri must be set")
 			}
 			adminSvc, err := openMCPAdmin()
 			if err != nil {
@@ -511,10 +524,22 @@ func newMCPClientCommand() *cobra.Command {
 				trimmedNamespace := strings.TrimSpace(updateNamespace)
 				namespacePtr = &trimmedNamespace
 			}
+			var lockdPresetPtr *bool
+			var presets []preset.Definition
+			if presetSet {
+				lockdPreset, resolvedPresets, err := resolveMCPPresetFlags(updatePresetFlags)
+				if err != nil {
+					return err
+				}
+				lockdPresetPtr = &lockdPreset
+				presets = resolvedPresets
+			}
 			if err := adminSvc.UpdateClient(mcpadmin.UpdateClientRequest{
 				ClientID:     updateID,
 				Name:         updateName,
 				Namespace:    namespacePtr,
+				LockdPreset:  lockdPresetPtr,
+				Presets:      presets,
 				Scopes:       updateScopes,
 				RedirectURIs: updateRedirectURIs,
 			}); err != nil {
@@ -526,10 +551,53 @@ func newMCPClientCommand() *cobra.Command {
 	}
 	updateCmd.Flags().StringVar(&updateName, "name", "", "updated client name")
 	updateCmd.Flags().StringVarP(&updateNamespace, "namespace", "n", "", "replacement default namespace override for this client (empty clears override)")
+	updateCmd.Flags().StringSliceVarP(&updatePresetFlags, "preset", "p", nil, "replacement preset set: lockd and/or preset YAML file path(s)")
 	updateCmd.Flags().StringSliceVar(&updateScopes, "scope", nil, "replacement scope list")
 	updateCmd.Flags().StringSliceVar(&updateRedirectURIs, "redirect-uri", nil, "replacement redirect URI allow-list")
 	cmd.AddCommand(updateCmd)
 
+	return cmd
+}
+
+func newMCPPresetCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:                "preset [name]",
+		Short:              "List or export built-in MCP preset templates",
+		DisableFlagParsing: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			listOnly, outPath, target, err := parseMCPPresetCommandArgs(args)
+			if err != nil {
+				return err
+			}
+			if listOnly {
+				for _, name := range preset.BuiltInNames() {
+					fmt.Fprintln(cmd.OutOrStdout(), name)
+				}
+				return nil
+			}
+			if target == "" && strings.TrimSpace(outPath) == "" {
+				return fmt.Errorf("provide a preset name, --list, or --out")
+			}
+			var payload []byte
+			if target == "" {
+				payload, err = preset.AllBuiltInYAML()
+			} else {
+				payload, err = preset.BuiltInYAML(strings.ToLower(target))
+			}
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(outPath) != "" {
+				if err := os.WriteFile(outPath, payload, 0o644); err != nil {
+					return fmt.Errorf("write preset output %s: %w", outPath, err)
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "wrote preset yaml: %s\n", outPath)
+				return nil
+			}
+			_, err = cmd.OutOrStdout().Write(payload)
+			return err
+		},
+	}
 	return cmd
 }
 
@@ -609,6 +677,97 @@ func ensureMCPStateInitialized(cfg lockdmcp.Config, adminSvc *mcpadmin.Service, 
 		return err
 	}
 	return nil
+}
+
+func resolveMCPPresetFlags(values []string) (bool, []preset.Definition, error) {
+	if len(values) == 0 {
+		return true, nil, nil
+	}
+	lockdPreset := false
+	defs := make([]preset.Definition, 0)
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			return false, nil, fmt.Errorf("preset value must not be empty")
+		}
+		if strings.EqualFold(trimmed, preset.ReservedLockdName) {
+			lockdPreset = true
+			continue
+		}
+		loaded, err := preset.LoadFile(trimmed)
+		if err != nil {
+			return false, nil, err
+		}
+		defs = append(defs, loaded...)
+	}
+	normalized, err := preset.NormalizeCollection(defs)
+	switch {
+	case len(defs) == 0:
+		normalized = nil
+	case err != nil:
+		return false, nil, err
+	}
+	if !lockdPreset && len(normalized) == 0 {
+		return false, nil, fmt.Errorf("at least one preset is required")
+	}
+	return lockdPreset, normalized, nil
+}
+
+func enabledClientPresetNames(client mcpadmin.Client) []string {
+	names := make([]string, 0, len(client.Presets)+1)
+	if client.LockdPreset {
+		names = append(names, preset.ReservedLockdName)
+	}
+	for _, def := range client.Presets {
+		names = append(names, def.Name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func parseMCPPresetCommandArgs(args []string) (bool, string, string, error) {
+	listOnly := false
+	outPath := ""
+	target := ""
+	for i := 0; i < len(args); i++ {
+		arg := strings.TrimSpace(args[i])
+		switch arg {
+		case "-l", "--list":
+			listOnly = true
+		case "-o", "--out":
+			if i+1 >= len(args) {
+				return false, "", "", fmt.Errorf("%s requires a value", arg)
+			}
+			i++
+			outPath = strings.TrimSpace(args[i])
+			if outPath == "" {
+				return false, "", "", fmt.Errorf("%s requires a non-empty value", arg)
+			}
+		default:
+			if strings.HasPrefix(arg, "--out=") {
+				outPath = strings.TrimSpace(strings.TrimPrefix(arg, "--out="))
+				if outPath == "" {
+					return false, "", "", fmt.Errorf("--out requires a non-empty value")
+				}
+				continue
+			}
+			if strings.HasPrefix(arg, "-o=") {
+				outPath = strings.TrimSpace(strings.TrimPrefix(arg, "-o="))
+				if outPath == "" {
+					return false, "", "", fmt.Errorf("-o requires a non-empty value")
+				}
+				continue
+			}
+			if strings.HasPrefix(arg, "-") {
+				return false, "", "", fmt.Errorf("unknown preset flag %q", arg)
+			}
+			if target != "" {
+				return false, "", "", fmt.Errorf("expected at most one preset name")
+			}
+			target = arg
+		}
+	}
+	return listOnly, outPath, target, nil
 }
 
 func explainMCPAdminStateError(err error) error {

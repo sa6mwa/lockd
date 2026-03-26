@@ -18,6 +18,7 @@ import (
 	"github.com/spf13/viper"
 	lockdmcp "pkt.systems/lockd/mcp"
 	mcpoauth "pkt.systems/lockd/mcp/oauth"
+	"pkt.systems/lockd/mcp/preset"
 	mcpstate "pkt.systems/lockd/mcp/state"
 	"pkt.systems/pslog"
 )
@@ -695,6 +696,198 @@ func TestMCPClientAddAndUpdateNamespace(t *testing.T) {
 	}
 }
 
+func TestMCPClientAddAndUpdatePresets(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	statePath, tokenStorePath, _ := bootstrapMCPStateForClientTests(t)
+	presetPath := writeTestMCPPresetFile(t, `
+preset: memory
+kinds:
+  - name: note
+    namespace: agents
+    schema:
+      type: object
+      properties:
+        text:
+          type: string
+`)
+	root := newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetArgs([]string{
+		"mcp",
+		"--state-file", statePath,
+		"--token-store", tokenStorePath,
+		"client", "add",
+		"--name", "memory-client",
+		"--preset", presetPath,
+	})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute mcp client add with preset: %v", err)
+	}
+	clientID := parseOutputField(stdout.String(), "client_id:")
+	if clientID == "" {
+		t.Fatalf("expected client_id in add output, got %q", stdout.String())
+	}
+
+	data, err := mcpstate.Load(statePath)
+	if err != nil {
+		t.Fatalf("load state after add: %v", err)
+	}
+	client, ok := findClientByID(data.Clients, clientID)
+	if !ok {
+		t.Fatalf("client %s not found after add", clientID)
+	}
+	if client.LockdPreset {
+		t.Fatalf("expected lockd preset disabled for custom-only add")
+	}
+	if len(client.Presets) != 1 || client.Presets[0].Name != "memory" {
+		t.Fatalf("unexpected presets after add: %#v", client.Presets)
+	}
+
+	root = newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
+	root.SetArgs([]string{
+		"mcp",
+		"--state-file", statePath,
+		"--token-store", tokenStorePath,
+		"client", "update", clientID,
+		"--preset", "lockd",
+		"--preset", presetPath,
+	})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute mcp client update with presets: %v", err)
+	}
+
+	data, err = mcpstate.Load(statePath)
+	if err != nil {
+		t.Fatalf("load state after update: %v", err)
+	}
+	client, ok = findClientByID(data.Clients, clientID)
+	if !ok {
+		t.Fatalf("client %s not found after update", clientID)
+	}
+	if !client.LockdPreset {
+		t.Fatalf("expected lockd preset enabled after update")
+	}
+	if len(client.Presets) != 1 || client.Presets[0].Name != "memory" {
+		t.Fatalf("unexpected presets after update: %#v", client.Presets)
+	}
+}
+
+func TestMCPClientListAndShowIncludePresets(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	statePath, tokenStorePath, _ := bootstrapMCPStateForClientTests(t)
+	presetPath := writeTestMCPPresetFile(t, `
+preset: memory
+kinds:
+  - name: note
+    namespace: agents
+    schema:
+      type: object
+      properties:
+        text:
+          type: string
+`)
+	root := newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetArgs([]string{
+		"mcp",
+		"--state-file", statePath,
+		"--token-store", tokenStorePath,
+		"client", "add",
+		"--name", "memory-client",
+		"--preset", "lockd",
+		"--preset", presetPath,
+	})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute mcp client add: %v", err)
+	}
+	clientID := parseOutputField(stdout.String(), "client_id:")
+
+	root = newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
+	stdout.Reset()
+	root.SetOut(&stdout)
+	root.SetArgs([]string{
+		"mcp",
+		"--state-file", statePath,
+		"--token-store", tokenStorePath,
+		"client", "list",
+	})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute mcp client list: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "PRESETS") || !strings.Contains(stdout.String(), "lockd,memory") {
+		t.Fatalf("expected presets in client list output, got %q", stdout.String())
+	}
+
+	root = newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
+	stdout.Reset()
+	root.SetOut(&stdout)
+	root.SetArgs([]string{
+		"mcp",
+		"--state-file", statePath,
+		"--token-store", tokenStorePath,
+		"client", "show", clientID,
+	})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute mcp client show: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "presets: lockd,memory") {
+		t.Fatalf("expected presets in client show output, got %q", stdout.String())
+	}
+}
+
+func TestMCPPresetCommandListsAndExportsBuiltIns(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	root := newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetArgs([]string{"mcp", "preset", "--list"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute mcp preset --list: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "memory") {
+		t.Fatalf("expected memory in preset list, got %q", stdout.String())
+	}
+
+	root = newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
+	stdout.Reset()
+	root.SetOut(&stdout)
+	root.SetArgs([]string{"mcp", "preset", "memory"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute mcp preset memory: %v", err)
+	}
+	defs, err := preset.ParseYAML(stdout.Bytes())
+	if err != nil {
+		t.Fatalf("parse built-in preset yaml: %v", err)
+	}
+	if len(defs) != 1 || defs[0].Name != "memory" {
+		t.Fatalf("unexpected built-in preset defs: %#v", defs)
+	}
+
+	outPath := filepath.Join(t.TempDir(), "presets.yaml")
+	root = newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
+	stdout.Reset()
+	root.SetOut(&stdout)
+	root.SetArgs([]string{"mcp", "preset", "--out", outPath})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute mcp preset --out: %v", err)
+	}
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read preset output: %v", err)
+	}
+	if !bytes.Contains(data, []byte("preset: memory")) {
+		t.Fatalf("expected memory preset in written yaml, got %q", string(data))
+	}
+}
+
 func TestMCPClientNamespaceValidationErrors(t *testing.T) {
 	viper.Reset()
 	t.Cleanup(viper.Reset)
@@ -1216,6 +1409,15 @@ func bootstrapMCPStateForClientTests(t *testing.T) (statePath, tokenStorePath, c
 func findClientByID(clients map[string]mcpstate.Client, clientID string) (mcpstate.Client, bool) {
 	client, ok := clients[clientID]
 	return client, ok
+}
+
+func writeTestMCPPresetFile(t *testing.T, data string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "preset.yaml")
+	if err := os.WriteFile(path, []byte(strings.TrimSpace(data)+"\n"), 0o644); err != nil {
+		t.Fatalf("write test preset file: %v", err)
+	}
+	return path
 }
 
 func parseOutputField(out, key string) string {

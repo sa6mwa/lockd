@@ -3,9 +3,12 @@ package state
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"pkt.systems/lockd/mcp/preset"
 )
 
 func TestBootstrapLoadAndVerifySecret(t *testing.T) {
@@ -64,7 +67,7 @@ func TestSaveRoundTrip(t *testing.T) {
 	now := time.Now().UTC()
 
 	base := NewData("https://localhost:19341", now)
-	client, secret, err := base.AddClient("test", "team_alpha", []string{"read", "write"}, []string{"https://example.test/callback"}, now)
+	client, secret, err := base.AddClient("test", "team_alpha", true, nil, []string{"read", "write"}, []string{"https://example.test/callback"}, now)
 	if err != nil {
 		t.Fatalf("add client: %v", err)
 	}
@@ -84,6 +87,9 @@ func TestSaveRoundTrip(t *testing.T) {
 	if loaded.Clients[client.ID].Namespace != "team_alpha" {
 		t.Fatalf("namespace=%q want %q", loaded.Clients[client.ID].Namespace, "team_alpha")
 	}
+	if !loaded.Clients[client.ID].LockdPreset {
+		t.Fatalf("expected lockd preset enabled by default")
+	}
 }
 
 func TestAddClientRejectsInvalidRedirectURI(t *testing.T) {
@@ -91,7 +97,7 @@ func TestAddClientRejectsInvalidRedirectURI(t *testing.T) {
 
 	now := time.Now().UTC()
 	data := NewData("https://issuer.example", now)
-	if _, _, err := data.AddClient("invalid", "", []string{"read"}, []string{"/relative/callback"}, now); err == nil {
+	if _, _, err := data.AddClient("invalid", "", true, nil, []string{"read"}, []string{"/relative/callback"}, now); err == nil {
 		t.Fatalf("expected invalid redirect URI error")
 	}
 }
@@ -101,7 +107,7 @@ func TestUpdateClientRedirectURIs(t *testing.T) {
 
 	now := time.Now().UTC()
 	data := NewData("https://issuer.example", now)
-	client, _, err := data.AddClient("test", "", []string{"read"}, nil, now)
+	client, _, err := data.AddClient("test", "", true, nil, []string{"read"}, nil, now)
 	if err != nil {
 		t.Fatalf("add client: %v", err)
 	}
@@ -119,7 +125,7 @@ func TestAddClientRejectsInvalidNamespace(t *testing.T) {
 
 	now := time.Now().UTC()
 	data := NewData("https://issuer.example", now)
-	if _, _, err := data.AddClient("invalid", "bad/namespace", []string{"read"}, nil, now); err == nil {
+	if _, _, err := data.AddClient("invalid", "bad/namespace", true, nil, []string{"read"}, nil, now); err == nil {
 		t.Fatalf("expected invalid namespace error")
 	}
 }
@@ -129,7 +135,7 @@ func TestUpdateClientNamespace(t *testing.T) {
 
 	now := time.Now().UTC()
 	data := NewData("https://issuer.example", now)
-	client, _, err := data.AddClient("test", "", []string{"read"}, nil, now)
+	client, _, err := data.AddClient("test", "", true, nil, []string{"read"}, nil, now)
 	if err != nil {
 		t.Fatalf("add client: %v", err)
 	}
@@ -144,5 +150,98 @@ func TestUpdateClientNamespace(t *testing.T) {
 	}
 	if got := data.Clients[client.ID].Namespace; got != "" {
 		t.Fatalf("namespace=%q want empty", got)
+	}
+}
+
+func TestAddClientPersistsNormalizedPresets(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	data := NewData("https://issuer.example", now)
+	defs := []preset.Definition{{
+		Name: "Memory Vault",
+		Kinds: []preset.Kind{{
+			Name:      "Note",
+			Namespace: "TeamA",
+			Schema: preset.Schema{
+				Type: "object",
+				Properties: map[string]preset.Schema{
+					"text": {Type: "string"},
+				},
+				Required: []string{"text"},
+			},
+		}},
+	}}
+	client, _, err := data.AddClient("preset-client", "", false, defs, []string{"read"}, nil, now)
+	if err != nil {
+		t.Fatalf("add client: %v", err)
+	}
+	got := data.Clients[client.ID]
+	if got.LockdPreset {
+		t.Fatalf("expected lockd preset disabled for custom-only client")
+	}
+	if len(got.Presets) != 1 {
+		t.Fatalf("len(got.Presets)=%d want 1", len(got.Presets))
+	}
+	if got.Presets[0].Name != "memory_vault" {
+		t.Fatalf("preset name=%q want memory_vault", got.Presets[0].Name)
+	}
+	if got.Presets[0].Kinds[0].Namespace != "teama" {
+		t.Fatalf("preset namespace=%q want teama", got.Presets[0].Kinds[0].Namespace)
+	}
+}
+
+func TestUpdateClientPresetsReplacesEnabledSurface(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	data := NewData("https://issuer.example", now)
+	client, _, err := data.AddClient("preset-client", "", true, nil, []string{"read"}, nil, now)
+	if err != nil {
+		t.Fatalf("add client: %v", err)
+	}
+	defs := []preset.Definition{{
+		Name: "memory",
+		Kinds: []preset.Kind{{
+			Name:      "note",
+			Namespace: "ops",
+			Operations: []preset.Operation{
+				preset.OperationQuery,
+				preset.OperationStateGet,
+			},
+			Schema: preset.Schema{
+				Type: "object",
+				Properties: map[string]preset.Schema{
+					"text": {Type: "string"},
+				},
+			},
+		}},
+	}}
+	if err := data.UpdateClientPresets(client.ID, false, defs, now); err != nil {
+		t.Fatalf("update presets: %v", err)
+	}
+	got := data.Clients[client.ID]
+	if got.LockdPreset {
+		t.Fatalf("expected lockd preset disabled")
+	}
+	if !reflect.DeepEqual(got.Presets[0].Kinds[0].Operations, []preset.Operation{
+		preset.OperationQuery,
+		preset.OperationStateGet,
+	}) {
+		t.Fatalf("operations=%v", got.Presets[0].Kinds[0].Operations)
+	}
+}
+
+func TestUpdateClientPresetsRejectsEmptySurface(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	data := NewData("https://issuer.example", now)
+	client, _, err := data.AddClient("preset-client", "", true, nil, []string{"read"}, nil, now)
+	if err != nil {
+		t.Fatalf("add client: %v", err)
+	}
+	if err := data.UpdateClientPresets(client.ID, false, nil, now); err == nil {
+		t.Fatalf("expected empty surface update to fail")
 	}
 }

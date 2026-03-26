@@ -23,6 +23,7 @@ import (
 	"pkt.systems/kryptograf"
 	"pkt.systems/kryptograf/keymgmt"
 	"pkt.systems/lockd"
+	"pkt.systems/lockd/mcp/preset"
 	"pkt.systems/lockd/namespaces"
 )
 
@@ -52,16 +53,18 @@ type Data struct {
 
 // Client is a confidential OAuth client record.
 type Client struct {
-	ID           string    `json:"id"`
-	Name         string    `json:"name"`
-	SecretSalt   string    `json:"secret_salt"`
-	SecretHash   string    `json:"secret_hash"`
-	Namespace    string    `json:"namespace,omitempty"`
-	Scopes       []string  `json:"scopes,omitempty"`
-	RedirectURIs []string  `json:"redirect_uris,omitempty"`
-	Revoked      bool      `json:"revoked"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID           string              `json:"id"`
+	Name         string              `json:"name"`
+	SecretSalt   string              `json:"secret_salt"`
+	SecretHash   string              `json:"secret_hash"`
+	Namespace    string              `json:"namespace,omitempty"`
+	LockdPreset  bool                `json:"lockd_preset,omitempty"`
+	Presets      []preset.Definition `json:"presets,omitempty"`
+	Scopes       []string            `json:"scopes,omitempty"`
+	RedirectURIs []string            `json:"redirect_uris,omitempty"`
+	Revoked      bool                `json:"revoked"`
+	CreatedAt    time.Time           `json:"created_at"`
+	UpdatedAt    time.Time           `json:"updated_at"`
 }
 
 type cryptoMaterial struct {
@@ -127,7 +130,7 @@ func Bootstrap(req BootstrapRequest) (BootstrapResponse, error) {
 	if name == "" {
 		name = "default"
 	}
-	client, secret, err := data.AddClient(name, "", req.InitialScopes, nil, now)
+	client, secret, err := data.AddClient(name, "", true, nil, req.InitialScopes, nil, now)
 	if err != nil {
 		return BootstrapResponse{}, err
 	}
@@ -168,6 +171,7 @@ func (d *Data) Clone() *Data {
 	}
 	for id, c := range d.Clients {
 		copied := c
+		copied.Presets = clonePresetDefinitions(c.Presets)
 		copied.Scopes = append([]string(nil), c.Scopes...)
 		copied.RedirectURIs = append([]string(nil), c.RedirectURIs...)
 		out.Clients[id] = copied
@@ -198,6 +202,18 @@ func (d *Data) Normalize() {
 		} else {
 			c.Namespace = normalizedNamespace
 		}
+		normalizedPresets, err := preset.NormalizeCollection(c.Presets)
+		switch {
+		case len(c.Presets) == 0:
+			normalizedPresets = nil
+		case err != nil:
+			c.Presets = nil
+		default:
+			c.Presets = normalizedPresets
+		}
+		if !c.LockdPreset && len(c.Presets) == 0 {
+			c.LockdPreset = true
+		}
 		c.Scopes = normalizeScopes(c.Scopes)
 		c.RedirectURIs = normalizeRedirectURIs(c.RedirectURIs)
 		d.Clients[c.ID] = c
@@ -208,7 +224,7 @@ func (d *Data) Normalize() {
 }
 
 // AddClient creates a confidential client and returns the new record and cleartext secret.
-func (d *Data) AddClient(name string, namespace string, scopes, redirectURIs []string, now time.Time) (Client, string, error) {
+func (d *Data) AddClient(name string, namespace string, lockdPreset bool, presets []preset.Definition, scopes, redirectURIs []string, now time.Time) (Client, string, error) {
 	if d == nil {
 		return Client{}, "", fmt.Errorf("state required")
 	}
@@ -220,7 +236,14 @@ func (d *Data) AddClient(name string, namespace string, scopes, redirectURIs []s
 	if name == "" {
 		return Client{}, "", fmt.Errorf("client name required")
 	}
+	if !lockdPreset && len(presets) == 0 {
+		lockdPreset = true
+	}
 	normalizedNamespace, err := normalizeOptionalNamespace(namespace)
+	if err != nil {
+		return Client{}, "", err
+	}
+	normalizedPresets, err := normalizeOptionalPresets(lockdPreset, presets)
 	if err != nil {
 		return Client{}, "", err
 	}
@@ -239,6 +262,8 @@ func (d *Data) AddClient(name string, namespace string, scopes, redirectURIs []s
 		SecretSalt:   salt,
 		SecretHash:   hash,
 		Namespace:    normalizedNamespace,
+		LockdPreset:  lockdPreset,
+		Presets:      normalizedPresets,
 		Scopes:       normalizeScopes(scopes),
 		RedirectURIs: validRedirectURIs,
 		CreatedAt:    now.UTC(),
@@ -247,6 +272,32 @@ func (d *Data) AddClient(name string, namespace string, scopes, redirectURIs []s
 	d.Clients[id] = client
 	d.UpdatedAt = now.UTC()
 	return client, secret, nil
+}
+
+// UpdateClientPresets replaces the enabled built-in/custom preset set.
+func (d *Data) UpdateClientPresets(clientID string, lockdPreset bool, presets []preset.Definition, now time.Time) error {
+	if d == nil {
+		return fmt.Errorf("state required")
+	}
+	d.Normalize()
+	clientID = strings.TrimSpace(clientID)
+	client, ok := d.Clients[clientID]
+	if !ok {
+		return ErrClientNotFound
+	}
+	normalizedPresets, err := normalizeOptionalPresets(lockdPreset, presets)
+	if err != nil {
+		return err
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	client.LockdPreset = lockdPreset
+	client.Presets = normalizedPresets
+	client.UpdatedAt = now.UTC()
+	d.Clients[clientID] = client
+	d.UpdatedAt = now.UTC()
+	return nil
 }
 
 // RotateClientSecret rotates the secret for clientID and returns the new cleartext secret.
@@ -437,6 +488,7 @@ func (d *Data) ListClients() []Client {
 	out := make([]Client, 0, len(ids))
 	for _, id := range ids {
 		client := d.Clients[id]
+		client.Presets = clonePresetDefinitions(client.Presets)
 		client.Scopes = append([]string(nil), client.Scopes...)
 		client.RedirectURIs = append([]string(nil), client.RedirectURIs...)
 		out = append(out, client)
@@ -824,4 +876,73 @@ func normalizeOptionalNamespace(namespace string) (string, error) {
 		return "", fmt.Errorf("invalid namespace %q: %w", trimmed, err)
 	}
 	return normalized, nil
+}
+
+func normalizeOptionalPresets(lockdPreset bool, presets []preset.Definition) ([]preset.Definition, error) {
+	normalized, err := preset.NormalizeCollection(presets)
+	switch {
+	case len(presets) == 0:
+		normalized = nil
+	case err != nil:
+		return nil, err
+	}
+	if !lockdPreset && len(normalized) == 0 {
+		return nil, fmt.Errorf("at least one preset is required when lockd preset is disabled")
+	}
+	return clonePresetDefinitions(normalized), nil
+}
+
+func clonePresetDefinitions(in []preset.Definition) []preset.Definition {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]preset.Definition, len(in))
+	for i := range in {
+		out[i] = clonePresetDefinition(in[i])
+	}
+	return out
+}
+
+func clonePresetDefinition(in preset.Definition) preset.Definition {
+	out := preset.Definition{
+		Name:        in.Name,
+		Description: in.Description,
+		Kinds:       make([]preset.Kind, len(in.Kinds)),
+	}
+	for i := range in.Kinds {
+		out.Kinds[i] = clonePresetKind(in.Kinds[i])
+	}
+	return out
+}
+
+func clonePresetKind(in preset.Kind) preset.Kind {
+	out := preset.Kind{
+		Name:        in.Name,
+		Description: in.Description,
+		Namespace:   in.Namespace,
+		Operations:  append([]preset.Operation(nil), in.Operations...),
+		Schema:      clonePresetSchema(in.Schema),
+		Tools:       in.Tools,
+	}
+	return out
+}
+
+func clonePresetSchema(in preset.Schema) preset.Schema {
+	out := preset.Schema{
+		Type:                 in.Type,
+		Description:          in.Description,
+		Required:             append([]string(nil), in.Required...),
+		AdditionalProperties: in.AdditionalProperties,
+	}
+	if in.Items != nil {
+		items := clonePresetSchema(*in.Items)
+		out.Items = &items
+	}
+	if len(in.Properties) > 0 {
+		out.Properties = make(map[string]preset.Schema, len(in.Properties))
+		for k, v := range in.Properties {
+			out.Properties[k] = clonePresetSchema(v)
+		}
+	}
+	return out
 }

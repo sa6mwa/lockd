@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"pkt.systems/lockd/mcp/preset"
 	mcpstate "pkt.systems/lockd/mcp/state"
 )
 
@@ -233,6 +234,60 @@ func TestClientNamespaceAndEnsureActive(t *testing.T) {
 	}
 	if err := mgr.EnsureClientActive(boot.ClientID); !errors.Is(err, ErrClientInactive) {
 		t.Fatalf("expected ErrClientInactive from EnsureClientActive after revoke, got %v", err)
+	}
+}
+
+func TestUpdateClientPresetSurfacePersistsToState(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "mcp.pem")
+	tokenStorePath := filepath.Join(dir, "mcp-token-store.enc.json")
+
+	boot, err := mcpstate.Bootstrap(mcpstate.BootstrapRequest{
+		Path:              statePath,
+		Issuer:            "https://127.0.0.1:19341",
+		InitialClientName: "default",
+	})
+	if err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	mgr, err := NewManager(ManagerConfig{StatePath: statePath, TokenStore: tokenStorePath})
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	lockdPreset := false
+	if err := mgr.UpdateClient(UpdateClientRequest{
+		ClientID:    boot.ClientID,
+		LockdPreset: &lockdPreset,
+		Presets: []preset.Definition{{
+			Name: "memory",
+			Kinds: []preset.Kind{{
+				Name:      "note",
+				Namespace: "agents",
+				Schema: preset.Schema{
+					Type: "object",
+					Properties: map[string]preset.Schema{
+						"text": {Type: "string"},
+					},
+				},
+			}},
+		}},
+	}); err != nil {
+		t.Fatalf("update client presets: %v", err)
+	}
+
+	loaded, err := mcpstate.Load(statePath)
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	client := loaded.Clients[boot.ClientID]
+	if client.LockdPreset {
+		t.Fatalf("expected lockd preset disabled")
+	}
+	if len(client.Presets) != 1 || client.Presets[0].Kinds[0].Tools.StateGet != "memory.note.state.get" {
+		t.Fatalf("unexpected presets: %#v", client.Presets)
 	}
 }
 

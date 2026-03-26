@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"pkt.systems/lockd/mcp/oauth"
+	"pkt.systems/lockd/mcp/preset"
 	mcpstate "pkt.systems/lockd/mcp/state"
 	"pkt.systems/pslog"
 )
@@ -30,6 +31,8 @@ type AddClientRequest struct {
 	Name string
 	// Namespace optionally sets a per-client default namespace for MCP tools.
 	Namespace    string
+	LockdPreset  bool
+	Presets      []preset.Definition
 	Scopes       []string
 	RedirectURIs []string
 }
@@ -47,6 +50,8 @@ type UpdateClientRequest struct {
 	// Namespace updates per-client default namespace when non-nil.
 	// Nil leaves value unchanged; empty string clears override.
 	Namespace    *string
+	LockdPreset  *bool
+	Presets      []preset.Definition
 	Scopes       []string
 	RedirectURIs []string
 }
@@ -148,6 +153,8 @@ func (s *Service) AddClient(req AddClientRequest) (AddClientResponse, error) {
 	resp, err := mgr.AddClient(oauth.AddClientRequest{
 		Name:         req.Name,
 		Namespace:    req.Namespace,
+		LockdPreset:  req.LockdPreset,
+		Presets:      req.Presets,
 		Scopes:       req.Scopes,
 		RedirectURIs: req.RedirectURIs,
 	})
@@ -197,6 +204,8 @@ func (s *Service) UpdateClient(req UpdateClientRequest) error {
 		ClientID:     strings.TrimSpace(req.ClientID),
 		Name:         req.Name,
 		Namespace:    req.Namespace,
+		LockdPreset:  req.LockdPreset,
+		Presets:      req.Presets,
 		Scopes:       req.Scopes,
 		RedirectURIs: req.RedirectURIs,
 	})

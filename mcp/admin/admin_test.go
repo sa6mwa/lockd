@@ -3,6 +3,8 @@ package admin
 import (
 	"path/filepath"
 	"testing"
+
+	"pkt.systems/lockd/mcp/preset"
 )
 
 func TestServiceBootstrapAndCredentials(t *testing.T) {
@@ -124,5 +126,53 @@ func TestServiceClientLifecycle(t *testing.T) {
 	}
 	if _, err := svc.GetClient(added.ClientID); err == nil {
 		t.Fatalf("expected error for removed client")
+	}
+}
+
+func TestServiceAddClientPersistsPresetSurface(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	svc := New(Config{
+		StatePath:  filepath.Join(dir, "mcp.pem"),
+		TokenStore: filepath.Join(dir, "mcp-token-store.enc.json"),
+	})
+	if _, err := svc.Bootstrap(BootstrapRequest{
+		Issuer:            "https://127.0.0.1:19341",
+		InitialClientName: "default",
+	}); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	added, err := svc.AddClient(AddClientRequest{
+		Name:        "memory-client",
+		LockdPreset: false,
+		Presets: []preset.Definition{{
+			Name: "memory",
+			Kinds: []preset.Kind{{
+				Name:      "note",
+				Namespace: "agents",
+				Schema: preset.Schema{
+					Type: "object",
+					Properties: map[string]preset.Schema{
+						"text": {Type: "string"},
+					},
+				},
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("add client: %v", err)
+	}
+
+	client, err := svc.GetClient(added.ClientID)
+	if err != nil {
+		t.Fatalf("get client: %v", err)
+	}
+	if client.LockdPreset {
+		t.Fatalf("expected lockd preset disabled")
+	}
+	if len(client.Presets) != 1 || client.Presets[0].Name != "memory" {
+		t.Fatalf("unexpected presets: %#v", client.Presets)
 	}
 }

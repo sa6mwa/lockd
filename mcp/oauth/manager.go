@@ -26,6 +26,7 @@ import (
 
 	"pkt.systems/kryptograf"
 	"pkt.systems/kryptograf/keymgmt"
+	"pkt.systems/lockd/mcp/preset"
 	"pkt.systems/lockd/mcp/state"
 	"pkt.systems/pslog"
 )
@@ -65,6 +66,8 @@ type AddClientRequest struct {
 	// Namespace optionally sets a per-client default namespace used by MCP tools
 	// when the tool input omits namespace.
 	Namespace    string
+	LockdPreset  bool
+	Presets      []preset.Definition
 	Scopes       []string
 	RedirectURIs []string
 }
@@ -82,6 +85,8 @@ type UpdateClientRequest struct {
 	// Namespace updates the optional per-client default namespace when non-nil.
 	// Use pointer to distinguish "leave unchanged" (nil) from "clear" ("").
 	Namespace    *string
+	LockdPreset  *bool
+	Presets      []preset.Definition
 	Scopes       []string
 	RedirectURIs []string
 }
@@ -363,7 +368,7 @@ func (m *Manager) SetIssuer(issuer string) error {
 func (m *Manager) AddClient(req AddClientRequest) (AddClientResponse, error) {
 	resp := AddClientResponse{}
 	err := m.mutate(func(d *state.Data, now time.Time) error {
-		client, secret, err := d.AddClient(req.Name, req.Namespace, req.Scopes, req.RedirectURIs, now)
+		client, secret, err := d.AddClient(req.Name, req.Namespace, req.LockdPreset, req.Presets, req.Scopes, req.RedirectURIs, now)
 		if err != nil {
 			return err
 		}
@@ -419,6 +424,20 @@ func (m *Manager) UpdateClient(req UpdateClientRequest) error {
 		}
 		if req.Namespace != nil {
 			if err := d.UpdateClientNamespace(req.ClientID, *req.Namespace, now); err != nil {
+				return err
+			}
+		}
+		if req.LockdPreset != nil || req.Presets != nil {
+			lockdPreset := false
+			client, ok := d.Clients[strings.TrimSpace(req.ClientID)]
+			if !ok {
+				return state.ErrClientNotFound
+			}
+			lockdPreset = client.LockdPreset
+			if req.LockdPreset != nil {
+				lockdPreset = *req.LockdPreset
+			}
+			if err := d.UpdateClientPresets(req.ClientID, lockdPreset, req.Presets, now); err != nil {
 				return err
 			}
 		}

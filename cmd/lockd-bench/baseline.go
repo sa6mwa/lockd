@@ -752,15 +752,6 @@ func latestAndPreviousBaselineRecords(records []baselineRunRecord, preset, backe
 	return current, nil
 }
 
-func findBaselineCase(cases []baselineCaseResult, workload string, size int) (baselineCaseResult, bool) {
-	for _, candidate := range cases {
-		if candidate.Workload == workload && candidate.Size == size {
-			return candidate, true
-		}
-	}
-	return baselineCaseResult{}, false
-}
-
 func recordHistoryBranch(record baselineRunRecord) string {
 	if strings.TrimSpace(record.HistoryBranch) != "" {
 		return record.HistoryBranch

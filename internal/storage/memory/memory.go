@@ -124,6 +124,7 @@ func (s *Store) Close() error {
 	return nil
 }
 
+// Abort satisfies storage.Backend by delegating to Close for the in-memory store.
 func (s *Store) Abort() error {
 	return s.Close()
 }

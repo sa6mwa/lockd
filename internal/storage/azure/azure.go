@@ -233,6 +233,7 @@ func isContainerExists(err error) bool {
 // Close satisfies storage.Backend by releasing resources held by Store (no-op for Azure).
 func (s *Store) Close() error { return nil }
 
+// Abort satisfies storage.Backend by delegating to Close for the Azure client.
 func (s *Store) Abort() error { return s.Close() }
 
 // BackendHash returns the stable identity hash for this backend.

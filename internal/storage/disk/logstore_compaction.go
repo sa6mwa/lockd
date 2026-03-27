@@ -903,6 +903,7 @@ func (w *compactionWriter) writeChunk(offset int64, chunk []byte) error {
 	return nil
 }
 
+// CompactLogstore runs logstore compaction immediately for one namespace.
 func (s *Store) CompactLogstore(ctx context.Context, namespace string) error {
 	_ = ctx
 	if s == nil || s.logstore == nil {

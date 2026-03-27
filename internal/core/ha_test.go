@@ -93,12 +93,11 @@ type failingHAMetaBackend struct {
 type barrierHAMemberBackend struct {
 	storage.Backend
 
-	mu           sync.Mutex
-	started      int
-	released     bool
-	releaseCh    chan struct{}
-	storeCalls   int
-	listMetaKeys int
+	mu         sync.Mutex
+	started    int
+	released   bool
+	releaseCh  chan struct{}
+	storeCalls int
 }
 
 func newBarrierHAMemberBackend(inner storage.Backend) *barrierHAMemberBackend {

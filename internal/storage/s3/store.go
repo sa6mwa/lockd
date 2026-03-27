@@ -208,6 +208,7 @@ func defaultTransport() http.RoundTripper {
 // Close satisfies storage.Backend and is a no-op for the S3 client.
 func (s *Store) Close() error { return nil }
 
+// Abort satisfies storage.Backend by delegating to Close for the S3 client.
 func (s *Store) Abort() error { return s.Close() }
 
 // BackendHash returns the stable identity hash for this backend.

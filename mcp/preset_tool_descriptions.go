@@ -12,6 +12,7 @@ const presetHelpFirstLine = "DISCOVERY: If you have not reviewed this preset in 
 const presetNamespaceLine = "SURFACE: Namespace is fixed by the preset binding; never invent or pass namespace arguments for preset tools."
 const presetQueryLine = "QUERY DIALECT: `query` is lockd LQL, not natural-language search. Use exact field paths like `/title`, `/tags`, `/text`, `/company`, or `/time`."
 const presetAttachmentLine = "SENSITIVE: Attachment payloads or one-time stream URLs may be returned; do not echo raw payload secrets or capability URLs into user-visible summaries."
+const presetNamespaceGuidanceLine = "NAMESPACE DESIGN: Presets can share one lockd namespace across multiple kinds, but one kind per namespace is usually simpler and may perform better for indexing/query locality."
 
 func presetHelpToolDescription(def presetcfg.Definition) string {
 	presetSummary := strings.TrimSpace(def.Description)
@@ -23,6 +24,7 @@ func presetHelpToolDescription(def presetcfg.Definition) string {
 			presetHelpFirstLine,
 			presetNamespaceLine,
 			"PRESET PURPOSE: " + presetSummary,
+			presetNamespaceGuidanceLine,
 		},
 		Purpose:  fmt.Sprintf("Summarize the generated %s preset tools and tell the agent which operations exist before it starts guessing.", def.Name),
 		UseWhen:  "You are starting work with this preset, you need to confirm the available kinds/operations, or a prior tool call failed and you need to re-anchor on the actual surface.",
@@ -43,7 +45,7 @@ func presetQueryToolDescription(def presetcfg.Definition, kind presetcfg.Kind) s
 		},
 		Purpose:  fmt.Sprintf("Run LQL queries over `%s` %s records and return matching keys for follow-up reads or updates.", def.Name, kindLabel(kind)),
 		UseWhen:  fmt.Sprintf("You need to discover candidate %s records by tags, keywords, titles, names, URLs, dates, or other indexed fields before calling `%s.%s.state.get`.", kindLabel(kind), def.Name, kind.Name),
-		Requires: fmt.Sprintf("`query` is required and is evaluated only within namespace %q for `%s` %s records. `limit` caps returned keys. `cursor` continues pagination from a previous result. Use empty query string (`\"\"`) to enumerate all keys for this kind.", kind.Namespace, def.Name, kindLabel(kind)),
+		Requires: fmt.Sprintf("`query` is required and is evaluated within namespace %q for `%s` %s records. Preset query automatically injects an internal `_lockd_kind=%q` filter, so results stay scoped to this kind even when multiple kinds share one namespace. `limit` caps returned keys. `cursor` continues pagination from a previous result. Use empty query string (`\"\"`) to enumerate all keys for this kind.", kind.Namespace, def.Name, kindLabel(kind), kind.Name),
 		Effects:  fmt.Sprintf("Returns matching `keys`, optional `cursor` for continuation, observed `index_seq`, and lockd query metadata. It does not return documents; use the returned keys with `%s.%s.state.get`.", def.Name, kind.Name),
 		Retry:    "Safe to retry; read-only query. If you receive a continuation cursor, pass that exact cursor back unchanged to fetch the next page.",
 		Next:     fmt.Sprintf("Use returned keys with `%s.%s.state.get`, or refine the query if the result set is too broad. LQL examples for this tool: %s", def.Name, kind.Name, examples),

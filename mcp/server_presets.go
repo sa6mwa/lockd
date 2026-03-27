@@ -200,9 +200,10 @@ func (s *server) registerPresetHelpTool(srv *mcpsdk.Server, def presetcfg.Defini
 			"kinds":       kinds,
 			"workflow": []string{
 				fmt.Sprintf("Call `%s.help` first when you have not used this preset in the current session.", def.Name),
-				fmt.Sprintf("Use `%s.<kind>.query` to discover keys with LQL before calling `%s.<kind>.state.get`.", def.Name, def.Name),
+				fmt.Sprintf("Use `%s.<kind>.query` to discover keys with LQL before calling `%s.<kind>.state.get`; preset query auto-filters to the current kind even when multiple kinds share one namespace.", def.Name, def.Name),
 				fmt.Sprintf("Use `%s.<kind>.state.put` when you know the target key and need durable schema-backed state.", def.Name),
 				fmt.Sprintf("Only call `%s.<kind>.attachments.get` after `%s.<kind>.state.get` shows `_lockd_attachments` metadata.", def.Name, def.Name),
+				"One kind per namespace is usually the simplest and fastest design, but shared-namespace presets remain valid when you also want raw lockd namespace-wide query behavior.",
 			},
 			"tools": tools,
 		}, nil
@@ -220,7 +221,7 @@ func (s *server) addPresetQueryTool(srv *mcpsdk.Server, def presetcfg.Definition
 	}
 	mcpsdk.AddTool(srv, tool, withObservedTool(s, name, func(ctx context.Context, req *mcpsdk.CallToolRequest, input map[string]any) (*mcpsdk.CallToolResult, map[string]any, error) {
 		_, out, err := s.handleQueryTool(ctx, req, queryToolInput{
-			Query:     mapString(input, "query"),
+			Query:     presetScopedQuery(mapString(input, "query"), rt.kind),
 			Cursor:    mapString(input, "cursor"),
 			Limit:     mapInt(input, "limit"),
 			Namespace: rt.kind.Namespace,
@@ -228,12 +229,19 @@ func (s *server) addPresetQueryTool(srv *mcpsdk.Server, def presetcfg.Definition
 		if err != nil {
 			return nil, nil, err
 		}
-		return nil, map[string]any{
-			"keys":      out.Keys,
-			"cursor":    out.Cursor,
-			"index_seq": out.IndexSeq,
-			"metadata":  out.Metadata,
-		}, nil
+		result := map[string]any{
+			"keys": out.Keys,
+		}
+		if strings.TrimSpace(out.Cursor) != "" {
+			result["cursor"] = out.Cursor
+		}
+		if out.IndexSeq > 0 {
+			result["index_seq"] = out.IndexSeq
+		}
+		if len(out.Metadata) > 0 {
+			result["metadata"] = out.Metadata
+		}
+		return nil, result, nil
 	}))
 }
 
@@ -248,7 +256,7 @@ func (s *server) addPresetStatePutTool(srv *mcpsdk.Server, def presetcfg.Definit
 	}
 	mcpsdk.AddTool(srv, tool, withObservedTool(s, name, func(ctx context.Context, req *mcpsdk.CallToolRequest, input map[string]any) (*mcpsdk.CallToolResult, map[string]any, error) {
 		key := mapString(input, "key")
-		doc := presetDocumentFromInput(rt.kind.Schema, input)
+		doc := presetStoredDocumentFromInput(rt.kind, input)
 		payload, err := json.Marshal(doc)
 		if err != nil {
 			return nil, nil, fmt.Errorf("encode preset document: %w", err)
@@ -400,14 +408,15 @@ func (s *server) loadPresetStateOutput(ctx context.Context, req *mcpsdk.CallTool
 	if err := dec.Decode(&document); err != nil {
 		return nil, fmt.Errorf("decode preset state %q: %w", key, err)
 	}
-	if err := rt.documentResolved.Validate(&document); err != nil {
+	documentView := stripPresetInternalFields(document)
+	if err := rt.documentResolved.Validate(&documentView); err != nil {
 		return nil, fmt.Errorf("preset state %q does not match schema: %w", key, err)
 	}
 	out := map[string]any{
 		"_lockd_key": key,
 	}
 	for prop := range rt.kind.Schema.Properties {
-		if value, ok := document[prop]; ok {
+		if value, ok := documentView[prop]; ok {
 			out[prop] = value
 		}
 	}
@@ -604,11 +613,40 @@ func falseSchema() *jsonschema.Schema {
 }
 
 func presetDocumentFromInput(schema presetcfg.Schema, input map[string]any) map[string]any {
-	out := make(map[string]any, len(schema.Properties))
+	out := make(map[string]any, len(schema.Properties)+1)
 	for key := range schema.Properties {
 		if value, ok := input[key]; ok {
 			out[key] = value
 		}
+	}
+	return out
+}
+
+func presetStoredDocumentFromInput(kind presetcfg.Kind, input map[string]any) map[string]any {
+	out := presetDocumentFromInput(kind.Schema, input)
+	out["_lockd_kind"] = kind.Name
+	return out
+}
+
+func presetScopedQuery(expr string, kind presetcfg.Kind) string {
+	filter := fmt.Sprintf("/_lockd_kind=%q", kind.Name)
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return filter
+	}
+	return filter + "," + expr
+}
+
+func stripPresetInternalFields(document map[string]any) map[string]any {
+	if len(document) == 0 {
+		return map[string]any{}
+	}
+	out := make(map[string]any, len(document))
+	for key, value := range document {
+		if strings.HasPrefix(key, presetcfg.ReservedFieldPrefix) {
+			continue
+		}
+		out[key] = value
 	}
 	return out
 }

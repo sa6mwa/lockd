@@ -128,6 +128,7 @@ func TestBuiltInMemoryPresetToolDescriptionsAreOperationallyDetailed(t *testing.
 	for _, phrase := range []string{
 		"RECORD PURPOSE: Saved URLs and references with titles, summaries, and retrieval tags.",
 		"`query` is lockd LQL",
+		"Preset query automatically injects an internal `_lockd_kind=",
 		"Use empty query string (`\"\"`) to enumerate all keys",
 		"`cursor` continues pagination from a previous result",
 		"/title=\"Quarterly plan\"",
@@ -282,6 +283,9 @@ func TestPresetStatePutGetAndDeleteRoundTrip(t *testing.T) {
 	if doc["text"] != "remember this" {
 		t.Fatalf("stored doc text=%v", doc["text"])
 	}
+	if doc["_lockd_kind"] != "note" {
+		t.Fatalf("stored discriminator=%v want note", doc["_lockd_kind"])
+	}
 
 	getRes, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{
 		Name: "memory.note.state.get",
@@ -377,6 +381,89 @@ func TestPresetStateGetIncludesAttachmentMetadata(t *testing.T) {
 	first, ok := attachments[0].(map[string]any)
 	if !ok || first["name"] != "memo.txt" {
 		t.Fatalf("attachment metadata=%#v", attachments[0])
+	}
+}
+
+func TestPresetQueryFiltersSharedNamespaceByKind(t *testing.T) {
+	t.Parallel()
+
+	s, _ := newToolTestServer(t)
+	cs, closeFn := connectMCPClientSessionForSurface(t, s, toolSurface{
+		Presets: []presetcfg.Definition{{
+			Name: "memory",
+			Kinds: []presetcfg.Kind{
+				{
+					Name:      "note",
+					Namespace: "agents",
+					Schema: presetcfg.Schema{
+						Type: "object",
+						Properties: map[string]presetcfg.Schema{
+							"text": {Type: "string"},
+						},
+						Required: []string{"text"},
+					},
+				},
+				{
+					Name:      "bookmark",
+					Namespace: "agents",
+					Schema: presetcfg.Schema{
+						Type: "object",
+						Properties: map[string]presetcfg.Schema{
+							"title": {Type: "string"},
+							"url":   {Type: "string"},
+						},
+						Required: []string{"title", "url"},
+					},
+				},
+			},
+		}},
+	})
+	defer closeFn()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for _, tc := range []struct {
+		name string
+		args map[string]any
+	}{
+		{
+			name: "memory.note.state.put",
+			args: map[string]any{"key": "note-1", "text": "project bookmark mention"},
+		},
+		{
+			name: "memory.bookmark.state.put",
+			args: map[string]any{"key": "bookmark-1", "title": "Project Plan", "url": "https://example.com/plan"},
+		},
+	} {
+		res, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{Name: tc.name, Arguments: tc.args})
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if res.IsError {
+			t.Fatalf("%s returned tool error: %+v", tc.name, res)
+		}
+	}
+
+	queryRes, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{
+		Name:      "memory.bookmark.query",
+		Arguments: map[string]any{"query": ""},
+	})
+	if err != nil {
+		t.Fatalf("bookmark query: %v", err)
+	}
+	if queryRes.IsError {
+		t.Fatalf("bookmark query returned tool error: %+v", queryRes)
+	}
+	queryContent, ok := queryRes.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("bookmark query content type = %T", queryRes.StructuredContent)
+	}
+	keys, ok := queryContent["keys"].([]any)
+	if !ok {
+		t.Fatalf("bookmark query keys = %#v", queryContent["keys"])
+	}
+	if len(keys) != 1 || keys[0] != "bookmark-1" {
+		t.Fatalf("bookmark query keys=%v want [bookmark-1]", keys)
 	}
 }
 

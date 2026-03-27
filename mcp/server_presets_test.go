@@ -80,6 +80,27 @@ func TestBuiltInMemoryPresetToolDescriptionsAreOperationallyDetailed(t *testing.
 		}
 		byName[tool.Name] = tool
 	}
+	for _, want := range []string{
+		"memory.notes.query",
+		"memory.notes.state.put",
+		"memory.notes.state.get",
+		"memory.notes.state.delete",
+		"memory.notes.queue.enqueue",
+		"memory.notes.attachments.get",
+	} {
+		if byName[want] == nil {
+			t.Fatalf("missing built-in memory tool %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		"memory.bookmarks.queue.enqueue",
+		"memory.bookmarks.attachments.get",
+		"memory.memory.query",
+	} {
+		if byName[forbidden] != nil {
+			t.Fatalf("unexpected built-in memory tool %q", forbidden)
+		}
+	}
 	mustDesc := func(name string) string {
 		t.Helper()
 		tool := byName[name]
@@ -162,6 +183,31 @@ func TestBuiltInMemoryPresetToolDescriptionsAreOperationallyDetailed(t *testing.
 	stateGetDesc := mustDesc("memory.reminders.state.get")
 	if !strings.Contains(stateGetDesc, "_lockd_attachments") {
 		t.Fatalf("memory.reminders.state.get should explain attachment metadata contract: %q", stateGetDesc)
+	}
+
+	queueDesc := mustDesc("memory.notes.queue.enqueue")
+	for _, phrase := range []string{
+		"Queue name is fixed to `memory.notes`",
+		"Enqueues a message onto fixed queue `memory.notes`",
+	} {
+		if !strings.Contains(queueDesc, phrase) {
+			t.Fatalf("memory.notes.queue.enqueue missing phrase %q: %q", phrase, queueDesc)
+		}
+	}
+	queueTool := byName["memory.notes.queue.enqueue"]
+	if queueTool == nil {
+		t.Fatalf("missing tool %q", "memory.notes.queue.enqueue")
+	}
+	queueInput, ok := queueTool.InputSchema.(map[string]any)
+	if !ok {
+		t.Fatalf("memory.notes.queue.enqueue input schema type = %T", queueTool.InputSchema)
+	}
+	queueProps, ok := queueInput["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("memory.notes.queue.enqueue input schema missing properties: %#v", queueInput)
+	}
+	if _, ok := queueProps["queue"]; ok {
+		t.Fatalf("memory.notes.queue.enqueue should not expose queue field")
 	}
 
 	helpRes, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{

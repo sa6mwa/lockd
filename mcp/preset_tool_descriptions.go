@@ -101,6 +101,7 @@ func presetStateDeleteToolDescription(def presetcfg.Definition, kind presetcfg.K
 }
 
 func presetQueueEnqueueToolDescription(def presetcfg.Definition, kind presetcfg.Kind) string {
+	queueName := presetQueueName(def, kind)
 	return formatToolDescription(toolContract{
 		Top: []string{
 			fmt.Sprintf("DISCOVERY: Use `%s.help` to confirm this kind supports queue enqueue before constructing message payloads.", def.Name),
@@ -109,8 +110,8 @@ func presetQueueEnqueueToolDescription(def presetcfg.Definition, kind presetcfg.
 		},
 		Purpose:  fmt.Sprintf("Publish one `%s` %s-shaped payload into a lockd queue using the same schema fields as the preset record.", def.Name, kindLabel(kind)),
 		UseWhen:  "You need asynchronous coordination, reminders, work dispatch, or event delivery rather than durable keyed state.",
-		Requires: fmt.Sprintf("Queue payload fields follow the same schema as `%s.%s.state.put`, but there is no `key`. `queue` may be omitted to use the default queue. Delay/visibility/TTL/attempt settings are optional queue controls, not schema fields.", def.Name, kind.Name),
-		Effects:  "Enqueues a message and returns queue/message metadata such as `message_id`, visibility deadline, payload size, and correlation id.",
+		Requires: fmt.Sprintf("Queue payload fields follow the same schema as `%s.%s.state.put`, but there is no `key`. Queue name is fixed to `%s`; do not invent or pass queue names for preset tools. Delay/visibility/TTL/attempt settings are optional queue controls, not schema fields.", def.Name, kind.Name, queueName),
+		Effects:  fmt.Sprintf("Enqueues a message onto fixed queue `%s` and returns queue/message metadata such as `message_id`, visibility deadline, payload size, and correlation id.", queueName),
 		Retry:    "Do not blindly retry after uncertain enqueue outcome unless duplicate publication is acceptable for your workflow.",
 		Next:     "If the payload should also be durable memory, write it separately with the state tool. Otherwise hand off to whatever queue consumer is responsible for this message type.",
 	})
@@ -135,8 +136,8 @@ func presetAttachmentsGetToolDescription(def presetcfg.Definition, kind presetcf
 func presetQueryExamples(presetName string, kind presetcfg.Kind) string {
 	if strings.EqualFold(presetName, "memory") {
 		switch strings.ToLower(kind.Name) {
-		case "memory":
-			return "`\"\"` for all memory keys; `icontains{field=/text,value=renewal}` for free-text recall; `in{field=/tags,any=project-x|urgent}` for tag filtering."
+		case "notes":
+			return "`\"\"` for all note keys; `icontains{field=/text,value=renewal}` for free-text recall; `in{field=/tags,any=project-x|urgent}` for tag filtering."
 		case "bookmarks":
 			return "`\"\"` for all bookmarks; `/title=\"Quarterly plan\"` for exact title match; `icontains{field=/summary,value=benchmark}` or `icontains{field=/url,value=docs}` for fuzzy lookup."
 		case "contacts":
@@ -162,6 +163,10 @@ func kindLabel(kind presetcfg.Kind) string {
 		return strings.TrimSpace(kind.Description)
 	}
 	return kind.Name
+}
+
+func presetQueueName(def presetcfg.Definition, kind presetcfg.Kind) string {
+	return def.Name + "." + kind.Name
 }
 
 func quotedList(values []string) string {

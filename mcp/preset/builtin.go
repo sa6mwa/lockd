@@ -70,9 +70,17 @@ func mustBuiltInDefinitions() map[string]Definition {
 			Description: "Shared AI memory and recall documents for notes, bookmarks, contacts, reminders, and todos.",
 			Kinds: []Kind{
 				{
-					Name:        "memory",
+					Name:        "notes",
 					Description: "Free-form memory entries for recall, facts, notes, and snippets of durable context.",
 					Namespace:   "memory",
+					Operations: []Operation{
+						OperationQuery,
+						OperationStatePut,
+						OperationStateGet,
+						OperationStateDelete,
+						OperationQueueEnqueue,
+						OperationAttachmentsGet,
+					},
 					Schema: Schema{
 						Type: "object",
 						Properties: map[string]Schema{
@@ -95,6 +103,12 @@ func mustBuiltInDefinitions() map[string]Definition {
 					Name:        "bookmarks",
 					Description: "Saved URLs and references with titles, summaries, and retrieval tags.",
 					Namespace:   "memory",
+					Operations: []Operation{
+						OperationQuery,
+						OperationStatePut,
+						OperationStateGet,
+						OperationStateDelete,
+					},
 					Schema: Schema{
 						Type: "object",
 						Properties: map[string]Schema{
@@ -114,6 +128,14 @@ func mustBuiltInDefinitions() map[string]Definition {
 					Name:        "contacts",
 					Description: "People or organization contacts with communication details and tags.",
 					Namespace:   "memory",
+					Operations: []Operation{
+						OperationQuery,
+						OperationStatePut,
+						OperationStateGet,
+						OperationStateDelete,
+						OperationQueueEnqueue,
+						OperationAttachmentsGet,
+					},
 					Schema: Schema{
 						Type: "object",
 						Properties: map[string]Schema{
@@ -147,6 +169,14 @@ func mustBuiltInDefinitions() map[string]Definition {
 					Name:        "reminders",
 					Description: "Time-bound reminders and future follow-up items.",
 					Namespace:   "memory",
+					Operations: []Operation{
+						OperationQuery,
+						OperationStatePut,
+						OperationStateGet,
+						OperationStateDelete,
+						OperationQueueEnqueue,
+						OperationAttachmentsGet,
+					},
 					Schema: Schema{
 						Type: "object",
 						Properties: map[string]Schema{
@@ -166,6 +196,14 @@ func mustBuiltInDefinitions() map[string]Definition {
 					Name:        "todo",
 					Description: "Action items and task tracking entries.",
 					Namespace:   "memory",
+					Operations: []Operation{
+						OperationQuery,
+						OperationStatePut,
+						OperationStateGet,
+						OperationStateDelete,
+						OperationQueueEnqueue,
+						OperationAttachmentsGet,
+					},
 					Schema: Schema{
 						Type: "object",
 						Properties: map[string]Schema{

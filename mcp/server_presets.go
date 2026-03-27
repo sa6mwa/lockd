@@ -136,7 +136,7 @@ func newPresetRuntimeKind(kind presetcfg.Kind) (*presetRuntimeKind, error) {
 		stateDeleteInput:  buildPresetKeyOnlyInputSchema("Preset document key"),
 		queryInput:        buildPresetQueryInputSchema(),
 		queryOutput:       buildPresetQueryOutputSchema(),
-		queueEnqueueInput: buildPresetQueueInputSchema(kind.Schema),
+		queueEnqueueInput: nil,
 		queueOutput:       buildPresetQueueOutputSchema(),
 		attachmentsInput:  buildPresetAttachmentGetInputSchema(),
 		attachmentsOutput: buildPresetAttachmentGetOutputSchema(),
@@ -310,11 +310,12 @@ func (s *server) addPresetStateDeleteTool(srv *mcpsdk.Server, def presetcfg.Defi
 
 func (s *server) addPresetQueueEnqueueTool(srv *mcpsdk.Server, def presetcfg.Definition, rt *presetRuntimeKind) {
 	name := rt.kind.Tools.QueueEnqueue
+	queueName := presetQueueName(def, rt.kind)
 	tool := &mcpsdk.Tool{
 		Name:         name,
 		Description:  presetQueueEnqueueToolDescription(def, rt.kind),
 		Annotations:  &mcpsdk.ToolAnnotations{OpenWorldHint: boolRef(false)},
-		InputSchema:  rt.queueEnqueueInput,
+		InputSchema:  buildPresetQueueInputSchema(rt.kind.Schema, queueName),
 		OutputSchema: rt.queueOutput,
 	}
 	mcpsdk.AddTool(srv, tool, withObservedTool(s, name, func(ctx context.Context, req *mcpsdk.CallToolRequest, input map[string]any) (*mcpsdk.CallToolResult, map[string]any, error) {
@@ -324,7 +325,7 @@ func (s *server) addPresetQueueEnqueueTool(srv *mcpsdk.Server, def presetcfg.Def
 			return nil, nil, fmt.Errorf("encode preset queue payload: %w", err)
 		}
 		_, out, err := s.handleQueueEnqueueTool(ctx, req, queueEnqueueToolInput{
-			Queue:             mapString(input, "queue"),
+			Queue:             queueName,
 			Namespace:         rt.kind.Namespace,
 			PayloadText:       string(payload),
 			DelaySeconds:      mapInt64(input, "delay_seconds"),
@@ -513,10 +514,9 @@ func buildPresetQueryOutputSchema() *jsonschema.Schema {
 	}, nil)
 }
 
-func buildPresetQueueInputSchema(schema presetcfg.Schema) *jsonschema.Schema {
+func buildPresetQueueInputSchema(schema presetcfg.Schema, queueName string) *jsonschema.Schema {
 	props := map[string]*jsonschema.Schema{
-		"queue":              scalarSchema("string", "Queue name. Omit to use the default queue for this workflow."),
-		"delay_seconds":      scalarSchema("integer", "Delay before the enqueued message becomes visible to consumers."),
+		"delay_seconds":      scalarSchema("integer", fmt.Sprintf("Delay before the message becomes visible on fixed queue %q.", queueName)),
 		"visibility_seconds": scalarSchema("integer", "Lease duration granted to a consumer that dequeues the message."),
 		"ttl_seconds":        scalarSchema("integer", "Retention lifetime before the message expires."),
 		"max_attempts":       scalarSchema("integer", "Maximum failed delivery attempts before the message is discarded or dead-lettered."),

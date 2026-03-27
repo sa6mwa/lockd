@@ -385,6 +385,25 @@ func buildFullMCPSpecJSONLWith(ctx context.Context, connect func(context.Context
 				}
 			}
 		}
+		for _, tool := range tools {
+			if tool == nil || !strings.HasSuffix(tool.Name, ".help") || tool.Name == "lockd.help" {
+				continue
+			}
+			callResult, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{
+				Name:      tool.Name,
+				Arguments: map[string]any{},
+			})
+			if err != nil {
+				return fmt.Errorf("call preset help %q: %w", tool.Name, err)
+			}
+			if err := enc.Encode(fullMCPSpecRecord{
+				Kind: "tool/call",
+				Name: tool.Name,
+				Data: callResult,
+			}); err != nil {
+				return err
+			}
+		}
 
 		return nil
 	}); err != nil {

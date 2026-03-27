@@ -14,15 +14,20 @@ const presetQueryLine = "QUERY DIALECT: `query` is lockd LQL, not natural-langua
 const presetAttachmentLine = "SENSITIVE: Attachment payloads or one-time stream URLs may be returned; do not echo raw payload secrets or capability URLs into user-visible summaries."
 
 func presetHelpToolDescription(def presetcfg.Definition) string {
+	presetSummary := strings.TrimSpace(def.Description)
+	if presetSummary == "" {
+		presetSummary = fmt.Sprintf("Schema-backed `%s` records.", def.Name)
+	}
 	return formatToolDescription(toolContract{
 		Top: []string{
 			presetHelpFirstLine,
 			presetNamespaceLine,
+			"PRESET PURPOSE: " + presetSummary,
 		},
 		Purpose:  fmt.Sprintf("Summarize the generated %s preset tools and tell the agent which operations exist before it starts guessing.", def.Name),
 		UseWhen:  "You are starting work with this preset, you need to confirm the available kinds/operations, or a prior tool call failed and you need to re-anchor on the actual surface.",
 		Requires: "No arguments. The result is scoped to this preset only.",
-		Effects:  "Returns the preset name, preset description, and the generated tool names that are actually available for this preset binding.",
+		Effects:  "Returns the preset name, preset description, kind summaries, workflow guidance, and the generated tool names that are actually available for this preset binding.",
 		Retry:    "Safe to retry; read-only surface discovery.",
 		Next:     "Pick the exact generated tool you need next. For retrieval, usually start with the relevant `<preset>.<kind>.query` or `<preset>.<kind>.state.get` tool.",
 	})
@@ -33,6 +38,7 @@ func presetQueryToolDescription(def presetcfg.Definition, kind presetcfg.Kind) s
 	return formatToolDescription(toolContract{
 		Top: []string{
 			fmt.Sprintf("DISCOVERY: If you have not reviewed `%s.help` in this session, call it before relying on this query tool.", def.Name),
+			"RECORD PURPOSE: " + kindSummary(kind),
 			presetQueryLine,
 		},
 		Purpose:  fmt.Sprintf("Run LQL queries over `%s` %s records and return matching keys for follow-up reads or updates.", def.Name, kindLabel(kind)),
@@ -50,6 +56,7 @@ func presetStatePutToolDescription(def presetcfg.Definition, kind presetcfg.Kind
 	return formatToolDescription(toolContract{
 		Top: []string{
 			fmt.Sprintf("DISCOVERY: Review `%s.help` if you are unsure which kind-specific fields belong on this `%s` write.", def.Name, kind.Name),
+			"RECORD PURPOSE: " + kindSummary(kind),
 			presetNamespaceLine,
 		},
 		Purpose:  fmt.Sprintf("Create or replace one `%s` %s record using the preset schema as the durable API contract.", def.Name, kindLabel(kind)),
@@ -65,6 +72,7 @@ func presetStateGetToolDescription(def presetcfg.Definition, kind presetcfg.Kind
 	return formatToolDescription(toolContract{
 		Top: []string{
 			fmt.Sprintf("DISCOVERY: `%s.help` lists the sibling tools that can act on the same `%s` record after this read.", def.Name, kind.Name),
+			"RECORD PURPOSE: " + kindSummary(kind),
 			presetNamespaceLine,
 		},
 		Purpose:  fmt.Sprintf("Read one `%s` %s record by key and return it in the flattened preset API shape.", def.Name, kindLabel(kind)),
@@ -80,6 +88,7 @@ func presetStateDeleteToolDescription(def presetcfg.Definition, kind presetcfg.K
 	return formatToolDescription(toolContract{
 		Top: []string{
 			fmt.Sprintf("DISCOVERY: Confirm the key with `%s.%s.state.get` first if you are not certain deletion is intended.", def.Name, kind.Name),
+			"RECORD PURPOSE: " + kindSummary(kind),
 			presetNamespaceLine,
 		},
 		Purpose:  fmt.Sprintf("Delete one `%s` %s record by key.", def.Name, kindLabel(kind)),
@@ -95,6 +104,7 @@ func presetQueueEnqueueToolDescription(def presetcfg.Definition, kind presetcfg.
 	return formatToolDescription(toolContract{
 		Top: []string{
 			fmt.Sprintf("DISCOVERY: Use `%s.help` to confirm this kind supports queue enqueue before constructing message payloads.", def.Name),
+			"RECORD PURPOSE: " + kindSummary(kind),
 			presetNamespaceLine,
 		},
 		Purpose:  fmt.Sprintf("Publish one `%s` %s-shaped payload into a lockd queue using the same schema fields as the preset record.", def.Name, kindLabel(kind)),
@@ -110,6 +120,7 @@ func presetAttachmentsGetToolDescription(def presetcfg.Definition, kind presetcf
 	return formatToolDescription(toolContract{
 		Top: []string{
 			fmt.Sprintf("DISCOVERY: Call `%s.%s.state.get` first to inspect `_lockd_attachments` and confirm the attachment name you need.", def.Name, kind.Name),
+			"RECORD PURPOSE: " + kindSummary(kind),
 			presetAttachmentLine,
 		},
 		Purpose:  fmt.Sprintf("Fetch one attachment associated with a `%s` %s record.", def.Name, kindLabel(kind)),
@@ -137,6 +148,13 @@ func presetQueryExamples(presetName string, kind presetcfg.Kind) string {
 		}
 	}
 	return "`\"\"` to enumerate all keys, exact field comparisons such as `/title=\"...\"`, and `icontains{field=/...,value=...}` or `in{field=/tags,any=...}` for broader recall."
+}
+
+func kindSummary(kind presetcfg.Kind) string {
+	if strings.TrimSpace(kind.Description) != "" {
+		return strings.TrimSpace(kind.Description)
+	}
+	return fmt.Sprintf("%s records.", kind.Name)
 }
 
 func kindLabel(kind presetcfg.Kind) string {

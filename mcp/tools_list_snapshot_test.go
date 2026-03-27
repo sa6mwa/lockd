@@ -236,4 +236,18 @@ func TestBuildFullMCPSpecJSONLForClientSurface(t *testing.T) {
 			t.Fatalf("missing preset tool %q in client surface: %v", want, toolNames)
 		}
 	}
+	foundPresetHelpCall := false
+	for _, line := range lines[1:] {
+		var record fullMCPSpecRecord
+		if err := json.Unmarshal(line, &record); err != nil {
+			t.Fatalf("decode full mcp spec record: %v", err)
+		}
+		if record.Kind == "tool/call" && record.Name == "memory.help" {
+			foundPresetHelpCall = true
+			break
+		}
+	}
+	if !foundPresetHelpCall {
+		t.Fatalf("missing preset help tool/call record in client surface snapshot")
+	}
 }

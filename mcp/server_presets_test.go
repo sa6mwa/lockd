@@ -99,9 +99,13 @@ func TestBuiltInMemoryPresetToolDescriptionsAreOperationallyDetailed(t *testing.
 	if !strings.Contains(helpDesc, "call this tool first") {
 		t.Fatalf("memory.help should direct discovery-first usage: %q", helpDesc)
 	}
+	if !strings.Contains(helpDesc, "PRESET PURPOSE: Shared AI memory and recall documents") {
+		t.Fatalf("memory.help should include preset purpose from config: %q", helpDesc)
+	}
 
 	queryDesc := mustDesc("memory.bookmarks.query")
 	for _, phrase := range []string{
+		"RECORD PURPOSE: Saved URLs and references with titles, summaries, and retrieval tags.",
 		"`query` is lockd LQL",
 		"Use empty query string (`\"\"`) to enumerate all keys",
 		"`cursor` continues pagination from a previous result",
@@ -129,6 +133,20 @@ func TestBuiltInMemoryPresetToolDescriptionsAreOperationallyDetailed(t *testing.
 			t.Fatalf("memory.bookmarks.query should not expose %q in preset query schema", field)
 		}
 	}
+	for field, phrase := range map[string]string{
+		"query":  "Use empty string to enumerate all keys",
+		"limit":  "Maximum number of keys to return in this page",
+		"cursor": "Opaque continuation cursor",
+	} {
+		entry, ok := properties[field].(map[string]any)
+		if !ok {
+			t.Fatalf("memory.bookmarks.query field %q schema = %#v", field, properties[field])
+		}
+		desc, _ := entry["description"].(string)
+		if !strings.Contains(desc, phrase) {
+			t.Fatalf("memory.bookmarks.query field %q description %q missing %q", field, desc, phrase)
+		}
+	}
 
 	statePutDesc := mustDesc("memory.contacts.state.put")
 	for _, phrase := range []string{
@@ -144,6 +162,39 @@ func TestBuiltInMemoryPresetToolDescriptionsAreOperationallyDetailed(t *testing.
 	stateGetDesc := mustDesc("memory.reminders.state.get")
 	if !strings.Contains(stateGetDesc, "_lockd_attachments") {
 		t.Fatalf("memory.reminders.state.get should explain attachment metadata contract: %q", stateGetDesc)
+	}
+
+	helpRes, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{
+		Name:      "memory.help",
+		Arguments: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("memory.help call: %v", err)
+	}
+	if helpRes.IsError {
+		t.Fatalf("memory.help returned tool error: %+v", helpRes)
+	}
+	helpPayload, ok := helpRes.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("memory.help payload type = %T", helpRes.StructuredContent)
+	}
+	if got := helpPayload["description"]; got != def.Description {
+		t.Fatalf("memory.help description=%v want %q", got, def.Description)
+	}
+	kinds, ok := helpPayload["kinds"].([]any)
+	if !ok || len(kinds) == 0 {
+		t.Fatalf("memory.help kinds=%#v", helpPayload["kinds"])
+	}
+	firstKind, ok := kinds[0].(map[string]any)
+	if !ok {
+		t.Fatalf("memory.help first kind=%#v", kinds[0])
+	}
+	if strings.TrimSpace(fmt.Sprint(firstKind["description"])) == "" {
+		t.Fatalf("memory.help kind description missing: %#v", firstKind)
+	}
+	workflow, ok := helpPayload["workflow"].([]any)
+	if !ok || len(workflow) < 3 {
+		t.Fatalf("memory.help workflow=%#v", helpPayload["workflow"])
 	}
 }
 

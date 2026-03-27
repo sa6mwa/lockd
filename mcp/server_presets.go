@@ -153,24 +153,58 @@ func (s *server) registerPresetHelpTool(srv *mcpsdk.Server, def presetcfg.Defini
 		OutputSchema: objectSchema(map[string]*jsonschema.Schema{
 			"preset":      scalarSchema("string", "Preset name"),
 			"description": scalarSchema("string", "Preset description"),
+			"kinds": {
+				Type: "array",
+				Items: objectSchema(map[string]*jsonschema.Schema{
+					"name":        scalarSchema("string", "Preset kind name"),
+					"description": scalarSchema("string", "Kind-specific purpose and usage summary"),
+					"namespace":   scalarSchema("string", "Hidden lockd namespace bound to this kind"),
+					"tools": {
+						Type:  "array",
+						Items: toolNameSchema(),
+					},
+				}, []string{"name", "tools"}),
+			},
+			"workflow": {
+				Type:  "array",
+				Items: scalarSchema("string", "Suggested preset workflow hint"),
+			},
 			"tools": {
 				Type:  "array",
 				Items: toolNameSchema(),
 			},
-		}, []string{"preset", "tools"}),
+		}, []string{"preset", "kinds", "workflow", "tools"}),
 	}
 	mcpsdk.AddTool(srv, tool, withObservedTool(s, name, func(_ context.Context, _ *mcpsdk.CallToolRequest, _ map[string]any) (*mcpsdk.CallToolResult, map[string]any, error) {
 		tools := []string{name}
+		kinds := make([]map[string]any, 0, len(def.Kinds))
 		for _, kind := range def.Kinds {
+			kindTools := make([]string, 0, len(kind.Operations))
 			for _, op := range kind.Operations {
-				tools = append(tools, def.Name+"."+kind.Name+"."+string(op))
+				toolName := def.Name + "." + kind.Name + "." + string(op)
+				kindTools = append(kindTools, toolName)
+				tools = append(tools, toolName)
 			}
+			sort.Strings(kindTools)
+			kinds = append(kinds, map[string]any{
+				"name":        kind.Name,
+				"description": kindSummary(kind),
+				"namespace":   kind.Namespace,
+				"tools":       kindTools,
+			})
 		}
 		sort.Strings(tools)
 		return nil, map[string]any{
 			"preset":      def.Name,
 			"description": def.Description,
-			"tools":       tools,
+			"kinds":       kinds,
+			"workflow": []string{
+				fmt.Sprintf("Call `%s.help` first when you have not used this preset in the current session.", def.Name),
+				fmt.Sprintf("Use `%s.<kind>.query` to discover keys with LQL before calling `%s.<kind>.state.get`.", def.Name, def.Name),
+				fmt.Sprintf("Use `%s.<kind>.state.put` when you know the target key and need durable schema-backed state.", def.Name),
+				fmt.Sprintf("Only call `%s.<kind>.attachments.get` after `%s.<kind>.state.get` shows `_lockd_attachments` metadata.", def.Name, def.Name),
+			},
+			"tools": tools,
 		}, nil
 	}))
 }
@@ -435,7 +469,7 @@ func buildPresetStateOutputSchema(schema presetcfg.Schema) *jsonschema.Schema {
 		"_lockd_attachments": {
 			Type: "array",
 			Items: objectSchema(map[string]*jsonschema.Schema{
-				"name":             scalarSchema("string", "Attachment name"),
+				"name":             scalarSchema("string", "Attachment name to pass to the preset attachments.get tool"),
 				"content_type":     scalarSchema("string", "Attachment content type"),
 				"size_bytes":       scalarSchema("integer", "Attachment size in bytes"),
 				"plaintext_sha256": scalarSchema("string", "Attachment SHA-256 checksum"),
@@ -458,9 +492,9 @@ func buildPresetKeyOnlyInputSchema(keyDescription string) *jsonschema.Schema {
 
 func buildPresetQueryInputSchema() *jsonschema.Schema {
 	return objectSchema(map[string]*jsonschema.Schema{
-		"query":  scalarSchema("string", "LQL query expression"),
-		"limit":  scalarSchema("integer", "Maximum rows to return"),
-		"cursor": scalarSchema("string", "Continuation cursor"),
+		"query":  scalarSchema("string", "LQL query expression. Use empty string to enumerate all keys for this kind."),
+		"limit":  scalarSchema("integer", "Maximum number of keys to return in this page."),
+		"cursor": scalarSchema("string", "Opaque continuation cursor returned by a previous preset query page."),
 	}, []string{"query"})
 }
 
@@ -481,11 +515,11 @@ func buildPresetQueryOutputSchema() *jsonschema.Schema {
 
 func buildPresetQueueInputSchema(schema presetcfg.Schema) *jsonschema.Schema {
 	props := map[string]*jsonschema.Schema{
-		"queue":              scalarSchema("string", "Queue name"),
-		"delay_seconds":      scalarSchema("integer", "Initial invisibility delay"),
-		"visibility_seconds": scalarSchema("integer", "Visibility timeout"),
-		"ttl_seconds":        scalarSchema("integer", "Message retention TTL"),
-		"max_attempts":       scalarSchema("integer", "Maximum failed attempts"),
+		"queue":              scalarSchema("string", "Queue name. Omit to use the default queue for this workflow."),
+		"delay_seconds":      scalarSchema("integer", "Delay before the enqueued message becomes visible to consumers."),
+		"visibility_seconds": scalarSchema("integer", "Lease duration granted to a consumer that dequeues the message."),
+		"ttl_seconds":        scalarSchema("integer", "Retention lifetime before the message expires."),
+		"max_attempts":       scalarSchema("integer", "Maximum failed delivery attempts before the message is discarded or dead-lettered."),
 		"attributes": {
 			Type:                 "object",
 			AdditionalProperties: &jsonschema.Schema{},
@@ -513,9 +547,9 @@ func buildPresetQueueOutputSchema() *jsonschema.Schema {
 
 func buildPresetAttachmentGetInputSchema() *jsonschema.Schema {
 	return objectSchema(map[string]*jsonschema.Schema{
-		"key":          scalarSchema("string", "Document key"),
-		"name":         scalarSchema("string", "Attachment name"),
-		"payload_mode": scalarSchema("string", "Payload mode: auto, inline, stream, or none"),
+		"key":          scalarSchema("string", "Document key that owns the attachment"),
+		"name":         scalarSchema("string", "Attachment name from `_lockd_attachments` metadata"),
+		"payload_mode": scalarSchema("string", "Attachment delivery mode: `none` for metadata only, `inline` for small payloads, `stream` for one-time URL delivery, or `auto` to let lockd choose"),
 	}, []string{"key", "name"})
 }
 
@@ -531,14 +565,14 @@ func buildPresetAttachmentGetOutputSchema() *jsonschema.Schema {
 			"created_at_unix":  scalarSchema("integer", "Creation timestamp"),
 			"updated_at_unix":  scalarSchema("integer", "Update timestamp"),
 		}, []string{"id", "name", "size"}),
-		"payload_mode":             scalarSchema("string", "Returned payload mode"),
-		"payload_bytes":            scalarSchema("integer", "Payload size"),
+		"payload_mode":             scalarSchema("string", "Returned payload mode after lockd resolves the request"),
+		"payload_bytes":            scalarSchema("integer", "Payload size in bytes"),
 		"payload_sha256":           scalarSchema("string", "Payload SHA-256"),
-		"payload_text":             scalarSchema("string", "Inline UTF-8 payload"),
-		"payload_base64":           scalarSchema("string", "Inline base64 payload"),
-		"download_url":             scalarSchema("string", "Download URL"),
-		"download_method":          scalarSchema("string", "Download method"),
-		"download_expires_at_unix": scalarSchema("integer", "Download URL expiry"),
+		"payload_text":             scalarSchema("string", "Inline UTF-8 payload when the attachment is textual and returned inline"),
+		"payload_base64":           scalarSchema("string", "Inline base64 payload when returned inline but not valid UTF-8"),
+		"download_url":             scalarSchema("string", "One-time download URL when payload delivery uses streaming"),
+		"download_method":          scalarSchema("string", "HTTP method to use with `download_url`"),
+		"download_expires_at_unix": scalarSchema("integer", "Unix timestamp when `download_url` expires"),
 	}, []string{"key", "attachment", "payload_mode", "payload_bytes"})
 }
 

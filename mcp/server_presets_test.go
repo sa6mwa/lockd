@@ -53,6 +53,100 @@ func TestPresetOnlySurfaceListsGeneratedTools(t *testing.T) {
 	}
 }
 
+func TestBuiltInMemoryPresetToolDescriptionsAreOperationallyDetailed(t *testing.T) {
+	t.Parallel()
+
+	def, ok := presetcfg.BuiltInDefinition("memory")
+	if !ok {
+		t.Fatalf("expected built-in memory preset")
+	}
+	s, _ := newToolTestServer(t)
+	cs, closeFn := connectMCPClientSessionForSurface(t, s, toolSurface{
+		Presets: []presetcfg.Definition{def},
+	})
+	defer closeFn()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tools, err := listAllTools(ctx, cs)
+	if err != nil {
+		t.Fatalf("list tools: %v", err)
+	}
+
+	byName := make(map[string]*mcpsdk.Tool, len(tools))
+	for _, tool := range tools {
+		if tool == nil {
+			continue
+		}
+		byName[tool.Name] = tool
+	}
+	mustDesc := func(name string) string {
+		t.Helper()
+		tool := byName[name]
+		if tool == nil {
+			t.Fatalf("missing tool %q", name)
+		}
+		desc := strings.TrimSpace(tool.Description)
+		for _, section := range []string{"Purpose:", "Use when:", "Requires:", "Effects:", "Retry:", "Next:"} {
+			if !strings.Contains(desc, section) {
+				t.Fatalf("tool %s missing %s section: %q", name, section, desc)
+			}
+		}
+		return desc
+	}
+
+	helpDesc := mustDesc("memory.help")
+	if !strings.Contains(helpDesc, "call this tool first") {
+		t.Fatalf("memory.help should direct discovery-first usage: %q", helpDesc)
+	}
+
+	queryDesc := mustDesc("memory.bookmarks.query")
+	for _, phrase := range []string{
+		"`query` is lockd LQL",
+		"Use empty query string (`\"\"`) to enumerate all keys",
+		"`cursor` continues pagination from a previous result",
+		"/title=\"Quarterly plan\"",
+		"icontains{field=/summary,value=benchmark}",
+	} {
+		if !strings.Contains(queryDesc, phrase) {
+			t.Fatalf("memory.bookmarks.query missing phrase %q: %q", phrase, queryDesc)
+		}
+	}
+	queryTool := byName["memory.bookmarks.query"]
+	if queryTool == nil {
+		t.Fatalf("missing tool %q", "memory.bookmarks.query")
+	}
+	inputSchema, ok := queryTool.InputSchema.(map[string]any)
+	if !ok {
+		t.Fatalf("memory.bookmarks.query input schema type = %T, want map[string]any", queryTool.InputSchema)
+	}
+	properties, ok := inputSchema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("memory.bookmarks.query input schema missing properties: %#v", inputSchema)
+	}
+	for _, field := range []string{"engine", "refresh", "fields"} {
+		if _, ok := properties[field]; ok {
+			t.Fatalf("memory.bookmarks.query should not expose %q in preset query schema", field)
+		}
+	}
+
+	statePutDesc := mustDesc("memory.contacts.state.put")
+	for _, phrase := range []string{
+		"Create or replace one `memory`",
+		"Required fields for this kind are `key`, `name`",
+		"schema as the durable API contract",
+	} {
+		if !strings.Contains(statePutDesc, phrase) {
+			t.Fatalf("memory.contacts.state.put missing phrase %q: %q", phrase, statePutDesc)
+		}
+	}
+
+	stateGetDesc := mustDesc("memory.reminders.state.get")
+	if !strings.Contains(stateGetDesc, "_lockd_attachments") {
+		t.Fatalf("memory.reminders.state.get should explain attachment metadata contract: %q", stateGetDesc)
+	}
+}
+
 func TestPresetStatePutGetAndDeleteRoundTrip(t *testing.T) {
 	t.Parallel()
 

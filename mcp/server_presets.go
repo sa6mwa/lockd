@@ -147,7 +147,7 @@ func (s *server) registerPresetHelpTool(srv *mcpsdk.Server, def presetcfg.Defini
 	name := def.Name + ".help"
 	tool := &mcpsdk.Tool{
 		Name:        name,
-		Description: fmt.Sprintf("Summarize the generated %s preset MCP tools.", def.Name),
+		Description: presetHelpToolDescription(def),
 		Annotations: &mcpsdk.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: boolRef(false)},
 		InputSchema: objectSchema(map[string]*jsonschema.Schema{}, nil),
 		OutputSchema: objectSchema(map[string]*jsonschema.Schema{
@@ -179,7 +179,7 @@ func (s *server) addPresetQueryTool(srv *mcpsdk.Server, def presetcfg.Definition
 	name := rt.kind.Tools.Query
 	tool := &mcpsdk.Tool{
 		Name:         name,
-		Description:  fmt.Sprintf("Query %s %s keys in namespace %s.", def.Name, rt.kind.Name, rt.kind.Namespace),
+		Description:  presetQueryToolDescription(def, rt.kind),
 		Annotations:  &mcpsdk.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: boolRef(false)},
 		InputSchema:  rt.queryInput,
 		OutputSchema: rt.queryOutput,
@@ -188,10 +188,7 @@ func (s *server) addPresetQueryTool(srv *mcpsdk.Server, def presetcfg.Definition
 		_, out, err := s.handleQueryTool(ctx, req, queryToolInput{
 			Query:     mapString(input, "query"),
 			Cursor:    mapString(input, "cursor"),
-			Engine:    mapString(input, "engine"),
-			Refresh:   mapString(input, "refresh"),
 			Limit:     mapInt(input, "limit"),
-			Fields:    mapAnyMap(input, "fields"),
 			Namespace: rt.kind.Namespace,
 		})
 		if err != nil {
@@ -210,7 +207,7 @@ func (s *server) addPresetStatePutTool(srv *mcpsdk.Server, def presetcfg.Definit
 	name := rt.kind.Tools.StatePut
 	tool := &mcpsdk.Tool{
 		Name:         name,
-		Description:  fmt.Sprintf("Create or replace a %s %s document.", def.Name, rt.kind.Name),
+		Description:  presetStatePutToolDescription(def, rt.kind),
 		Annotations:  &mcpsdk.ToolAnnotations{OpenWorldHint: boolRef(false)},
 		InputSchema:  rt.statePutInput,
 		OutputSchema: rt.stateOutput,
@@ -238,7 +235,7 @@ func (s *server) addPresetStateGetTool(srv *mcpsdk.Server, def presetcfg.Definit
 	name := rt.kind.Tools.StateGet
 	tool := &mcpsdk.Tool{
 		Name:         name,
-		Description:  fmt.Sprintf("Read one %s %s document.", def.Name, rt.kind.Name),
+		Description:  presetStateGetToolDescription(def, rt.kind),
 		Annotations:  &mcpsdk.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: boolRef(false)},
 		InputSchema:  rt.stateGetInput,
 		OutputSchema: rt.stateOutput,
@@ -253,7 +250,7 @@ func (s *server) addPresetStateDeleteTool(srv *mcpsdk.Server, def presetcfg.Defi
 	name := rt.kind.Tools.StateDelete
 	tool := &mcpsdk.Tool{
 		Name:        name,
-		Description: fmt.Sprintf("Delete one %s %s document.", def.Name, rt.kind.Name),
+		Description: presetStateDeleteToolDescription(def, rt.kind),
 		Annotations: &mcpsdk.ToolAnnotations{DestructiveHint: boolRef(true), OpenWorldHint: boolRef(false)},
 		InputSchema: rt.stateDeleteInput,
 		OutputSchema: objectSchema(map[string]*jsonschema.Schema{
@@ -281,7 +278,7 @@ func (s *server) addPresetQueueEnqueueTool(srv *mcpsdk.Server, def presetcfg.Def
 	name := rt.kind.Tools.QueueEnqueue
 	tool := &mcpsdk.Tool{
 		Name:         name,
-		Description:  fmt.Sprintf("Enqueue a %s %s payload into a queue.", def.Name, rt.kind.Name),
+		Description:  presetQueueEnqueueToolDescription(def, rt.kind),
 		Annotations:  &mcpsdk.ToolAnnotations{OpenWorldHint: boolRef(false)},
 		InputSchema:  rt.queueEnqueueInput,
 		OutputSchema: rt.queueOutput,
@@ -323,7 +320,7 @@ func (s *server) addPresetAttachmentsGetTool(srv *mcpsdk.Server, def presetcfg.D
 	name := rt.kind.Tools.AttachmentsGet
 	tool := &mcpsdk.Tool{
 		Name:         name,
-		Description:  fmt.Sprintf("Retrieve one attachment associated with a %s %s document.", def.Name, rt.kind.Name),
+		Description:  presetAttachmentsGetToolDescription(def, rt.kind),
 		Annotations:  &mcpsdk.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: boolRef(false)},
 		InputSchema:  rt.attachmentsInput,
 		OutputSchema: rt.attachmentsOutput,
@@ -461,15 +458,9 @@ func buildPresetKeyOnlyInputSchema(keyDescription string) *jsonschema.Schema {
 
 func buildPresetQueryInputSchema() *jsonschema.Schema {
 	return objectSchema(map[string]*jsonschema.Schema{
-		"query":   scalarSchema("string", "LQL query expression"),
-		"limit":   scalarSchema("integer", "Maximum rows to return"),
-		"cursor":  scalarSchema("string", "Continuation cursor"),
-		"engine":  scalarSchema("string", "Query engine override"),
-		"refresh": scalarSchema("string", "Refresh policy"),
-		"fields": {
-			Type:                 "object",
-			AdditionalProperties: &jsonschema.Schema{},
-		},
+		"query":  scalarSchema("string", "LQL query expression"),
+		"limit":  scalarSchema("integer", "Maximum rows to return"),
+		"cursor": scalarSchema("string", "Continuation cursor"),
 	}, []string{"query"})
 }
 

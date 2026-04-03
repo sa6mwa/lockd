@@ -773,6 +773,61 @@ kinds:
 	if len(client.Presets) != 1 || client.Presets[0].Name != "memory" {
 		t.Fatalf("unexpected presets after update: %#v", client.Presets)
 	}
+
+	root = newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
+	var replacementOut bytes.Buffer
+	root.SetOut(&replacementOut)
+	root.SetArgs([]string{
+		"mcp",
+		"--state-file", statePath,
+		"--token-store", tokenStorePath,
+		"client", "update", clientID,
+		"--preset", presetPath,
+	})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute mcp client update with replacement preset: %v", err)
+	}
+
+	data, err = mcpstate.Load(statePath)
+	if err != nil {
+		t.Fatalf("load state after replacement update: %v", err)
+	}
+	client, ok = findClientByID(data.Clients, clientID)
+	if !ok {
+		t.Fatalf("client %s not found after replacement update", clientID)
+	}
+	if client.LockdPreset {
+		t.Fatalf("expected lockd preset disabled after replacement update")
+	}
+	if len(client.Presets) != 1 || client.Presets[0].Name != "memory" {
+		t.Fatalf("unexpected presets after replacement update: %#v", client.Presets)
+	}
+
+	origPrettyX := mcpPrettyXRunner
+	t.Cleanup(func() { mcpPrettyXRunner = origPrettyX })
+	mcpPrettyXRunner = func(_ context.Context, payload []byte, out io.Writer) error {
+		_, err := out.Write(payload)
+		return err
+	}
+
+	root = newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
+	var toolsOut bytes.Buffer
+	root.SetOut(&toolsOut)
+	root.SetArgs([]string{
+		"mcp",
+		"--state-file", statePath,
+		"--token-store", tokenStorePath,
+		"client", "tools-list", clientID,
+	})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute mcp client tools-list after preset replacement: %v", err)
+	}
+	if bytes.Contains(toolsOut.Bytes(), []byte(`"name":"lockd.help"`)) {
+		t.Fatalf("expected lockd tools to be absent after preset replacement, got %q", toolsOut.String())
+	}
+	if !bytes.Contains(toolsOut.Bytes(), []byte(`"name":"memory.help"`)) {
+		t.Fatalf("expected memory tools after preset replacement, got %q", toolsOut.String())
+	}
 }
 
 func TestMCPClientListAndShowIncludePresets(t *testing.T) {

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -862,6 +863,20 @@ kinds:
 		t.Fatalf("execute mcp client add: %v", err)
 	}
 	clientID := parseOutputField(stdout.String(), "client_id:")
+	data, err := mcpstate.Load(statePath)
+	if err != nil {
+		t.Fatalf("load state after add: %v", err)
+	}
+	client, ok := findClientByID(data.Clients, clientID)
+	if !ok {
+		t.Fatalf("client %s not found after add", clientID)
+	}
+	if !client.LockdPreset {
+		t.Fatalf("expected lockd preset enabled after add with lockd + custom preset")
+	}
+	if len(client.Presets) != 1 || client.Presets[0].Name != "memory" {
+		t.Fatalf("unexpected presets after add: %#v", client.Presets)
+	}
 
 	root = newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
 	stdout.Reset()
@@ -893,6 +908,86 @@ kinds:
 	}
 	if !strings.Contains(stdout.String(), "presets: lockd,memory") {
 		t.Fatalf("expected presets in client show output, got %q", stdout.String())
+	}
+}
+
+func TestMCPClientPresetGetExportsYAML(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	statePath, tokenStorePath, _ := bootstrapMCPStateForClientTests(t)
+	presetPath := writeTestMCPPresetFile(t, `
+preset: memory
+kinds:
+  - name: note
+    namespace: memory
+    schema:
+      type: object
+      properties:
+        text:
+          type: string
+`)
+
+	root := newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
+	var addOut bytes.Buffer
+	root.SetOut(&addOut)
+	root.SetArgs([]string{
+		"mcp",
+		"--state-file", statePath,
+		"--token-store", tokenStorePath,
+		"client", "add",
+		"--name", "memory-client",
+		"--preset", "lockd",
+		"--preset", presetPath,
+	})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute mcp client add with lockd + preset: %v", err)
+	}
+	clientID := parseOutputField(addOut.String(), "client_id:")
+	if clientID == "" {
+		t.Fatalf("expected client_id in add output, got %q", addOut.String())
+	}
+
+	data, err := mcpstate.Load(statePath)
+	if err != nil {
+		t.Fatalf("load state after add: %v", err)
+	}
+	client, ok := findClientByID(data.Clients, clientID)
+	if !ok {
+		t.Fatalf("client %s not found after add", clientID)
+	}
+
+	outPath := filepath.Join(t.TempDir(), "client-preset.yaml")
+	root = newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
+	var exportOut bytes.Buffer
+	root.SetOut(&exportOut)
+	root.SetArgs([]string{
+		"mcp",
+		"--state-file", statePath,
+		"--token-store", tokenStorePath,
+		"client", "preset", "get", "memory-client",
+		"--out", outPath,
+	})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute mcp client preset get --out: %v", err)
+	}
+	if !strings.Contains(exportOut.String(), "wrote client preset yaml: "+outPath) {
+		t.Fatalf("expected export confirmation, got %q", exportOut.String())
+	}
+
+	exported, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read exported client preset yaml: %v", err)
+	}
+	if !bytes.Contains(exported, []byte("include --preset lockd")) {
+		t.Fatalf("expected exported preset yaml to mention lockd reapplication, got %q", string(exported))
+	}
+	parsed, err := preset.ParseYAML(exported)
+	if err != nil {
+		t.Fatalf("parse exported preset yaml: %v", err)
+	}
+	if !reflect.DeepEqual(parsed, client.Presets) {
+		t.Fatalf("exported presets mismatch:\nparsed=%#v\nstored=%#v", parsed, client.Presets)
 	}
 }
 
@@ -1055,6 +1150,19 @@ func TestMCPClientCommandsAcceptNameReference(t *testing.T) {
 				t.Helper()
 				if !strings.Contains(output, `"jsonrpc":"2.0"`) {
 					t.Fatalf("expected tools-list json output, got %q", output)
+				}
+			},
+		},
+		{
+			name: "preset-get",
+			args: []string{"client", "preset", "get", "memory-client"},
+			check: func(t *testing.T, output string) {
+				t.Helper()
+				if !strings.Contains(output, "lockd MCP client preset export") {
+					t.Fatalf("expected preset export output, got %q", output)
+				}
+				if !strings.Contains(output, "client_name: memory-client") {
+					t.Fatalf("expected preset export output to resolve client by name, got %q", output)
 				}
 			},
 		},

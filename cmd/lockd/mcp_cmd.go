@@ -19,6 +19,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
+	"gopkg.in/yaml.v3"
 
 	"pkt.systems/lockd"
 	lockdmcp "pkt.systems/lockd/mcp"
@@ -423,6 +424,44 @@ func newMCPClientCommand() *cobra.Command {
 	addCmd.Flags().StringSliceVar(&addRedirectURIs, "redirect-uri", nil, "allowed redirect URI(s) for authorization_code flow")
 	cmd.AddCommand(addCmd)
 
+	presetCmd := &cobra.Command{
+		Use:   "preset",
+		Short: "Show or export a client's preset YAML",
+	}
+	var presetOutPath string
+	presetGetCmd := &cobra.Command{
+		Use:               "get <id-or-name>",
+		Short:             "Print a client's stored preset YAML",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: completeMCPOAuthClientIDArg,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			adminSvc, err := openMCPAdmin()
+			if err != nil {
+				return err
+			}
+			client, err := adminSvc.GetClient(strings.TrimSpace(args[0]))
+			if err != nil {
+				return explainMCPAdminStateError(err)
+			}
+			payload, err := renderMCPClientPresetYAML(client)
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(presetOutPath) != "" {
+				if err := writeOutputFile(presetOutPath, payload, 0o644); err != nil {
+					return fmt.Errorf("write client preset output %s: %w", presetOutPath, err)
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "wrote client preset yaml: %s\n", presetOutPath)
+				return nil
+			}
+			_, err = cmd.OutOrStdout().Write(payload)
+			return err
+		},
+	}
+	presetGetCmd.Flags().StringVarP(&presetOutPath, "out", "o", "", "write client preset YAML to a file instead of stdout")
+	presetCmd.AddCommand(presetGetCmd)
+	cmd.AddCommand(presetCmd)
+
 	rmCmd := &cobra.Command{
 		Use:               "remove <id>",
 		Short:             "Remove an OAuth client",
@@ -659,6 +698,32 @@ func newMCPPresetCommand() *cobra.Command {
 	getCmd.Flags().StringVarP(&outPath, "out", "o", "", "write preset YAML to a file instead of stdout")
 	cmd.AddCommand(getCmd)
 	return cmd
+}
+
+func renderMCPClientPresetYAML(client mcpadmin.Client) ([]byte, error) {
+	var buf bytes.Buffer
+	fmt.Fprintf(&buf, "# lockd MCP client preset export\n")
+	fmt.Fprintf(&buf, "# client_id: %s\n", client.ID)
+	fmt.Fprintf(&buf, "# client_name: %s\n", client.Name)
+	fmt.Fprintf(&buf, "# reapply with: lockd mcp client update <id-or-name> --preset <file>\n")
+	if client.LockdPreset {
+		fmt.Fprintf(&buf, "# built-in lockd preset is enabled; include --preset lockd when reapplying\n")
+	}
+	if len(client.Presets) == 0 {
+		fmt.Fprintf(&buf, "# no custom preset YAML is stored for this client\n")
+		return buf.Bytes(), nil
+	}
+	for i, def := range client.Presets {
+		if i > 0 {
+			buf.WriteString("---\n")
+		}
+		out, err := yaml.Marshal(def)
+		if err != nil {
+			return nil, fmt.Errorf("marshal client preset %q: %w", def.Name, err)
+		}
+		buf.Write(out)
+	}
+	return buf.Bytes(), nil
 }
 
 func completeMCPOAuthClientID(_ *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {

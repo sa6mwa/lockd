@@ -911,7 +911,7 @@ kinds:
 	}
 }
 
-func TestMCPClientPresetGetExportsYAML(t *testing.T) {
+func TestMCPClientPresetExportsYAML(t *testing.T) {
 	viper.Reset()
 	t.Cleanup(viper.Reset)
 
@@ -965,11 +965,11 @@ kinds:
 		"mcp",
 		"--state-file", statePath,
 		"--token-store", tokenStorePath,
-		"client", "preset", "get", "memory-client",
+		"client", "preset", "memory-client",
 		"--out", outPath,
 	})
 	if err := root.Execute(); err != nil {
-		t.Fatalf("execute mcp client preset get --out: %v", err)
+		t.Fatalf("execute mcp client preset --out: %v", err)
 	}
 	if !strings.Contains(exportOut.String(), "wrote client preset yaml: "+outPath) {
 		t.Fatalf("expected export confirmation, got %q", exportOut.String())
@@ -1154,8 +1154,8 @@ func TestMCPClientCommandsAcceptNameReference(t *testing.T) {
 			},
 		},
 		{
-			name: "preset-get",
-			args: []string{"client", "preset", "get", "memory-client"},
+			name: "preset",
+			args: []string{"client", "preset", "memory-client"},
 			check: func(t *testing.T, output string) {
 				t.Helper()
 				if !strings.Contains(output, "lockd MCP client preset export") {

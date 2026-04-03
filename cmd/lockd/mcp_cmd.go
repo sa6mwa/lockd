@@ -425,40 +425,45 @@ func newMCPClientCommand() *cobra.Command {
 	cmd.AddCommand(addCmd)
 
 	presetCmd := &cobra.Command{
-		Use:   "preset",
-		Short: "Show or export a client's preset YAML",
+		Use:               "preset <id-or-name>",
+		Short:             "Show or export a client's preset YAML",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: completeMCPOAuthClientIDArg,
 	}
 	var presetOutPath string
+	renderPreset := func(cmd *cobra.Command, args []string) error {
+		adminSvc, err := openMCPAdmin()
+		if err != nil {
+			return err
+		}
+		client, err := adminSvc.GetClient(strings.TrimSpace(args[0]))
+		if err != nil {
+			return explainMCPAdminStateError(err)
+		}
+		payload, err := renderMCPClientPresetYAML(client)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(presetOutPath) != "" {
+			if err := writeOutputFile(presetOutPath, payload, 0o644); err != nil {
+				return fmt.Errorf("write client preset output %s: %w", presetOutPath, err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "wrote client preset yaml: %s\n", presetOutPath)
+			return nil
+		}
+		_, err = cmd.OutOrStdout().Write(payload)
+		return err
+	}
+	presetCmd.RunE = renderPreset
+	presetCmd.Flags().StringVarP(&presetOutPath, "out", "o", "", "write client preset YAML to a file instead of stdout")
 	presetGetCmd := &cobra.Command{
 		Use:               "get <id-or-name>",
 		Short:             "Print a client's stored preset YAML",
+		Hidden:            true,
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeMCPOAuthClientIDArg,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			adminSvc, err := openMCPAdmin()
-			if err != nil {
-				return err
-			}
-			client, err := adminSvc.GetClient(strings.TrimSpace(args[0]))
-			if err != nil {
-				return explainMCPAdminStateError(err)
-			}
-			payload, err := renderMCPClientPresetYAML(client)
-			if err != nil {
-				return err
-			}
-			if strings.TrimSpace(presetOutPath) != "" {
-				if err := writeOutputFile(presetOutPath, payload, 0o644); err != nil {
-					return fmt.Errorf("write client preset output %s: %w", presetOutPath, err)
-				}
-				fmt.Fprintf(cmd.OutOrStdout(), "wrote client preset yaml: %s\n", presetOutPath)
-				return nil
-			}
-			_, err = cmd.OutOrStdout().Write(payload)
-			return err
-		},
+		RunE:              renderPreset,
 	}
-	presetGetCmd.Flags().StringVarP(&presetOutPath, "out", "o", "", "write client preset YAML to a file instead of stdout")
 	presetCmd.AddCommand(presetGetCmd)
 	cmd.AddCommand(presetCmd)
 

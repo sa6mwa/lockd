@@ -456,15 +456,6 @@ func newMCPClientCommand() *cobra.Command {
 	}
 	presetCmd.RunE = renderPreset
 	presetCmd.Flags().StringVarP(&presetOutPath, "out", "o", "", "write client preset YAML to a file instead of stdout")
-	presetGetCmd := &cobra.Command{
-		Use:               "get <id-or-name>",
-		Short:             "Print a client's stored preset YAML",
-		Hidden:            true,
-		Args:              cobra.ExactArgs(1),
-		ValidArgsFunction: completeMCPOAuthClientIDArg,
-		RunE:              renderPreset,
-	}
-	presetCmd.AddCommand(presetGetCmd)
 	cmd.AddCommand(presetCmd)
 
 	rmCmd := &cobra.Command{

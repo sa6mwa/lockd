@@ -180,7 +180,7 @@ type StartConsumerFailureMode string
 
 const (
 	// StartConsumerFailureModeImmediateFailure exercises the managed consumer
-	// path where the handler returns an error and the SDK closes the message
+	// path where the handler returns an error and the runner nacks the message
 	// automatically after the callback returns.
 	StartConsumerFailureModeImmediateFailure StartConsumerFailureMode = "immediate-failure"
 	// StartConsumerFailureModeDeferredDefer exercises the handler path where the
@@ -285,9 +285,6 @@ func runStartConsumerFailureScenario(t testing.TB, cli *lockdclient.Client, labe
 				cancel()
 				return nil
 			case 2:
-				if err := cm.Message.Ack(handlerCtx); err != nil {
-					return fmt.Errorf("consumer %s: ack redelivery: %w", mode, err)
-				}
 				completed.Store(true)
 				cancel()
 				return nil
@@ -398,12 +395,6 @@ func RunStartConsumerSmoke(t testing.TB, cli *lockdclient.Client, opts StartCons
 			}
 			if !check.withState && cm.State != nil {
 				return fmt.Errorf("consumer %s: unexpected state handle", name)
-			}
-			ackCtx, ackCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			err := cm.Message.Ack(ackCtx)
-			ackCancel()
-			if err != nil {
-				return fmt.Errorf("consumer %s: ack: %w", name, err)
 			}
 			// Shared queue consumers briefly yield to reduce scheduling skew.
 			if check.queue == sharedQueue {
@@ -541,11 +532,6 @@ func RunStartConsumerStateSaveRegression(t testing.TB, cli *lockdclient.Client, 
 			}
 			reloadedSave.Store(true)
 
-			ackCtx, ackCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer ackCancel()
-			if err := cm.Message.Ack(ackCtx); err != nil {
-				return fmt.Errorf("ack: %w", err)
-			}
 			handled.Store(true)
 			cancel()
 			return nil

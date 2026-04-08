@@ -242,10 +242,11 @@ and retry loops stay linked to the originating enqueue.
   `ConsumerConfig`, auto-generates `Options.Owner` when empty, applies
   restart backoff via `ConsumerRestartPolicy`, and routes panics in handlers
   and lifecycle hooks through the same restart/error path. The handler decides
-  the delivery outcome: `Ack()` commits, `Defer()` explicitly hands the message
-  back for later workflow continuation, and a non-nil error means failure.
-  Managed consumers close each message automatically after the callback
-  returns, so handlers do not need to call `Close()`.
+  the delivery outcome: `return nil` means success and the runner auto-acks,
+  `Defer()` explicitly hands the message back for later workflow continuation,
+  and a non-nil error means failure. Managed consumers close each message
+  automatically after the callback returns, so handlers do not need to call
+  `Close()` or `Ack()` on the success path.
 
 ### CLI (`lockd client queue …`)
 

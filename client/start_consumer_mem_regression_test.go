@@ -136,11 +136,6 @@ func TestStartConsumerStateFirstSaveMem(t *testing.T) {
 			}
 			reloadedSave.Store(true)
 
-			ackCtx, ackCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer ackCancel()
-			if err := cm.Message.Ack(ackCtx); err != nil {
-				return fmt.Errorf("ack: %w", err)
-			}
 			acked.Store(true)
 			cancel()
 			return nil
@@ -166,7 +161,7 @@ func TestStartConsumerStateFirstSaveMem(t *testing.T) {
 	}
 }
 
-func TestStartConsumerStatePersistsAcrossNackMem(t *testing.T) {
+func TestStartConsumerStatePersistsAcrossFailureMem(t *testing.T) {
 	ts := lockd.StartTestServer(t)
 	cli := ts.Client
 	if cli == nil {
@@ -195,6 +190,7 @@ func TestStartConsumerStatePersistsAcrossNackMem(t *testing.T) {
 			Owner:        "worker-state-persist-retry",
 			Prefetch:     1,
 			BlockSeconds: 5,
+			OnCloseDelay: 100 * time.Millisecond,
 		},
 		MessageHandler: func(handlerCtx context.Context, cm client.ConsumerMessage) error {
 			if cm.Message == nil || cm.State == nil {
@@ -211,11 +207,6 @@ func TestStartConsumerStatePersistsAcrossNackMem(t *testing.T) {
 			}
 			if state.Counter >= 2 {
 				finalCounter.Store(int32(state.Counter))
-				ackCtx, ackCancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer ackCancel()
-				if err := cm.Message.Ack(ackCtx); err != nil {
-					return fmt.Errorf("ack: %w", err)
-				}
 				acked.Store(true)
 				cancel()
 				return nil
@@ -225,15 +216,10 @@ func TestStartConsumerStatePersistsAcrossNackMem(t *testing.T) {
 			if err := cm.State.Save(handlerCtx, &state); err != nil {
 				return fmt.Errorf("save state: %w", err)
 			}
-			nackCtx, nackCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer nackCancel()
-			return cm.Message.Nack(nackCtx, 100*time.Millisecond, nil)
+			return fmt.Errorf("state retry: counter=%d", state.Counter)
 		},
 		ErrorHandler: func(_ context.Context, event client.ConsumerError) error {
-			if errors.Is(event.Err, context.Canceled) || errors.Is(event.Err, context.DeadlineExceeded) {
-				return nil
-			}
-			return event.Err
+			return nil
 		},
 	})
 	if err != nil && !errors.Is(err, context.Canceled) {
@@ -295,11 +281,6 @@ func TestStartConsumerStatePersistsAcrossDeferMem(t *testing.T) {
 			}
 			if state.Counter >= 2 {
 				finalCounter.Store(int32(state.Counter))
-				ackCtx, ackCancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer ackCancel()
-				if err := cm.Message.Ack(ackCtx); err != nil {
-					return fmt.Errorf("ack: %w", err)
-				}
 				acked.Store(true)
 				cancel()
 				return nil

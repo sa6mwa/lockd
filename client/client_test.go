@@ -3792,9 +3792,6 @@ func TestClientStartConsumerDefaultsOwnerWhenEmpty(t *testing.T) {
 				Owner: "",
 			},
 			MessageHandler: func(ctx context.Context, cm client.ConsumerMessage) error {
-				if err := cm.Message.Ack(ctx); err != nil {
-					return err
-				}
 				if handled.Add(1) == 2 {
 					cancel()
 				}
@@ -3807,9 +3804,6 @@ func TestClientStartConsumerDefaultsOwnerWhenEmpty(t *testing.T) {
 				Owner: "",
 			},
 			MessageHandler: func(ctx context.Context, cm client.ConsumerMessage) error {
-				if err := cm.Message.Ack(ctx); err != nil {
-					return err
-				}
 				if handled.Add(1) == 2 {
 					cancel()
 				}
@@ -3950,9 +3944,6 @@ func TestClientStartConsumerSharedMessageHandler(t *testing.T) {
 		if string(body) != string(payloads[cm.Queue]) {
 			return fmt.Errorf("unexpected payload for %s: %q", cm.Queue, body)
 		}
-		if err := cm.Message.Ack(context.Background()); err != nil {
-			return err
-		}
 		seenMu.Lock()
 		seen[cm.Queue] = true
 		gotBoth := seen["queue-a"] && seen["queue-b"]
@@ -4074,9 +4065,6 @@ func TestClientStartConsumerWithStateMessage(t *testing.T) {
 				}
 				if cm.State.LeaseID() != "lease-state" {
 					return fmt.Errorf("unexpected state lease id %q", cm.State.LeaseID())
-				}
-				if err := cm.Message.Ack(context.Background()); err != nil {
-					return err
 				}
 				cancel()
 				return nil
@@ -4327,9 +4315,6 @@ func TestClientStartConsumerRestartsAndCallsErrorHandler(t *testing.T) {
 				if cm.Name() != "orders-worker" {
 					return fmt.Errorf("unexpected consumer name %q", cm.Name())
 				}
-				if err := cm.Message.Ack(context.Background()); err != nil {
-					return err
-				}
 				cancel()
 				return nil
 			},
@@ -4524,9 +4509,6 @@ func TestClientStartConsumerLifecycleHooks(t *testing.T) {
 				mu.Unlock()
 			},
 			MessageHandler: func(_ context.Context, cm client.ConsumerMessage) error {
-				if err := cm.Message.Ack(context.Background()); err != nil {
-					return err
-				}
 				cancel()
 				return nil
 			},
@@ -4635,9 +4617,6 @@ func TestClientStartConsumerRecoversMessageHandlerPanic(t *testing.T) {
 			MessageHandler: func(_ context.Context, cm client.ConsumerMessage) error {
 				if handlerCalls.Add(1) == 1 {
 					panic("boom")
-				}
-				if err := cm.Message.Ack(context.Background()); err != nil {
-					return err
 				}
 				cancel()
 				return nil
@@ -4848,6 +4827,8 @@ func TestClientStartConsumerAutoExtendErrorDoesNotDeadlock(t *testing.T) {
 				ErrorCode: "lease_conflict",
 				Detail:    "simulated extend conflict",
 			})
+		case "/v1/queue/ack":
+			_ = json.NewEncoder(w).Encode(map[string]any{"acked": true})
 		case "/v1/queue/nack":
 			_ = json.NewEncoder(w).Encode(map[string]any{"nacked": true})
 		default:

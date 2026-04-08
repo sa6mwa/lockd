@@ -7424,13 +7424,6 @@ func (c *Client) runQueueHandlerWithAutoExtend(ctx context.Context, msg *QueueMe
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	defer func() {
-		closeErr := msg.ClosePayload()
-		if closeErr == nil {
-			return
-		}
-		err = errors.Join(err, closeErr)
-	}()
 
 	handlerDone := make(chan error, 1)
 	go func() {
@@ -7460,13 +7453,7 @@ func (c *Client) runQueueHandlerWithAutoExtend(ctx context.Context, msg *QueueMe
 					extendErr = e
 				}
 			}
-			if err != nil && extendErr != nil {
-				return errors.Join(err, extendErr)
-			}
-			if err != nil {
-				return err
-			}
-			return extendErr
+			return c.finalizeManagedConsumerMessage(msg, err, extendErr)
 		case err := <-extendDone:
 			extendSettled = true
 			if err == nil {
@@ -7476,6 +7463,36 @@ func (c *Client) runQueueHandlerWithAutoExtend(ctx context.Context, msg *QueueMe
 			cancel()
 		}
 	}
+}
+
+func (c *Client) finalizeManagedConsumerMessage(msg *QueueMessage, handlerErr, extendErr error) error {
+	if msg == nil || msg.handle == nil {
+		return errors.Join(handlerErr, extendErr)
+	}
+	if queueMessageClosed(msg) {
+		return errors.Join(handlerErr, extendErr)
+	}
+	reqCtx, cancel := msg.handle.client.requestContextNoTimeout(context.Background())
+	defer cancel()
+	if handlerErr == nil {
+		if err := msg.Ack(reqCtx); err != nil {
+			if extendErr != nil {
+				return errors.Join(err, extendErr)
+			}
+			return err
+		}
+		return extendErr
+	}
+	if err := msg.Nack(reqCtx, msg.onCloseDelay, handlerErr); err != nil {
+		if extendErr != nil {
+			return errors.Join(handlerErr, err, extendErr)
+		}
+		return errors.Join(handlerErr, err)
+	}
+	if extendErr != nil {
+		return errors.Join(handlerErr, extendErr)
+	}
+	return handlerErr
 }
 
 type consumerRuntimeConfig struct {
@@ -7811,16 +7828,8 @@ func (c *Client) handleConsumerFailure(ctx context.Context, cfg consumerRuntimeC
 }
 
 func (c *Client) runConsumerAttempt(ctx context.Context, cfg consumerRuntimeConfig) error {
-	var lastMsg *QueueMessage
-	closeLastMsg := func() error {
-		if lastMsg == nil {
-			return nil
-		}
-		return lastMsg.Close()
-	}
 	if cfg.withState {
-		err := c.SubscribeWithState(ctx, cfg.queue, cfg.options, func(handlerCtx context.Context, msg *QueueMessage, state *QueueStateHandle) error {
-			lastMsg = msg
+		return c.SubscribeWithState(ctx, cfg.queue, cfg.options, func(handlerCtx context.Context, msg *QueueMessage, state *QueueStateHandle) error {
 			return cfg.messageHandler(handlerCtx, ConsumerMessage{
 				Client:       c,
 				Logger:       c.logger,
@@ -7831,13 +7840,8 @@ func (c *Client) runConsumerAttempt(ctx context.Context, cfg consumerRuntimeConf
 				consumerName: cfg.name,
 			})
 		})
-		if closeErr := closeLastMsg(); closeErr != nil {
-			err = errors.Join(err, closeErr)
-		}
-		return err
 	}
-	err := c.Subscribe(ctx, cfg.queue, cfg.options, func(handlerCtx context.Context, msg *QueueMessage) error {
-		lastMsg = msg
+	return c.Subscribe(ctx, cfg.queue, cfg.options, func(handlerCtx context.Context, msg *QueueMessage) error {
 		return cfg.messageHandler(handlerCtx, ConsumerMessage{
 			Client:       c,
 			Logger:       c.logger,
@@ -7847,19 +7851,16 @@ func (c *Client) runConsumerAttempt(ctx context.Context, cfg consumerRuntimeConf
 			consumerName: cfg.name,
 		})
 	})
-	if closeErr := closeLastMsg(); closeErr != nil {
-		err = errors.Join(err, closeErr)
-	}
-	return err
 }
 
 // StartConsumer starts one or more long-running queue consumers and blocks until
 // they terminate. Each ConsumerConfig runs in its own goroutine and restarts on
-// failure according to RestartPolicy. The SDK closes each message automatically
-// after the handler returns, so handlers only need to Ack, Defer, or return an
-// error. Panics from message handlers, lifecycle hooks, and error handlers are
-// recovered and treated as consume-loop failures. Cancel ctx to stop all
-// consumers; context cancellation returns nil.
+// failure according to RestartPolicy. Handlers return nil for success and the
+// runner auto-acks, return an error for failure, or call Defer explicitly when
+// handing a message back for later workflow continuation. Panics from message
+// handlers, lifecycle hooks, and error handlers are recovered and treated as
+// consume-loop failures. Cancel ctx to stop all consumers; context cancellation
+// returns nil.
 func (c *Client) StartConsumer(ctx context.Context, consumers ...ConsumerConfig) error {
 	if c == nil {
 		return fmt.Errorf("lockd: client is nil")

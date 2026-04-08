@@ -195,13 +195,13 @@
 //
 // The handler owns the business decision for the delivery:
 //
-//   - return nil after Ack or Defer
+//   - return nil for success; StartConsumer will ack automatically
 //   - return an error for failure
 //   - call Defer explicitly when the message should be handed back for later
 //     workflow continuation
 //
 // StartConsumer closes each message automatically after the handler returns, so
-// handlers do not need to call Close.
+// handlers do not need to call Close or Ack on the success path.
 //
 // ErrorHandler receives ConsumerError before each restart. Returning nil keeps
 // the loop running. Returning an error stops StartConsumer and returns that
@@ -224,7 +224,7 @@
 //	        }
 //	    }
 //
-//	    return cm.Message.Ack(ctx)
+//	    return nil
 //	}
 //
 //	err := cli.StartConsumer(ctx,

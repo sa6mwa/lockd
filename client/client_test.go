@@ -3792,7 +3792,6 @@ func TestClientStartConsumerDefaultsOwnerWhenEmpty(t *testing.T) {
 				Owner: "",
 			},
 			MessageHandler: func(ctx context.Context, cm client.ConsumerMessage) error {
-				defer cm.Message.Close()
 				if err := cm.Message.Ack(ctx); err != nil {
 					return err
 				}
@@ -3808,7 +3807,6 @@ func TestClientStartConsumerDefaultsOwnerWhenEmpty(t *testing.T) {
 				Owner: "",
 			},
 			MessageHandler: func(ctx context.Context, cm client.ConsumerMessage) error {
-				defer cm.Message.Close()
 				if err := cm.Message.Ack(ctx); err != nil {
 					return err
 				}
@@ -3930,7 +3928,6 @@ func TestClientStartConsumerSharedMessageHandler(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	handler := func(_ context.Context, cm client.ConsumerMessage) error {
-		defer cm.Message.Close()
 		if cm.Client != cli {
 			return fmt.Errorf("handler received unexpected client pointer")
 		}
@@ -4069,7 +4066,6 @@ func TestClientStartConsumerWithStateMessage(t *testing.T) {
 			WithState: true,
 			Options:   client.SubscribeOptions{Owner: "state-worker"},
 			MessageHandler: func(_ context.Context, cm client.ConsumerMessage) error {
-				defer cm.Message.Close()
 				if !cm.WithState {
 					return fmt.Errorf("expected stateful delivery")
 				}
@@ -4328,7 +4324,6 @@ func TestClientStartConsumerRestartsAndCallsErrorHandler(t *testing.T) {
 				Multiplier:       2.0,
 			},
 			MessageHandler: func(_ context.Context, cm client.ConsumerMessage) error {
-				defer cm.Message.Close()
 				if cm.Name() != "orders-worker" {
 					return fmt.Errorf("unexpected consumer name %q", cm.Name())
 				}
@@ -4529,7 +4524,6 @@ func TestClientStartConsumerLifecycleHooks(t *testing.T) {
 				mu.Unlock()
 			},
 			MessageHandler: func(_ context.Context, cm client.ConsumerMessage) error {
-				defer cm.Message.Close()
 				if err := cm.Message.Ack(context.Background()); err != nil {
 					return err
 				}
@@ -4639,7 +4633,6 @@ func TestClientStartConsumerRecoversMessageHandlerPanic(t *testing.T) {
 				Multiplier:       2.0,
 			},
 			MessageHandler: func(_ context.Context, cm client.ConsumerMessage) error {
-				defer cm.Message.Close()
 				if handlerCalls.Add(1) == 1 {
 					panic("boom")
 				}
@@ -4884,7 +4877,6 @@ func TestClientStartConsumerAutoExtendErrorDoesNotDeadlock(t *testing.T) {
 				Multiplier:       2.0,
 			},
 			MessageHandler: func(handlerCtx context.Context, cm client.ConsumerMessage) error {
-				defer cm.Message.Close()
 				select {
 				case <-handlerCtx.Done():
 					return nil

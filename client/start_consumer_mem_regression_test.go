@@ -107,7 +107,6 @@ func TestStartConsumerStateFirstSaveMem(t *testing.T) {
 			if cm.Message == nil || cm.State == nil {
 				return fmt.Errorf("expected message and state handle")
 			}
-			defer cm.Message.Close()
 
 			var current struct {
 				Counter int `json:"counter"`
@@ -201,7 +200,6 @@ func TestStartConsumerStatePersistsAcrossNackMem(t *testing.T) {
 			if cm.Message == nil || cm.State == nil {
 				return fmt.Errorf("expected message and state handle")
 			}
-			defer cm.Message.Close()
 
 			deliveries.Add(1)
 
@@ -286,7 +284,6 @@ func TestStartConsumerStatePersistsAcrossDeferMem(t *testing.T) {
 			if cm.Message == nil || cm.State == nil {
 				return fmt.Errorf("expected message and state handle")
 			}
-			defer cm.Message.Close()
 
 			deliveries.Add(1)
 

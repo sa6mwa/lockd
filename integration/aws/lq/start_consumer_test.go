@@ -44,3 +44,22 @@ func TestAWSStartConsumerStateSaveRegression(t *testing.T) {
 		Timeout: 90 * time.Second,
 	})
 }
+
+func TestAWSStartConsumerHandlerFailureMatrix(t *testing.T) {
+	queuetestutil.InstallWatchdog(t, "aws-start-consumer-failure", 2*time.Minute)
+
+	cfg := prepareAWSQueueConfig(t, awsQueueOptions{
+		PollInterval:      25 * time.Millisecond,
+		PollJitter:        0,
+		ResilientInterval: 250 * time.Millisecond,
+		SweeperInterval:   5 * time.Minute,
+	})
+	ts := startAWSQueueServer(t, cfg)
+	ensureAWSQueueWritableOrSkip(t, ts.Client)
+
+	result := queuetestutil.RunStartConsumerFailureMatrix(t, ts.Client, queuetestutil.StartConsumerFailureMatrixOptions{
+		Label:   "aws-start-consumer-failure",
+		Timeout: 90 * time.Second,
+	})
+	t.Logf("immediate=%+v deferred=%+v", result.Immediate, result.Deferred)
+}

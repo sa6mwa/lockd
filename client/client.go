@@ -7415,7 +7415,7 @@ func (c *Client) autoExtendQueueMessage(ctx context.Context, msg *QueueMessage, 
 	}
 }
 
-func (c *Client) runQueueHandlerWithAutoExtend(ctx context.Context, msg *QueueMessage, handler func(context.Context) error) error {
+func (c *Client) runQueueHandlerWithAutoExtend(ctx context.Context, msg *QueueMessage, handler func(context.Context) error) (err error) {
 	if msg == nil || msg.handle == nil || handler == nil {
 		if handler == nil {
 			return nil
@@ -7424,6 +7424,13 @@ func (c *Client) runQueueHandlerWithAutoExtend(ctx context.Context, msg *QueueMe
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	defer func() {
+		closeErr := msg.ClosePayload()
+		if closeErr == nil {
+			return
+		}
+		err = errors.Join(err, closeErr)
+	}()
 
 	handlerDone := make(chan error, 1)
 	go func() {
@@ -7804,8 +7811,16 @@ func (c *Client) handleConsumerFailure(ctx context.Context, cfg consumerRuntimeC
 }
 
 func (c *Client) runConsumerAttempt(ctx context.Context, cfg consumerRuntimeConfig) error {
+	var lastMsg *QueueMessage
+	closeLastMsg := func() error {
+		if lastMsg == nil {
+			return nil
+		}
+		return lastMsg.Close()
+	}
 	if cfg.withState {
-		return c.SubscribeWithState(ctx, cfg.queue, cfg.options, func(handlerCtx context.Context, msg *QueueMessage, state *QueueStateHandle) error {
+		err := c.SubscribeWithState(ctx, cfg.queue, cfg.options, func(handlerCtx context.Context, msg *QueueMessage, state *QueueStateHandle) error {
+			lastMsg = msg
 			return cfg.messageHandler(handlerCtx, ConsumerMessage{
 				Client:       c,
 				Logger:       c.logger,
@@ -7816,8 +7831,13 @@ func (c *Client) runConsumerAttempt(ctx context.Context, cfg consumerRuntimeConf
 				consumerName: cfg.name,
 			})
 		})
+		if closeErr := closeLastMsg(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+		return err
 	}
-	return c.Subscribe(ctx, cfg.queue, cfg.options, func(handlerCtx context.Context, msg *QueueMessage) error {
+	err := c.Subscribe(ctx, cfg.queue, cfg.options, func(handlerCtx context.Context, msg *QueueMessage) error {
+		lastMsg = msg
 		return cfg.messageHandler(handlerCtx, ConsumerMessage{
 			Client:       c,
 			Logger:       c.logger,
@@ -7827,13 +7847,19 @@ func (c *Client) runConsumerAttempt(ctx context.Context, cfg consumerRuntimeConf
 			consumerName: cfg.name,
 		})
 	})
+	if closeErr := closeLastMsg(); closeErr != nil {
+		err = errors.Join(err, closeErr)
+	}
+	return err
 }
 
 // StartConsumer starts one or more long-running queue consumers and blocks until
 // they terminate. Each ConsumerConfig runs in its own goroutine and restarts on
-// failure according to RestartPolicy. Panics from message handlers, lifecycle
-// hooks, and error handlers are recovered and treated as consume-loop failures.
-// Cancel ctx to stop all consumers; context cancellation returns nil.
+// failure according to RestartPolicy. The SDK closes each message automatically
+// after the handler returns, so handlers only need to Ack, Defer, or return an
+// error. Panics from message handlers, lifecycle hooks, and error handlers are
+// recovered and treated as consume-loop failures. Cancel ctx to stop all
+// consumers; context cancellation returns nil.
 func (c *Client) StartConsumer(ctx context.Context, consumers ...ConsumerConfig) error {
 	if c == nil {
 		return fmt.Errorf("lockd: client is nil")

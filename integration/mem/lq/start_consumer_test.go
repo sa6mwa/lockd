@@ -38,3 +38,19 @@ func TestMemStartConsumerStateSaveRegression(t *testing.T) {
 		})
 	}
 }
+
+func TestMemStartConsumerHandlerFailureMatrix(t *testing.T) {
+	for _, mode := range memQueueModes {
+		mode := mode
+		t.Run(mode.name, func(t *testing.T) {
+			queuetestutil.InstallWatchdog(t, "mem-start-consumer-failure-"+mode.name, 45*time.Second)
+			cfg := buildMemQueueConfig(t, mode.queueWatch)
+			ts := startMemQueueServer(t, cfg)
+			result := queuetestutil.RunStartConsumerFailureMatrix(t, ts.Client, queuetestutil.StartConsumerFailureMatrixOptions{
+				Label:   "mem-start-consumer-failure-" + mode.name,
+				Timeout: 30 * time.Second,
+			})
+			t.Logf("immediate=%+v deferred=%+v", result.Immediate, result.Deferred)
+		})
+	}
+}

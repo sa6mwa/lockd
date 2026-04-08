@@ -42,3 +42,21 @@ func TestDiskStartConsumerStateSaveRegression(t *testing.T) {
 		Timeout: 30 * time.Second,
 	})
 }
+
+func TestDiskStartConsumerHandlerFailureMatrix(t *testing.T) {
+	queuetestutil.InstallWatchdog(t, "disk-start-consumer-failure", 45*time.Second)
+
+	root := prepareDiskQueueRoot(t)
+	cfg := buildDiskQueueConfig(t, root, diskQueueOptions{
+		EnableWatch:       false,
+		PollInterval:      25 * time.Millisecond,
+		PollJitter:        0,
+		ResilientInterval: 250 * time.Millisecond,
+	})
+	ts := startDiskQueueServer(t, cfg)
+	result := queuetestutil.RunStartConsumerFailureMatrix(t, ts.Client, queuetestutil.StartConsumerFailureMatrixOptions{
+		Label:   "disk-start-consumer-failure",
+		Timeout: 30 * time.Second,
+	})
+	t.Logf("immediate=%+v deferred=%+v", result.Immediate, result.Deferred)
+}

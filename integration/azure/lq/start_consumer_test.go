@@ -50,3 +50,26 @@ func TestAzureStartConsumerStateSaveRegression(t *testing.T) {
 		},
 	})
 }
+
+func TestAzureStartConsumerHandlerFailureMatrix(t *testing.T) {
+	queuetestutil.InstallWatchdog(t, "azure-start-consumer-failure", 2*time.Minute)
+
+	cfg := prepareAzureQueueConfig(t, azureQueueOptions{
+		PollInterval:      25 * time.Millisecond,
+		PollJitter:        0,
+		ResilientInterval: 250 * time.Millisecond,
+	})
+	ts := startAzureQueueServer(t, cfg)
+	ensureAzureQueueWritableOrSkip(t, cfg, ts.Client)
+
+	result := queuetestutil.RunStartConsumerFailureMatrix(t, ts.Client, queuetestutil.StartConsumerFailureMatrixOptions{
+		Label:   "azure-start-consumer-failure",
+		Timeout: 90 * time.Second,
+		QueueSetup: func(queues ...string) {
+			for _, queue := range queues {
+				scheduleAzureQueueCleanup(t, cfg, queue)
+			}
+		},
+	})
+	t.Logf("immediate=%+v deferred=%+v", result.Immediate, result.Deferred)
+}

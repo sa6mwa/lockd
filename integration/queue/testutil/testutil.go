@@ -175,6 +175,146 @@ type StartConsumerStateSaveRegressionOptions struct {
 	QueueSetup func(queue string)
 }
 
+// StartConsumerFailureMode identifies the retry strategy under test.
+type StartConsumerFailureMode string
+
+const (
+	// StartConsumerFailureModeImmediateFailure exercises the managed consumer
+	// path where the handler returns an error and the SDK closes the message
+	// automatically after the callback returns.
+	StartConsumerFailureModeImmediateFailure StartConsumerFailureMode = "immediate-failure"
+	// StartConsumerFailureModeDeferredDefer exercises the handler path where the
+	// first delivery is intentionally deferred before the callback returns.
+	StartConsumerFailureModeDeferredDefer StartConsumerFailureMode = "deferred-defer"
+)
+
+// StartConsumerFailureRun captures one retry-path replay attempt.
+type StartConsumerFailureRun struct {
+	Mode        StartConsumerFailureMode
+	Queue       string
+	Attempts    int32
+	Completed   bool
+	TimedOut    bool
+	DecisionErr error
+	StartErr    error
+	Duration    time.Duration
+}
+
+// StartConsumerFailureMatrixOptions configures RunStartConsumerFailureMatrix.
+type StartConsumerFailureMatrixOptions struct {
+	// Label scopes generated queue/consumer names.
+	Label string
+	// Timeout bounds the full matrix runtime for each retry-path scenario.
+	Timeout time.Duration
+	// QueueSetup runs after queue name generation, before enqueue/consume starts.
+	QueueSetup func(queues ...string)
+}
+
+// StartConsumerFailureMatrix captures both retry-path variants.
+type StartConsumerFailureMatrix struct {
+	Immediate StartConsumerFailureRun
+	Deferred  StartConsumerFailureRun
+}
+
+// RunStartConsumerFailureMatrix reproduces the managed consumer restart-after-
+// handler-failure matrix with the handler-error path and the explicit defer
+// path.
+func RunStartConsumerFailureMatrix(t testing.TB, cli *lockdclient.Client, opts StartConsumerFailureMatrixOptions) StartConsumerFailureMatrix {
+	t.Helper()
+	if cli == nil {
+		t.Fatalf("client required")
+	}
+	label := strings.TrimSpace(opts.Label)
+	if label == "" {
+		label = "start-consumer-failure-matrix"
+	}
+	return StartConsumerFailureMatrix{
+		Immediate: runStartConsumerFailureScenario(t, cli, label, opts.Timeout, StartConsumerFailureModeImmediateFailure, opts.QueueSetup),
+		Deferred:  runStartConsumerFailureScenario(t, cli, label, opts.Timeout, StartConsumerFailureModeDeferredDefer, opts.QueueSetup),
+	}
+}
+
+func runStartConsumerFailureScenario(t testing.TB, cli *lockdclient.Client, label string, timeout time.Duration, mode StartConsumerFailureMode, queueSetup func(queues ...string)) StartConsumerFailureRun {
+	t.Helper()
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	queue := QueueName(label + "-" + string(mode))
+	if queueSetup != nil {
+		queueSetup(queue)
+	}
+	MustEnqueueBytes(t, cli, queue, []byte(`{"kind":"consumer-restart-failure"}`))
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	var (
+		attempts  atomic.Int32
+		completed atomic.Bool
+	)
+
+	start := time.Now()
+	err := cli.StartConsumer(ctx, lockdclient.ConsumerConfig{
+		Name:  label + "-" + string(mode),
+		Queue: queue,
+		Options: lockdclient.SubscribeOptions{
+			Owner:        QueueOwner(label + "-owner-" + string(mode)),
+			Prefetch:     1,
+			BlockSeconds: 2,
+		},
+		RestartPolicy: lockdclient.ConsumerRestartPolicy{
+			ImmediateRetries: 1,
+			BaseDelay:        25 * time.Millisecond,
+			MaxDelay:         25 * time.Millisecond,
+			Multiplier:       2,
+		},
+		MessageHandler: func(handlerCtx context.Context, cm lockdclient.ConsumerMessage) error {
+			if cm.Message == nil {
+				return fmt.Errorf("consumer %s: nil message", mode)
+			}
+			attempt := attempts.Add(1)
+			switch attempt {
+			case 1:
+				if mode == StartConsumerFailureModeImmediateFailure {
+					return fmt.Errorf("consumer %s: handler failure", mode)
+				}
+				if err := cm.Message.Defer(handlerCtx, 0); err != nil {
+					return fmt.Errorf("consumer %s: defer handoff: %w", mode, err)
+				}
+				completed.Store(true)
+				cancel()
+				return nil
+			case 2:
+				if err := cm.Message.Ack(handlerCtx); err != nil {
+					return fmt.Errorf("consumer %s: ack redelivery: %w", mode, err)
+				}
+				completed.Store(true)
+				cancel()
+				return nil
+			default:
+				return fmt.Errorf("consumer %s: unexpected delivery attempt %d", mode, attempt)
+			}
+		},
+		ErrorHandler: func(handlerCtx context.Context, event lockdclient.ConsumerError) error {
+			if event.Attempt == 1 {
+				return nil
+			}
+			return event.Err
+		},
+	})
+
+	return StartConsumerFailureRun{
+		Mode:        mode,
+		Queue:       queue,
+		Attempts:    attempts.Load(),
+		Completed:   completed.Load(),
+		TimedOut:    !completed.Load() && ctx.Err() != nil,
+		DecisionErr: nil,
+		StartErr:    err,
+		Duration:    time.Since(start),
+	}
+}
+
 // RunStartConsumerSmoke verifies StartConsumer across mixed queue configs:
 // two consumers on one shared queue, plus one consumer each on two distinct
 // queues (one stateful). The test cancels context after each handler observes at
@@ -258,10 +398,6 @@ func RunStartConsumerSmoke(t testing.TB, cli *lockdclient.Client, opts StartCons
 			}
 			if !check.withState && cm.State != nil {
 				return fmt.Errorf("consumer %s: unexpected state handle", name)
-			}
-			defer cm.Message.Close()
-			if err := cm.Message.ClosePayload(); err != nil {
-				return fmt.Errorf("consumer %s: close payload: %w", name, err)
 			}
 			ackCtx, ackCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			err := cm.Message.Ack(ackCtx)
@@ -377,8 +513,6 @@ func RunStartConsumerStateSaveRegression(t testing.TB, cli *lockdclient.Client, 
 			if cm.State == nil {
 				return fmt.Errorf("state handle is required for stateful consumer")
 			}
-			defer cm.Message.Close()
-
 			var current struct {
 				Counter int `json:"counter"`
 			}

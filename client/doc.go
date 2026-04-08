@@ -193,6 +193,16 @@
 // immediate retries, then exponential backoff starting at 250ms with multiplier
 // 2.0 and max delay 5 minutes. Jitter defaults to zero and can be enabled.
 //
+// The handler owns the business decision for the delivery:
+//
+//   - return nil after Ack or Defer
+//   - return an error for failure
+//   - call Defer explicitly when the message should be handed back for later
+//     workflow continuation
+//
+// StartConsumer closes each message automatically after the handler returns, so
+// handlers do not need to call Close.
+//
 // ErrorHandler receives ConsumerError before each restart. Returning nil keeps
 // the loop running. Returning an error stops StartConsumer and returns that
 // error. OnStart and OnStop lifecycle hooks can be used for observability.
@@ -203,8 +213,6 @@
 // cancellation returns nil.
 //
 //	handler := func(ctx context.Context, cm client.ConsumerMessage) error {
-//	    defer cm.Message.Close()
-//
 //	    if cm.State != nil {
 //	        var state map[string]any
 //	        if err := cm.State.Load(ctx, &state); err != nil && !errors.Is(err, client.ErrStateNotFound) {

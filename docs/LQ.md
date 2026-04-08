@@ -241,7 +241,11 @@ and retry loops stay linked to the originating enqueue.
   `Subscribe` and `SubscribeWithState`. It runs one goroutine per
   `ConsumerConfig`, auto-generates `Options.Owner` when empty, applies
   restart backoff via `ConsumerRestartPolicy`, and routes panics in handlers
-  and lifecycle hooks through the same restart/error path.
+  and lifecycle hooks through the same restart/error path. The handler decides
+  the delivery outcome: `Ack()` commits, `Defer()` explicitly hands the message
+  back for later workflow continuation, and a non-nil error means failure.
+  Managed consumers close each message automatically after the callback
+  returns, so handlers do not need to call `Close()`.
 
 ### CLI (`lockd client queue …`)
 

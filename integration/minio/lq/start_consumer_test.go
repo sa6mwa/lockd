@@ -40,3 +40,20 @@ func TestMinioStartConsumerStateSaveRegression(t *testing.T) {
 		Timeout: 90 * time.Second,
 	})
 }
+
+func TestMinioStartConsumerHandlerFailureMatrix(t *testing.T) {
+	queuetestutil.InstallWatchdog(t, "minio-start-consumer-failure", 2*time.Minute)
+
+	cfg := prepareMinioQueueConfig(t, minioQueueOptions{
+		PollInterval:      25 * time.Millisecond,
+		PollJitter:        0,
+		ResilientInterval: 250 * time.Millisecond,
+	})
+	ts := startMinioQueueServer(t, cfg)
+
+	result := queuetestutil.RunStartConsumerFailureMatrix(t, ts.Client, queuetestutil.StartConsumerFailureMatrixOptions{
+		Label:   "minio-start-consumer-failure",
+		Timeout: 90 * time.Second,
+	})
+	t.Logf("immediate=%+v deferred=%+v", result.Immediate, result.Deferred)
+}

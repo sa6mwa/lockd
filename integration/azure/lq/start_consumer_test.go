@@ -31,6 +31,28 @@ func TestAzureStartConsumerSmoke(t *testing.T) {
 	})
 }
 
+func TestAzureStartConsumerAutoAckRegression(t *testing.T) {
+	queuetestutil.InstallWatchdog(t, "azure-start-consumer-auto-ack", 2*time.Minute)
+
+	cfg := prepareAzureQueueConfig(t, azureQueueOptions{
+		PollInterval:      25 * time.Millisecond,
+		PollJitter:        0,
+		ResilientInterval: 250 * time.Millisecond,
+	})
+	ts := startAzureQueueServer(t, cfg)
+	ensureAzureQueueWritableOrSkip(t, cfg, ts.Client)
+
+	queuetestutil.RunStartConsumerAutoAckRegression(t, ts.Client, queuetestutil.StartConsumerAutoAckRegressionOptions{
+		Label:   "azure-start-consumer-auto-ack",
+		Timeout: 90 * time.Second,
+		QueueSetup: func(queues ...string) {
+			for _, queue := range queues {
+				scheduleAzureQueueCleanup(t, cfg, queue)
+			}
+		},
+	})
+}
+
 func TestAzureStartConsumerStateSaveRegression(t *testing.T) {
 	queuetestutil.InstallWatchdog(t, "azure-start-consumer-state-save", 2*time.Minute)
 

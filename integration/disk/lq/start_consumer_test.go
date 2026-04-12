@@ -26,6 +26,23 @@ func TestDiskStartConsumerSmoke(t *testing.T) {
 	})
 }
 
+func TestDiskStartConsumerAutoAckRegression(t *testing.T) {
+	queuetestutil.InstallWatchdog(t, "disk-start-consumer-auto-ack", 45*time.Second)
+
+	root := prepareDiskQueueRoot(t)
+	cfg := buildDiskQueueConfig(t, root, diskQueueOptions{
+		EnableWatch:       false,
+		PollInterval:      25 * time.Millisecond,
+		PollJitter:        0,
+		ResilientInterval: 250 * time.Millisecond,
+	})
+	ts := startDiskQueueServer(t, cfg)
+	queuetestutil.RunStartConsumerAutoAckRegression(t, ts.Client, queuetestutil.StartConsumerAutoAckRegressionOptions{
+		Label:   "disk-start-consumer-auto-ack",
+		Timeout: 30 * time.Second,
+	})
+}
+
 func TestDiskStartConsumerStateSaveRegression(t *testing.T) {
 	queuetestutil.InstallWatchdog(t, "disk-start-consumer-state-save", 45*time.Second)
 

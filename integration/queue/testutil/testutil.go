@@ -216,6 +216,14 @@ type StartConsumerFailureMatrix struct {
 	Deferred  StartConsumerFailureRun
 }
 
+// StartConsumerAutoAckRegressionOptions configures RunStartConsumerAutoAckRegression.
+type StartConsumerAutoAckRegressionOptions struct {
+	Label      string
+	Timeout    time.Duration
+	QueueSetup func(queues ...string)
+	Visibility time.Duration
+}
+
 // RunStartConsumerFailureMatrix reproduces the managed consumer restart-after-
 // handler-failure matrix with the handler-error path and the explicit defer
 // path.
@@ -310,6 +318,83 @@ func runStartConsumerFailureScenario(t testing.TB, cli *lockdclient.Client, labe
 		StartErr:    err,
 		Duration:    time.Since(start),
 	}
+}
+
+// RunStartConsumerAutoAckRegression verifies the managed StartConsumer path
+// auto-acks a handler that returns nil, and the message does not reappear after
+// the original visibility timeout expires.
+func RunStartConsumerAutoAckRegression(t testing.TB, cli *lockdclient.Client, opts StartConsumerAutoAckRegressionOptions) {
+	t.Helper()
+	if cli == nil {
+		t.Fatalf("client required")
+	}
+	label := strings.TrimSpace(opts.Label)
+	if label == "" {
+		label = "start-consumer-auto-ack"
+	}
+	timeout := opts.Timeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	visibility := opts.Visibility
+	if visibility <= 0 {
+		visibility = time.Second
+	}
+	queue := QueueName(label + "-auto-ack")
+	if opts.QueueSetup != nil {
+		opts.QueueSetup(queue)
+	}
+
+	enqueueCtx, enqueueCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	_, err := cli.Enqueue(enqueueCtx, queue, bytes.NewReader([]byte("managed-auto-ack")), lockdclient.EnqueueOptions{
+		ContentType: "text/plain",
+		Visibility:  visibility,
+	})
+	enqueueCancel()
+	if err != nil {
+		t.Fatalf("enqueue auto-ack message: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	var handled atomic.Bool
+	err = cli.StartConsumer(ctx, lockdclient.ConsumerConfig{
+		Name:  label + "-consumer",
+		Queue: queue,
+		Options: lockdclient.SubscribeOptions{
+			Owner:        QueueOwner(label + "-owner"),
+			Prefetch:     1,
+			BlockSeconds: 2,
+		},
+		MessageHandler: func(handlerCtx context.Context, cm lockdclient.ConsumerMessage) error {
+			if cm.Message == nil {
+				return fmt.Errorf("consumer %s: nil message", queue)
+			}
+			body, readErr := io.ReadAll(cm.Message)
+			if readErr != nil {
+				return fmt.Errorf("consumer %s: read payload: %w", queue, readErr)
+			}
+			if string(body) != "managed-auto-ack" {
+				return fmt.Errorf("consumer %s: unexpected payload %q", queue, body)
+			}
+			handled.Store(true)
+			cancel()
+			return nil
+		},
+		ErrorHandler: func(_ context.Context, event lockdclient.ConsumerError) error {
+			return event.Err
+		},
+	})
+	if err != nil {
+		t.Fatalf("start consumer auto-ack: %v", err)
+	}
+	if !handled.Load() {
+		t.Fatalf("auto-ack regression did not handle a message")
+	}
+
+	time.Sleep(visibility + 1500*time.Millisecond)
+	EnsureQueueEmpty(t, cli, queue)
 }
 
 // RunStartConsumerSmoke verifies StartConsumer across mixed queue configs:

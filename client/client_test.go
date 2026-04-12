@@ -4199,11 +4199,8 @@ func TestClientStartConsumerNamespacePrecedence(t *testing.T) {
 					Namespace: tc.optionsNamespace,
 				},
 				MessageHandler: func(handlerCtx context.Context, msg client.ConsumerMessage) error {
-					if msg.Message != nil {
-						defer msg.Message.Close()
-						if ackErr := msg.Message.Ack(context.Background()); ackErr != nil {
-							return ackErr
-						}
+					if msg.Message == nil {
+						return fmt.Errorf("expected message")
 					}
 					cancel()
 					return nil
@@ -4222,6 +4219,179 @@ func TestClientStartConsumerNamespacePrecedence(t *testing.T) {
 				t.Fatalf("expected namespace %q, got %q", tc.expectedNamespace, got)
 			}
 		})
+	}
+}
+
+func TestClientStartConsumerAutoNackOnHandlerError(t *testing.T) {
+	now := time.Now().Unix()
+	firstMessage := testQueueMessage{
+		Queue:                    "orders",
+		MessageID:                "msg-auto-nack-1",
+		Attempts:                 1,
+		MaxAttempts:              4,
+		NotVisibleUntilUnix:      now,
+		VisibilityTimeoutSeconds: 15,
+		PayloadContentType:       "text/plain",
+		PayloadBytes:             4,
+		LeaseID:                  "lease-auto-nack-1",
+		LeaseExpiresAtUnix:       now + 30,
+		FencingToken:             91,
+		MetaETag:                 "etag-auto-nack-1",
+	}
+	secondMessage := firstMessage
+	secondMessage.MessageID = "msg-auto-nack-2"
+	secondMessage.LeaseID = "lease-auto-nack-2"
+	secondMessage.FencingToken = 92
+	secondMessage.MetaETag = "etag-auto-nack-2"
+
+	var (
+		mu             sync.Mutex
+		nackReq        api.NackRequest
+		ackCount       atomic.Int32
+		nackCount      atomic.Int32
+		subscribeCalls atomic.Int32
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/queue/subscribe":
+			var req api.DequeueRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode subscribe request: %v", err)
+			}
+			call := int(subscribeCalls.Add(1))
+			msg := firstMessage
+			if call > 1 {
+				msg = secondMessage
+			}
+			mw := multipart.NewWriter(w)
+			w.Header().Set("Content-Type", "multipart/related; boundary="+mw.Boundary())
+			w.WriteHeader(http.StatusOK)
+
+			metaHeader := textproto.MIMEHeader{}
+			metaHeader.Set("Content-Type", "application/json")
+			metaHeader.Set("Content-Disposition", `form-data; name="meta"`)
+			metaPart, err := mw.CreatePart(metaHeader)
+			if err != nil {
+				t.Fatalf("create meta part: %v", err)
+			}
+			if err := json.NewEncoder(metaPart).Encode(map[string]any{
+				"message":     msg,
+				"next_cursor": fmt.Sprintf("cursor-%d", call),
+			}); err != nil {
+				t.Fatalf("encode meta: %v", err)
+			}
+
+			payloadHeader := textproto.MIMEHeader{}
+			payloadHeader.Set("Content-Type", msg.PayloadContentType)
+			payloadHeader.Set("Content-Disposition", `form-data; name="payload"`)
+			payloadPart, err := mw.CreatePart(payloadHeader)
+			if err != nil {
+				t.Fatalf("create payload part: %v", err)
+			}
+			if _, err := payloadPart.Write([]byte("work")); err != nil {
+				t.Fatalf("write payload: %v", err)
+			}
+			if err := mw.Close(); err != nil {
+				t.Fatalf("close multipart: %v", err)
+			}
+		case "/v1/queue/ack":
+			ackCount.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]any{"acked": true})
+		case "/v1/queue/nack":
+			var req api.NackRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode nack request: %v", err)
+			}
+			mu.Lock()
+			nackReq = req
+			mu.Unlock()
+			nackCount.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]any{"nacked": true})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	cli, err := client.New(srv.URL, client.WithDisableMTLS(true), client.WithEndpointShuffle(false))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var (
+		handlerCalls atomic.Int32
+		errorCalls   atomic.Int32
+	)
+	err = cli.StartConsumer(ctx, client.ConsumerConfig{
+		Name:    "orders-auto-nack",
+		Queue:   "orders",
+		Options: client.SubscribeOptions{Owner: "worker-auto-nack"},
+		RestartPolicy: client.ConsumerRestartPolicy{
+			ImmediateRetries: 1,
+			BaseDelay:        20 * time.Millisecond,
+			MaxDelay:         20 * time.Millisecond,
+			Multiplier:       2.0,
+		},
+		MessageHandler: func(handlerCtx context.Context, cm client.ConsumerMessage) error {
+			call := handlerCalls.Add(1)
+			if cm.Message == nil {
+				return fmt.Errorf("expected message on attempt %d", call)
+			}
+			body, readErr := io.ReadAll(cm.Message)
+			if readErr != nil {
+				return fmt.Errorf("read payload on attempt %d: %w", call, readErr)
+			}
+			if string(body) != "work" {
+				return fmt.Errorf("unexpected payload on attempt %d: %q", call, body)
+			}
+			if call == 1 {
+				return fmt.Errorf("handler boom")
+			}
+			cancel()
+			return nil
+		},
+		ErrorHandler: func(_ context.Context, event client.ConsumerError) error {
+			errorCalls.Add(1)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("start consumer: %v", err)
+	}
+	if handlerCalls.Load() != 2 {
+		t.Fatalf("expected 2 handler calls, got %d", handlerCalls.Load())
+	}
+	if subscribeCalls.Load() != 2 {
+		t.Fatalf("expected 2 subscribe calls, got %d", subscribeCalls.Load())
+	}
+	if errorCalls.Load() != 1 {
+		t.Fatalf("expected 1 error handler call, got %d", errorCalls.Load())
+	}
+	if ackCount.Load() != 1 {
+		t.Fatalf("expected 1 ack request, got %d", ackCount.Load())
+	}
+	if nackCount.Load() != 1 {
+		t.Fatalf("expected 1 nack request, got %d", nackCount.Load())
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if nackReq.Queue != "orders" || nackReq.MessageID != firstMessage.MessageID {
+		t.Fatalf("unexpected nack request identity: %+v", nackReq)
+	}
+	if nackReq.Intent != api.NackIntentFailure {
+		t.Fatalf("expected failure intent, got %+v", nackReq)
+	}
+	if nackReq.DelaySeconds != 0 {
+		t.Fatalf("expected zero nack delay, got %+v", nackReq)
+	}
+	if nackReq.LeaseID != firstMessage.LeaseID || nackReq.FencingToken != firstMessage.FencingToken || nackReq.MetaETag != firstMessage.MetaETag {
+		t.Fatalf("unexpected nack lease metadata: %+v", nackReq)
+	}
+	if nackReq.LastError == nil {
+		t.Fatalf("expected last_error to be populated")
 	}
 }
 

@@ -25,6 +25,22 @@ func TestMinioStartConsumerSmoke(t *testing.T) {
 	})
 }
 
+func TestMinioStartConsumerAutoAckRegression(t *testing.T) {
+	queuetestutil.InstallWatchdog(t, "minio-start-consumer-auto-ack", 2*time.Minute)
+
+	cfg := prepareMinioQueueConfig(t, minioQueueOptions{
+		PollInterval:      25 * time.Millisecond,
+		PollJitter:        0,
+		ResilientInterval: 250 * time.Millisecond,
+	})
+	ts := startMinioQueueServer(t, cfg)
+
+	queuetestutil.RunStartConsumerAutoAckRegression(t, ts.Client, queuetestutil.StartConsumerAutoAckRegressionOptions{
+		Label:   "minio-start-consumer-auto-ack",
+		Timeout: 90 * time.Second,
+	})
+}
+
 func TestMinioStartConsumerStateSaveRegression(t *testing.T) {
 	queuetestutil.InstallWatchdog(t, "minio-start-consumer-state-save", 2*time.Minute)
 

@@ -7385,6 +7385,15 @@ func queueMessageClosed(msg *QueueMessage) bool {
 	return msg.handle.done
 }
 
+func queueMessageDisposition(msg *QueueMessage) (done, acked, nacked bool) {
+	if msg == nil || msg.handle == nil {
+		return true, false, false
+	}
+	msg.handle.mu.Lock()
+	defer msg.handle.mu.Unlock()
+	return msg.handle.done, msg.handle.acked, msg.handle.nacked
+}
+
 func (c *Client) autoExtendQueueMessage(ctx context.Context, msg *QueueMessage, stop <-chan struct{}) error {
 	for {
 		delay := queueAutoExtendDelay(msg.VisibilityTimeout())
@@ -7446,6 +7455,7 @@ func (c *Client) runQueueHandlerWithAutoExtend(ctx context.Context, msg *QueueMe
 	for {
 		select {
 		case err := <-handlerDone:
+			handlerCtxErr := runCtx.Err()
 			cancel()
 			close(stopExtend)
 			if !extendSettled {
@@ -7453,7 +7463,7 @@ func (c *Client) runQueueHandlerWithAutoExtend(ctx context.Context, msg *QueueMe
 					extendErr = e
 				}
 			}
-			return c.finalizeManagedConsumerMessage(msg, err, extendErr)
+			return c.finalizeManagedConsumerMessage(msg, err, extendErr, handlerCtxErr)
 		case err := <-extendDone:
 			extendSettled = true
 			if err == nil {
@@ -7465,16 +7475,26 @@ func (c *Client) runQueueHandlerWithAutoExtend(ctx context.Context, msg *QueueMe
 	}
 }
 
-func (c *Client) finalizeManagedConsumerMessage(msg *QueueMessage, handlerErr, extendErr error) error {
+func (c *Client) finalizeManagedConsumerMessage(msg *QueueMessage, handlerErr, extendErr, handlerCtxErr error) error {
 	if msg == nil || msg.handle == nil {
-		return errors.Join(handlerErr, extendErr)
+		return errors.Join(handlerErr, extendErr, handlerCtxErr)
 	}
-	if queueMessageClosed(msg) {
-		return errors.Join(handlerErr, extendErr)
+	done, acked, nacked := queueMessageDisposition(msg)
+	if done {
+		if acked || nacked {
+			return errors.Join(handlerErr, extendErr)
+		}
+		return errors.Join(handlerErr, extendErr, handlerCtxErr)
 	}
 	reqCtx, cancel := msg.handle.client.requestContextNoTimeout(context.Background())
 	defer cancel()
 	if handlerErr == nil {
+		if handlerCtxErr != nil {
+			if extendErr != nil {
+				return errors.Join(handlerCtxErr, extendErr)
+			}
+			return handlerCtxErr
+		}
 		if err := msg.Ack(reqCtx); err != nil {
 			if extendErr != nil {
 				return errors.Join(err, extendErr)

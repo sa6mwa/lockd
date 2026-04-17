@@ -182,7 +182,7 @@ func (d *Data) Clone() *Data {
 }
 
 // Normalize validates and repairs structural defaults.
-func (d *Data) Normalize() {
+func (d *Data) Normalize() error {
 	if d.Version <= 0 {
 		d.Version = 1
 	}
@@ -200,22 +200,14 @@ func (d *Data) Normalize() {
 		c.SecretHash = strings.TrimSpace(c.SecretHash)
 		normalizedNamespace, err := normalizeOptionalNamespace(c.Namespace)
 		if err != nil {
-			c.Namespace = ""
-		} else {
-			c.Namespace = normalizedNamespace
+			return fmt.Errorf("client %q namespace: %w", c.ID, err)
 		}
-		normalizedPresets, err := preset.NormalizeCollection(c.Presets)
-		switch {
-		case len(c.Presets) == 0:
-			c.Presets = nil
-		case err != nil:
-			c.Presets = nil
-		default:
-			c.Presets = normalizedPresets
+		c.Namespace = normalizedNamespace
+		normalizedPresets, err := normalizeOptionalPresets(c.LockdPreset, c.Presets)
+		if err != nil {
+			return fmt.Errorf("client %q presets: %w", c.ID, err)
 		}
-		if !c.LockdPreset && len(c.Presets) == 0 {
-			c.LockdPreset = true
-		}
+		c.Presets = normalizedPresets
 		c.Scopes = normalizeScopes(c.Scopes)
 		c.RedirectURIs = normalizeRedirectURIs(c.RedirectURIs)
 		d.Clients[c.ID] = c
@@ -223,6 +215,7 @@ func (d *Data) Normalize() {
 			delete(d.Clients, id)
 		}
 	}
+	return nil
 }
 
 // AddClient creates a confidential client and returns the new record and cleartext secret.
@@ -230,7 +223,9 @@ func (d *Data) AddClient(name string, namespace string, lockdPreset bool, preset
 	if d == nil {
 		return Client{}, "", fmt.Errorf("state required")
 	}
-	d.Normalize()
+	if err := d.Normalize(); err != nil {
+		return Client{}, "", err
+	}
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
@@ -284,7 +279,9 @@ func (d *Data) UpdateClientPresets(clientID string, lockdPreset bool, presets []
 	if d == nil {
 		return fmt.Errorf("state required")
 	}
-	d.Normalize()
+	if err := d.Normalize(); err != nil {
+		return err
+	}
 	clientID = strings.TrimSpace(clientID)
 	client, ok := d.Clients[clientID]
 	if !ok {
@@ -310,7 +307,9 @@ func (d *Data) RotateClientSecret(clientID string, now time.Time) (string, error
 	if d == nil {
 		return "", fmt.Errorf("state required")
 	}
-	d.Normalize()
+	if err := d.Normalize(); err != nil {
+		return "", err
+	}
 	clientID = strings.TrimSpace(clientID)
 	client, ok := d.Clients[clientID]
 	if !ok {
@@ -336,7 +335,9 @@ func (d *Data) RemoveClient(clientID string, now time.Time) error {
 	if d == nil {
 		return fmt.Errorf("state required")
 	}
-	d.Normalize()
+	if err := d.Normalize(); err != nil {
+		return err
+	}
 	clientID = strings.TrimSpace(clientID)
 	if _, ok := d.Clients[clientID]; !ok {
 		return ErrClientNotFound
@@ -354,7 +355,9 @@ func (d *Data) RevokeClient(clientID string, revoked bool, now time.Time) error 
 	if d == nil {
 		return fmt.Errorf("state required")
 	}
-	d.Normalize()
+	if err := d.Normalize(); err != nil {
+		return err
+	}
 	clientID = strings.TrimSpace(clientID)
 	client, ok := d.Clients[clientID]
 	if !ok {
@@ -375,7 +378,9 @@ func (d *Data) UpdateClientName(clientID, name string, now time.Time) error {
 	if d == nil {
 		return fmt.Errorf("state required")
 	}
-	d.Normalize()
+	if err := d.Normalize(); err != nil {
+		return err
+	}
 	clientID = strings.TrimSpace(clientID)
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -416,7 +421,9 @@ func (d *Data) UpdateClientScopes(clientID string, scopes []string, now time.Tim
 	if d == nil {
 		return fmt.Errorf("state required")
 	}
-	d.Normalize()
+	if err := d.Normalize(); err != nil {
+		return err
+	}
 	clientID = strings.TrimSpace(clientID)
 	client, ok := d.Clients[clientID]
 	if !ok {
@@ -437,7 +444,9 @@ func (d *Data) UpdateClientRedirectURIs(clientID string, redirectURIs []string, 
 	if d == nil {
 		return fmt.Errorf("state required")
 	}
-	d.Normalize()
+	if err := d.Normalize(); err != nil {
+		return err
+	}
 	clientID = strings.TrimSpace(clientID)
 	client, ok := d.Clients[clientID]
 	if !ok {
@@ -462,7 +471,9 @@ func (d *Data) UpdateClientNamespace(clientID string, namespace string, now time
 	if d == nil {
 		return fmt.Errorf("state required")
 	}
-	d.Normalize()
+	if err := d.Normalize(); err != nil {
+		return err
+	}
 	clientID = strings.TrimSpace(clientID)
 	client, ok := d.Clients[clientID]
 	if !ok {
@@ -483,16 +494,19 @@ func (d *Data) UpdateClientNamespace(clientID string, namespace string, now time
 }
 
 // SetIssuer updates the OAuth issuer value.
-func (d *Data) SetIssuer(issuer string, now time.Time) {
+func (d *Data) SetIssuer(issuer string, now time.Time) error {
 	if d == nil {
-		return
+		return nil
 	}
-	d.Normalize()
+	if err := d.Normalize(); err != nil {
+		return err
+	}
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
 	d.Issuer = strings.TrimSpace(issuer)
 	d.UpdatedAt = now.UTC()
+	return nil
 }
 
 // ListClients returns clients sorted by ID.
@@ -500,7 +514,9 @@ func (d *Data) ListClients() []Client {
 	if d == nil {
 		return nil
 	}
-	d.Normalize()
+	if err := d.Normalize(); err != nil {
+		return nil
+	}
 	ids := make([]string, 0, len(d.Clients))
 	for id := range d.Clients {
 		ids = append(ids, id)
@@ -522,7 +538,9 @@ func (d *Data) VerifyClientSecret(clientID, secret string) (*Client, bool) {
 	if d == nil {
 		return nil, false
 	}
-	d.Normalize()
+	if err := d.Normalize(); err != nil {
+		return nil, false
+	}
 	clientID = strings.TrimSpace(clientID)
 	client, ok := d.Clients[clientID]
 	if !ok || client.Revoked {
@@ -579,7 +597,9 @@ func Load(path string) (*Data, error) {
 	if err := json.Unmarshal(plaintext, &data); err != nil {
 		return nil, fmt.Errorf("decode mcp state: %w", err)
 	}
-	data.Normalize()
+	if err := data.Normalize(); err != nil {
+		return nil, fmt.Errorf("normalize mcp state: %w", err)
+	}
 	return &data, nil
 }
 
@@ -601,7 +621,9 @@ func Save(path string, data *Data) error {
 		return fmt.Errorf("resolve state path: %w", err)
 	}
 	data = data.Clone()
-	data.Normalize()
+	if err := data.Normalize(); err != nil {
+		return fmt.Errorf("normalize mcp state: %w", err)
+	}
 
 	payload, err := json.Marshal(data)
 	if err != nil {

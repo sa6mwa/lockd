@@ -359,8 +359,7 @@ func (m *Manager) SetIssuer(issuer string) error {
 		return fmt.Errorf("invalid issuer %q: %w", issuer, err)
 	}
 	return m.mutate(func(d *state.Data, now time.Time) error {
-		d.SetIssuer(issuer, now)
-		return nil
+		return d.SetIssuer(issuer, now)
 	})
 }
 

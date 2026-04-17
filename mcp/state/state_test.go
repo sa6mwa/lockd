@@ -1,6 +1,7 @@
 package state
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -244,6 +245,99 @@ func TestUpdateClientPresetsRejectsEmptySurface(t *testing.T) {
 	}
 	if err := data.UpdateClientPresets(client.ID, false, nil, now); err == nil {
 		t.Fatalf("expected empty surface update to fail")
+	}
+}
+
+func TestNormalizeRejectsInvalidCustomPresetState(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	data := NewData("https://issuer.example", now)
+	client, _, err := data.AddClient("preset-client", "", false, []preset.Definition{{
+		Name: "memory",
+		Kinds: []preset.Kind{{
+			Name:      "note",
+			Namespace: "ops",
+			Schema: preset.Schema{
+				Type: "object",
+				Properties: map[string]preset.Schema{
+					"text": {Type: "string"},
+				},
+			},
+		}},
+	}}, []string{"read"}, nil, now)
+	if err != nil {
+		t.Fatalf("add client: %v", err)
+	}
+
+	broken := data.Clients[client.ID]
+	broken.Presets[0].Kinds[0].Namespace = "bad namespace"
+	data.Clients[client.ID] = broken
+
+	if err := data.Normalize(); err == nil {
+		t.Fatalf("expected invalid preset state to fail normalization")
+	} else if !strings.Contains(err.Error(), `client "`+client.ID+`" presets`) {
+		t.Fatalf("unexpected normalize error: %v", err)
+	}
+}
+
+func TestLoadRejectsInvalidCustomPresetState(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	data := NewData("https://issuer.example", now)
+	client, _, err := data.AddClient("preset-client", "", false, []preset.Definition{{
+		Name: "memory",
+		Kinds: []preset.Kind{{
+			Name:      "note",
+			Namespace: "ops",
+			Schema: preset.Schema{
+				Type: "object",
+				Properties: map[string]preset.Schema{
+					"text": {Type: "string"},
+				},
+			},
+		}},
+	}}, []string{"read"}, nil, now)
+	if err != nil {
+		t.Fatalf("add client: %v", err)
+	}
+
+	broken := data.Clone()
+	clientState := broken.Clients[client.ID]
+	clientState.Presets[0].Kinds[0].Namespace = "bad namespace"
+	broken.Clients[client.ID] = clientState
+
+	payload, err := json.Marshal(broken)
+	if err != nil {
+		t.Fatalf("marshal broken state: %v", err)
+	}
+	material, basePEM, err := ensureMaterial(nil)
+	if err != nil {
+		t.Fatalf("ensure material: %v", err)
+	}
+	ciphertext, err := encryptPayload(payload, material)
+	if err != nil {
+		t.Fatalf("encrypt payload: %v", err)
+	}
+	raw, err := upsertStateBlock(basePEM, ciphertext)
+	if err != nil {
+		t.Fatalf("upsert state block: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "mcp.pem")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write state file: %v", err)
+	}
+
+	_, err = Load(path)
+	if err == nil {
+		t.Fatalf("expected load to reject invalid preset state")
+	}
+	if !strings.Contains(err.Error(), "normalize mcp state") {
+		t.Fatalf("unexpected load error: %v", err)
+	}
+	if !strings.Contains(err.Error(), `client "`+client.ID+`" presets`) {
+		t.Fatalf("unexpected load error detail: %v", err)
 	}
 }
 

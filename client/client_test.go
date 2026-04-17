@@ -3921,7 +3921,7 @@ func TestClientStartConsumerSharedMessageHandler(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	handler := func(_ context.Context, cm client.ConsumerMessage) error {
+	handler := func(handlerCtx context.Context, cm client.ConsumerMessage) error {
 		if cm.Client != cli {
 			return fmt.Errorf("handler received unexpected client pointer")
 		}
@@ -3949,6 +3949,9 @@ func TestClientStartConsumerSharedMessageHandler(t *testing.T) {
 		gotBoth := seen["queue-a"] && seen["queue-b"]
 		seenMu.Unlock()
 		if gotBoth {
+			if err := cm.Message.Ack(handlerCtx); err != nil {
+				return fmt.Errorf("ack shared message: %w", err)
+			}
 			cancel()
 		}
 		return nil
@@ -4056,7 +4059,7 @@ func TestClientStartConsumerWithStateMessage(t *testing.T) {
 			Queue:     "workflow",
 			WithState: true,
 			Options:   client.SubscribeOptions{Owner: "state-worker"},
-			MessageHandler: func(_ context.Context, cm client.ConsumerMessage) error {
+			MessageHandler: func(handlerCtx context.Context, cm client.ConsumerMessage) error {
 				if !cm.WithState {
 					return fmt.Errorf("expected stateful delivery")
 				}
@@ -4065,6 +4068,9 @@ func TestClientStartConsumerWithStateMessage(t *testing.T) {
 				}
 				if cm.State.LeaseID() != "lease-state" {
 					return fmt.Errorf("unexpected state lease id %q", cm.State.LeaseID())
+				}
+				if err := cm.Message.Ack(handlerCtx); err != nil {
+					return fmt.Errorf("ack stateful message: %w", err)
 				}
 				cancel()
 				return nil
@@ -4348,6 +4354,9 @@ func TestClientStartConsumerAutoNackOnHandlerError(t *testing.T) {
 			}
 			if call == 1 {
 				return fmt.Errorf("handler boom")
+			}
+			if err := cm.Message.Ack(handlerCtx); err != nil {
+				return fmt.Errorf("ack payload on attempt %d: %w", call, err)
 			}
 			cancel()
 			return nil
@@ -4956,7 +4965,11 @@ func TestClientStartConsumerAutoExtendErrorDoesNotDeadlock(t *testing.T) {
 		FencingToken:             71,
 	}
 
-	var extendCalls atomic.Int32
+	var (
+		extendCalls atomic.Int32
+		ackCalls    atomic.Int32
+		nackCalls   atomic.Int32
+	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/queue/subscribe":
@@ -4998,8 +5011,10 @@ func TestClientStartConsumerAutoExtendErrorDoesNotDeadlock(t *testing.T) {
 				Detail:    "simulated extend conflict",
 			})
 		case "/v1/queue/ack":
+			ackCalls.Add(1)
 			_ = json.NewEncoder(w).Encode(map[string]any{"acked": true})
 		case "/v1/queue/nack":
+			nackCalls.Add(1)
 			_ = json.NewEncoder(w).Encode(map[string]any{"nacked": true})
 		default:
 			t.Fatalf("unexpected path %s", r.URL.Path)
@@ -5058,6 +5073,110 @@ func TestClientStartConsumerAutoExtendErrorDoesNotDeadlock(t *testing.T) {
 
 	if extendCalls.Load() == 0 {
 		t.Fatalf("expected at least one /v1/queue/extend call")
+	}
+	if ackCalls.Load() != 0 {
+		t.Fatalf("expected auto-extend failure to avoid ack, got %d ack calls", ackCalls.Load())
+	}
+	if nackCalls.Load() != 0 {
+		t.Fatalf("expected auto-extend failure to avoid nack, got %d nack calls", nackCalls.Load())
+	}
+}
+
+func TestClientSubscribeDoesNotAckWhenHandlerExitsOnContextCancel(t *testing.T) {
+	now := time.Now().Unix()
+	message := testQueueMessage{
+		Queue:                    "orders",
+		MessageID:                "msg-cancel-no-ack",
+		Attempts:                 1,
+		MaxAttempts:              3,
+		NotVisibleUntilUnix:      now,
+		VisibilityTimeoutSeconds: 30,
+		PayloadContentType:       "text/plain",
+		PayloadBytes:             4,
+		LeaseID:                  "lease-cancel-no-ack",
+		LeaseExpiresAtUnix:       now + 30,
+		FencingToken:             81,
+		MetaETag:                 "etag-cancel-no-ack",
+	}
+
+	var (
+		ackCalls  atomic.Int32
+		nackCalls atomic.Int32
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/queue/subscribe":
+			mw := multipart.NewWriter(w)
+			w.Header().Set("Content-Type", "multipart/related; boundary="+mw.Boundary())
+			w.WriteHeader(http.StatusOK)
+			metaHeader := textproto.MIMEHeader{}
+			metaHeader.Set("Content-Type", "application/json")
+			metaHeader.Set("Content-Disposition", `form-data; name="meta"`)
+			metaPart, err := mw.CreatePart(metaHeader)
+			if err != nil {
+				t.Fatalf("create meta part: %v", err)
+			}
+			if err := json.NewEncoder(metaPart).Encode(map[string]any{
+				"message":     message,
+				"next_cursor": "cursor-cancel",
+			}); err != nil {
+				t.Fatalf("encode meta: %v", err)
+			}
+			payloadHeader := textproto.MIMEHeader{}
+			payloadHeader.Set("Content-Type", message.PayloadContentType)
+			payloadHeader.Set("Content-Disposition", `form-data; name="payload"`)
+			payloadPart, err := mw.CreatePart(payloadHeader)
+			if err != nil {
+				t.Fatalf("create payload part: %v", err)
+			}
+			if _, err := payloadPart.Write([]byte("work")); err != nil {
+				t.Fatalf("write payload: %v", err)
+			}
+			if err := mw.Close(); err != nil {
+				t.Fatalf("close multipart: %v", err)
+			}
+		case "/v1/queue/ack":
+			ackCalls.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]any{"acked": true})
+		case "/v1/queue/nack":
+			nackCalls.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]any{"nacked": true})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	cli, err := client.New(srv.URL, client.WithDisableMTLS(true), client.WithEndpointShuffle(false))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- cli.Subscribe(ctx, "orders", client.SubscribeOptions{Owner: "worker-cancel-no-ack"}, func(handlerCtx context.Context, _ *client.QueueMessage) error {
+			<-handlerCtx.Done()
+			return nil
+		})
+	}()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context cancellation, got %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatalf("subscribe did not stop after context cancellation")
+	}
+
+	if ackCalls.Load() != 0 {
+		t.Fatalf("expected canceled handler exit to avoid ack, got %d ack calls", ackCalls.Load())
+	}
+	if nackCalls.Load() != 0 {
+		t.Fatalf("expected canceled handler exit to avoid nack, got %d nack calls", nackCalls.Load())
 	}
 }
 

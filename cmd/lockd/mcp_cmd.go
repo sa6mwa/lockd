@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -26,6 +25,7 @@ import (
 	mcpadmin "pkt.systems/lockd/mcp/admin"
 	"pkt.systems/lockd/mcp/preset"
 	"pkt.systems/lockd/tlsutil"
+	"pkt.systems/prettyx"
 	"pkt.systems/pslog"
 )
 
@@ -921,18 +921,10 @@ func writePrettyXOutputTo(ctx context.Context, payload []byte, out io.Writer) er
 }
 
 func runPrettyX(ctx context.Context, payload []byte, out io.Writer) error {
-	cmd := exec.CommandContext(ctx, "prettyx")
-	cmd.Stdin = bytes.NewReader(payload)
-	cmd.Stdout = out
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		if strings.TrimSpace(stderr.String()) != "" {
-			return fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
-		}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return nil
+	return prettyx.PrettyTo(out, payload, nil)
 }
 
 func oauthResourceURLOverrideFromConfig() string {

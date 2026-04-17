@@ -165,6 +165,8 @@ github.com/kylelemons/godebug v1.1.0 h1:RPNrshWIDI6G2gRW9EHilWtl7Z6Sb1BR0xunSBf0
 github.com/kylelemons/godebug v1.1.0/go.mod h1:9/0rRGxNHcop5bhtWyNeEfOS8JIWk580+fNqagV/RAw=
 github.com/lufia/plan9stats v0.0.0-20260216142805-b3301c5f2a88 h1:PTw+yKnXcOFCR6+8hHTyWBeQ/P4Nb7dd4/0ohEcWQuM=
 github.com/lufia/plan9stats v0.0.0-20260216142805-b3301c5f2a88/go.mod h1:autxFIvghDt3jPTLoqZ9OZ7s9qTGNAWmYCjVFWPX/zg=
+github.com/mattn/go-isatty v0.0.20 h1:xfD0iDuEKnDkl03q4limB+vH+GxLEtL/jb4xVJSWWEY=
+github.com/mattn/go-isatty v0.0.20/go.mod h1:W+V8PltTTMOvKvAeJH7IuucS94S2C6jfK/D7dTCTo3Y=
 github.com/minio/crc64nvme v1.1.1 h1:8dwx/Pz49suywbO+auHCBpCtlW1OfpcLN7wYgVR6wAI=
 github.com/minio/crc64nvme v1.1.1/go.mod h1:eVfm2fAzLlxMdUGc0EEBGSMmPwmXD5XiNRpnu9J3bvg=
 github.com/minio/md5-simd v1.1.2 h1:Gdi1DZK69+ZVMoNHRXJyNcxrMA4dSxoYHZSQbirFg34=
@@ -293,6 +295,7 @@ golang.org/x/sys v0.0.0-20180909124046-d0be0721c37e/go.mod h1:STP8DvDyc/dI5b8T5h
 golang.org/x/sys v0.0.0-20190916202348-b4ddaad3f8a3/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
 golang.org/x/sys v0.0.0-20201204225414-ed752295db88/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
 golang.org/x/sys v0.1.0/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
+golang.org/x/sys v0.6.0/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
 golang.org/x/sys v0.42.0 h1:omrd2nAlyT5ESRdCLYdm3+fMfNFE/+Rf4bDIQImRJeo=
 golang.org/x/sys v0.42.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=
 golang.org/x/term v0.40.0 h1:36e4zGLqU4yhjlmxEaagx2KuYbJq3EwY8K943ZsHcvg=
@@ -330,6 +333,8 @@ pkt.systems/kryptograf v0.6.0 h1:+tLQFUfPOYRkX2v6FwZ8SK3BppKWe04ky1j3hZtSOhc=
 pkt.systems/kryptograf v0.6.0/go.mod h1:thyyuqeBvwXKyOp/VrF1+UMe7ldoHwGgdn5iZB2eFnc=
 pkt.systems/lql v0.17.0 h1:qr8Nm6smOo4FNC7lAZ0iN2susmlLrJni7Fj9jm5NXfM=
 pkt.systems/lql v0.17.0/go.mod h1:6o2HIJzxPylronJi4srw+Jmk1h/5sTyxgLuMo6ivoXg=
+pkt.systems/prettyx v0.4.0 h1:pSw3McBTr3hqsHHftVvGyYzRkrL1Yp+LILOAwyDnoUw=
+pkt.systems/prettyx v0.4.0/go.mod h1:yx4YUJUyt90fiV9xOqhdKbyt3CgnVB0qZWQfIf7qOD0=
 pkt.systems/psi v0.3.0 h1:09CWw0EvBZkB+BuTPSsvkvLhnTHTWkj2Kf5pSVAKPiE=
 pkt.systems/psi v0.3.0/go.mod h1:0orsp6x9pcwiEkYm3AUtweTin9LXzA/DwuVdeMiCDh4=
 pkt.systems/pslog v0.21.0 h1:1dN7fx4wVm8somntvBiSqH38uYhY65O+0RVPWno0/QA=

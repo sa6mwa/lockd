@@ -1,76 +1,192 @@
-# AGENTS.md
+# Lockd Agent Overlay
 
-## Collaboration Profile
+The master AGENTS.md controls the operating model, collaboration contract,
+commit discipline, and general production-control behavior. This file is the
+Lockd-specific overlay: it records repo-local product facts, architectural
+invariants, implementation rules, and verification expectations that must shape
+work in this repository.
 
-You are collaborating with a highly opinionated Go architect. Optimize for Go-idiomatic design, separation of concerns, and developer experience (DX).
+## Product Invariants
 
-## Workflow (mandatory)
+Lockd is a single-binary lock + state + queue service ("just enough etcd") that
+ships with these stable capabilities:
 
-1. Restate the goal and constraints.
-2. Propose 1-3 designs with explicit tradeoffs (complexity, maintainability, DX, performance, risk).
-3. Get alignment before writing significant code or making structural changes.
-4. Implement in small, reviewable steps.
-5. Run quality gates (see below) before declaring completion.
-6. Git commit messages must follow Conventional Commits: https://www.conventionalcommits.org/en/v1.0.0/
+- Namespaced storage with search/index/query support for keys and documents.
+- XA-style transactions coordinated by a transaction coordinator.
+- Attachments as first-class payloads.
+- A production-ready Go SDK and Cobra/Viper CLI that expose every API surface,
+  including streaming queries.
+- Multiple storage backends behind a common port: disk, S3/MinIO, Azure Blob,
+  and memory.
+- Transparent encryption through shared storage crypto plumbing.
+- Comprehensive verification coverage through unit tests, CLI tests,
+  backend-specific integration suites, and YCSB benchmarks.
 
-## Purpose
+New work should build on those capabilities. Do not reintroduce older
+assumptions that treat query/indexing, transactions, attachments, streaming, or
+multi-backend support as experimental side paths.
 
-Lockd is a single-binary lock + state + queue service ("just enough etcd") that now ships with:
+## Architecture Boundaries
 
-- Namespaced storage with search/index/query support (keys and documents).
-- XA-style transactions (TC-driven) and attachments as first-class features.
-- A production-ready Go SDK + CLI (cobra/viper) that expose every API surface, including streaming queries.
-- Multiple storage backends behind a common port (disk, S3/MinIO, Azure Blob, memory) with transparent encryption.
-- Comprehensive testing: unit tests, CLI tests, backend-specific integration suites (`run-integration-suites.sh`), and YCSB benchmarks (`ycsb/`).
+- `server.go` and `cmd/lockd/` own server startup and CLI wiring for leases,
+  queue, indexer, namespace administration, and client commands.
+- `client/` owns the Go SDK, CLI helpers, streaming query response types, and
+  document helpers.
+- `internal/storage/` owns storage backend implementations and shared crypto
+  plumbing.
+- `internal/search/` owns index management, query dispatch, index-vs-scan
+  selection, and storage/search adapters.
+- `integration/` owns backend suites for memory, disk, NFS, AWS, Azure, and
+  MinIO, plus focused query and lock-queue suites.
+- `run-integration-suites.sh` is the CI-style backend integration entrypoint.
+- `ycsb/` is a standalone benchmark module and must be treated as a first-class
+  client.
 
-Everything in this repo assumes those pieces are stable. New work should build on that reality rather than older assumptions.
+Package boundaries matter. Public API packages expose stable surfaces;
+`internal/...` packages hold implementation details. If two or more
+implementations or adapters share a role, define an interface at the appropriate
+boundary. Constructors for implementations should be named `New...` and return
+the interface type when an interface exists.
 
-## Operating Principles
+Avoid cyclic imports. If shared behavior causes a cycle, extract the common
+pieces into a core package or subpackage that both callers can import.
 
-1. Outcome over clock time. If a change touches many layers, finish it even if it takes longer.
-2. Refactor with confidence. The backend abstraction, integration suites, and watchdogs exist so we can land large changes safely.
-3. Tests are the contract. A feature is not done until `go test ./...` and relevant integration suites pass.
-4. Surface regressions quickly. Watchdogs, QRF dashboards, and structured logs must remain enabled in tests.
-5. Document as you go. Update README/docs when behavior changes. Record benchmarks in `docs/performance/`. Track follow-ups in `BACKLOG.md`.
+## Public API Shape
 
-## Refactors (strong preference)
+Preserve the SDK and CLI as high-DX surfaces:
 
-- Avoid feature flags for refactoring tasks.
-- Prefer clean refactors with a clear cutover:
-  - No lingering legacy implementations, structs, or parallel codepaths.
-  - Remove dead code and migrate call sites in the same change-set/sequence.
-- Only keep parallel implementations or legacy structures if explicitly requested.
+- User-facing Go functions or interface methods with more than four parameters,
+  including `context.Context`, should move non-context inputs into a request
+  struct.
+- User-facing Go functions or interface methods should return at most two
+  values: `(T, error)`.
+- When multiple non-error outputs are required, return a response struct plus
+  `error`.
+- CLI commands must exercise real SDK calls. Cobra wiring must not drift from
+  SDK behavior.
+- CLI flags, help, examples, defaults, and error messages are part of the public
+  developer experience.
 
-## Architecture & Packaging
+## Streaming Rules
 
-- Separation starts at the package boundary:
-  - Public API packages for exported surfaces.
-  - `internal/...` for non-exported implementation details.
-- If there are two or more variants/adapters of an implementation, use an interface.
-- Constructors:
-  - Provide a `New...` constructor for implementations.
-  - Constructors must return the interface type, never a concrete type.
-- Cyclic imports:
-  - If cycles occur, extract core functionality into a `core` package or subpackage so both main/module code and subpackages can import it without cycles.
+Streaming must be real producer-to-consumer streaming. Do not hide full-message
+materialization behind a streaming-looking API.
 
-## Public API Shape (strong preference)
+- `client.Query` and `QueryResponse` must preserve streaming semantics.
+- CLI query output with `--documents` streams NDJSON without buffering the full
+  result set.
+- `io.ReadAll` and equivalent full-buffer reads are prohibited on document,
+  state, attachment, query-document, update-body, and mutate-stream payload
+  paths.
+- Use streaming readers/writers and bounded spool thresholds where needed.
+- Exceptions are limited to small control-plane JSON envelopes and tests with
+  deliberately bounded fixtures.
 
-- Inputs:
-  - If a user-facing function or interface method takes more than 4 parameters total (including `ctx context.Context`), move non-`ctx` inputs into a request struct (e.g., `FooRequest`).
-- Outputs:
-  - A user-facing function or interface method must return no more than two values: `(T, error)`.
-  - If more than one non-error value is required, return a response struct as the first value and `error` as the second.
+If a dependency cannot support true streaming through its public API, stop and
+surface that constraint instead of silently implementing buffered behavior.
 
-## Documentation & Generators
+## Storage And Encryption
 
-- Every package must have a `doc.go` with standard Go package comment documentation.
-- Code generation:
-  - If generators are not tightly bound to a single package, put `generate.go` at the top-level module folder.
-  - If tightly bound to a single package, put `generate.go` in that package folder (with generator runner `main` packages underneath as appropriate).
+- Crypto is on by default. Every backend must route state, metadata, queue,
+  document, attachment, and index payload paths through `internal/storage.Crypto`
+  when encryption is enabled.
+- CAS semantics are part of the storage contract. Writes use
+  `PutObjectOptions{ExpectedETag}` where applicable.
+- Backends must translate provider-specific conditional-write and missing-object
+  failures into `storage.ErrCASMismatch` and `storage.ErrNotFound`.
+- Index manifests and segments live under `index/`.
+- Backend cleanup helpers must delete encrypted objects, metadata, state, index
+  manifests, and index segments for the affected namespace.
+- Do not remove observed-key warm-up logic in storage handlers. It protects
+  correctness under eventual-consistency behavior.
 
-## Repo Hygiene
+## Query And Indexing
 
-- If `.golangci.yml` does not exist in the repo root, create it with the contents below:
+- Selector syntax includes RFC 6901 JSON Pointer plus Lockd shorthand such as
+  `/field>=10` and brace-based forms.
+- Query behavior must cover selectors, pagination, namespace isolation, public
+  reads, return modes, document streaming, and indexed-vs-scan dispatch.
+- Query syntax or behavior changes require corresponding README and CLI help
+  updates.
+- Integration query datasets use dataset profile guards; preserve those guards
+  when adding coverage.
+
+## Queue And Concurrency
+
+- Queue suites cover advanced polling, QRF throttling, chaos scenarios,
+  namespace contention, and multi-server/multi-worker behavior.
+- Watchdogs must remain active for long or parallel tests such as
+  acquire-for-update loops, queue chaos, and YCSB pre-checks.
+- Chaos tests should be deterministic. Network-drop simulations default to a
+  single disconnect with `MaxDisconnects=1`.
+- Acquire-for-update uses bounded retries, defaulting to five. If that contract
+  changes, update code, docs, and tests together.
+- Integration tests should use real `client.Client` behavior. If a scenario
+  fails, fix the SDK, CLI, or server path rather than mocking around it.
+
+## Verification Matrix
+
+Use the strongest applicable verification for the change. For executable
+behavior, tests are the contract.
+
+| Layer | Command | Notes |
+| --- | --- | --- |
+| Unit and CLI | `go test ./...` | Must stay fast locally; add watchdogs for long tests. |
+| Vet | `go vet ./...` | Required before completion when Go code changes. |
+| Lint | `golint ./...` | Required before completion when available. |
+| Lint meta | `golangci-lint run ./...` | Required before completion when available. |
+| Integration suites | `./run-integration-suites.sh <suite>` | Use targeted impacted suites such as `disk/query` or `minio/lq`. |
+| Full integration sweep | `./run-integration-suites.sh` | Required before releases and large cross-backend refactors. |
+| Benchmarks | `run-benchmark-suites.sh` or supported `ycsb/` targets | Record benchmark evidence in `docs/performance/`. |
+
+For documentation-only changes, use readback and Markdown/config validation
+where available. If a required verifier is unavailable in the environment, state
+that explicitly in the completion report.
+
+## Benchmark Workflow
+
+Benchmark and perf-guard work must use supported repo entrypoints before ad hoc
+commands:
+
+- Prefer `make perf-guard-*`, `make perf-freeze-*`,
+  `make perf-show-frozen-baselines`, `make bench`,
+  `run-benchmark-suites.sh`, and documented `ycsb/` targets.
+- Only run direct commands such as `go run ./cmd/lockd-bench ...` when debugging
+  the harness itself or when no supported entrypoint exists. State that reason
+  explicitly.
+- If a perf target fails, inspect the exact `Makefile` or script path before
+  attempting manual reproduction.
+
+YCSB perf runs use this established flow:
+
+1. Rebuild the dev stack with `nerdctl compose -f devenv/docker-compose.yaml down`
+   and `nerdctl compose -f devenv/docker-compose.yaml up --build -d`.
+2. Keep `LOCKD_OTLP_ENDPOINT` empty in `devenv/docker-compose.yaml` to avoid
+   tracing overhead during perf runs.
+3. From `ycsb/`, run `make lockd-load` then `make lockd-run` for the 10k-record
+   baseline target.
+4. Capture CPU pprof during a run:
+   `curl -s "http://127.0.0.1:6060/debug/pprof/profile?seconds=10" -o /tmp/lockd.pprof`
+   then `go tool pprof -top /tmp/lockd.pprof`.
+5. If a perf regression appears, capture heap too:
+   `curl -s "http://127.0.0.1:6060/debug/pprof/heap" -o /tmp/lockd-heap.pprof`
+   then `go tool pprof -top -alloc_space /tmp/lockd-heap.pprof`.
+
+## Documentation And Repo Hygiene
+
+- Every package should have a `doc.go` with a standard Go package comment.
+- If a generator is not tightly bound to a single package, put `generate.go` at
+  the top-level module folder.
+- If a generator is package-specific, put `generate.go` in that package folder,
+  with generator runner `main` packages underneath as appropriate.
+- Update README, CLI help, docs, and `BACKLOG.md` when behavior, operational
+  guidance, or follow-up commitments change.
+- Record benchmark results in `docs/performance/`.
+- Keep structured logging intact. Server and CLI logs are part of the debugging
+  surface; preserve subsystem names such as `server.lifecycle.core`,
+  `search.index`, and `queue.dispatcher`.
+
+If `.golangci.yml` is missing from the repo root, create it with:
 
 ```yaml
 version: "2"
@@ -89,89 +205,3 @@ linters:
       - linters: [staticcheck]
         text: "S1009"
 ```
-
-## Project Layout (snapshot)
-
-- `server.go` / `cmd/lockd/`: main server + CLI wiring (leases, queue, indexer, namespace admin).
-- `client/`: Go SDK, CLI helpers, streaming query response types, document helpers.
-- `internal/storage/`: backend implementations (disk, s3, azure, memory) and shared crypto plumbing.
-- `internal/search/`: index manager, dispatcher (index vs scan), adapters.
-- `integration/`: backend suites (mem/disk/nfs/aws/azure/minio) plus focus suites (`.../query`, `.../lq`).
-- `run-integration-suites.sh`: entrypoint for CI-style coverage across backends.
-- `ycsb/`: standalone module for YCSB benchmarks.
-
-## Workflows
-
-### Planning & Execution
-
-- Start with the tests. Identify which unit/integration suites must cover the change. Add or extend tests before or alongside the implementation.
-- Leverage storage abstraction. Touch common code first, then backend-specific overrides.
-- Iterate in place. Avoid abandoning branches mid-feature. If a direction is wrong, explain why and pivot.
-- Keep logging intact. Server/CLI logs (pslog) are part of the debugging surface. Maintain subsystem names (`server.lifecycle.core`, `search.index`, `queue.dispatcher`, etc.).
-
-### Testing Expectations
-
-| Layer | Command | Notes |
-| --- | --- | --- |
-| Unit & CLI | `go test ./...` | Must stay fast (<10s locally). Add watchdogs for long tests. |
-| Vet | `go vet ./...` | Required before completion. |
-| Lint | `golint ./...` | Required before completion. |
-| Lint (meta) | `golangci-lint run ./...` | Required before completion. |
-| Integration suites | `./run-integration-suites.sh <suite>` | Use targeted suites (e.g. `disk/query`, `minio/lq`). Run all impacted suites before landing. |
-| Full sweep | `./run-integration-suites.sh` | Required before releases or large refactors. |
-| Benchmarks | `run-benchmark-suites.sh` / `ycsb` | Record results in `docs/performance/`. |
-
-### Benchmark Workflow
-
-- Benchmark and perf-guard work must go through the supported repo entrypoints first, with `Makefile` targets as the default interface when they exist.
-- Prefer `make perf-guard-*`, `make perf-freeze-*`, `make perf-show-frozen-baselines`, `make bench`, `run-benchmark-suites.sh`, and the documented `ycsb/` make targets over ad hoc benchmark commands.
-- Do not invent one-off benchmark invocations when a supported target already exists.
-- Only run `go run ./cmd/lockd-bench ...` or similarly direct benchmark commands when debugging the benchmark harness itself or when no supported entrypoint exists; in that case, state explicitly that you are stepping outside the normal interface and why.
-- If a perf target fails, inspect and trace the exact `Makefile`/script path before attempting any manual reproduction.
-
-### CLI & SDK Changes
-
-- Single source of truth. CLI commands must exercise real SDK calls; unit tests (e.g. `cmd/lockd/client_cli_test.go`) ensure Cobra wiring doesn’t drift.
-- Query ergonomics. Selector syntax is RFC 6901 + shorthand (`/field>=10`, braces, etc.). Update README + CLI help when syntax/extensions change.
-- Streaming. `client.Query` + `QueryResponse` must keep streaming semantics zero-copy; CLI `--documents` streams NDJSON (no buffering).
-- Hard rule: `io.ReadAll` (or equivalent full-buffer reads) is prohibited on document/state payload paths (query return=documents, update bodies, mutate streams, attachment/state reads). Use streaming readers/writers plus spool thresholds instead. Exceptions are limited to small control-plane JSON envelopes and tests explicitly designed for bounded fixtures.
-
-### Integration Suite Coverage
-
-- Each backend suite (`mem`, `disk`, `nfs`, `aws`, `azure`, `minio`) must:
-  - Run selectors, pagination, namespace isolation, public reads.
-  - Run query domain datasets (with dataset profile guards) and document streaming tests.
-  - Clean up meta/state/index artifacts via the backend-specific helpers (`CleanupQueryNamespaces`, etc.).
-
-- Queue suites (`.../lq`) cover advanced polling, QRF throttling, and chaos scenarios. Keep watchdogs active and prefer real `client.Client` usage.
-
-### Storage & Encryption
-
-- Crypto-on by default. Every backend routes state/meta/queue payloads through `internal/storage.Crypto` when enabled. Helpers (MinIO/Azure/AWS) must clean both encrypted objects and index manifests.
-- CAS semantics. Use `PutObjectOptions{ExpectedETag}` for writes; backends must translate storage-specific errors into `storage.ErrCASMismatch` / `storage.ErrNotFound`.
-- Indexing. Index manifests and segments live under `index/`. Cleaning routines must delete both manifest + segment files per namespace.
-
-### Debugging Guardrails (unchanged principles, refreshed scope)
-
-- Watchdogs on all long/parallel tests (AcquireForUpdate loops, queue chaos, YCSB pre-checks). Panic >=10s hangs and dump stacks.
-- Deterministic chaos: when simulating network drops, default to a single disconnect (`MaxDisconnects=1`).
-- Real clients only in integration tests. If a scenario fails, fix the SDK/CLI rather than mocking around it.
-- Acquire-for-update contract: bounded retries (default 5). Update docs/tests if the limit changes.
-- Namespace + queue contention: ensure every backend suite includes multi-server, multi-worker tests so namespace wiring and queue watchers stay healthy.
-- Observed key tracking: never remove the observed-key warm-up logic in storage handlers; it shields us from eventual-consistency quirks.
-
-## Collaboration Notes
-
-- Record big work. Long-running benchmarks or refactors should leave breadcrumbs (PR notes, `docs/performance/`, `BACKLOG.md`).
-- Communicate blockers. If a suite flakes, capture the log (`integration-logs/*.log`) and note it in the issue/PR before retrying.
-- YCSB driver: treat it as a first-class client. Benchmark code lives in its own module so we can add dependencies without polluting the main build.
-
-## YCSB Perf Workflow (keep this for context compaction)
-
-- Rebuild the dev stack before perf runs: `nerdctl compose -f devenv/docker-compose.yaml down` then `nerdctl compose -f devenv/docker-compose.yaml up --build -d`.
-- Disable tracing overhead for perf runs: keep `LOCKD_OTLP_ENDPOINT` empty in `devenv/docker-compose.yaml`.
-- Run the baseline load/run from `ycsb/`: `make lockd-load` then `make lockd-run` (10k records target).
-- Capture pprof while a run is in flight: `curl -s "http://127.0.0.1:6060/debug/pprof/profile?seconds=10" -o /tmp/lockd.pprof` and `go tool pprof -top /tmp/lockd.pprof`.
-- If a perf regression appears, capture heap too: `curl -s "http://127.0.0.1:6060/debug/pprof/heap" -o /tmp/lockd-heap.pprof` then `go tool pprof -top -alloc_space /tmp/lockd-heap.pprof`.
-
-With this playbook, we can confidently evolve lockd (namespaces, query/index, CLI, YCSB) without clinging to outdated guardrails. Finish what you start, lean on tests, and keep shipping.

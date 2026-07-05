@@ -46,6 +46,79 @@ func TestStoreMetaCAS(t *testing.T) {
 	}
 }
 
+func TestStoreMetaCopiesMutableFields(t *testing.T) {
+	store := New()
+	ctx := context.Background()
+
+	meta := &storage.Meta{
+		Version:               1,
+		Lease:                 &storage.Lease{ID: "lease-1"},
+		StateDescriptor:       []byte("state-desc"),
+		Attributes:            map[string]string{"query": "visible"},
+		Attachments:           []storage.Attachment{{ID: "att-1", Descriptor: []byte("att-desc")}},
+		StagedStateDescriptor: []byte("staged-state-desc"),
+		StagedAttributes:      map[string]string{"hidden": "false"},
+		StagedAttachments:     []storage.StagedAttachment{{ID: "staged-1", StagedDescriptor: []byte("staged-att-desc")}},
+		StagedAttachmentDeletes: []string{
+			"delete-1",
+		},
+	}
+	if _, err := store.StoreMeta(ctx, namespaces.Default, "copy", meta, ""); err != nil {
+		t.Fatalf("store meta: %v", err)
+	}
+
+	meta.Lease.ID = "mutated"
+	meta.StateDescriptor[0] = 'X'
+	meta.Attributes["query"] = "mutated"
+	meta.Attachments[0].Descriptor[0] = 'X'
+	meta.StagedStateDescriptor[0] = 'X'
+	meta.StagedAttributes["hidden"] = "mutated"
+	meta.StagedAttachments[0].StagedDescriptor[0] = 'X'
+	meta.StagedAttachmentDeletes[0] = "mutated"
+
+	loaded, err := store.LoadMeta(ctx, namespaces.Default, "copy")
+	if err != nil {
+		t.Fatalf("load meta: %v", err)
+	}
+	loaded.Meta.Lease.ID = "loaded-mutated"
+	loaded.Meta.StateDescriptor[0] = 'Y'
+	loaded.Meta.Attributes["query"] = "loaded-mutated"
+	loaded.Meta.Attachments[0].Descriptor[0] = 'Y'
+	loaded.Meta.StagedStateDescriptor[0] = 'Y'
+	loaded.Meta.StagedAttributes["hidden"] = "loaded-mutated"
+	loaded.Meta.StagedAttachments[0].StagedDescriptor[0] = 'Y'
+	loaded.Meta.StagedAttachmentDeletes[0] = "loaded-mutated"
+
+	reloaded, err := store.LoadMeta(ctx, namespaces.Default, "copy")
+	if err != nil {
+		t.Fatalf("reload meta: %v", err)
+	}
+	if reloaded.Meta.Lease.ID != "lease-1" {
+		t.Fatalf("lease alias leaked: %+v", reloaded.Meta.Lease)
+	}
+	if string(reloaded.Meta.StateDescriptor) != "state-desc" {
+		t.Fatalf("state descriptor alias leaked: %q", reloaded.Meta.StateDescriptor)
+	}
+	if reloaded.Meta.Attributes["query"] != "visible" {
+		t.Fatalf("attributes alias leaked: %v", reloaded.Meta.Attributes)
+	}
+	if string(reloaded.Meta.Attachments[0].Descriptor) != "att-desc" {
+		t.Fatalf("attachment descriptor alias leaked: %q", reloaded.Meta.Attachments[0].Descriptor)
+	}
+	if string(reloaded.Meta.StagedStateDescriptor) != "staged-state-desc" {
+		t.Fatalf("staged state descriptor alias leaked: %q", reloaded.Meta.StagedStateDescriptor)
+	}
+	if reloaded.Meta.StagedAttributes["hidden"] != "false" {
+		t.Fatalf("staged attributes alias leaked: %v", reloaded.Meta.StagedAttributes)
+	}
+	if string(reloaded.Meta.StagedAttachments[0].StagedDescriptor) != "staged-att-desc" {
+		t.Fatalf("staged attachment descriptor alias leaked: %q", reloaded.Meta.StagedAttachments[0].StagedDescriptor)
+	}
+	if reloaded.Meta.StagedAttachmentDeletes[0] != "delete-1" {
+		t.Fatalf("staged attachment deletes alias leaked: %v", reloaded.Meta.StagedAttachmentDeletes)
+	}
+}
+
 func TestWriteStateCAS(t *testing.T) {
 	store := New()
 	ctx := context.Background()

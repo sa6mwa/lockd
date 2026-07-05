@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -1790,42 +1789,10 @@ func buildBenchHTTPClient(cfg benchConfig) (*http.Client, error) {
 
 func buildBenchClientTLS(bundle *tlsutil.ClientBundle) *tls.Config {
 	return &tls.Config{
-		MinVersion:         tls.VersionTLS12,
-		Certificates:       []tls.Certificate{bundle.Certificate},
-		RootCAs:            bundle.CAPool,
-		InsecureSkipVerify: true,
-		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-			return verifyBenchServerCertificate(rawCerts, bundle.CAPool)
-		},
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{bundle.Certificate},
+		RootCAs:      bundle.CAPool,
 	}
-}
-
-func verifyBenchServerCertificate(rawCerts [][]byte, roots *x509.CertPool) error {
-	if len(rawCerts) == 0 {
-		return errors.New("mtls: missing server certificate")
-	}
-	certs := make([]*x509.Certificate, 0, len(rawCerts))
-	for _, raw := range rawCerts {
-		cert, err := x509.ParseCertificate(raw)
-		if err != nil {
-			return fmt.Errorf("mtls: parse server certificate: %w", err)
-		}
-		certs = append(certs, cert)
-	}
-	leaf := certs[0]
-	opts := x509.VerifyOptions{
-		Roots:         roots,
-		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		Intermediates: x509.NewCertPool(),
-		CurrentTime:   time.Now(),
-	}
-	for _, cert := range certs[1:] {
-		opts.Intermediates.AddCert(cert)
-	}
-	if _, err := leaf.Verify(opts); err != nil {
-		return fmt.Errorf("mtls: verify server certificate: %w", err)
-	}
-	return nil
 }
 
 func openBenchStore(cfg benchConfig, crypto *storage.Crypto, root string) (storage.Backend, *indexer.Store) {

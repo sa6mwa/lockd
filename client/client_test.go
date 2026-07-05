@@ -418,6 +418,74 @@ func TestClientWithBundlePathMTLS(t *testing.T) {
 	}
 }
 
+func TestClientWithBundlePathRejectsWrongServerHostname(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	ca, err := tlsutil.GenerateCA("lockd-sdk-test-ca", time.Hour)
+	if err != nil {
+		t.Fatalf("generate ca: %v", err)
+	}
+	serverIssued, err := ca.IssueServer([]string{"wrong.lockd.test"}, "lockd-sdk-test-server", time.Hour)
+	if err != nil {
+		t.Fatalf("issue server cert: %v", err)
+	}
+	clientIssued, err := ca.IssueClient(tlsutil.ClientCertRequest{
+		CommonName: "lockd-sdk-test-client",
+		Validity:   time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("issue client cert: %v", err)
+	}
+	clientBundlePEM, err := tlsutil.EncodeClientBundle(ca.CertPEM, clientIssued.CertPEM, clientIssued.KeyPEM)
+	if err != nil {
+		t.Fatalf("encode client bundle: %v", err)
+	}
+	bundlePath := filepath.Join(t.TempDir(), "client.pem")
+	if err := os.WriteFile(bundlePath, clientBundlePEM, 0o600); err != nil {
+		t.Fatalf("write client bundle: %v", err)
+	}
+
+	serverCert, err := tls.X509KeyPair(serverIssued.CertPEM, serverIssued.KeyPEM)
+	if err != nil {
+		t.Fatalf("load server keypair: %v", err)
+	}
+	clientCAs := x509.NewCertPool()
+	if !clientCAs.AppendCertsFromPEM(ca.CertPEM) {
+		t.Fatal("append ca cert")
+	}
+
+	var hit bool
+	ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit = true
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"key":"demo","version":1}`)
+	}))
+	ts.TLS = &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{serverCert},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    clientCAs,
+	}
+	ts.StartTLS()
+	defer ts.Close()
+
+	cli, err := client.New(ts.URL, client.WithBundlePath(bundlePath), client.WithEndpointShuffle(false))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	_, err = cli.Describe(ctx, "demo")
+	if err == nil {
+		t.Fatal("expected hostname verification error")
+	}
+	if !strings.Contains(err.Error(), "certificate") {
+		t.Fatalf("expected certificate error, got %v", err)
+	}
+	if hit {
+		t.Fatal("expected TLS hostname rejection before handler invocation")
+	}
+}
+
 func TestClientWithBundlePEMMTLS(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -5623,5 +5691,49 @@ func TestClientQueryDocuments(t *testing.T) {
 	}
 	if hint := resp2.Metadata["hint"]; hint != "scan" {
 		t.Fatalf("expected metadata hint=scan, got %v", resp2.Metadata)
+	}
+}
+
+func TestClientQueryDocumentsReturnsStreamErrorTrailer(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/query", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Trailer", strings.Join([]string{
+			"X-Lockd-Query-Cursor",
+			"X-Lockd-Query-Error",
+			"X-Lockd-Query-Index-Seq",
+			"X-Lockd-Query-Metadata",
+		}, ", "))
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Header().Set("X-Lockd-Query-Return", "documents")
+		fmt.Fprintln(w, `{"ns":"default","key":"doc-1","ver":7,"doc":{"status":"ready"}}`)
+		w.Header().Set("X-Lockd-Query-Error", "backend read failed")
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	cli, err := client.New(srv.URL, client.WithDisableMTLS(true))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	resp, err := cli.Query(context.Background(),
+		client.WithQueryNamespace("default"),
+		client.WithQueryReturnDocuments(),
+	)
+	if err != nil {
+		t.Fatalf("query documents: %v", err)
+	}
+	count := 0
+	err = resp.ForEach(func(row client.QueryRow) error {
+		count++
+		return nil
+	})
+	if err == nil {
+		t.Fatal("expected stream trailer error")
+	}
+	if !strings.Contains(err.Error(), "backend read failed") {
+		t.Fatalf("expected trailer error detail, got %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected one row before trailer error, got %d", count)
 	}
 }

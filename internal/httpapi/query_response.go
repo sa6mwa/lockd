@@ -33,6 +33,7 @@ func declareQueryDocumentTrailers(headers http.Header) {
 	}
 	headers.Set("Trailer", strings.Join([]string{
 		headerQueryCursor,
+		headerQueryError,
 		headerQueryIndexSeq,
 		headerQueryMetadata,
 	}, ", "))
@@ -53,4 +54,26 @@ func applyQueryDocumentTrailers(headers http.Header, cursor string, indexSeq uin
 			headers.Set(headerQueryMetadata, string(payload))
 		}
 	}
+}
+
+func applyQueryDocumentErrorTrailer(headers http.Header, err error) {
+	if headers == nil || err == nil {
+		return
+	}
+	if message := sanitizeTrailerValue(err.Error()); message != "" {
+		headers.Set(headerQueryError, message)
+	}
+}
+
+func sanitizeTrailerValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, value)
 }

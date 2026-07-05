@@ -147,15 +147,7 @@ func (s *Store) LoadMeta(_ context.Context, namespace, key string) (storage.Load
 	if !ok {
 		return storage.LoadMetaResult{}, storage.ErrNotFound
 	}
-	clone := *entry.data
-	if entry.data.Lease != nil {
-		leaseCopy := *entry.data.Lease
-		clone.Lease = &leaseCopy
-	}
-	if len(entry.data.StateDescriptor) > 0 {
-		clone.StateDescriptor = append([]byte(nil), entry.data.StateDescriptor...)
-	}
-	return storage.LoadMetaResult{Meta: &clone, ETag: entry.etag}, nil
+	return storage.LoadMetaResult{Meta: cloneMeta(entry.data), ETag: entry.etag}, nil
 }
 
 // ScanMetaSummaries enumerates key+summary rows for the namespace.
@@ -183,6 +175,21 @@ func (s *Store) StoreMeta(_ context.Context, namespace, key string, meta *storag
 		return "", storage.ErrCASMismatch
 	}
 	etag := uuidv7.NewString()
+	clone := cloneMeta(meta)
+	if clone == nil {
+		clone = &storage.Meta{}
+	}
+	s.metas[storageKey] = &metaEntry{
+		data: clone,
+		etag: etag,
+	}
+	return etag, nil
+}
+
+func cloneMeta(meta *storage.Meta) *storage.Meta {
+	if meta == nil {
+		return nil
+	}
 	clone := *meta
 	if meta.Lease != nil {
 		leaseCopy := *meta.Lease
@@ -191,11 +198,40 @@ func (s *Store) StoreMeta(_ context.Context, namespace, key string, meta *storag
 	if len(meta.StateDescriptor) > 0 {
 		clone.StateDescriptor = append([]byte(nil), meta.StateDescriptor...)
 	}
-	s.metas[storageKey] = &metaEntry{
-		data: &clone,
-		etag: etag,
+	if len(meta.StagedStateDescriptor) > 0 {
+		clone.StagedStateDescriptor = append([]byte(nil), meta.StagedStateDescriptor...)
 	}
-	return etag, nil
+	clone.Attributes = cloneStringMap(meta.Attributes)
+	clone.StagedAttributes = cloneStringMap(meta.StagedAttributes)
+	if len(meta.Attachments) > 0 {
+		clone.Attachments = make([]storage.Attachment, len(meta.Attachments))
+		copy(clone.Attachments, meta.Attachments)
+		for i := range clone.Attachments {
+			clone.Attachments[i].Descriptor = append([]byte(nil), meta.Attachments[i].Descriptor...)
+		}
+	}
+	if len(meta.StagedAttachments) > 0 {
+		clone.StagedAttachments = make([]storage.StagedAttachment, len(meta.StagedAttachments))
+		copy(clone.StagedAttachments, meta.StagedAttachments)
+		for i := range clone.StagedAttachments {
+			clone.StagedAttachments[i].StagedDescriptor = append([]byte(nil), meta.StagedAttachments[i].StagedDescriptor...)
+		}
+	}
+	if len(meta.StagedAttachmentDeletes) > 0 {
+		clone.StagedAttachmentDeletes = append([]string(nil), meta.StagedAttachmentDeletes...)
+	}
+	return &clone
+}
+
+func cloneStringMap(source map[string]string) map[string]string {
+	if len(source) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(source))
+	for key, value := range source {
+		out[key] = value
+	}
+	return out
 }
 
 // DeleteMeta removes metadata for key, respecting the expected ETag when present.

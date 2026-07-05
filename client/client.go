@@ -1497,6 +1497,7 @@ func (s *QueueStateHandle) RemoveWithOptions(ctx context.Context, opts RemoveOpt
 const headerFencingToken = "X-Fencing-Token"
 const headerTxnID = "X-Txn-ID"
 const headerQueryCursor = "X-Lockd-Query-Cursor"
+const headerQueryError = "X-Lockd-Query-Error"
 const headerQueryIndexSeq = "X-Lockd-Query-Index-Seq"
 const headerQueryMetadata = "X-Lockd-Query-Metadata"
 const headerQueryReturn = "X-Lockd-Query-Return"
@@ -2575,12 +2576,13 @@ type QueryResponse struct {
 	// Metadata carries metadata values returned by the server for this object.
 	Metadata map[string]string
 
-	mode    QueryReturn
-	keys    []string
-	keyCopy []string
-	stream  *queryStream
+	mode      QueryReturn
+	keys      []string
+	keyCopy   []string
+	streamErr error
+	stream    *queryStream
 
-	trailerReader func() (string, uint64, map[string]string)
+	trailerReader func() (string, uint64, map[string]string, error)
 	trailerOnce   sync.Once
 }
 
@@ -2643,7 +2645,10 @@ func (qr *QueryResponse) Close() error {
 	}
 	stream := qr.stream
 	qr.stream = nil
-	return stream.Close()
+	if err := stream.Close(); err != nil {
+		return err
+	}
+	return qr.streamErr
 }
 
 // ForEach invokes fn for every entry in the response. For document streams the
@@ -2666,8 +2671,7 @@ func (qr *QueryResponse) ForEach(fn func(QueryRow) error) error {
 	for {
 		row, err := qr.stream.Next()
 		if err == io.EOF {
-			qr.Close()
-			return nil
+			return qr.Close()
 		}
 		if err != nil {
 			qr.Close()
@@ -2704,7 +2708,7 @@ func newKeyQueryResponse(resp api.QueryResponse, mode QueryReturn) *QueryRespons
 	}
 }
 
-func newDocumentQueryResponse(namespace, cursor string, indexSeq uint64, metadata map[string]string, reader io.ReadCloser, trailerFns ...func() (string, uint64, map[string]string)) *QueryResponse {
+func newDocumentQueryResponse(namespace, cursor string, indexSeq uint64, metadata map[string]string, reader io.ReadCloser, trailerFns ...func() (string, uint64, map[string]string, error)) *QueryResponse {
 	resp := &QueryResponse{
 		Namespace: namespace,
 		Cursor:    cursor,
@@ -2724,7 +2728,7 @@ func (qr *QueryResponse) applyTrailers() {
 		return
 	}
 	qr.trailerOnce.Do(func() {
-		cursor, indexSeq, metadata := qr.trailerReader()
+		cursor, indexSeq, metadata, err := qr.trailerReader()
 		if cursor != "" {
 			qr.Cursor = cursor
 		}
@@ -2733,6 +2737,9 @@ func (qr *QueryResponse) applyTrailers() {
 		}
 		if len(metadata) > 0 {
 			qr.Metadata = mergeMetadata(qr.Metadata, metadata)
+		}
+		if err != nil {
+			qr.streamErr = err
 		}
 	})
 }
@@ -2825,6 +2832,14 @@ func parseQueryMetadataHeader(raw string) map[string]string {
 		return nil
 	}
 	return out
+}
+
+func parseQueryStreamError(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	return fmt.Errorf("lockd: query document stream failed: %s", raw)
 }
 
 // QueryRow represents a single row returned from /v1/query.
@@ -5253,10 +5268,11 @@ func (c *Client) Query(ctx context.Context, optFns ...QueryOption) (*QueryRespon
 	switch mode {
 	case QueryReturnDocuments:
 		reader := &cancelReadCloser{ReadCloser: resp.Body, cancel: cancel}
-		trailerReader := func() (string, uint64, map[string]string) {
+		trailerReader := func() (string, uint64, map[string]string, error) {
 			return strings.TrimSpace(resp.Trailer.Get(headerQueryCursor)),
 				parseUintHeader(resp.Trailer.Get(headerQueryIndexSeq)),
-				parseQueryMetadataHeader(resp.Trailer.Get(headerQueryMetadata))
+				parseQueryMetadataHeader(resp.Trailer.Get(headerQueryMetadata)),
+				parseQueryStreamError(resp.Trailer.Get(headerQueryError))
 		}
 		respObj := newDocumentQueryResponse(ns, "", 0, nil, reader, trailerReader)
 		c.logTraceCtx(ctx, "client.query.success", "namespace", ns, "engine", opts.Engine, "mode", "documents", "endpoint", endpoint)
@@ -7988,40 +8004,8 @@ func newUnixHTTPClient(raw string) (*http.Client, string, error) {
 
 func buildClientTLS(bundle *tlsutil.ClientBundle) *tls.Config {
 	return &tls.Config{
-		MinVersion:         tls.VersionTLS12,
-		Certificates:       []tls.Certificate{bundle.Certificate},
-		RootCAs:            bundle.CAPool,
-		InsecureSkipVerify: true,
-		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-			return verifyServerCertificate(rawCerts, bundle.CAPool)
-		},
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{bundle.Certificate},
+		RootCAs:      bundle.CAPool,
 	}
-}
-
-func verifyServerCertificate(rawCerts [][]byte, roots *x509.CertPool) error {
-	if len(rawCerts) == 0 {
-		return errors.New("mtls: missing server certificate")
-	}
-	certs := make([]*x509.Certificate, 0, len(rawCerts))
-	for _, raw := range rawCerts {
-		cert, err := x509.ParseCertificate(raw)
-		if err != nil {
-			return fmt.Errorf("mtls: parse server certificate: %w", err)
-		}
-		certs = append(certs, cert)
-	}
-	leaf := certs[0]
-	opts := x509.VerifyOptions{
-		Roots:         roots,
-		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		Intermediates: x509.NewCertPool(),
-		CurrentTime:   time.Now(),
-	}
-	for _, cert := range certs[1:] {
-		opts.Intermediates.AddCert(cert)
-	}
-	if _, err := leaf.Verify(opts); err != nil {
-		return fmt.Errorf("mtls: verify server certificate: %w", err)
-	}
-	return nil
 }

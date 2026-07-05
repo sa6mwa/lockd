@@ -48,6 +48,7 @@ const (
 	headerFencingToken            = "X-Fencing-Token"
 	headerMetadataQueryHidden     = "X-Lockd-Meta-Query-Hidden"
 	headerQueryCursor             = "X-Lockd-Query-Cursor"
+	headerQueryError              = "X-Lockd-Query-Error"
 	headerQueryIndexSeq           = "X-Lockd-Query-Index-Seq"
 	headerQueryMetadata           = "X-Lockd-Query-Metadata"
 	headerQueryReturn             = "X-Lockd-Query-Return"
@@ -1126,6 +1127,7 @@ func (h *Handler) writeQueryDocumentsCore(ctx context.Context, w http.ResponseWr
 	}
 	if err != nil {
 		if streamWriter.Committed() {
+			applyQueryDocumentErrorTrailer(headers, err)
 			sink.Flush()
 			if logger != nil {
 				logger.Warn("http.query.documents.stream.error", "namespace", cmd.Namespace, "error", err)

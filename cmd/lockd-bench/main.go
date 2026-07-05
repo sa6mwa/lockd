@@ -1789,9 +1789,13 @@ func buildBenchHTTPClient(cfg benchConfig) (*http.Client, error) {
 
 func buildBenchClientTLS(bundle *tlsutil.ClientBundle) *tls.Config {
 	return &tls.Config{
-		MinVersion:   tls.VersionTLS12,
-		Certificates: []tls.Certificate{bundle.Certificate},
-		RootCAs:      bundle.CAPool,
+		MinVersion:         tls.VersionTLS12,
+		Certificates:       []tls.Certificate{bundle.Certificate},
+		RootCAs:            bundle.CAPool,
+		InsecureSkipVerify: true,
+		VerifyConnection: func(state tls.ConnectionState) error {
+			return tlsutil.VerifyLockdServerConnection(state, bundle.CAPool)
+		},
 	}
 }
 

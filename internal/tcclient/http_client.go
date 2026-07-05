@@ -82,9 +82,13 @@ func buildClientTLS(bundle *tlsutil.ClientBundle, roots *x509.CertPool) *tls.Con
 		roots = bundle.CAPool
 	}
 	return &tls.Config{
-		MinVersion:   tls.VersionTLS12,
-		Certificates: []tls.Certificate{bundle.Certificate},
-		RootCAs:      roots,
+		MinVersion:         tls.VersionTLS12,
+		Certificates:       []tls.Certificate{bundle.Certificate},
+		RootCAs:            roots,
+		InsecureSkipVerify: true,
+		VerifyConnection: func(state tls.ConnectionState) error {
+			return tlsutil.VerifyLockdServerConnection(state, roots)
+		},
 	}
 }
 
@@ -93,8 +97,12 @@ func buildServerTLS(bundle *tlsutil.Bundle, roots *x509.CertPool) *tls.Config {
 		roots = bundle.CAPool
 	}
 	return &tls.Config{
-		MinVersion:   tls.VersionTLS12,
-		Certificates: []tls.Certificate{bundle.ServerCertificate},
-		RootCAs:      roots,
+		MinVersion:         tls.VersionTLS12,
+		Certificates:       []tls.Certificate{bundle.ServerCertificate},
+		RootCAs:            roots,
+		InsecureSkipVerify: true,
+		VerifyConnection: func(state tls.ConnectionState) error {
+			return tlsutil.VerifyLockdServerConnection(state, roots)
+		},
 	}
 }

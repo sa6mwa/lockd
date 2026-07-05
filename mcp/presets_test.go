@@ -217,6 +217,27 @@ kinds:
 	}
 }
 
+func TestParsePresetYAMLRejectsNormalizedPropertyCollision(t *testing.T) {
+	t.Parallel()
+
+	_, err := ParsePresetYAML([]byte(`
+preset: memory
+kinds:
+  - name: note
+    namespace: default
+    schema:
+      type: object
+      properties:
+        foo-bar:
+          type: string
+        foo_bar:
+          type: integer
+`))
+	if err == nil || !strings.Contains(err.Error(), `both normalize to "foo_bar"`) {
+		t.Fatalf("err=%v want normalized property collision error", err)
+	}
+}
+
 func TestParsePresetYAMLRejectsNestedArray(t *testing.T) {
 	t.Parallel()
 

@@ -291,6 +291,7 @@ func normalizeSchema(in Schema, path string, objectDepth int, isRoot bool) (Sche
 			keys = append(keys, key)
 		}
 		sort.Strings(keys)
+		normalizedKeys := make(map[string]string, len(keys))
 		for _, key := range keys {
 			if strings.HasPrefix(strings.ToLower(strings.TrimSpace(key)), ReservedFieldPrefix) {
 				return Schema{}, fmt.Errorf("schema %q property %q uses reserved %s prefix", path, key, ReservedFieldPrefix)
@@ -299,6 +300,10 @@ func normalizeSchema(in Schema, path string, objectDepth int, isRoot bool) (Sche
 			if err != nil {
 				return Schema{}, fmt.Errorf("schema %q property %q: %w", path, key, err)
 			}
+			if previous, ok := normalizedKeys[normalizedKey]; ok {
+				return Schema{}, fmt.Errorf("schema %q properties %q and %q both normalize to %q", path, previous, key, normalizedKey)
+			}
+			normalizedKeys[normalizedKey] = key
 			child, err := normalizeSchema(in.Properties[key], path+"."+normalizedKey, objectDepth, false)
 			if err != nil {
 				return Schema{}, err

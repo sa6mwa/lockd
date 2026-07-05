@@ -351,7 +351,16 @@ func TestClientWithBundlePathMTLS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate ca: %v", err)
 	}
-	serverIssued, err := ca.IssueServer([]string{"127.0.0.1", "localhost"}, "lockd-sdk-test-server", time.Hour)
+	serverSPIFFE, err := lockd.SPIFFEURIForServer("lockd-sdk-test-server")
+	if err != nil {
+		t.Fatalf("server spiffe uri: %v", err)
+	}
+	serverIssued, err := ca.IssueServerWithRequest(tlsutil.ServerCertRequest{
+		CommonName: "lockd-sdk-test-server",
+		Validity:   time.Hour,
+		Hosts:      []string{"127.0.0.1", "localhost"},
+		URIs:       []*url.URL{serverSPIFFE},
+	})
 	if err != nil {
 		t.Fatalf("issue server cert: %v", err)
 	}
@@ -483,6 +492,74 @@ func TestClientWithBundlePathRejectsWrongServerHostname(t *testing.T) {
 	}
 	if hit {
 		t.Fatal("expected TLS hostname rejection before handler invocation")
+	}
+}
+
+func TestClientWithBundlePathAcceptsGeneratedWildcardServerBundle(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	ca, err := tlsutil.GenerateCA("lockd-sdk-test-ca", time.Hour)
+	if err != nil {
+		t.Fatalf("generate ca: %v", err)
+	}
+	serverIssued, err := ca.IssueServer(nil, "lockd-sdk-test-server", time.Hour)
+	if err != nil {
+		t.Fatalf("issue server cert: %v", err)
+	}
+	clientIssued, err := ca.IssueClient(tlsutil.ClientCertRequest{
+		CommonName: "lockd-sdk-test-client",
+		Validity:   time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("issue client cert: %v", err)
+	}
+	clientBundlePEM, err := tlsutil.EncodeClientBundle(ca.CertPEM, clientIssued.CertPEM, clientIssued.KeyPEM)
+	if err != nil {
+		t.Fatalf("encode client bundle: %v", err)
+	}
+	bundlePath := filepath.Join(t.TempDir(), "client.pem")
+	if err := os.WriteFile(bundlePath, clientBundlePEM, 0o600); err != nil {
+		t.Fatalf("write client bundle: %v", err)
+	}
+
+	serverCert, err := tls.X509KeyPair(serverIssued.CertPEM, serverIssued.KeyPEM)
+	if err != nil {
+		t.Fatalf("load server keypair: %v", err)
+	}
+	clientCAs := x509.NewCertPool()
+	if !clientCAs.AppendCertsFromPEM(ca.CertPEM) {
+		t.Fatal("append ca cert")
+	}
+
+	var hit bool
+	ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit = true
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"key":"demo","version":1}`)
+	}))
+	ts.TLS = &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{serverCert},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    clientCAs,
+	}
+	ts.StartTLS()
+	defer ts.Close()
+
+	cli, err := client.New(ts.URL, client.WithBundlePath(bundlePath), client.WithEndpointShuffle(false))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	resp, err := cli.Describe(ctx, "demo")
+	if err != nil {
+		t.Fatalf("describe: %v", err)
+	}
+	if resp == nil || resp.Key != "demo" {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+	if !hit {
+		t.Fatal("expected server to receive request")
 	}
 }
 
@@ -633,7 +710,16 @@ func startClientMTLSTestServer(t *testing.T) (*httptest.Server, []byte, string, 
 	if err != nil {
 		t.Fatalf("generate ca: %v", err)
 	}
-	serverIssued, err := ca.IssueServer([]string{"127.0.0.1", "localhost"}, "lockd-sdk-test-server", time.Hour)
+	serverSPIFFE, err := lockd.SPIFFEURIForServer("lockd-sdk-test-server")
+	if err != nil {
+		t.Fatalf("server spiffe uri: %v", err)
+	}
+	serverIssued, err := ca.IssueServerWithRequest(tlsutil.ServerCertRequest{
+		CommonName: "lockd-sdk-test-server",
+		Validity:   time.Hour,
+		Hosts:      []string{"127.0.0.1", "localhost"},
+		URIs:       []*url.URL{serverSPIFFE},
+	})
 	if err != nil {
 		t.Fatalf("issue server cert: %v", err)
 	}

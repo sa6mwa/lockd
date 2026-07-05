@@ -1904,7 +1904,11 @@ func newClientUpdateCommand(cfg *clientCLIConfig) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				result, err = cli.UpdateBytes(ctx, key, lease, payload, opts)
+				updated, err := cli.UpdateBytes(ctx, key, lease, payload, opts)
+				if err != nil {
+					return err
+				}
+				result = updated
 			} else {
 				reader, closer, err := openStatePayloadReader(cmd, path)
 				if err != nil {
@@ -1913,10 +1917,11 @@ func newClientUpdateCommand(cfg *clientCLIConfig) *cobra.Command {
 				if closer != nil {
 					defer closer.Close()
 				}
-				result, err = cli.UpdateStream(ctx, key, lease, newEmptyJSONAsNullReader(reader), opts)
-			}
-			if err != nil {
-				return err
+				updated, err := cli.UpdateStream(ctx, key, lease, newEmptyJSONAsNullReader(reader), opts)
+				if err != nil {
+					return err
+				}
+				result = updated
 			}
 			summary := map[string]any{
 				"version": result.NewVersion,

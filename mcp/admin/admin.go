@@ -52,6 +52,7 @@ type UpdateClientRequest struct {
 	Namespace    *string
 	LockdPreset  *bool
 	Presets      []preset.Definition
+	PresetsSet   bool
 	Scopes       []string
 	RedirectURIs []string
 }
@@ -238,6 +239,7 @@ func (s *Service) UpdateClient(req UpdateClientRequest) error {
 		Namespace:    req.Namespace,
 		LockdPreset:  req.LockdPreset,
 		Presets:      req.Presets,
+		PresetsSet:   req.PresetsSet,
 		Scopes:       req.Scopes,
 		RedirectURIs: req.RedirectURIs,
 	})

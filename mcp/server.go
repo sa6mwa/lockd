@@ -186,6 +186,7 @@ func NewServer(req NewServerRequest) (Server, error) {
 		if s.resourceID == "" {
 			s.resourceID = joinURL(issuer, s.mcpHTTPPath)
 		}
+		s.oauthManager.SetProtectedResourceURL(s.resourceID)
 		s.oauthWellKnown = oauthAuthorizationServerWellKnownPath(s.authHTTPPath, issuerPath)
 		s.openIDWellKnown = openIDConfigurationWellKnownPath(s.authHTTPPath)
 		s.metadataPath = oauthProtectedResourceWellKnownPath(s.authHTTPPath, urlPathPrefix(s.resourceID))

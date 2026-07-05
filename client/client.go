@@ -95,6 +95,8 @@ type SubscribeOptions struct {
 	StartAfter string
 	// OnCloseDelay applies a delay before auto-nack when handlers close without ack.
 	OnCloseDelay time.Duration
+
+	ackSuccessfulHandlerAfterCancel bool
 }
 
 // WatchQueueOptions configures non-consuming queue visibility watches.
@@ -7278,11 +7280,11 @@ func (c *Client) subscribe(ctx context.Context, queue string, opts SubscribeOpti
 			msg := newQueueMessage(handle, nil, opts.OnCloseDelay)
 			var handlerErr error
 			if stateful {
-				handlerErr = c.runQueueHandlerWithAutoExtend(ctx, msg, func(handlerCtx context.Context) error {
+				handlerErr = c.runQueueHandlerWithAutoExtend(ctx, msg, opts.ackSuccessfulHandlerAfterCancel, func(handlerCtx context.Context) error {
 					return stateHandler(handlerCtx, msg, msg.StateHandle())
 				})
 			} else {
-				handlerErr = c.runQueueHandlerWithAutoExtend(ctx, msg, func(handlerCtx context.Context) error {
+				handlerErr = c.runQueueHandlerWithAutoExtend(ctx, msg, opts.ackSuccessfulHandlerAfterCancel, func(handlerCtx context.Context) error {
 					return handler(handlerCtx, msg)
 				})
 			}
@@ -7424,7 +7426,7 @@ func (c *Client) autoExtendQueueMessage(ctx context.Context, msg *QueueMessage, 
 	}
 }
 
-func (c *Client) runQueueHandlerWithAutoExtend(ctx context.Context, msg *QueueMessage, handler func(context.Context) error) (err error) {
+func (c *Client) runQueueHandlerWithAutoExtend(ctx context.Context, msg *QueueMessage, ackSuccessfulHandlerAfterCancel bool, handler func(context.Context) error) (err error) {
 	if msg == nil || msg.handle == nil || handler == nil {
 		if handler == nil {
 			return nil
@@ -7463,7 +7465,7 @@ func (c *Client) runQueueHandlerWithAutoExtend(ctx context.Context, msg *QueueMe
 					extendErr = e
 				}
 			}
-			return c.finalizeManagedConsumerMessage(msg, err, extendErr, handlerCtxErr)
+			return c.finalizeManagedConsumerMessage(msg, err, extendErr, handlerCtxErr, ackSuccessfulHandlerAfterCancel)
 		case err := <-extendDone:
 			extendSettled = true
 			if err == nil {
@@ -7475,7 +7477,7 @@ func (c *Client) runQueueHandlerWithAutoExtend(ctx context.Context, msg *QueueMe
 	}
 }
 
-func (c *Client) finalizeManagedConsumerMessage(msg *QueueMessage, handlerErr, extendErr, handlerCtxErr error) error {
+func (c *Client) finalizeManagedConsumerMessage(msg *QueueMessage, handlerErr, extendErr, handlerCtxErr error, ackSuccessfulHandlerAfterCancel bool) error {
 	if msg == nil || msg.handle == nil {
 		return errors.Join(handlerErr, extendErr, handlerCtxErr)
 	}
@@ -7489,19 +7491,22 @@ func (c *Client) finalizeManagedConsumerMessage(msg *QueueMessage, handlerErr, e
 	reqCtx, cancel := msg.handle.client.requestContextNoTimeout(context.Background())
 	defer cancel()
 	if handlerErr == nil {
-		if handlerCtxErr != nil {
-			if extendErr != nil {
+		if extendErr != nil {
+			if handlerCtxErr != nil {
 				return errors.Join(handlerCtxErr, extendErr)
 			}
+			return extendErr
+		}
+		if handlerCtxErr != nil && !ackSuccessfulHandlerAfterCancel {
 			return handlerCtxErr
 		}
 		if err := msg.Ack(reqCtx); err != nil {
-			if extendErr != nil {
-				return errors.Join(err, extendErr)
+			if handlerCtxErr != nil {
+				return errors.Join(err, handlerCtxErr)
 			}
 			return err
 		}
-		return extendErr
+		return handlerCtxErr
 	}
 	if err := msg.Nack(reqCtx, msg.onCloseDelay, handlerErr); err != nil {
 		if extendErr != nil {
@@ -7848,8 +7853,10 @@ func (c *Client) handleConsumerFailure(ctx context.Context, cfg consumerRuntimeC
 }
 
 func (c *Client) runConsumerAttempt(ctx context.Context, cfg consumerRuntimeConfig) error {
+	opts := cfg.options
+	opts.ackSuccessfulHandlerAfterCancel = true
 	if cfg.withState {
-		return c.SubscribeWithState(ctx, cfg.queue, cfg.options, func(handlerCtx context.Context, msg *QueueMessage, state *QueueStateHandle) error {
+		return c.SubscribeWithState(ctx, cfg.queue, opts, func(handlerCtx context.Context, msg *QueueMessage, state *QueueStateHandle) error {
 			return cfg.messageHandler(handlerCtx, ConsumerMessage{
 				Client:       c,
 				Logger:       c.logger,
@@ -7861,7 +7868,7 @@ func (c *Client) runConsumerAttempt(ctx context.Context, cfg consumerRuntimeConf
 			})
 		})
 	}
-	return c.Subscribe(ctx, cfg.queue, cfg.options, func(handlerCtx context.Context, msg *QueueMessage) error {
+	return c.Subscribe(ctx, cfg.queue, opts, func(handlerCtx context.Context, msg *QueueMessage) error {
 		return cfg.messageHandler(handlerCtx, ConsumerMessage{
 			Client:       c,
 			Logger:       c.logger,

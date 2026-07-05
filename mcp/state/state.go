@@ -203,6 +203,9 @@ func (d *Data) Normalize() error {
 			return fmt.Errorf("client %q namespace: %w", c.ID, err)
 		}
 		c.Namespace = normalizedNamespace
+		if !c.LockdPreset && len(c.Presets) == 0 {
+			c.LockdPreset = true
+		}
 		normalizedPresets, err := normalizeOptionalPresets(c.LockdPreset, c.Presets)
 		if err != nil {
 			return fmt.Errorf("client %q presets: %w", c.ID, err)

@@ -94,6 +94,55 @@ func TestSaveRoundTrip(t *testing.T) {
 	}
 }
 
+func TestLoadDefaultsLegacyClientToLockdPreset(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	data := NewData("https://issuer.example", now)
+	data.Clients["legacy-client"] = Client{
+		ID:         "legacy-client",
+		Name:       "legacy",
+		SecretSalt: "salt",
+		SecretHash: "hash",
+		Scopes:     []string{"read"},
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+
+	payload, err := json.Marshal(data)
+	if err != nil {
+		t.Fatalf("marshal legacy state: %v", err)
+	}
+	material, basePEM, err := ensureMaterial(nil)
+	if err != nil {
+		t.Fatalf("ensure material: %v", err)
+	}
+	ciphertext, err := encryptPayload(payload, material)
+	if err != nil {
+		t.Fatalf("encrypt payload: %v", err)
+	}
+	raw, err := upsertStateBlock(basePEM, ciphertext)
+	if err != nil {
+		t.Fatalf("upsert state block: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "mcp.pem")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write state file: %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("load legacy state: %v", err)
+	}
+	client := loaded.Clients["legacy-client"]
+	if !client.LockdPreset {
+		t.Fatalf("expected legacy client to default to lockd preset")
+	}
+	if len(client.Presets) != 0 {
+		t.Fatalf("expected no custom presets, got %#v", client.Presets)
+	}
+}
+
 func TestAddClientRejectsInvalidRedirectURI(t *testing.T) {
 	t.Parallel()
 

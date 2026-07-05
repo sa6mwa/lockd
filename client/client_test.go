@@ -5082,6 +5082,100 @@ func TestClientStartConsumerAutoExtendErrorDoesNotDeadlock(t *testing.T) {
 	}
 }
 
+func TestClientStartConsumerAutoAcksWhenSuccessfulHandlerCancelsContext(t *testing.T) {
+	now := time.Now().Unix()
+	message := testQueueMessage{
+		Queue:                    "orders",
+		MessageID:                "msg-cancel-auto-ack",
+		Attempts:                 1,
+		MaxAttempts:              3,
+		NotVisibleUntilUnix:      now,
+		VisibilityTimeoutSeconds: 30,
+		PayloadContentType:       "text/plain",
+		PayloadBytes:             4,
+		LeaseID:                  "lease-cancel-auto-ack",
+		LeaseExpiresAtUnix:       now + 30,
+		FencingToken:             82,
+		MetaETag:                 "etag-cancel-auto-ack",
+	}
+
+	var (
+		ackCalls  atomic.Int32
+		nackCalls atomic.Int32
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/queue/subscribe":
+			mw := multipart.NewWriter(w)
+			w.Header().Set("Content-Type", "multipart/related; boundary="+mw.Boundary())
+			w.WriteHeader(http.StatusOK)
+			metaHeader := textproto.MIMEHeader{}
+			metaHeader.Set("Content-Type", "application/json")
+			metaHeader.Set("Content-Disposition", `form-data; name="meta"`)
+			metaPart, err := mw.CreatePart(metaHeader)
+			if err != nil {
+				t.Fatalf("create meta part: %v", err)
+			}
+			if err := json.NewEncoder(metaPart).Encode(map[string]any{
+				"message":     message,
+				"next_cursor": "cursor-cancel-auto-ack",
+			}); err != nil {
+				t.Fatalf("encode meta: %v", err)
+			}
+			payloadHeader := textproto.MIMEHeader{}
+			payloadHeader.Set("Content-Type", message.PayloadContentType)
+			payloadHeader.Set("Content-Disposition", `form-data; name="payload"`)
+			payloadPart, err := mw.CreatePart(payloadHeader)
+			if err != nil {
+				t.Fatalf("create payload part: %v", err)
+			}
+			if _, err := payloadPart.Write([]byte("work")); err != nil {
+				t.Fatalf("write payload: %v", err)
+			}
+			if err := mw.Close(); err != nil {
+				t.Fatalf("close multipart: %v", err)
+			}
+		case "/v1/queue/ack":
+			ackCalls.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]any{"acked": true})
+		case "/v1/queue/nack":
+			nackCalls.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]any{"nacked": true})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	cli, err := client.New(srv.URL, client.WithDisableMTLS(true), client.WithEndpointShuffle(false))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	err = cli.StartConsumer(ctx, client.ConsumerConfig{
+		Name:    "orders-cancel-auto-ack",
+		Queue:   "orders",
+		Options: client.SubscribeOptions{Owner: "worker-cancel-auto-ack"},
+		MessageHandler: func(_ context.Context, cm client.ConsumerMessage) error {
+			if cm.Message == nil {
+				return fmt.Errorf("expected message")
+			}
+			cancel()
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("start consumer: %v", err)
+	}
+	if ackCalls.Load() != 1 {
+		t.Fatalf("expected one auto-ack, got %d", ackCalls.Load())
+	}
+	if nackCalls.Load() != 0 {
+		t.Fatalf("expected no nack calls, got %d", nackCalls.Load())
+	}
+}
+
 func TestClientSubscribeDoesNotAckWhenHandlerExitsOnContextCancel(t *testing.T) {
 	now := time.Now().Unix()
 	message := testQueueMessage{

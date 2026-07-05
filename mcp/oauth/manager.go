@@ -54,6 +54,7 @@ var (
 type ManagerConfig struct {
 	StatePath            string
 	TokenStore           string
+	ProtectedResourceURL string
 	AccessTokenTTL       time.Duration
 	RefreshTokenTTL      time.Duration
 	AuthorizationCodeTTL time.Duration
@@ -87,6 +88,7 @@ type UpdateClientRequest struct {
 	Namespace    *string
 	LockdPreset  *bool
 	Presets      []preset.Definition
+	PresetsSet   bool
 	Scopes       []string
 	RedirectURIs []string
 }
@@ -130,6 +132,7 @@ type OpenIDConfigurationMetadata struct {
 type Manager struct {
 	path                 string
 	tokenStore           string
+	protectedResourceURL string
 	accessTokenTTL       time.Duration
 	refreshTokenTTL      time.Duration
 	authorizationCodeTTL time.Duration
@@ -214,6 +217,7 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	m := &Manager{
 		path:                 path,
 		tokenStore:           strings.TrimSpace(cfg.TokenStore),
+		protectedResourceURL: strings.TrimSpace(cfg.ProtectedResourceURL),
 		accessTokenTTL:       cfg.AccessTokenTTL,
 		refreshTokenTTL:      cfg.RefreshTokenTTL,
 		authorizationCodeTTL: cfg.AuthorizationCodeTTL,
@@ -244,6 +248,16 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 		return nil, err
 	}
 	return m, nil
+}
+
+// SetProtectedResourceURL sets the accepted OAuth resource indicator for issued tokens.
+func (m *Manager) SetProtectedResourceURL(resourceID string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.protectedResourceURL = strings.TrimSpace(resourceID)
 }
 
 // StatePath returns the backing state file path.
@@ -426,7 +440,7 @@ func (m *Manager) UpdateClient(req UpdateClientRequest) error {
 				return err
 			}
 		}
-		if req.LockdPreset != nil || req.Presets != nil {
+		if req.LockdPreset != nil || req.PresetsSet || req.Presets != nil {
 			lockdPreset := false
 			client, ok := d.Clients[strings.TrimSpace(req.ClientID)]
 			if !ok {
@@ -436,7 +450,11 @@ func (m *Manager) UpdateClient(req UpdateClientRequest) error {
 			if req.LockdPreset != nil {
 				lockdPreset = *req.LockdPreset
 			}
-			if err := d.UpdateClientPresets(req.ClientID, lockdPreset, req.Presets, now); err != nil {
+			presets := req.Presets
+			if !req.PresetsSet && presets == nil {
+				presets = client.Presets
+			}
+			if err := d.UpdateClientPresets(req.ClientID, lockdPreset, presets, now); err != nil {
 				return err
 			}
 		}
@@ -482,6 +500,16 @@ func (m *Manager) VerifyToken(ctx context.Context, token string, _ *http.Request
 			m.logger.Warn("oauth token store persist failed", "path", m.tokenStore, "error", err)
 		}
 		return nil, fmt.Errorf("%w: client revoked or missing", mcpauth.ErrInvalidToken)
+	}
+	if strings.TrimSpace(entry.Resource) == "" && strings.TrimSpace(m.protectedResourceURL) != "" {
+		entry.Resource = strings.TrimSpace(m.protectedResourceURL)
+		m.accessToken[trimmed] = entry
+		if err := m.saveTokenStoreLocked(); err != nil {
+			m.logger.Warn("oauth token store resource migration failed", "path", m.tokenStore, "error", err)
+		}
+	}
+	if err := m.verifyTokenResourceLocked(entry.Resource); err != nil {
+		return nil, fmt.Errorf("%w: %v", mcpauth.ErrInvalidToken, err)
 	}
 
 	info := &mcpauth.TokenInfo{
@@ -535,6 +563,11 @@ func (m *Manager) HandleToken(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		resource, err := parseResourceParam(r.Form.Get("resource"))
+		if err != nil {
+			writeOAuthError(w, http.StatusBadRequest, "invalid_target", err.Error())
+			return
+		}
+		resource, err = m.acceptedTokenResourceLocked(resource)
 		if err != nil {
 			writeOAuthError(w, http.StatusBadRequest, "invalid_target", err.Error())
 			return
@@ -601,6 +634,11 @@ func (m *Manager) HandleToken(w http.ResponseWriter, r *http.Request) {
 			}
 			resource = requestedResource
 		}
+		resource, err = m.acceptedTokenResourceLocked(resource)
+		if err != nil {
+			writeOAuthError(w, http.StatusBadRequest, "invalid_target", err.Error())
+			return
+		}
 		resp, err := m.issueTokenLocked(clientID, entry.Scopes, resource, true, now)
 		if err != nil {
 			writeOAuthError(w, http.StatusInternalServerError, "server_error", "failed to issue token")
@@ -649,6 +687,11 @@ func (m *Manager) HandleToken(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			resource = requestedResource
+		}
+		resource, err = m.acceptedTokenResourceLocked(resource)
+		if err != nil {
+			writeOAuthError(w, http.StatusBadRequest, "invalid_target", err.Error())
+			return
 		}
 		resp, err := m.issueTokenLocked(clientID, effectiveScopes, resource, true, now)
 		if err != nil {
@@ -993,6 +1036,36 @@ func (m *Manager) issueTokenLocked(clientID string, scopes []string, resource st
 		return TokenResponse{}, err
 	}
 	return resp, nil
+}
+
+func (m *Manager) acceptedTokenResourceLocked(resource string) (string, error) {
+	resource = strings.TrimSpace(resource)
+	protected := strings.TrimSpace(m.protectedResourceURL)
+	if protected == "" {
+		return resource, nil
+	}
+	if resource == "" {
+		return protected, nil
+	}
+	if resource != protected {
+		return "", fmt.Errorf("resource %q does not match protected resource %q", resource, protected)
+	}
+	return protected, nil
+}
+
+func (m *Manager) verifyTokenResourceLocked(resource string) error {
+	resource = strings.TrimSpace(resource)
+	protected := strings.TrimSpace(m.protectedResourceURL)
+	if protected == "" {
+		return nil
+	}
+	if resource == "" {
+		return fmt.Errorf("token is not bound to protected resource %q", protected)
+	}
+	if resource != protected {
+		return fmt.Errorf("resource %q does not match protected resource %q", resource, protected)
+	}
+	return nil
 }
 
 func (m *Manager) cleanupLocked(now time.Time) {

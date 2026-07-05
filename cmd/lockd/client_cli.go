@@ -1889,10 +1889,6 @@ func newClientUpdateCommand(cfg *clientCLIConfig) *cobra.Command {
 				path = args[0]
 			}
 			fmtChoice := parseStateFormat(stateFormat(format), path)
-			payload, err := loadStatePayload(path, fmtChoice)
-			if err != nil {
-				return err
-			}
 			ns := resolveNamespaceInput(namespace)
 			opts := lockdclient.UpdateOptions{
 				Namespace:    ns,
@@ -1902,7 +1898,23 @@ func newClientUpdateCommand(cfg *clientCLIConfig) *cobra.Command {
 				TxnID:        txn,
 			}
 			ctx, _ := commandContextWithCorrelation(cmd)
-			result, err := cli.UpdateBytes(ctx, key, lease, payload, opts)
+			var result *lockdclient.UpdateResult
+			if stateUpdateRequiresMaterialization(fmtChoice) {
+				payload, err := loadStatePayload(path, fmtChoice)
+				if err != nil {
+					return err
+				}
+				result, err = cli.UpdateBytes(ctx, key, lease, payload, opts)
+			} else {
+				reader, closer, err := openStatePayloadReader(cmd, path)
+				if err != nil {
+					return err
+				}
+				if closer != nil {
+					defer closer.Close()
+				}
+				result, err = cli.UpdateStream(ctx, key, lease, newEmptyJSONAsNullReader(reader), opts)
+			}
 			if err != nil {
 				return err
 			}
@@ -2617,6 +2629,90 @@ func loadStatePayload(path string, format stateFormat) ([]byte, error) {
 	default:
 		return ensureJSONBytes(trimmed)
 	}
+}
+
+func stateUpdateRequiresMaterialization(format stateFormat) bool {
+	return format == stateFormatYAML
+}
+
+func openStatePayloadReader(cmd *cobra.Command, path string) (io.Reader, io.Closer, error) {
+	if path == "-" {
+		return commandInput(cmd), nil, nil
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	return file, file, nil
+}
+
+type emptyJSONAsNullReader struct {
+	r       io.Reader
+	prefix  []byte
+	checked bool
+}
+
+func newEmptyJSONAsNullReader(r io.Reader) io.Reader {
+	if r == nil {
+		return strings.NewReader("null")
+	}
+	return &emptyJSONAsNullReader{r: r}
+}
+
+func (r *emptyJSONAsNullReader) Read(p []byte) (int, error) {
+	if !r.checked {
+		r.checked = true
+		if err := r.readPrefix(); err != nil {
+			return 0, err
+		}
+	}
+	if len(r.prefix) > 0 {
+		n := copy(p, r.prefix)
+		r.prefix = r.prefix[n:]
+		return n, nil
+	}
+	return r.r.Read(p)
+}
+
+func (r *emptyJSONAsNullReader) readPrefix() error {
+	buf := make([]byte, 1)
+	for {
+		n, err := r.r.Read(buf)
+		if n > 0 {
+			b := buf[0]
+			if !isJSONWhitespace(b) {
+				r.prefix = []byte{b}
+				return nil
+			}
+		}
+		if err == nil {
+			continue
+		}
+		if err == io.EOF {
+			r.prefix = []byte("null")
+			return nil
+		}
+		return err
+	}
+}
+
+func isJSONWhitespace(b byte) bool {
+	switch b {
+	case ' ', '\n', '\r', '\t':
+		return true
+	default:
+		return false
+	}
+}
+
+func commandInput(cmd *cobra.Command) io.Reader {
+	if cmd != nil {
+		if root := cmd.Root(); root != nil {
+			return root.InOrStdin()
+		}
+		return cmd.InOrStdin()
+	}
+	return os.Stdin
 }
 
 func newClientAttachmentsCommand(cfg *clientCLIConfig) *cobra.Command {

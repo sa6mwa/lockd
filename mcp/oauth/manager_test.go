@@ -130,6 +130,149 @@ func TestVerifyTokenIncludesClientNamespaceExtra(t *testing.T) {
 	}
 }
 
+func TestClientCredentialsRejectsMismatchedResource(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "mcp.pem")
+	tokenStorePath := filepath.Join(dir, "mcp-token-store.enc.json")
+	protectedResource := "https://api.example/mcp"
+
+	boot, err := mcpstate.Bootstrap(mcpstate.BootstrapRequest{
+		Path:              statePath,
+		Issuer:            "https://issuer.example",
+		InitialClientName: "default",
+	})
+	if err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	mgr, err := NewManager(ManagerConfig{
+		StatePath:            statePath,
+		TokenStore:           tokenStorePath,
+		ProtectedResourceURL: protectedResource,
+	})
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+
+	mismatched := issueClientCredentialsWithResource(t, mgr, boot.ClientID, boot.ClientSecret, "https://other.example/mcp")
+	if mismatched.statusCode != http.StatusBadRequest {
+		t.Fatalf("mismatched resource status=%d body=%q", mismatched.statusCode, mismatched.body)
+	}
+	if mismatched.errorCode != "invalid_target" {
+		t.Fatalf("mismatched resource error=%q want invalid_target body=%q", mismatched.errorCode, mismatched.body)
+	}
+
+	matched := issueClientCredentialsWithResource(t, mgr, boot.ClientID, boot.ClientSecret, protectedResource)
+	if matched.statusCode != http.StatusOK {
+		t.Fatalf("matched resource status=%d body=%q", matched.statusCode, matched.body)
+	}
+	if _, err := mgr.VerifyToken(context.Background(), matched.token.AccessToken, nil); err != nil {
+		t.Fatalf("verify matched resource token: %v", err)
+	}
+}
+
+func TestVerifyTokenRejectsStoredMismatchedResource(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "mcp.pem")
+	tokenStorePath := filepath.Join(dir, "mcp-token-store.enc.json")
+
+	boot, err := mcpstate.Bootstrap(mcpstate.BootstrapRequest{
+		Path:              statePath,
+		Issuer:            "https://issuer.example",
+		InitialClientName: "default",
+	})
+	if err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	firstResource := "https://api.example/mcp"
+	mgr, err := NewManager(ManagerConfig{
+		StatePath:            statePath,
+		TokenStore:           tokenStorePath,
+		ProtectedResourceURL: firstResource,
+	})
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	issued := issueClientCredentials(t, mgr, boot.ClientID, boot.ClientSecret)
+	if issued.statusCode != http.StatusOK {
+		t.Fatalf("issue token status=%d body=%q", issued.statusCode, issued.body)
+	}
+	if _, err := mgr.VerifyToken(context.Background(), issued.token.AccessToken, nil); err != nil {
+		t.Fatalf("verify token against issuing resource: %v", err)
+	}
+
+	restarted, err := NewManager(ManagerConfig{
+		StatePath:            statePath,
+		TokenStore:           tokenStorePath,
+		ProtectedResourceURL: "https://other.example/mcp",
+	})
+	if err != nil {
+		t.Fatalf("new manager after restart: %v", err)
+	}
+	if _, err := restarted.VerifyToken(context.Background(), issued.token.AccessToken, nil); err == nil {
+		t.Fatalf("expected mismatched stored resource token to be rejected")
+	}
+}
+
+func TestVerifyTokenMigratesLegacyUnboundStoredResource(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "mcp.pem")
+	tokenStorePath := filepath.Join(dir, "mcp-token-store.enc.json")
+
+	boot, err := mcpstate.Bootstrap(mcpstate.BootstrapRequest{
+		Path:              statePath,
+		Issuer:            "https://issuer.example",
+		InitialClientName: "default",
+	})
+	if err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	legacy, err := NewManager(ManagerConfig{
+		StatePath:  statePath,
+		TokenStore: tokenStorePath,
+	})
+	if err != nil {
+		t.Fatalf("new legacy manager: %v", err)
+	}
+	issued := issueClientCredentials(t, legacy, boot.ClientID, boot.ClientSecret)
+	if issued.statusCode != http.StatusOK {
+		t.Fatalf("issue legacy token status=%d body=%q", issued.statusCode, issued.body)
+	}
+
+	protectedResource := "https://api.example/mcp"
+	upgraded, err := NewManager(ManagerConfig{
+		StatePath:            statePath,
+		TokenStore:           tokenStorePath,
+		ProtectedResourceURL: protectedResource,
+	})
+	if err != nil {
+		t.Fatalf("new upgraded manager: %v", err)
+	}
+	if _, err := upgraded.VerifyToken(context.Background(), issued.token.AccessToken, nil); err != nil {
+		t.Fatalf("verify migrated legacy token: %v", err)
+	}
+
+	restarted, err := NewManager(ManagerConfig{
+		StatePath:            statePath,
+		TokenStore:           tokenStorePath,
+		ProtectedResourceURL: protectedResource,
+	})
+	if err != nil {
+		t.Fatalf("new restarted manager: %v", err)
+	}
+	if _, err := restarted.VerifyToken(context.Background(), issued.token.AccessToken, nil); err != nil {
+		t.Fatalf("verify migrated token after restart: %v", err)
+	}
+}
+
 func TestUpdateClientNamespaceValidation(t *testing.T) {
 	t.Parallel()
 
@@ -291,6 +434,131 @@ func TestUpdateClientPresetSurfacePersistsToState(t *testing.T) {
 	}
 }
 
+func TestUpdateClientLockdPresetPreservesCustomPresetsWhenOmitted(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "mcp.pem")
+	tokenStorePath := filepath.Join(dir, "mcp-token-store.enc.json")
+
+	boot, err := mcpstate.Bootstrap(mcpstate.BootstrapRequest{
+		Path:              statePath,
+		Issuer:            "https://127.0.0.1:19341",
+		InitialClientName: "default",
+	})
+	if err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	mgr, err := NewManager(ManagerConfig{StatePath: statePath, TokenStore: tokenStorePath})
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	lockdPreset := false
+	if err := mgr.UpdateClient(UpdateClientRequest{
+		ClientID:    boot.ClientID,
+		LockdPreset: &lockdPreset,
+		Presets: []preset.Definition{{
+			Name: "memory",
+			Kinds: []preset.Kind{{
+				Name:      "note",
+				Namespace: "agents",
+				Schema: preset.Schema{
+					Type: "object",
+					Properties: map[string]preset.Schema{
+						"text": {Type: "string"},
+					},
+				},
+			}},
+		}},
+	}); err != nil {
+		t.Fatalf("set custom presets: %v", err)
+	}
+
+	lockdPreset = true
+	if err := mgr.UpdateClient(UpdateClientRequest{
+		ClientID:    boot.ClientID,
+		LockdPreset: &lockdPreset,
+	}); err != nil {
+		t.Fatalf("enable lockd preset: %v", err)
+	}
+
+	loaded, err := mcpstate.Load(statePath)
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	client := loaded.Clients[boot.ClientID]
+	if !client.LockdPreset {
+		t.Fatalf("expected lockd preset enabled")
+	}
+	if len(client.Presets) != 1 || client.Presets[0].Name != "memory" {
+		t.Fatalf("expected custom presets to be preserved, got %#v", client.Presets)
+	}
+}
+
+func TestUpdateClientPresetSetClearsCustomPresetsForLockdOnly(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "mcp.pem")
+	tokenStorePath := filepath.Join(dir, "mcp-token-store.enc.json")
+
+	boot, err := mcpstate.Bootstrap(mcpstate.BootstrapRequest{
+		Path:              statePath,
+		Issuer:            "https://127.0.0.1:19341",
+		InitialClientName: "default",
+	})
+	if err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	mgr, err := NewManager(ManagerConfig{StatePath: statePath, TokenStore: tokenStorePath})
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	lockdPreset := true
+	if err := mgr.UpdateClient(UpdateClientRequest{
+		ClientID:    boot.ClientID,
+		LockdPreset: &lockdPreset,
+		Presets: []preset.Definition{{
+			Name: "memory",
+			Kinds: []preset.Kind{{
+				Name:      "note",
+				Namespace: "agents",
+				Schema: preset.Schema{
+					Type: "object",
+					Properties: map[string]preset.Schema{
+						"text": {Type: "string"},
+					},
+				},
+			}},
+		}},
+		PresetsSet: true,
+	}); err != nil {
+		t.Fatalf("set mixed presets: %v", err)
+	}
+
+	if err := mgr.UpdateClient(UpdateClientRequest{
+		ClientID:    boot.ClientID,
+		LockdPreset: &lockdPreset,
+		PresetsSet:  true,
+	}); err != nil {
+		t.Fatalf("replace with lockd-only preset: %v", err)
+	}
+
+	loaded, err := mcpstate.Load(statePath)
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	client := loaded.Clients[boot.ClientID]
+	if !client.LockdPreset {
+		t.Fatalf("expected lockd preset enabled")
+	}
+	if len(client.Presets) != 0 {
+		t.Fatalf("expected custom presets to be cleared, got %#v", client.Presets)
+	}
+}
+
 type tokenExchange struct {
 	statusCode int
 	body       string
@@ -300,8 +568,16 @@ type tokenExchange struct {
 
 func issueClientCredentials(t *testing.T, mgr *Manager, clientID, clientSecret string) tokenExchange {
 	t.Helper()
+	return issueClientCredentialsWithResource(t, mgr, clientID, clientSecret, "")
+}
+
+func issueClientCredentialsWithResource(t *testing.T, mgr *Manager, clientID, clientSecret, resource string) tokenExchange {
+	t.Helper()
 	form := url.Values{}
 	form.Set("grant_type", "client_credentials")
+	if strings.TrimSpace(resource) != "" {
+		form.Set("resource", resource)
+	}
 	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.SetBasicAuth(clientID, clientSecret)

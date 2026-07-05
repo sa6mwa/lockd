@@ -634,6 +634,7 @@ func newMCPClientCommand() *cobra.Command {
 				Namespace:    namespacePtr,
 				LockdPreset:  lockdPresetPtr,
 				Presets:      presets,
+				PresetsSet:   presetSet,
 				Scopes:       updateScopes,
 				RedirectURIs: updateRedirectURIs,
 			}); err != nil {

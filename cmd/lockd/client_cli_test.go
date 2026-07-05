@@ -6,12 +6,15 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1398,6 +1401,150 @@ func TestCLIClientAcquireReleaseRollbackClearsState(t *testing.T) {
 	state := loadKeyState(ctx, t, ts, key)
 	if len(state) != 0 {
 		t.Fatalf("expected empty state after rollback release, got %v", state)
+	}
+}
+
+func TestCLIClientUpdateStreamsJSONFromFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fifo streaming regression test requires Unix fifos")
+	}
+	t.Setenv("LOCKD_CONFIG", "")
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	requestStarted := make(chan struct{})
+	releaseBody := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/update" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		close(requestStarted)
+		<-releaseBody
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read update body: %v", err)
+		}
+		if string(body) != `{"streamed":true}` {
+			t.Fatalf("body=%q want streamed JSON", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"new_version":2,"new_state_etag":"etag-stream","bytes":17}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	fifoPath := filepath.Join(t.TempDir(), "state.json")
+	if err := syscall.Mkfifo(fifoPath, 0o600); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+	cmd := newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{
+		"client",
+		"--server", srv.URL,
+		"--disable-mtls",
+		"update",
+		"--key", "orders",
+		"--lease", xid.New().String(),
+		"--txn-id", xid.New().String(),
+		"--fencing-token", "7",
+		"--type", "json",
+		fifoPath,
+	})
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- cmd.Execute()
+	}()
+	writeCh := make(chan error, 1)
+	go func() {
+		writer, err := os.OpenFile(fifoPath, os.O_WRONLY, 0)
+		if err != nil {
+			writeCh <- err
+			return
+		}
+		_, err = writer.Write([]byte(`{"streamed":true}`))
+		if err == nil {
+			<-requestStarted
+			err = writer.Close()
+		} else {
+			_ = writer.Close()
+		}
+		writeCh <- err
+	}()
+
+	select {
+	case <-requestStarted:
+	case err := <-errCh:
+		t.Fatalf("command finished before update request: err=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+	case <-time.After(time.Second):
+		t.Fatalf("update did not start HTTP request before input EOF; stderr=%q", stderr.String())
+	}
+	if err := <-writeCh; err != nil {
+		t.Fatalf("write input: %v", err)
+	}
+	close(releaseBody)
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("command failed: %v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatalf("command did not finish")
+	}
+	if !strings.Contains(stdout.String(), `"version": 2`) {
+		t.Fatalf("expected update summary in stdout, got %q", stdout.String())
+	}
+}
+
+func TestCLIClientUpdateMapsEmptyJSONFileToNull(t *testing.T) {
+	t.Setenv("LOCKD_CONFIG", "")
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/update" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read update body: %v", err)
+		}
+		if string(body) != "null" {
+			t.Fatalf("body=%q want null", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"new_version":3,"new_state_etag":"etag-null","bytes":4}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(statePath, bytes.Repeat([]byte(" \n\t"), 32*1024), 0o600); err != nil {
+		t.Fatalf("write empty state file: %v", err)
+	}
+	cmd := newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{
+		"client",
+		"--server", srv.URL,
+		"--disable-mtls",
+		"update",
+		"--key", "orders",
+		"--lease", xid.New().String(),
+		"--txn-id", xid.New().String(),
+		"--fencing-token", "7",
+		"--type", "json",
+		statePath,
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("command failed: %v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"version": 3`) {
+		t.Fatalf("expected update summary in stdout, got %q", stdout.String())
 	}
 }
 

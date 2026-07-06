@@ -133,8 +133,7 @@ behavior, tests are the contract.
 | --- | --- | --- |
 | Unit and CLI | `go test ./...` | Must stay fast locally; add watchdogs for long tests. |
 | Vet | `go vet ./...` | Required before completion when Go code changes. |
-| Lint | `golint ./...` | Required before completion when available. |
-| Lint meta | `golangci-lint run ./...` | Required before completion when available. |
+| Lint | `golangci-lint run ./...` | Required before completion when available. |
 | Integration suites | `./run-integration-suites.sh <suite>` | Use targeted impacted suites such as `disk/query` or `minio/lq`. |
 | Full integration sweep | `./run-integration-suites.sh` | Required before releases and large cross-backend refactors. |
 | Benchmarks | `run-benchmark-suites.sh` or supported `ycsb/` targets | Record benchmark evidence in `docs/performance/`. |

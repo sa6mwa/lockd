@@ -28,7 +28,7 @@ This subsystem covers runtime safeguards (QRF/LSF, idle sweepers), verification 
   - queue batch behavior and dispatcher fetch safety guards in `internal/core/queuedelivery_batch_test.go`.
   - strict-decode behavior guards in `internal/httpapi/handler_strict_decode_test.go`.
 - Full release verification gate was executed after chunk landing:
-  - `go test ./...`, `go vet ./...`, `golint ./...`, `golangci-lint run ./...`, and full `run-integration-suites.sh` sweep.
+  - `go test ./...`, `go vet ./...`, `golangci-lint run ./...`, and full `run-integration-suites.sh` sweep.
 - Full benchmark verification was executed:
   - `run-benchmark-suites.sh` completed for `disk`, `minio`, `mem`, `aws`, and `azure`.
 - Post-verification lint cleanup was completed:

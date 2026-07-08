@@ -222,6 +222,9 @@ func normalizeKind(presetName string, in Kind) (Kind, error) {
 	if err != nil {
 		return Kind{}, err
 	}
+	if err := rejectToolArgumentCollisions(schema, ops, name); err != nil {
+		return Kind{}, err
+	}
 	out := Kind{
 		Name:        name,
 		Description: strings.TrimSpace(in.Description),
@@ -238,6 +241,31 @@ func normalizeKind(presetName string, in Kind) (Kind, error) {
 		AttachmentsGet: kindToolName(presetName, out.Name, OperationAttachmentsGet),
 	}
 	return out, nil
+}
+
+func rejectToolArgumentCollisions(schema Schema, ops []Operation, kindName string) error {
+	if schema.Type != "object" || len(schema.Properties) == 0 {
+		return nil
+	}
+	reserved := make(map[string]Operation)
+	for _, op := range ops {
+		switch op {
+		case OperationStatePut:
+			reserved["key"] = op
+		case OperationQueueEnqueue:
+			reserved["delay_seconds"] = op
+			reserved["visibility_seconds"] = op
+			reserved["ttl_seconds"] = op
+			reserved["max_attempts"] = op
+			reserved["attributes"] = op
+		}
+	}
+	for property := range schema.Properties {
+		if op, ok := reserved[property]; ok {
+			return fmt.Errorf("schema %q property %q collides with generated %s tool argument", kindName, property, op)
+		}
+	}
+	return nil
 }
 
 func normalizeOperations(in []Operation) ([]Operation, error) {

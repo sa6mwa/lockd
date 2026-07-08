@@ -238,6 +238,48 @@ kinds:
 	}
 }
 
+func TestParsePresetYAMLRejectsStatePutKeyFieldCollision(t *testing.T) {
+	t.Parallel()
+
+	_, err := ParsePresetYAML([]byte(`
+preset: memory
+kinds:
+  - name: note
+    namespace: default
+    operations:
+      - state.put
+    schema:
+      type: object
+      properties:
+        key:
+          type: string
+`))
+	if err == nil || !strings.Contains(err.Error(), `property "key" collides with generated state.put tool argument`) {
+		t.Fatalf("err=%v want state.put key collision error", err)
+	}
+}
+
+func TestParsePresetYAMLRejectsQueueControlFieldCollision(t *testing.T) {
+	t.Parallel()
+
+	_, err := ParsePresetYAML([]byte(`
+preset: memory
+kinds:
+  - name: note
+    namespace: default
+    operations:
+      - queue.enqueue
+    schema:
+      type: object
+      properties:
+        max-attempts:
+          type: integer
+`))
+	if err == nil || !strings.Contains(err.Error(), `property "max_attempts" collides with generated queue.enqueue tool argument`) {
+		t.Fatalf("err=%v want queue control collision error", err)
+	}
+}
+
 func TestParsePresetYAMLRejectsNestedArray(t *testing.T) {
 	t.Parallel()
 

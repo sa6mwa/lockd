@@ -339,7 +339,7 @@ func TestPresetStateGetIncludesAttachmentMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
-	if _, err := cli.UpdateBytes(ctx, key, lease.LeaseID, []byte(`{"text":"memo"}`), lockdclient.UpdateOptions{
+	if _, err := cli.UpdateBytes(ctx, key, lease.LeaseID, []byte(`{"text":"memo","_lockd_kind":"note"}`), lockdclient.UpdateOptions{
 		Namespace: "agents",
 	}); err != nil {
 		t.Fatalf("update: %v", err)
@@ -464,6 +464,39 @@ func TestPresetQueryFiltersSharedNamespaceByKind(t *testing.T) {
 	}
 	if len(keys) != 1 || keys[0] != "bookmark-1" {
 		t.Fatalf("bookmark query keys=%v want [bookmark-1]", keys)
+	}
+
+	wrongGet, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{
+		Name:      "memory.note.state.get",
+		Arguments: map[string]any{"key": "bookmark-1"},
+	})
+	if err != nil {
+		t.Fatalf("wrong-kind state.get transport error: %v", err)
+	}
+	if !wrongGet.IsError {
+		t.Fatalf("expected wrong-kind state.get to return tool error, got %+v", wrongGet)
+	}
+
+	wrongDelete, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{
+		Name:      "memory.note.state.delete",
+		Arguments: map[string]any{"key": "bookmark-1"},
+	})
+	if err != nil {
+		t.Fatalf("wrong-kind state.delete transport error: %v", err)
+	}
+	if !wrongDelete.IsError {
+		t.Fatalf("expected wrong-kind state.delete to return tool error, got %+v", wrongDelete)
+	}
+
+	bookmarkGet, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{
+		Name:      "memory.bookmark.state.get",
+		Arguments: map[string]any{"key": "bookmark-1"},
+	})
+	if err != nil {
+		t.Fatalf("bookmark state.get: %v", err)
+	}
+	if bookmarkGet.IsError {
+		t.Fatalf("bookmark state.get returned tool error after wrong-kind delete attempt: %+v", bookmarkGet)
 	}
 }
 

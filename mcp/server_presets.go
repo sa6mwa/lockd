@@ -302,6 +302,9 @@ func (s *server) addPresetStateDeleteTool(srv *mcpsdk.Server, def presetcfg.Defi
 	}
 	mcpsdk.AddTool(srv, tool, withObservedTool(s, name, func(ctx context.Context, req *mcpsdk.CallToolRequest, input map[string]any) (*mcpsdk.CallToolResult, map[string]any, error) {
 		key := mapString(input, "key")
+		if _, err := s.loadPresetStoredDocument(ctx, rt, key); err != nil {
+			return nil, nil, err
+		}
 		_, out, err := s.handleStateDeleteTool(ctx, req, stateDeleteToolInput{
 			Key:       key,
 			Namespace: rt.kind.Namespace,
@@ -394,19 +397,9 @@ func (s *server) addPresetAttachmentsGetTool(srv *mcpsdk.Server, def presetcfg.D
 }
 
 func (s *server) loadPresetStateOutput(ctx context.Context, req *mcpsdk.CallToolRequest, rt *presetRuntimeKind, key string) (map[string]any, error) {
-	resp, err := s.upstream.Get(ctx, key, lockdclient.WithGetNamespace(rt.kind.Namespace))
+	document, err := s.loadPresetStoredDocument(ctx, rt, key)
 	if err != nil {
 		return nil, err
-	}
-	if !resp.HasState {
-		return nil, fmt.Errorf("preset state %q has no document", key)
-	}
-	reader := resp.Reader()
-	defer reader.Close()
-	var document map[string]any
-	dec := json.NewDecoder(reader)
-	if err := dec.Decode(&document); err != nil {
-		return nil, fmt.Errorf("decode preset state %q: %w", key, err)
 	}
 	documentView := stripPresetInternalFields(document)
 	if err := rt.documentResolved.Validate(&documentView); err != nil {
@@ -438,6 +431,27 @@ func (s *server) loadPresetStateOutput(ctx context.Context, req *mcpsdk.CallTool
 		out["_lockd_attachments"] = items
 	}
 	return out, nil
+}
+
+func (s *server) loadPresetStoredDocument(ctx context.Context, rt *presetRuntimeKind, key string) (map[string]any, error) {
+	resp, err := s.upstream.Get(ctx, key, lockdclient.WithGetNamespace(rt.kind.Namespace))
+	if err != nil {
+		return nil, err
+	}
+	if !resp.HasState {
+		return nil, fmt.Errorf("preset state %q has no document", key)
+	}
+	reader := resp.Reader()
+	defer reader.Close()
+	var document map[string]any
+	dec := json.NewDecoder(reader)
+	if err := dec.Decode(&document); err != nil {
+		return nil, fmt.Errorf("decode preset state %q: %w", key, err)
+	}
+	if kind, _ := document["_lockd_kind"].(string); kind != rt.kind.Name {
+		return nil, fmt.Errorf("preset state %q belongs to kind %q, not %q", key, kind, rt.kind.Name)
+	}
+	return document, nil
 }
 
 func presetSchemaToJSONSchema(schema presetcfg.Schema) *jsonschema.Schema {

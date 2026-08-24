@@ -247,6 +247,9 @@ for suite in "${SUITES_TO_RUN[@]}"; do
   if [[ $suite == aws* ]]; then
     suite_timeout=${LOCKD_AWS_GO_TEST_TIMEOUT:-10m}
   fi
+  if [[ $suite == aws/query ]]; then
+    suite_timeout=${LOCKD_AWS_QUERY_GO_TEST_TIMEOUT:-15m}
+  fi
   if [[ $suite == mixed* ]]; then
     suite_timeout=${LOCKD_MIXED_GO_TEST_TIMEOUT:-8m}
   fi

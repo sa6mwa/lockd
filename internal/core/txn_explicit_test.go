@@ -208,3 +208,41 @@ func TestUpdateExplicitTxnRegistersTxnRecord(t *testing.T) {
 		t.Fatalf("expected txn record for explicit txn, got %+v", rec)
 	}
 }
+
+func TestExplicitTxnReleaseUsesRequestedDecision(t *testing.T) {
+	ctx := context.Background()
+	svc := newTestService(t)
+
+	txnID := xid.New().String()
+	acq, err := svc.Acquire(ctx, AcquireCommand{
+		Namespace: "default", Key: "explicit-release", Owner: "worker", TTLSeconds: 30,
+		BlockSeconds: apiBlockNoWait, TxnID: txnID,
+	})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if _, err := svc.Update(ctx, UpdateCommand{
+		Namespace: "default", Key: "explicit-release", LeaseID: acq.LeaseID,
+		FencingToken: acq.FencingToken, TxnID: txnID, Body: strings.NewReader(`{"value":"committed"}`),
+		CompactWriter: func(w io.Writer, r io.Reader, _ int64) error { _, err := io.Copy(w, r); return err },
+	}); err != nil {
+		t.Fatalf("stage update: %v", err)
+	}
+	if _, err := svc.Release(ctx, ReleaseCommand{
+		Namespace: "default", Key: "explicit-release", LeaseID: acq.LeaseID,
+		FencingToken: acq.FencingToken, TxnID: txnID,
+	}); err != nil {
+		t.Fatalf("release explicit transaction: %v", err)
+	}
+
+	got, err := svc.Get(ctx, GetCommand{Namespace: "default", Key: "explicit-release", Public: true})
+	if err != nil {
+		t.Fatalf("get committed state: %v", err)
+	}
+	if got.NoContent || got.Reader == nil {
+		t.Fatal("expected committed state after release")
+	}
+	if err := got.Reader.Close(); err != nil {
+		t.Fatalf("close committed state: %v", err)
+	}
+}

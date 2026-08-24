@@ -441,7 +441,15 @@ func (s *Service) prepareImplicitTxnParticipant(ctx context.Context, txnID, name
 			}
 			return nil, false, "", err
 		}
-		if !rec.Implicit || rec.State != TxnStatePending {
+		// Regular explicit XA transactions are decided by their coordinator as
+		// soon as a participant releases. Only server-minted transactions that
+		// were later promoted to XA need the all-participant prepare barrier.
+		// Returning a regular pending record here would overwrite the caller's
+		// commit/rollback decision with pending.
+		if !rec.Implicit {
+			return nil, true, outcome, nil
+		}
+		if rec.State != TxnStatePending {
 			return rec, true, rec.State, nil
 		}
 		idx := participantIndex(rec.Participants, p)
@@ -470,6 +478,25 @@ func (s *Service) prepareImplicitTxnParticipant(ctx context.Context, txnID, name
 		}
 		return rec, allPrepared, decision, nil
 	}
+}
+
+// releaseMustReloadPromotedImplicitMeta reports whether a cached lease snapshot
+// may predate promotion of a server-minted transaction to XA. Normal releases
+// keep their cached metadata path; a promotion writes an implicit coordinator
+// record first, making an authoritative metadata reload both necessary and
+// detectable.
+func (s *Service) releaseMustReloadPromotedImplicitMeta(ctx context.Context, meta *storage.Meta, txnID string) bool {
+	if meta == nil || meta.Lease == nil || meta.Lease.TxnID != txnID || meta.Lease.TxnExplicit {
+		return false
+	}
+	rec, _, err := s.loadTxnRecord(ctx, txnID)
+	if err != nil {
+		// If the coordinator record cannot be inspected, do not trust a
+		// potentially stale snapshot. The authoritative metadata load below
+		// will surface its own storage error if the backend remains unavailable.
+		return !errors.Is(err, storage.ErrNotFound) && !errors.Is(err, storage.ErrNotImplemented)
+	}
+	return rec != nil && rec.Implicit
 }
 
 func (s *Service) normalizeParticipants(list []TxnParticipant) []TxnParticipant {

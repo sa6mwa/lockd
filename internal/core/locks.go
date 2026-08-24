@@ -528,12 +528,15 @@ func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (res *Release
 	}
 	keyComponent := relativeKey(namespace, storageKey)
 	kindLabel = leaseKindLabel(keyComponent)
-	// A transaction coordinator can apply a decision after the SDK last
-	// observed this lease. Do not let a cached pre-promotion or pre-decision
-	// metadata snapshot choose the release path: an implicit-XA lease must be
-	// resolved against the authoritative stored metadata.
-	knownMeta := (*storage.Meta)(nil)
-	knownMetaETag := ""
+	knownMeta := cmd.KnownMeta
+	knownMetaETag := cmd.KnownMetaETag
+	// A server-minted lease can be promoted to XA after its cached metadata was
+	// captured. Reload only that detectable promoted case; ordinary releases
+	// retain the handler cache path and still reload after a CAS conflict.
+	if s.releaseMustReloadPromotedImplicitMeta(ctx, knownMeta, cmd.TxnID) {
+		knownMeta = nil
+		knownMetaETag = ""
+	}
 
 	for {
 		plan := s.newWritePlan(ctx)

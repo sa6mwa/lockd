@@ -49,6 +49,10 @@ func runDiskQueueTxnDecision(t *testing.T) {
 		queuetestutil.InstallWatchdog(t, "disk-txn-mixed-rollback", 15*time.Second)
 		queuetestutil.RunQueueTxnMixedKeyScenario(t, ts, false)
 	})
+	t.Run("ImplicitXAFirstLeaseEnrollment", func(t *testing.T) {
+		queuetestutil.InstallWatchdog(t, "disk-implicit-xa-first-lease", 15*time.Second)
+		queuetestutil.RunImplicitXAFastLeaseEnrollmentScenario(t, ts)
+	})
 
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	_ = ts.Stop(stopCtx)

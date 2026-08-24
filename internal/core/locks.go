@@ -136,6 +136,14 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (res *Acquire
 	leaseID := xid.New().String()
 	if txnID == "" {
 		txnID = xid.New().String()
+	} else {
+		rec, err := s.promoteImplicitTxn(ctx, txnID)
+		if err != nil {
+			return nil, fmt.Errorf("promote implicit transaction: %w", err)
+		}
+		if rec != nil && rec.Implicit && rec.State != TxnStatePending {
+			return nil, Failure{Code: "txn_decided", Detail: "transaction already decided", HTTPStatus: http.StatusConflict}
+		}
 	}
 	backoff := newAcquireBackoff()
 	triedFastCreate := false
@@ -162,6 +170,13 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (res *Acquire
 			fastMeta.UpdatedAtUnix = now.Unix()
 			newMetaETag, err := s.store.StoreMeta(commitCtx, namespace, keyComponent, fastMeta, "")
 			if err == nil {
+				if txnExplicit {
+					if _, _, err := s.enlistTxnParticipant(commitCtx, txnID, namespace, keyComponent, fastMeta.Lease.ExpiresAtUnix); err != nil {
+						return nil, plan.Wait(fmt.Errorf("register txn participant: %w", err))
+					}
+				} else if err := s.registerImplicitTxnParticipant(commitCtx, txnID, namespace, keyComponent, fastMeta.Lease.ExpiresAtUnix); err != nil {
+					return nil, plan.Wait(fmt.Errorf("register implicit txn participant: %w", err))
+				}
 				if waitErr := plan.Wait(nil); waitErr != nil {
 					return nil, waitErr
 				}
@@ -296,6 +311,19 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (res *Acquire
 				continue
 			}
 			return nil, plan.Wait(fmt.Errorf("store meta: %w", err))
+		}
+		if txnExplicit {
+			if _, _, err := s.enlistTxnParticipant(commitCtx, txnID, namespace, keyComponent, meta.Lease.ExpiresAtUnix); err != nil {
+				if creationMu != nil {
+					creationMu.Unlock()
+				}
+				return nil, plan.Wait(fmt.Errorf("register txn participant: %w", err))
+			}
+		} else if err := s.registerImplicitTxnParticipant(commitCtx, txnID, namespace, keyComponent, meta.Lease.ExpiresAtUnix); err != nil {
+			if creationMu != nil {
+				creationMu.Unlock()
+			}
+			return nil, plan.Wait(fmt.Errorf("register implicit txn participant: %w", err))
 		}
 		if waitErr := plan.Wait(nil); waitErr != nil {
 			if creationMu != nil {
@@ -500,8 +528,12 @@ func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (res *Release
 	}
 	keyComponent := relativeKey(namespace, storageKey)
 	kindLabel = leaseKindLabel(keyComponent)
-	knownMeta := cmd.KnownMeta
-	knownMetaETag := cmd.KnownMetaETag
+	// A transaction coordinator can apply a decision after the SDK last
+	// observed this lease. Do not let a cached pre-promotion or pre-decision
+	// metadata snapshot choose the release path: an implicit-XA lease must be
+	// resolved against the authoritative stored metadata.
+	knownMeta := (*storage.Meta)(nil)
+	knownMetaETag := ""
 
 	for {
 		plan := s.newWritePlan(ctx)
@@ -569,6 +601,23 @@ func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (res *Release
 		if !commit {
 			decision = TxnStateRollback
 		}
+		var implicitRec *TxnRecord
+		if txnExplicit(meta) {
+			var allPrepared bool
+			implicitRec, allPrepared, decision, err = s.prepareImplicitTxnParticipant(ctx, cmd.TxnID, namespace, keyComponent, decision)
+			if err != nil {
+				return nil, plan.Wait(fmt.Errorf("prepare implicit txn participant: %w", err))
+			}
+			if implicitRec != nil && !allPrepared {
+				if s.leaseMetrics != nil {
+					s.leaseMetrics.addActive(kindLabel, -1)
+				}
+				if waitErr := plan.Wait(nil); waitErr != nil {
+					return nil, waitErr
+				}
+				return &ReleaseResult{Released: true}, nil
+			}
+		}
 		if !txnExplicit(meta) && noStagedChanges {
 			// Hot path for normal release: no staged mutation, no explicit txn semantics.
 			// Avoid full txn decision machinery and only clear the lease.
@@ -598,6 +647,9 @@ func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (res *Release
 			if err := s.updateLeaseIndex(commitCtx, namespace, keyComponent, oldExpires, 0); err != nil && s.logger != nil {
 				s.logger.Warn("lease.index.update_failed", "namespace", namespace, "key", keyComponent, "error", err)
 			}
+			if err := s.removeImplicitTxnParticipant(commitCtx, cmd.TxnID, namespace, keyComponent); err != nil && s.logger != nil {
+				s.logger.Warn("txn.implicit.remove_participant_failed", "namespace", namespace, "key", keyComponent, "txn_id", cmd.TxnID, "error", err)
+			}
 			if s.leaseMetrics != nil {
 				s.leaseMetrics.addActive(kindLabel, -1)
 			}
@@ -609,6 +661,9 @@ func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (res *Release
 		if !txnExplicit(meta) {
 			if err := s.applyTxnDecisionForMeta(commitCtx, namespace, keyComponent, cmd.TxnID, decision == TxnStateCommit, meta, metaETag); err != nil {
 				return nil, plan.Wait(err)
+			}
+			if err := s.removeImplicitTxnParticipant(commitCtx, cmd.TxnID, namespace, keyComponent); err != nil && s.logger != nil {
+				s.logger.Warn("txn.implicit.remove_participant_failed", "namespace", namespace, "key", keyComponent, "txn_id", cmd.TxnID, "error", err)
 			}
 			if s.leaseMetrics != nil {
 				s.leaseMetrics.addActive(kindLabel, -1)
@@ -631,6 +686,10 @@ func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (res *Release
 					Key:         keyComponent,
 					BackendHash: s.backendHash,
 				}},
+			}
+			if implicitRec != nil {
+				rec = *implicitRec
+				rec.State = decision
 			}
 			applyCtx := withTxnApplyHint(ctx, namespace, keyComponent, meta, metaETag)
 			state, err := s.tcDecider.Decide(applyCtx, rec)

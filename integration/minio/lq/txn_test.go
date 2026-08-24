@@ -48,6 +48,10 @@ func TestMinioQueueTxnDecision(t *testing.T) {
 		queuetestutil.InstallWatchdog(t, "minio-txn-mixed-rollback", 18*time.Second)
 		queuetestutil.RunQueueTxnMixedKeyScenario(t, ts, false)
 	})
+	t.Run("ImplicitXAFirstLeaseEnrollment", func(t *testing.T) {
+		queuetestutil.InstallWatchdog(t, "minio-implicit-xa-first-lease", 18*time.Second)
+		queuetestutil.RunImplicitXAFastLeaseEnrollmentScenario(t, ts)
+	})
 
 	t.Run("ReplayCommit", func(t *testing.T) {
 		queuetestutil.InstallWatchdog(t, "minio-txn-replay-commit", 20*time.Second)

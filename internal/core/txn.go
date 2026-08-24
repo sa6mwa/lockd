@@ -18,6 +18,7 @@ import (
 
 const (
 	txnNamespace            = ".txns"
+	implicitTxnNamespace    = ".implicit-txns"
 	txnDecisionNamespace    = ".txn-decisions"
 	txnDecisionMarkerPrefix = "m"
 	txnDecisionIndexPrefix  = "e"
@@ -108,12 +109,20 @@ type TxnParticipant struct {
 	BackendHash string `json:"backend_hash,omitempty"`
 	// Applied tracks whether the txn decision has been applied for this participant.
 	Applied bool `json:"applied,omitempty"`
+	// Prepared records that this participant has released its implicit-XA lease.
+	// A commit decision is not made until every enrolled implicit participant is prepared.
+	Prepared bool `json:"prepared,omitempty"`
+	// Outcome is the commit or rollback vote supplied when the participant prepared.
+	Outcome TxnState `json:"outcome,omitempty"`
 }
 
 // TxnRecord is the durable coordination record for a local transaction.
 type TxnRecord struct {
-	TxnID         string           `json:"txn_id"`
-	State         TxnState         `json:"state"`
+	TxnID string   `json:"txn_id"`
+	State TxnState `json:"state"`
+	// Implicit identifies a transaction seeded by a server-minted XID. It becomes
+	// XA only when that XID is supplied to a later acquire.
+	Implicit      bool             `json:"implicit,omitempty"`
 	Participants  []TxnParticipant `json:"participants,omitempty"`
 	ExpiresAtUnix int64            `json:"expires_at_unix,omitempty"`
 	TCTerm        uint64           `json:"tc_term,omitempty"`
@@ -123,6 +132,22 @@ type TxnRecord struct {
 
 func (s *Service) loadTxnRecord(ctx context.Context, txnID string) (*TxnRecord, string, error) {
 	obj, err := s.store.GetObject(ctx, txnNamespace, txnID)
+	if err != nil {
+		return nil, "", err
+	}
+	defer obj.Reader.Close()
+	var rec TxnRecord
+	if err := json.NewDecoder(obj.Reader).Decode(&rec); err != nil {
+		return nil, "", err
+	}
+	if rec.TxnID == "" {
+		rec.TxnID = txnID
+	}
+	return &rec, obj.Info.ETag, nil
+}
+
+func (s *Service) loadImplicitTxnRecord(ctx context.Context, txnID string) (*TxnRecord, string, error) {
+	obj, err := s.store.GetObject(ctx, implicitTxnNamespace, txnID)
 	if err != nil {
 		return nil, "", err
 	}
@@ -147,6 +172,21 @@ func (s *Service) putTxnRecord(ctx context.Context, rec *TxnRecord, expectedETag
 		return "", err
 	}
 	info, err := s.store.PutObject(ctx, txnNamespace, rec.TxnID, bytes.NewReader(buf.Bytes()), storage.PutObjectOptions{
+		ExpectedETag: expectedETag,
+		ContentType:  storage.ContentTypeJSON,
+	})
+	if err != nil {
+		return "", err
+	}
+	return info.ETag, nil
+}
+
+func (s *Service) putImplicitTxnRecord(ctx context.Context, rec *TxnRecord, expectedETag string) (string, error) {
+	buf := &bytes.Buffer{}
+	if err := json.NewEncoder(buf).Encode(rec); err != nil {
+		return "", err
+	}
+	info, err := s.store.PutObject(ctx, implicitTxnNamespace, rec.TxnID, bytes.NewReader(buf.Bytes()), storage.PutObjectOptions{
 		ExpectedETag: expectedETag,
 		ContentType:  storage.ContentTypeJSON,
 	})
@@ -199,10 +239,237 @@ func mergeParticipants(dst []TxnParticipant, src []TxnParticipant) []TxnParticip
 			if p.Applied && !dst[idx].Applied {
 				dst[idx].Applied = true
 			}
+			if p.Prepared && !dst[idx].Prepared {
+				dst[idx].Prepared = true
+				dst[idx].Outcome = p.Outcome
+			}
 		}
 	}
 	sortParticipants(dst)
 	return dst
+}
+
+// registerImplicitTxnParticipant records the lease that minted an XID without
+// making its normal single-lease release path coordinate through the TC. The
+// durable membership lets a later acquire presenting the XID promote the
+// original lease into the same XA transaction.
+func (s *Service) registerImplicitTxnParticipant(ctx context.Context, txnID, namespace, key string, leaseExpires int64) error {
+	p := TxnParticipant{Namespace: namespace, Key: key, BackendHash: s.backendHash}
+	for {
+		rec, etag, err := s.loadImplicitTxnRecord(ctx, txnID)
+		if err != nil {
+			if errors.Is(err, storage.ErrNotImplemented) {
+				return nil
+			}
+			if !errors.Is(err, storage.ErrNotFound) {
+				return err
+			}
+			rec = &TxnRecord{
+				TxnID:         txnID,
+				State:         TxnStatePending,
+				Implicit:      true,
+				Participants:  []TxnParticipant{p},
+				CreatedAtUnix: s.clock.Now().Unix(),
+			}
+		} else {
+			if rec.State != TxnStatePending {
+				return Failure{Code: "txn_decided", Detail: "transaction already decided", HTTPStatus: http.StatusConflict}
+			}
+			rec.Implicit = true
+			rec.Participants = mergeParticipants(rec.Participants, []TxnParticipant{p})
+		}
+		if leaseExpires > rec.ExpiresAtUnix {
+			rec.ExpiresAtUnix = leaseExpires
+		}
+		rec.UpdatedAtUnix = s.clock.Now().Unix()
+		if _, err := s.putImplicitTxnRecord(ctx, rec, etag); err != nil {
+			if errors.Is(err, storage.ErrCASMismatch) {
+				continue
+			}
+			if errors.Is(err, storage.ErrNotImplemented) {
+				return nil
+			}
+			return err
+		}
+		return nil
+	}
+}
+
+// removeImplicitTxnParticipant drops an unused server-minted lease from its
+// pending record. A lease released before implicit XA is activated must not
+// leave a phantom participant that can block a future reuse of its XID.
+func (s *Service) removeImplicitTxnParticipant(ctx context.Context, txnID, namespace, key string) error {
+	p := TxnParticipant{Namespace: namespace, Key: key, BackendHash: s.backendHash}
+	for {
+		rec, etag, err := s.loadImplicitTxnRecord(ctx, txnID)
+		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) || errors.Is(err, storage.ErrNotImplemented) {
+				return nil
+			}
+			return err
+		}
+		if !rec.Implicit || rec.State != TxnStatePending {
+			return nil
+		}
+		idx := participantIndex(rec.Participants, p)
+		if idx == -1 {
+			return nil
+		}
+		rec.Participants = append(rec.Participants[:idx], rec.Participants[idx+1:]...)
+		if len(rec.Participants) == 0 {
+			if err := s.store.DeleteObject(ctx, implicitTxnNamespace, txnID, storage.DeleteObjectOptions{ExpectedETag: etag, IgnoreNotFound: true}); err != nil {
+				if errors.Is(err, storage.ErrCASMismatch) {
+					continue
+				}
+				return err
+			}
+			return nil
+		}
+		rec.UpdatedAtUnix = s.clock.Now().Unix()
+		if _, err := s.putImplicitTxnRecord(ctx, rec, etag); err != nil {
+			if errors.Is(err, storage.ErrCASMismatch) {
+				continue
+			}
+			return err
+		}
+		return nil
+	}
+}
+
+// promoteImplicitTxn upgrades the server-minted participants to XA before a
+// later acquire using the minted XID can be acknowledged. This closes the
+// window in which the first lease could publish staged work independently.
+func (s *Service) promoteImplicitTxn(ctx context.Context, txnID string) (*TxnRecord, error) {
+	rec, seedETag, err := s.loadImplicitTxnRecord(ctx, txnID)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) || errors.Is(err, storage.ErrNotImplemented) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if !rec.Implicit || rec.State != TxnStatePending {
+		return rec, nil
+	}
+	for _, participant := range rec.Participants {
+		if participant.BackendHash != "" && s.backendHash != "" && participant.BackendHash != s.backendHash {
+			continue
+		}
+		for {
+			metaRes, err := s.store.LoadMeta(ctx, participant.Namespace, participant.Key)
+			if err != nil {
+				if errors.Is(err, storage.ErrNotFound) {
+					break
+				}
+				return nil, err
+			}
+			meta := metaRes.Meta
+			if meta.Lease == nil || meta.Lease.TxnID != txnID || meta.Lease.TxnExplicit {
+				break
+			}
+			meta.Lease.TxnExplicit = true
+			meta.UpdatedAtUnix = s.clock.Now().Unix()
+			if _, err := s.store.StoreMeta(ctx, participant.Namespace, participant.Key, meta, metaRes.ETag); err != nil {
+				if errors.Is(err, storage.ErrCASMismatch) {
+					continue
+				}
+				return nil, err
+			}
+			break
+		}
+	}
+	active, err := s.activateImplicitTxn(ctx, rec)
+	if err != nil {
+		return nil, err
+	}
+	if s.tcDecider != nil {
+		if err := s.tcDecider.Enlist(ctx, *active); err != nil {
+			return nil, err
+		}
+	}
+	if err := s.store.DeleteObject(ctx, implicitTxnNamespace, txnID, storage.DeleteObjectOptions{ExpectedETag: seedETag, IgnoreNotFound: true}); err != nil && !errors.Is(err, storage.ErrCASMismatch) {
+		return nil, err
+	}
+	return active, nil
+}
+
+// activateImplicitTxn moves the private server-minted seed into the regular
+// coordinator namespace only after a second participant reuses its XID.
+func (s *Service) activateImplicitTxn(ctx context.Context, seed *TxnRecord) (*TxnRecord, error) {
+	if seed == nil {
+		return nil, nil
+	}
+	for {
+		rec, etag, err := s.loadTxnRecord(ctx, seed.TxnID)
+		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				rec = &TxnRecord{TxnID: seed.TxnID, State: TxnStatePending, Implicit: true, CreatedAtUnix: s.clock.Now().Unix()}
+			} else if errors.Is(err, storage.ErrNotImplemented) {
+				return seed, nil
+			} else {
+				return nil, err
+			}
+		}
+		if rec.State != TxnStatePending {
+			return rec, nil
+		}
+		rec.Implicit = true
+		rec.Participants = mergeParticipants(rec.Participants, seed.Participants)
+		if seed.ExpiresAtUnix > rec.ExpiresAtUnix {
+			rec.ExpiresAtUnix = seed.ExpiresAtUnix
+		}
+		rec.UpdatedAtUnix = s.clock.Now().Unix()
+		if _, err := s.putTxnRecord(ctx, rec, etag); err != nil {
+			if errors.Is(err, storage.ErrCASMismatch) {
+				continue
+			}
+			return nil, err
+		}
+		return rec, nil
+	}
+}
+
+// prepareImplicitTxnParticipant records a release vote. Commit waits for all
+// participants so no staged data becomes public while another lease remains
+// active; any rollback vote makes the final decision a rollback.
+func (s *Service) prepareImplicitTxnParticipant(ctx context.Context, txnID, namespace, key string, outcome TxnState) (*TxnRecord, bool, TxnState, error) {
+	p := TxnParticipant{Namespace: namespace, Key: key, BackendHash: s.backendHash}
+	for {
+		rec, etag, err := s.loadTxnRecord(ctx, txnID)
+		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) || errors.Is(err, storage.ErrNotImplemented) {
+				return nil, false, "", nil
+			}
+			return nil, false, "", err
+		}
+		if !rec.Implicit || rec.State != TxnStatePending {
+			return rec, true, rec.State, nil
+		}
+		idx := participantIndex(rec.Participants, p)
+		if idx == -1 {
+			return nil, false, "", Failure{Code: "txn_participant_missing", Detail: "lease is not enrolled in transaction", HTTPStatus: http.StatusConflict}
+		}
+		rec.Participants[idx].Prepared = true
+		rec.Participants[idx].Outcome = outcome
+		allPrepared := true
+		decision := TxnStateCommit
+		for _, participant := range rec.Participants {
+			if !participant.Prepared {
+				allPrepared = false
+				break
+			}
+			if participant.Outcome == TxnStateRollback {
+				decision = TxnStateRollback
+			}
+		}
+		rec.UpdatedAtUnix = s.clock.Now().Unix()
+		if _, err := s.putTxnRecord(ctx, rec, etag); err != nil {
+			if errors.Is(err, storage.ErrCASMismatch) {
+				continue
+			}
+			return nil, false, "", err
+		}
+		return rec, allPrepared, decision, nil
+	}
 }
 
 func (s *Service) normalizeParticipants(list []TxnParticipant) []TxnParticipant {
@@ -385,6 +652,8 @@ func (s *Service) registerTxnParticipant(ctx context.Context, txnID, namespace, 
 				Participants:  []TxnParticipant{p},
 				CreatedAtUnix: now,
 			}
+		} else if rec.State != TxnStatePending {
+			return rec, etag, Failure{Code: "txn_decided", Detail: "transaction already decided", HTTPStatus: http.StatusConflict}
 		} else if idx := participantIndex(rec.Participants, p); idx == -1 {
 			rec.Participants = append(rec.Participants, p)
 		} else if rec.Participants[idx].BackendHash == "" && p.BackendHash != "" {

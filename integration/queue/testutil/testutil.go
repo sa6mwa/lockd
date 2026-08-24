@@ -1970,6 +1970,75 @@ func waitForQueueStateObject(ctx context.Context, backend storage.Backend, names
 	}
 }
 
+// RunImplicitXAFastLeaseEnrollmentScenario verifies that a server-minted XID
+// promotes its first lease when a later acquire uses the XID. Releasing the
+// first lease must leave both staged documents private until the final lease
+// releases and drives the transaction decision.
+func RunImplicitXAFastLeaseEnrollmentScenario(t testing.TB, ts *lockd.TestServer) {
+	t.Helper()
+	ensureActiveServer(t, ts)
+	cli := ts.Client
+	if cli == nil {
+		t.Fatalf("test server missing client")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	keyA := fmt.Sprintf("implicit-xa-a-%d", time.Now().UnixNano())
+	keyB := fmt.Sprintf("implicit-xa-b-%d", time.Now().UnixNano())
+	leaseA, err := cli.Acquire(ctx, api.AcquireRequest{
+		Namespace: namespaces.Default, Key: keyA, Owner: "implicit-xa-a", TTLSeconds: 30, BlockSecs: lockdclient.BlockWaitForever,
+	})
+	if err != nil {
+		t.Fatalf("acquire first implicit lease: %v", err)
+	}
+	leaseB, err := cli.Acquire(ctx, api.AcquireRequest{
+		Namespace: namespaces.Default, Key: keyB, Owner: "implicit-xa-b", TTLSeconds: 30, TxnID: leaseA.TxnID, BlockSecs: lockdclient.BlockWaitForever,
+	})
+	if err != nil {
+		t.Fatalf("acquire second implicit participant: %v", err)
+	}
+	if err := leaseA.Save(ctx, map[string]any{"value": "a"}); err != nil {
+		t.Fatalf("stage first implicit participant: %v", err)
+	}
+	if err := leaseB.Save(ctx, map[string]any{"value": "b"}); err != nil {
+		t.Fatalf("stage second implicit participant: %v", err)
+	}
+	if err := leaseA.Release(ctx); err != nil {
+		t.Fatalf("release first implicit participant: %v", err)
+	}
+	for _, key := range []string{keyA, keyB} {
+		res, err := cli.Get(ctx, key,
+			lockdclient.WithGetNamespace(namespaces.Default),
+			lockdclient.WithGetPublicDisabled(false),
+		)
+		if err != nil {
+			t.Fatalf("public get %s after first release: %v", key, err)
+		}
+		if res.HasState {
+			_ = res.Close()
+			t.Fatalf("staged state for %s became public before all participants released", key)
+		}
+	}
+	if err := leaseB.Release(ctx); err != nil {
+		t.Fatalf("release second implicit participant: %v", err)
+	}
+	for _, key := range []string{keyA, keyB} {
+		res, err := cli.Get(ctx, key,
+			lockdclient.WithGetNamespace(namespaces.Default),
+			lockdclient.WithGetPublicDisabled(false),
+		)
+		if err != nil {
+			t.Fatalf("public get %s after implicit commit: %v", key, err)
+		}
+		if !res.HasState {
+			t.Fatalf("committed state for %s missing after all participants released", key)
+		}
+		if err := res.Close(); err != nil {
+			t.Fatalf("close public response for %s: %v", key, err)
+		}
+	}
+}
+
 // RunQueueTxnMixedKeyScenario enlists two keys and a queue message in the same
 // txn and asserts commit (writes + ACK) or rollback (no writes + NACK).
 func RunQueueTxnMixedKeyScenario(t testing.TB, ts *lockd.TestServer, commit bool) {

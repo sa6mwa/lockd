@@ -119,6 +119,11 @@ func runMemQueueBasics(t *testing.T, mode memQueueMode) {
 		queuetestutil.RunQueueTxnMixedKeyScenario(t, ts, false)
 	})
 
+	t.Run("ImplicitXAFirstLeaseEnrollment", func(t *testing.T) {
+		queuetestutil.InstallWatchdog(t, "mem-implicit-xa-first-lease", 15*time.Second)
+		queuetestutil.RunImplicitXAFastLeaseEnrollmentScenario(t, ts)
+	})
+
 	t.Run("TxnReplayCommit", func(t *testing.T) {
 		queuetestutil.InstallWatchdog(t, "mem-txn-replay-commit", 15*time.Second)
 		queuetestutil.RunQueueTxnReplayScenario(t, cfg, startMemQueueServerWithOptions, true)

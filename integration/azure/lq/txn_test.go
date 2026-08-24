@@ -50,6 +50,10 @@ func TestAzureQueueTxnDecision(t *testing.T) {
 		queuetestutil.InstallWatchdog(t, "azure-txn-mixed-rollback", 20*time.Second)
 		queuetestutil.RunQueueTxnMixedKeyScenario(t, ts, false)
 	})
+	t.Run("ImplicitXAFirstLeaseEnrollment", func(t *testing.T) {
+		queuetestutil.InstallWatchdog(t, "azure-implicit-xa-first-lease", 20*time.Second)
+		queuetestutil.RunImplicitXAFastLeaseEnrollmentScenario(t, ts)
+	})
 
 	t.Run("ReplayCommit", func(t *testing.T) {
 		queuetestutil.InstallWatchdog(t, "azure-txn-replay-commit", 25*time.Second)

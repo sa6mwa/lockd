@@ -51,6 +51,10 @@ func TestAWSQueueTxnDecision(t *testing.T) {
 		queuetestutil.InstallWatchdog(t, "aws-txn-mixed-rollback", 20*time.Second)
 		queuetestutil.RunQueueTxnMixedKeyScenario(t, ts, false)
 	})
+	t.Run("ImplicitXAFirstLeaseEnrollment", func(t *testing.T) {
+		queuetestutil.InstallWatchdog(t, "aws-implicit-xa-first-lease", 20*time.Second)
+		queuetestutil.RunImplicitXAFastLeaseEnrollmentScenario(t, ts)
+	})
 
 	t.Run("ReplayCommit", func(t *testing.T) {
 		queuetestutil.InstallWatchdog(t, "aws-txn-replay-commit", replayWatchdog)

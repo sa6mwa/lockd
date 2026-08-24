@@ -624,8 +624,19 @@ func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (res *Release
 		if !commit {
 			decision = TxnStateRollback
 		}
+		coordinatedTxn := txnExplicit(meta)
+		promoted, _, promotedErr := s.loadTxnRecord(commitCtx, cmd.TxnID)
+		if promotedErr != nil && !errors.Is(promotedErr, storage.ErrNotFound) && !errors.Is(promotedErr, storage.ErrNotImplemented) {
+			return nil, plan.Wait(fmt.Errorf("load transaction coordinator: %w", promotedErr))
+		}
+		if promoted != nil && promoted.Implicit {
+			if promoted.State == TxnStatePending && promoted.PromotionPending {
+				return nil, plan.Wait(Failure{Code: "txn_pending", Detail: "implicit transaction promotion is still enrolling", HTTPStatus: http.StatusConflict})
+			}
+			coordinatedTxn = true
+		}
 		var implicitRec *TxnRecord
-		if txnExplicit(meta) {
+		if coordinatedTxn {
 			var allPrepared bool
 			implicitRec, allPrepared, decision, err = s.prepareImplicitTxnParticipant(ctx, cmd.TxnID, namespace, keyComponent, decision)
 			if err != nil {
@@ -641,7 +652,7 @@ func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (res *Release
 				return &ReleaseResult{Released: true}, nil
 			}
 		}
-		if !txnExplicit(meta) && noStagedChanges {
+		if !coordinatedTxn && noStagedChanges {
 			// Hot path for normal release: no staged mutation, no explicit txn semantics.
 			// Avoid full txn decision machinery and only clear the lease.
 			oldExpires := int64(0)
@@ -681,7 +692,7 @@ func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (res *Release
 			}
 			return &ReleaseResult{Released: true, MetaCleared: true}, nil
 		}
-		if !txnExplicit(meta) {
+		if !coordinatedTxn {
 			if err := s.applyTxnDecisionForMeta(commitCtx, namespace, keyComponent, cmd.TxnID, decision == TxnStateCommit, meta, metaETag); err != nil {
 				return nil, plan.Wait(err)
 			}

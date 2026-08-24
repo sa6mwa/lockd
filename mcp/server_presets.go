@@ -13,8 +13,10 @@ import (
 	mcpauth "github.com/modelcontextprotocol/go-sdk/auth"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
 	presetcfg "pkt.systems/lockd/mcp/preset"
+	"pkt.systems/lql"
 )
 
 type toolSurface struct {
@@ -220,8 +222,12 @@ func (s *server) addPresetQueryTool(srv *mcpsdk.Server, def presetcfg.Definition
 		OutputSchema: rt.queryOutput,
 	}
 	mcpsdk.AddTool(srv, tool, withObservedTool(s, name, func(ctx context.Context, req *mcpsdk.CallToolRequest, input map[string]any) (*mcpsdk.CallToolResult, map[string]any, error) {
+		selector, err := presetScopedSelector(mapString(input, "query"), rt.kind)
+		if err != nil {
+			return nil, nil, err
+		}
 		_, out, err := s.handleQueryTool(ctx, req, queryToolInput{
-			Query:     presetScopedQuery(mapString(input, "query"), rt.kind),
+			selector:  &selector,
 			Cursor:    mapString(input, "cursor"),
 			Limit:     mapInt(input, "limit"),
 			Namespace: rt.kind.Namespace,
@@ -229,9 +235,11 @@ func (s *server) addPresetQueryTool(srv *mcpsdk.Server, def presetcfg.Definition
 		if err != nil {
 			return nil, nil, err
 		}
-		result := map[string]any{
-			"keys": out.Keys,
+		keys := out.Keys
+		if keys == nil {
+			keys = []string{}
 		}
+		result := map[string]any{"keys": keys}
 		if strings.TrimSpace(out.Cursor) != "" {
 			result["cursor"] = out.Cursor
 		}
@@ -671,13 +679,23 @@ func presetStoredDocumentFromInput(kind presetcfg.Kind, input map[string]any) ma
 	return out
 }
 
-func presetScopedQuery(expr string, kind presetcfg.Kind) string {
-	filter := fmt.Sprintf("/_lockd_kind=%q", kind.Name)
+func presetScopedSelector(expr string, kind presetcfg.Kind) (api.Selector, error) {
+	filter, err := lql.ParseSelectorString(fmt.Sprintf("/_lockd_kind=%q", kind.Name))
+	if err != nil {
+		return api.Selector{}, fmt.Errorf("parse preset kind selector: %w", err)
+	}
 	expr = strings.TrimSpace(expr)
 	if expr == "" {
-		return filter
+		return filter, nil
 	}
-	return filter + "," + expr
+	user, err := lql.ParseSelectorString(expr)
+	if err != nil {
+		return api.Selector{}, err
+	}
+	// Keep the discriminator in an outer AND node. LQL accepts indexed input
+	// clauses (for example and.0.*), which would otherwise overwrite a raw
+	// prepended filter that occupies the same index.
+	return api.Selector{And: []api.Selector{filter, user}}, nil
 }
 
 func stripPresetInternalFields(document map[string]any) map[string]any {

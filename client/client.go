@@ -7504,7 +7504,9 @@ func (c *Client) finalizeManagedConsumerMessage(msg *QueueMessage, handlerErr, e
 		}
 		return errors.Join(handlerErr, extendErr, handlerCtxErr)
 	}
-	reqCtx, cancel := msg.handle.client.requestContextNoTimeout(context.Background())
+	// Settlement runs after the handler context may already be cancelled, but it
+	// must still be bounded so managed-consumer shutdown cannot hang forever.
+	reqCtx, cancel := msg.handle.client.closeContext()
 	defer cancel()
 	if handlerErr == nil {
 		if extendErr != nil {

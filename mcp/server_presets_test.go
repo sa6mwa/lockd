@@ -432,7 +432,7 @@ func TestPresetQueryFiltersSharedNamespaceByKind(t *testing.T) {
 		},
 		{
 			name: "memory.bookmark.state.put",
-			args: map[string]any{"key": "bookmark-1", "title": "Project Plan", "url": "https://example.com/plan"},
+			args: map[string]any{"key": "bookmark-1", "title": "Bypass", "url": "https://example.com/plan"},
 		},
 	} {
 		res, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{Name: tc.name, Arguments: tc.args})
@@ -464,6 +464,30 @@ func TestPresetQueryFiltersSharedNamespaceByKind(t *testing.T) {
 	}
 	if len(keys) != 1 || keys[0] != "bookmark-1" {
 		t.Fatalf("bookmark query keys=%v want [bookmark-1]", keys)
+	}
+
+	bypassQuery, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{
+		Name: "memory.note.query",
+		Arguments: map[string]any{
+			"query": "and.0.or.0.eq{field=/title,value=Bypass}",
+		},
+	})
+	if err != nil {
+		t.Fatalf("cross-kind query transport error: %v", err)
+	}
+	if bypassQuery.IsError {
+		t.Fatalf("cross-kind query returned tool error: %+v", bypassQuery)
+	}
+	bypassContent, ok := bypassQuery.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("cross-kind query content type = %T", bypassQuery.StructuredContent)
+	}
+	bypassKeys, ok := bypassContent["keys"].([]any)
+	if !ok {
+		t.Fatalf("cross-kind query keys = %#v", bypassContent["keys"])
+	}
+	if len(bypassKeys) != 0 {
+		t.Fatalf("cross-kind query leaked keys=%v", bypassKeys)
 	}
 
 	wrongGet, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{

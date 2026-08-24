@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,6 +24,14 @@ type promotionOrderingBackend struct {
 	storage.Backend
 	txnID                      string
 	sawExplicitLeaseWithoutTxn bool
+}
+
+type promotionBarrierBackend struct {
+	storage.Backend
+	txnID   string
+	started chan struct{}
+	resume  chan struct{}
+	once    sync.Once
 }
 
 type failingImplicitEnrollmentBackend struct {
@@ -44,6 +53,18 @@ func (b *promotionOrderingBackend) StoreMeta(ctx context.Context, namespace, key
 			b.sawExplicitLeaseWithoutTxn = true
 		} else {
 			_ = obj.Reader.Close()
+		}
+	}
+	return b.Backend.StoreMeta(ctx, namespace, key, meta, expectedETag)
+}
+
+func (b *promotionBarrierBackend) StoreMeta(ctx context.Context, namespace, key string, meta *storage.Meta, expectedETag string) (string, error) {
+	if meta != nil && meta.Lease != nil && meta.Lease.TxnID == b.txnID && meta.Lease.TxnExplicit {
+		b.once.Do(func() { close(b.started) })
+		select {
+		case <-b.resume:
+		case <-ctx.Done():
+			return "", ctx.Err()
 		}
 	}
 	return b.Backend.StoreMeta(ctx, namespace, key, meta, expectedETag)
@@ -404,6 +425,102 @@ func TestPromoteImplicitTxnCreatesCoordinatorBeforeMarkingLeaseExplicit(t *testi
 	}
 	if rec == nil || !rec.Implicit || rec.State != TxnStatePending {
 		t.Fatalf("unexpected promoted transaction: %+v", rec)
+	}
+}
+
+func TestReleaseWaitsForImplicitPromotionEnrollment(t *testing.T) {
+	ctx := context.Background()
+	store := &promotionBarrierBackend{
+		Backend: memory.New(),
+		started: make(chan struct{}),
+		resume:  make(chan struct{}),
+	}
+	svc := New(Config{Store: store, BackendHash: "test-backend", DefaultNamespace: "default"})
+
+	leaseA, err := svc.Acquire(ctx, AcquireCommand{
+		Namespace: "default", Key: "promotion-race-a", Owner: "worker-a", TTLSeconds: 30, BlockSeconds: apiBlockNoWait,
+	})
+	if err != nil {
+		t.Fatalf("acquire seed lease: %v", err)
+	}
+	store.txnID = leaseA.TxnID
+	if _, err := svc.Update(ctx, UpdateCommand{
+		Namespace: leaseA.Namespace, Key: leaseA.Key, LeaseID: leaseA.LeaseID, FencingToken: leaseA.FencingToken, TxnID: leaseA.TxnID,
+		Body: strings.NewReader(`{"value":"a"}`), CompactWriter: func(w io.Writer, r io.Reader, _ int64) error { _, err := io.Copy(w, r); return err },
+	}); err != nil {
+		t.Fatalf("stage seed state: %v", err)
+	}
+
+	leaseBCh := make(chan *AcquireResult, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		leaseB, acquireErr := svc.Acquire(ctx, AcquireCommand{
+			Namespace: "default", Key: "promotion-race-b", Owner: "worker-b", TTLSeconds: 30, BlockSeconds: apiBlockNoWait, TxnID: leaseA.TxnID,
+		})
+		if acquireErr != nil {
+			errCh <- acquireErr
+			return
+		}
+		leaseBCh <- leaseB
+	}()
+	select {
+	case <-store.started:
+	case <-time.After(time.Second):
+		t.Fatal("promotion did not reach first explicit lease")
+	}
+
+	_, err = svc.Release(ctx, ReleaseCommand{
+		Namespace: leaseA.Namespace, Key: leaseA.Key, LeaseID: leaseA.LeaseID, FencingToken: leaseA.FencingToken, TxnID: leaseA.TxnID,
+	})
+	var failure Failure
+	if !errors.As(err, &failure) || failure.Code != "txn_pending" {
+		t.Fatalf("release during promotion error=%v, want txn_pending", err)
+	}
+	got, err := svc.Get(ctx, GetCommand{Namespace: leaseA.Namespace, Key: leaseA.Key, Public: true})
+	if err != nil {
+		t.Fatalf("public get during promotion: %v", err)
+	}
+	if got.Reader != nil {
+		_ = got.Reader.Close()
+	}
+	if !got.NoContent {
+		t.Fatal("release during promotion published staged state")
+	}
+
+	close(store.resume)
+	var leaseB *AcquireResult
+	select {
+	case err := <-errCh:
+		t.Fatalf("acquire second lease: %v", err)
+	case leaseB = <-leaseBCh:
+	case <-time.After(time.Second):
+		t.Fatal("second acquire did not complete after promotion unblocked")
+	}
+	if _, err := svc.Update(ctx, UpdateCommand{
+		Namespace: leaseB.Namespace, Key: leaseB.Key, LeaseID: leaseB.LeaseID, FencingToken: leaseB.FencingToken, TxnID: leaseB.TxnID,
+		Body: strings.NewReader(`{"value":"b"}`), CompactWriter: func(w io.Writer, r io.Reader, _ int64) error { _, err := io.Copy(w, r); return err },
+	}); err != nil {
+		t.Fatalf("stage second state: %v", err)
+	}
+	if _, err := svc.Release(ctx, ReleaseCommand{
+		Namespace: leaseA.Namespace, Key: leaseA.Key, LeaseID: leaseA.LeaseID, FencingToken: leaseA.FencingToken, TxnID: leaseA.TxnID,
+	}); err != nil {
+		t.Fatalf("release seed lease after enrollment: %v", err)
+	}
+	if _, err := svc.Release(ctx, ReleaseCommand{
+		Namespace: leaseB.Namespace, Key: leaseB.Key, LeaseID: leaseB.LeaseID, FencingToken: leaseB.FencingToken, TxnID: leaseB.TxnID,
+	}); err != nil {
+		t.Fatalf("release second lease: %v", err)
+	}
+	for _, key := range []string{leaseA.Key, leaseB.Key} {
+		state, getErr := svc.Get(ctx, GetCommand{Namespace: "default", Key: key, Public: true})
+		if getErr != nil {
+			t.Fatalf("public get %s after commit: %v", key, getErr)
+		}
+		if state.NoContent || state.Reader == nil {
+			t.Fatalf("public state %s missing after commit", key)
+		}
+		_ = state.Reader.Close()
 	}
 }
 

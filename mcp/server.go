@@ -19,6 +19,7 @@ import (
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"pkt.systems/lockd"
+	"pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
 	"pkt.systems/lockd/internal/svcfields"
 	"pkt.systems/lockd/mcp/oauth"
@@ -645,7 +646,8 @@ func (s *server) handleDescribeTool(ctx context.Context, req *mcpsdk.CallToolReq
 }
 
 type queryToolInput struct {
-	Query     string         `json:"query" jsonschema:"LQL query expression (empty string matches all keys). Examples: in{field=/tags,any=planning|finance}, contains{f=/summary,a=\"renewal|key phrase 2\"}, date{field=/updated_at,since=yesterday}, /updated_at>=2025-01-01T00:00:00Z"`
+	Query     string `json:"query" jsonschema:"LQL query expression (empty string matches all keys). Examples: in{field=/tags,any=planning|finance}, contains{f=/summary,a=\"renewal|key phrase 2\"}, date{field=/updated_at,since=yesterday}, /updated_at>=2025-01-01T00:00:00Z"`
+	selector  *api.Selector
 	Namespace string         `json:"namespace,omitempty" jsonschema:"Namespace (defaults to client default namespace, then server default namespace)"`
 	Limit     int            `json:"limit,omitempty" jsonschema:"Maximum rows to return"`
 	Cursor    string         `json:"cursor,omitempty" jsonschema:"Continuation cursor"`
@@ -665,9 +667,11 @@ type queryToolOutput struct {
 func (s *server) handleQueryTool(ctx context.Context, req *mcpsdk.CallToolRequest, input queryToolInput) (*mcpsdk.CallToolResult, queryToolOutput, error) {
 	expr := strings.TrimSpace(input.Query)
 	resolvedNamespace := s.resolveNamespaceForCall(input.Namespace, req)
-	opts := []lockdclient.QueryOption{
-		lockdclient.WithQuery(expr),
-		lockdclient.WithQueryNamespace(resolvedNamespace),
+	opts := []lockdclient.QueryOption{lockdclient.WithQueryNamespace(resolvedNamespace)}
+	if input.selector != nil {
+		opts = append(opts, lockdclient.WithQuerySelector(*input.selector))
+	} else {
+		opts = append(opts, lockdclient.WithQuery(expr))
 	}
 	if input.Limit > 0 {
 		opts = append(opts, lockdclient.WithQueryLimit(input.Limit))

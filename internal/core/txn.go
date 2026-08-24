@@ -122,12 +122,15 @@ type TxnRecord struct {
 	State TxnState `json:"state"`
 	// Implicit identifies a transaction seeded by a server-minted XID. It becomes
 	// XA only when that XID is supplied to a later acquire.
-	Implicit      bool             `json:"implicit,omitempty"`
-	Participants  []TxnParticipant `json:"participants,omitempty"`
-	ExpiresAtUnix int64            `json:"expires_at_unix,omitempty"`
-	TCTerm        uint64           `json:"tc_term,omitempty"`
-	UpdatedAtUnix int64            `json:"updated_at_unix,omitempty"`
-	CreatedAtUnix int64            `json:"created_at_unix,omitempty"`
+	Implicit bool `json:"implicit,omitempty"`
+	// PromotionPending prevents a promoted seed participant from releasing
+	// independently before the acquire that reused its XID is fully enrolled.
+	PromotionPending bool             `json:"promotion_pending,omitempty"`
+	Participants     []TxnParticipant `json:"participants,omitempty"`
+	ExpiresAtUnix    int64            `json:"expires_at_unix,omitempty"`
+	TCTerm           uint64           `json:"tc_term,omitempty"`
+	UpdatedAtUnix    int64            `json:"updated_at_unix,omitempty"`
+	CreatedAtUnix    int64            `json:"created_at_unix,omitempty"`
 }
 
 func (s *Service) loadTxnRecord(ctx context.Context, txnID string) (*TxnRecord, string, error) {
@@ -494,7 +497,13 @@ func (s *Service) activateImplicitTxn(ctx context.Context, seed *TxnRecord) (*Tx
 		rec, etag, err := s.loadTxnRecord(ctx, seed.TxnID)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
-				rec = &TxnRecord{TxnID: seed.TxnID, State: TxnStatePending, Implicit: true, CreatedAtUnix: s.clock.Now().Unix()}
+				rec = &TxnRecord{
+					TxnID:            seed.TxnID,
+					State:            TxnStatePending,
+					Implicit:         true,
+					PromotionPending: true,
+					CreatedAtUnix:    s.clock.Now().Unix(),
+				}
 			} else if errors.Is(err, storage.ErrNotImplemented) {
 				return seed, nil
 			} else {
@@ -548,6 +557,9 @@ func (s *Service) prepareImplicitTxnParticipant(ctx context.Context, txnID, name
 		}
 		if rec.State != TxnStatePending {
 			return rec, true, rec.State, nil
+		}
+		if rec.PromotionPending {
+			return nil, false, "", Failure{Code: "txn_pending", Detail: "implicit transaction promotion is still enrolling", HTTPStatus: http.StatusConflict}
 		}
 		idx := participantIndex(rec.Participants, p)
 		if idx == -1 {
@@ -805,32 +817,61 @@ func (s *Service) registerTxnParticipant(ctx context.Context, txnID, namespace, 
 	}
 }
 
+// completeImplicitTxnPromotion lifts the release barrier only after the
+// acquire that reused a server-minted XID has been enrolled in the coordinator.
+func (s *Service) completeImplicitTxnPromotion(ctx context.Context, txnID string) (*TxnRecord, string, error) {
+	for {
+		rec, etag, err := s.loadTxnRecord(ctx, txnID)
+		if err != nil {
+			if errors.Is(err, storage.ErrNotImplemented) {
+				return nil, "", nil
+			}
+			return nil, "", err
+		}
+		if !rec.Implicit || !rec.PromotionPending {
+			return rec, etag, nil
+		}
+		if rec.State != TxnStatePending {
+			return rec, etag, Failure{Code: "txn_decided", Detail: "transaction already decided", HTTPStatus: http.StatusConflict}
+		}
+		rec.PromotionPending = false
+		rec.UpdatedAtUnix = s.clock.Now().Unix()
+		newETag, err := s.putTxnRecord(ctx, rec, etag)
+		if errors.Is(err, storage.ErrCASMismatch) {
+			continue
+		}
+		if err != nil {
+			return nil, "", err
+		}
+		return rec, newETag, nil
+	}
+}
+
 func (s *Service) enlistTxnParticipant(ctx context.Context, txnID, namespace, key string, leaseExpires int64) (*TxnRecord, string, error) {
 	rec, etag, err := s.registerTxnParticipant(ctx, txnID, namespace, key, leaseExpires)
 	if err != nil {
 		return rec, etag, err
 	}
-	if s.tcDecider == nil {
-		return rec, etag, nil
+	if s.tcDecider != nil {
+		expiresAt := leaseExpires
+		if rec != nil && rec.ExpiresAtUnix > expiresAt {
+			expiresAt = rec.ExpiresAtUnix
+		}
+		enlist := TxnRecord{
+			TxnID:         txnID,
+			State:         TxnStatePending,
+			ExpiresAtUnix: expiresAt,
+			Participants: []TxnParticipant{{
+				Namespace:   namespace,
+				Key:         key,
+				BackendHash: s.backendHash,
+			}},
+		}
+		if err := s.tcDecider.Enlist(ctx, enlist); err != nil {
+			return rec, etag, err
+		}
 	}
-	expiresAt := leaseExpires
-	if rec != nil && rec.ExpiresAtUnix > expiresAt {
-		expiresAt = rec.ExpiresAtUnix
-	}
-	enlist := TxnRecord{
-		TxnID:         txnID,
-		State:         TxnStatePending,
-		ExpiresAtUnix: expiresAt,
-		Participants: []TxnParticipant{{
-			Namespace:   namespace,
-			Key:         key,
-			BackendHash: s.backendHash,
-		}},
-	}
-	if err := s.tcDecider.Enlist(ctx, enlist); err != nil {
-		return rec, etag, err
-	}
-	return rec, etag, nil
+	return s.completeImplicitTxnPromotion(ctx, txnID)
 }
 
 // decideTxn records the transaction decision using CAS to avoid races.

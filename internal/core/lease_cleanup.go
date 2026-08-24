@@ -15,6 +15,7 @@ func (s *Service) clearExpiredLease(ctx context.Context, namespace, key string, 
 	if meta.Lease.ExpiresAtUnix > now.Unix() {
 		return false, metaETag, nil
 	}
+	expiredLease := *meta.Lease
 	oldExpires := meta.Lease.ExpiresAtUnix
 	meta.Lease = nil
 	if cleanupStaging {
@@ -29,6 +30,11 @@ func (s *Service) clearExpiredLease(ctx context.Context, namespace, key string, 
 	if err := s.updateLeaseIndex(ctx, namespace, key, oldExpires, 0); err != nil {
 		if s.logger != nil && !errors.Is(err, storage.ErrNotImplemented) {
 			s.logger.Warn("lease.index.clear_failed", "namespace", namespace, "key", key, "error", err)
+		}
+	}
+	if !expiredLease.TxnExplicit && expiredLease.TxnID != "" {
+		if err := s.removeImplicitTxnParticipant(ctx, expiredLease.TxnID, namespace, key); err != nil && s.logger != nil {
+			s.logger.Warn("txn.implicit.remove_expired_participant_failed", "namespace", namespace, "key", key, "txn_id", expiredLease.TxnID, "error", err)
 		}
 	}
 	if s.sweeperMetrics != nil {

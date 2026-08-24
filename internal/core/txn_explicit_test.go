@@ -7,8 +7,10 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rs/xid"
+	"pkt.systems/lockd/internal/clock"
 	"pkt.systems/lockd/internal/storage"
 	"pkt.systems/lockd/internal/storage/memory"
 )
@@ -21,6 +23,18 @@ type promotionOrderingBackend struct {
 	storage.Backend
 	txnID                      string
 	sawExplicitLeaseWithoutTxn bool
+}
+
+type failingImplicitEnrollmentBackend struct {
+	storage.Backend
+	fail bool
+}
+
+func (b *failingImplicitEnrollmentBackend) PutObject(ctx context.Context, namespace, key string, body io.Reader, opts storage.PutObjectOptions) (*storage.ObjectInfo, error) {
+	if b.fail && namespace == implicitTxnNamespace {
+		return nil, errors.New("implicit transaction record unavailable")
+	}
+	return b.Backend.PutObject(ctx, namespace, key, body, opts)
 }
 
 func (b *promotionOrderingBackend) StoreMeta(ctx context.Context, namespace, key string, meta *storage.Meta, expectedETag string) (string, error) {
@@ -390,5 +404,127 @@ func TestPromoteImplicitTxnCreatesCoordinatorBeforeMarkingLeaseExplicit(t *testi
 	}
 	if rec == nil || !rec.Implicit || rec.State != TxnStatePending {
 		t.Fatalf("unexpected promoted transaction: %+v", rec)
+	}
+}
+
+func TestAcquireCompensatesFailedImplicitEnrollment(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name     string
+		seedMeta *storage.Meta
+	}{
+		{name: "new key"},
+		{name: "existing metadata", seedMeta: &storage.Meta{Attributes: map[string]string{"preserve": "yes"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &failingImplicitEnrollmentBackend{Backend: memory.New(), fail: true}
+			svc := New(Config{Store: store, BackendHash: "test-backend", DefaultNamespace: "default"})
+			key := "failed-implicit-enrollment"
+			if tc.seedMeta != nil {
+				if _, err := store.StoreMeta(ctx, "default", key, tc.seedMeta, ""); err != nil {
+					t.Fatalf("seed metadata: %v", err)
+				}
+			}
+
+			if _, err := svc.Acquire(ctx, AcquireCommand{
+				Namespace: "default", Key: key, Owner: "worker", TTLSeconds: 30, BlockSeconds: apiBlockNoWait,
+			}); err == nil {
+				t.Fatal("expected implicit enrollment failure")
+			}
+
+			metaRes, err := store.LoadMeta(ctx, "default", key)
+			if tc.seedMeta == nil {
+				if !errors.Is(err, storage.ErrNotFound) {
+					t.Fatalf("failed acquire left metadata behind: %v", err)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("load restored metadata: %v", err)
+				}
+				if metaRes.Meta.Lease != nil || metaRes.Meta.Attributes["preserve"] != "yes" {
+					t.Fatalf("failed acquire did not restore metadata: %+v", metaRes.Meta)
+				}
+			}
+
+			store.fail = false
+			if _, err := svc.Acquire(ctx, AcquireCommand{
+				Namespace: "default", Key: key, Owner: "worker", TTLSeconds: 30, BlockSeconds: apiBlockNoWait,
+			}); err != nil {
+				t.Fatalf("fresh acquire after enrollment failure: %v", err)
+			}
+		})
+	}
+}
+
+func TestPromoteImplicitTxnPrunesExpiredSeedParticipant(t *testing.T) {
+	ctx := context.Background()
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	clk := clock.NewManual(start)
+	svc := newTestServiceWithClock(t, clk)
+
+	seed, err := svc.Acquire(ctx, AcquireCommand{
+		Namespace: "default", Key: "expired-seed", Owner: "seed-worker", TTLSeconds: 1, BlockSeconds: apiBlockNoWait,
+	})
+	if err != nil {
+		t.Fatalf("acquire seed lease: %v", err)
+	}
+	clk.Advance(2 * time.Second)
+
+	participant, err := svc.Acquire(ctx, AcquireCommand{
+		Namespace: "default", Key: "promoted-after-expiry", Owner: "next-worker", TTLSeconds: 30,
+		BlockSeconds: apiBlockNoWait, TxnID: seed.TxnID,
+	})
+	if err != nil {
+		t.Fatalf("acquire using expired seed xid: %v", err)
+	}
+	if _, _, err := svc.loadImplicitTxnRecord(ctx, seed.TxnID); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expired seed record was retained: %v", err)
+	}
+
+	if _, err := svc.Update(ctx, UpdateCommand{
+		Namespace: "default", Key: "promoted-after-expiry", LeaseID: participant.LeaseID,
+		FencingToken: participant.FencingToken, TxnID: participant.TxnID,
+		Body:          strings.NewReader(`{"value":"published"}`),
+		CompactWriter: func(w io.Writer, r io.Reader, _ int64) error { _, err := io.Copy(w, r); return err },
+	}); err != nil {
+		t.Fatalf("stage participant state: %v", err)
+	}
+	if _, err := svc.Release(ctx, ReleaseCommand{
+		Namespace: "default", Key: "promoted-after-expiry", LeaseID: participant.LeaseID,
+		FencingToken: participant.FencingToken, TxnID: participant.TxnID,
+	}); err != nil {
+		t.Fatalf("release participant: %v", err)
+	}
+	got, err := svc.Get(ctx, GetCommand{Namespace: "default", Key: "promoted-after-expiry", Public: true})
+	if err != nil {
+		t.Fatalf("get published state: %v", err)
+	}
+	if got.NoContent || got.Reader == nil {
+		t.Fatal("state remained unpublished after stale seed pruning")
+	}
+	_ = got.Reader.Close()
+}
+
+func TestExpiredImplicitLeaseCleanupRemovesSeedParticipant(t *testing.T) {
+	ctx := context.Background()
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	clk := clock.NewManual(start)
+	svc := newTestServiceWithClock(t, clk)
+
+	seed, err := svc.Acquire(ctx, AcquireCommand{
+		Namespace: "default", Key: "cleanup-expired-seed", Owner: "seed-worker", TTLSeconds: 1, BlockSeconds: apiBlockNoWait,
+	})
+	if err != nil {
+		t.Fatalf("acquire seed lease: %v", err)
+	}
+	clk.Advance(2 * time.Second)
+	if _, err := svc.Get(ctx, GetCommand{
+		Namespace: "default", Key: "cleanup-expired-seed", LeaseID: seed.LeaseID,
+		FencingToken: seed.FencingToken,
+	}); err == nil {
+		t.Fatal("expected expired lease get to fail")
+	}
+	if _, _, err := svc.loadImplicitTxnRecord(ctx, seed.TxnID); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expired lease cleanup retained implicit seed: %v", err)
 	}
 }

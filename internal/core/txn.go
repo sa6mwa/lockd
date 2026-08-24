@@ -367,6 +367,10 @@ func (s *Service) promoteImplicitTxn(ctx context.Context, txnID string) (*TxnRec
 	if !rec.Implicit || rec.State != TxnStatePending {
 		return rec, nil
 	}
+	rec, seedETag, err = s.pruneImplicitTxnParticipants(ctx, rec, seedETag)
+	if err != nil || rec == nil {
+		return rec, err
+	}
 	// Install the coordinator record before exposing any lease as explicit XA.
 	// Release paths can then discover the promotion and coordinate through the
 	// record even when they hold a stale pre-promotion metadata snapshot.
@@ -410,6 +414,74 @@ func (s *Service) promoteImplicitTxn(ctx context.Context, txnID string) (*TxnRec
 		return nil, err
 	}
 	return active, nil
+}
+
+// pruneImplicitTxnParticipants removes local seed participants whose lease has
+// expired or disappeared. A client can no longer prepare those participants,
+// so retaining them would block any later promotion of the minted XID.
+func (s *Service) pruneImplicitTxnParticipants(ctx context.Context, rec *TxnRecord, etag string) (*TxnRecord, string, error) {
+	for rec != nil {
+		participants := make([]TxnParticipant, 0, len(rec.Participants))
+		changed := false
+		for _, participant := range rec.Participants {
+			if participant.BackendHash != "" && s.backendHash != "" && participant.BackendHash != s.backendHash {
+				participants = append(participants, participant)
+				continue
+			}
+			metaRes, err := s.store.LoadMeta(ctx, participant.Namespace, participant.Key)
+			if errors.Is(err, storage.ErrNotFound) {
+				changed = true
+				continue
+			}
+			if err != nil {
+				return nil, "", err
+			}
+			lease := metaRes.Meta.Lease
+			if lease == nil || lease.TxnID != rec.TxnID || lease.ExpiresAtUnix <= s.clock.Now().Unix() {
+				changed = true
+				continue
+			}
+			participants = append(participants, participant)
+		}
+		if !changed {
+			return rec, etag, nil
+		}
+		if len(participants) == 0 {
+			if err := s.store.DeleteObject(ctx, implicitTxnNamespace, rec.TxnID, storage.DeleteObjectOptions{ExpectedETag: etag, IgnoreNotFound: true}); err != nil {
+				if errors.Is(err, storage.ErrCASMismatch) {
+					var loadErr error
+					rec, etag, loadErr = s.loadImplicitTxnRecord(ctx, rec.TxnID)
+					if errors.Is(loadErr, storage.ErrNotFound) {
+						return nil, "", nil
+					}
+					if loadErr != nil {
+						return nil, "", loadErr
+					}
+					continue
+				}
+				return nil, "", err
+			}
+			return nil, "", nil
+		}
+		rec.Participants = participants
+		rec.UpdatedAtUnix = s.clock.Now().Unix()
+		newETag, err := s.putImplicitTxnRecord(ctx, rec, etag)
+		if errors.Is(err, storage.ErrCASMismatch) {
+			rec, etag, err = s.loadImplicitTxnRecord(ctx, rec.TxnID)
+			if errors.Is(err, storage.ErrNotFound) {
+				return nil, "", nil
+			}
+			if err != nil {
+				return nil, "", err
+			}
+			continue
+		}
+		if err != nil {
+			return nil, "", err
+		}
+		return rec, newETag, nil
+	}
+	return nil, "", nil
 }
 
 // activateImplicitTxn moves the private server-minted seed into the regular

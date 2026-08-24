@@ -175,10 +175,10 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (res *Acquire
 			if err == nil {
 				if txnExplicit {
 					if _, _, err := s.enlistTxnParticipant(commitCtx, txnID, namespace, keyComponent, fastMeta.Lease.ExpiresAtUnix); err != nil {
-						return nil, plan.Wait(fmt.Errorf("register txn participant: %w", err))
+						return nil, plan.Wait(s.acquireEnrollmentFailure(commitCtx, namespace, keyComponent, nil, newMetaETag, fmt.Errorf("register txn participant: %w", err)))
 					}
 				} else if err := s.registerImplicitTxnParticipant(commitCtx, txnID, namespace, keyComponent, fastMeta.Lease.ExpiresAtUnix); err != nil {
-					return nil, plan.Wait(fmt.Errorf("register implicit txn participant: %w", err))
+					return nil, plan.Wait(s.acquireEnrollmentFailure(commitCtx, namespace, keyComponent, nil, newMetaETag, fmt.Errorf("register implicit txn participant: %w", err)))
 				}
 				if waitErr := plan.Wait(nil); waitErr != nil {
 					return nil, waitErr
@@ -286,6 +286,7 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (res *Acquire
 			}
 		}
 
+		priorMeta := cloneMeta(*meta)
 		expiresAt := now.Add(ttl).Unix()
 		newFencing := meta.FencingToken + 1
 		meta.FencingToken = newFencing
@@ -320,13 +321,13 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (res *Acquire
 				if creationMu != nil {
 					creationMu.Unlock()
 				}
-				return nil, plan.Wait(fmt.Errorf("register txn participant: %w", err))
+				return nil, plan.Wait(s.acquireEnrollmentFailure(commitCtx, namespace, keyComponent, &priorMeta, newMetaETag, fmt.Errorf("register txn participant: %w", err)))
 			}
 		} else if err := s.registerImplicitTxnParticipant(commitCtx, txnID, namespace, keyComponent, meta.Lease.ExpiresAtUnix); err != nil {
 			if creationMu != nil {
 				creationMu.Unlock()
 			}
-			return nil, plan.Wait(fmt.Errorf("register implicit txn participant: %w", err))
+			return nil, plan.Wait(s.acquireEnrollmentFailure(commitCtx, namespace, keyComponent, &priorMeta, newMetaETag, fmt.Errorf("register implicit txn participant: %w", err)))
 		}
 		if waitErr := plan.Wait(nil); waitErr != nil {
 			if creationMu != nil {
@@ -371,6 +372,22 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (res *Acquire
 		)
 		return res, nil
 	}
+}
+
+// acquireEnrollmentFailure restores the metadata changed by an acquire whose
+// transaction enrollment failed. The caller never receives that lease, so it
+// must not remain installed until its TTL expires.
+func (s *Service) acquireEnrollmentFailure(ctx context.Context, namespace, key string, prior *storage.Meta, writtenETag string, enrollmentErr error) error {
+	var cleanupErr error
+	if prior == nil {
+		cleanupErr = s.store.DeleteMeta(ctx, namespace, key, writtenETag)
+	} else {
+		_, cleanupErr = s.store.StoreMeta(ctx, namespace, key, prior, writtenETag)
+	}
+	if cleanupErr == nil || errors.Is(cleanupErr, storage.ErrNotFound) {
+		return enrollmentErr
+	}
+	return errors.Join(enrollmentErr, fmt.Errorf("compensate failed acquire enrollment: %w", cleanupErr))
 }
 
 // KeepAlive refreshes a lease TTL.

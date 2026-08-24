@@ -10,10 +10,29 @@ import (
 
 	"github.com/rs/xid"
 	"pkt.systems/lockd/internal/storage"
+	"pkt.systems/lockd/internal/storage/memory"
 )
 
 type pendingEmptyDecisionTCDecider struct {
 	last TxnRecord
+}
+
+type promotionOrderingBackend struct {
+	storage.Backend
+	txnID                      string
+	sawExplicitLeaseWithoutTxn bool
+}
+
+func (b *promotionOrderingBackend) StoreMeta(ctx context.Context, namespace, key string, meta *storage.Meta, expectedETag string) (string, error) {
+	if meta != nil && meta.Lease != nil && meta.Lease.TxnID == b.txnID && meta.Lease.TxnExplicit {
+		obj, err := b.GetObject(ctx, txnNamespace, b.txnID)
+		if err != nil {
+			b.sawExplicitLeaseWithoutTxn = true
+		} else {
+			_ = obj.Reader.Close()
+		}
+	}
+	return b.Backend.StoreMeta(ctx, namespace, key, meta, expectedETag)
 }
 
 func (d *pendingEmptyDecisionTCDecider) Enlist(context.Context, TxnRecord) error {
@@ -338,5 +357,38 @@ func TestAcquireRejectsDecidedExplicitTxnWithoutPersistingLease(t *testing.T) {
 		BlockSeconds: apiBlockNoWait,
 	}); err != nil {
 		t.Fatalf("fresh acquire after rejected transaction: %v", err)
+	}
+}
+
+func TestPromoteImplicitTxnCreatesCoordinatorBeforeMarkingLeaseExplicit(t *testing.T) {
+	ctx := context.Background()
+	store := &promotionOrderingBackend{Backend: memory.New()}
+	svc := New(Config{
+		Store:            store,
+		BackendHash:      "test-backend",
+		DefaultNamespace: "default",
+	})
+
+	lease, err := svc.Acquire(ctx, AcquireCommand{
+		Namespace: "default", Key: "promotion-order", Owner: "worker", TTLSeconds: 30,
+		BlockSeconds: apiBlockNoWait,
+	})
+	if err != nil {
+		t.Fatalf("acquire implicit lease: %v", err)
+	}
+	store.txnID = lease.TxnID
+
+	if _, err := svc.promoteImplicitTxn(ctx, lease.TxnID); err != nil {
+		t.Fatalf("promote implicit transaction: %v", err)
+	}
+	if store.sawExplicitLeaseWithoutTxn {
+		t.Fatal("promotion marked a lease explicit before installing its coordinator record")
+	}
+	rec, _, err := svc.loadTxnRecord(ctx, lease.TxnID)
+	if err != nil {
+		t.Fatalf("load promoted transaction: %v", err)
+	}
+	if rec == nil || !rec.Implicit || rec.State != TxnStatePending {
+		t.Fatalf("unexpected promoted transaction: %+v", rec)
 	}
 }

@@ -367,6 +367,18 @@ func (s *Service) promoteImplicitTxn(ctx context.Context, txnID string) (*TxnRec
 	if !rec.Implicit || rec.State != TxnStatePending {
 		return rec, nil
 	}
+	// Install the coordinator record before exposing any lease as explicit XA.
+	// Release paths can then discover the promotion and coordinate through the
+	// record even when they hold a stale pre-promotion metadata snapshot.
+	active, err := s.activateImplicitTxn(ctx, rec)
+	if err != nil {
+		return nil, err
+	}
+	if s.tcDecider != nil {
+		if err := s.tcDecider.Enlist(ctx, *active); err != nil {
+			return nil, err
+		}
+	}
 	for _, participant := range rec.Participants {
 		if participant.BackendHash != "" && s.backendHash != "" && participant.BackendHash != s.backendHash {
 			continue
@@ -392,15 +404,6 @@ func (s *Service) promoteImplicitTxn(ctx context.Context, txnID string) (*TxnRec
 				return nil, err
 			}
 			break
-		}
-	}
-	active, err := s.activateImplicitTxn(ctx, rec)
-	if err != nil {
-		return nil, err
-	}
-	if s.tcDecider != nil {
-		if err := s.tcDecider.Enlist(ctx, *active); err != nil {
-			return nil, err
 		}
 	}
 	if err := s.store.DeleteObject(ctx, implicitTxnNamespace, txnID, storage.DeleteObjectOptions{ExpectedETag: seedETag, IgnoreNotFound: true}); err != nil && !errors.Is(err, storage.ErrCASMismatch) {

@@ -3,12 +3,30 @@ package core
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
 
 	"github.com/rs/xid"
+	"pkt.systems/lockd/internal/storage"
 )
+
+type pendingEmptyDecisionTCDecider struct {
+	last TxnRecord
+}
+
+func (d *pendingEmptyDecisionTCDecider) Enlist(context.Context, TxnRecord) error {
+	return nil
+}
+
+func (d *pendingEmptyDecisionTCDecider) Decide(_ context.Context, rec TxnRecord) (TxnState, error) {
+	d.last = rec
+	if rec.State == "" {
+		return TxnStatePending, nil
+	}
+	return rec.State, nil
+}
 
 func TestServerMintedTxnRegistersImplicitParticipant(t *testing.T) {
 	ctx := context.Background()
@@ -244,5 +262,50 @@ func TestExplicitTxnReleaseUsesRequestedDecision(t *testing.T) {
 	}
 	if err := got.Reader.Close(); err != nil {
 		t.Fatalf("close committed state: %v", err)
+	}
+}
+
+func TestReleaseAfterFinalizedImplicitXADecisionPreservesOutcome(t *testing.T) {
+	ctx := context.Background()
+	svc := newTestService(t)
+	decider := &pendingEmptyDecisionTCDecider{}
+	svc.SetTCDecider(decider)
+
+	leaseA, err := svc.Acquire(ctx, AcquireCommand{
+		Namespace: "default", Key: "finalized-implicit-a", Owner: "worker-a", TTLSeconds: 30, BlockSeconds: apiBlockNoWait,
+	})
+	if err != nil {
+		t.Fatalf("acquire first implicit lease: %v", err)
+	}
+	leaseB, err := svc.Acquire(ctx, AcquireCommand{
+		Namespace: "default", Key: "finalized-implicit-b", Owner: "worker-b", TTLSeconds: 30,
+		BlockSeconds: apiBlockNoWait, TxnID: leaseA.TxnID,
+	})
+	if err != nil {
+		t.Fatalf("acquire second implicit participant: %v", err)
+	}
+	rec, _, err := svc.loadTxnRecord(ctx, leaseA.TxnID)
+	if err != nil {
+		t.Fatalf("load promoted transaction: %v", err)
+	}
+	if rec == nil || !rec.Implicit {
+		t.Fatalf("expected promoted implicit transaction, got %+v", rec)
+	}
+	if _, err := svc.CommitTxn(ctx, *rec); err != nil {
+		t.Fatalf("externally decide implicit transaction: %v", err)
+	}
+	if _, _, err := svc.loadTxnRecord(ctx, leaseA.TxnID); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected finalized transaction record to be removed, got %v", err)
+	}
+
+	if _, err := svc.Release(ctx, ReleaseCommand{
+		Namespace: "default", Key: "finalized-implicit-b", LeaseID: leaseB.LeaseID,
+		FencingToken: leaseB.FencingToken, TxnID: leaseB.TxnID,
+		KnownMeta: leaseB.Meta, KnownMetaETag: leaseB.MetaETag,
+	}); err != nil {
+		t.Fatalf("release with stale finalized implicit-XA lease: %v", err)
+	}
+	if decider.last.State != TxnStateRollback {
+		t.Fatalf("expected stale release to preserve rollback outcome, got %q", decider.last.State)
 	}
 }

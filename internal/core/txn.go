@@ -437,7 +437,12 @@ func (s *Service) prepareImplicitTxnParticipant(ctx context.Context, txnID, name
 		rec, etag, err := s.loadTxnRecord(ctx, txnID)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) || errors.Is(err, storage.ErrNotImplemented) {
-				return nil, false, "", nil
+				// A decided transaction removes its record after all participants
+				// have applied and leaves a decision marker behind. A stale lease
+				// cache may still invoke Release in that state, but must retain its
+				// requested outcome so the coordinator can resolve the marker rather
+				// than treating an empty decision as pending.
+				return nil, true, outcome, nil
 			}
 			return nil, false, "", err
 		}

@@ -140,6 +140,7 @@ OAuth metadata/discovery path behavior:
 - `lockd mcp client list`
 - `lockd mcp client show <client_id>`
 - `lockd mcp client credentials <client_id> [--rotate-secret] [--format env|json]`
+- `lockd mcp client tools-list <client_id> [--out <path>]` writes the effective MCP snapshot as a pretty-printed JSON document stream. It is intentionally not JSONL: each document is valid JSON, but can span multiple physical lines. Use a streaming JSON decoder (including `prettyx`) to consume it.
 - `lockd mcp client add [--name <name>] [--scope ...] [--redirect-uri ...]`
 - `lockd mcp client update <client_id> [--name ...] [--scope ...] [--redirect-uri ...]`
 - `lockd mcp client revoke <client_id>`

@@ -121,6 +121,48 @@ func TestMCPPersistentFlagsReachSubcommands(t *testing.T) {
 	}
 }
 
+func TestMCPClientToolsListDocumentsPrettyJSONStream(t *testing.T) {
+	root := newRootCommand(pslog.NewStructured(context.Background(), io.Discard))
+	toolsListCmd, _, err := root.Find([]string{"mcp", "client", "tools-list"})
+	if err != nil {
+		t.Fatalf("find mcp client tools-list: %v", err)
+	}
+	if !strings.Contains(toolsListCmd.Long, "JSON document stream") || !strings.Contains(toolsListCmd.Long, "not JSONL") {
+		t.Fatalf("tools-list long help does not document stream format: %q", toolsListCmd.Long)
+	}
+	flag := toolsListCmd.Flags().Lookup("out")
+	if flag == nil || !strings.Contains(flag.Usage, "JSON document stream") || !strings.Contains(flag.Usage, "not JSONL") {
+		t.Fatalf("tools-list --out help does not document stream format: %#v", flag)
+	}
+}
+
+func TestWritePrettyXOutputToWritesJSONDocumentStream(t *testing.T) {
+	payload := []byte("{\"first\":1}\n{\"second\":{\"nested\":true}}\n")
+	var out bytes.Buffer
+	if err := writePrettyXOutputTo(context.Background(), payload, &out); err != nil {
+		t.Fatalf("write pretty JSON document stream: %v", err)
+	}
+	if bytes.Count(out.Bytes(), []byte("\n")) <= 2 {
+		t.Fatalf("expected pretty output to span multiple physical lines, got %q", out.String())
+	}
+	dec := json.NewDecoder(&out)
+	for i, want := range []map[string]any{
+		{"first": float64(1)},
+		{"second": map[string]any{"nested": true}},
+	} {
+		var got map[string]any
+		if err := dec.Decode(&got); err != nil {
+			t.Fatalf("decode document %d: %v", i, err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("document %d=%#v want %#v", i, got, want)
+		}
+	}
+	if err := dec.Decode(&map[string]any{}); err != io.EOF {
+		t.Fatalf("expected end of JSON document stream, got %v", err)
+	}
+}
+
 func TestMCPConfigGlobalFallbacks(t *testing.T) {
 	viper.Reset()
 	t.Cleanup(viper.Reset)

@@ -556,6 +556,7 @@ func newMCPClientCommand() *cobra.Command {
 	toolsListCmd := &cobra.Command{
 		Use:               "tools-list <id>",
 		Short:             "Dump the effective MCP tool snapshot for one OAuth client",
+		Long:              "Dump the effective MCP tool snapshot for one OAuth client as a pretty-printed JSON document stream. Each document is valid JSON, but may span multiple physical lines; this output is not JSONL.",
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeMCPOAuthClientIDArg,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -586,7 +587,7 @@ func newMCPClientCommand() *cobra.Command {
 			return writePrettyXOutputTo(ctx, payload, cmd.OutOrStdout())
 		},
 	}
-	toolsListCmd.Flags().StringVarP(&toolsListOutPath, "out", "o", "", "write pretty JSONL output to a file instead of stdout")
+	toolsListCmd.Flags().StringVarP(&toolsListOutPath, "out", "o", "", "write the pretty JSON document stream (not JSONL) to a file instead of stdout")
 	cmd.AddCommand(toolsListCmd)
 
 	var updateName string
@@ -916,7 +917,7 @@ func writePrettyXOutput(ctx context.Context, payload []byte, outPath string) err
 
 func writePrettyXOutputTo(ctx context.Context, payload []byte, out io.Writer) error {
 	if err := mcpPrettyXRunner(ctx, payload, out); err != nil {
-		return fmt.Errorf("format jsonl with prettyx: %w", err)
+		return fmt.Errorf("format JSON document stream with prettyx: %w", err)
 	}
 	return nil
 }

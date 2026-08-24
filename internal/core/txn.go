@@ -146,6 +146,23 @@ func (s *Service) loadTxnRecord(ctx context.Context, txnID string) (*TxnRecord, 
 	return &rec, obj.Info.ETag, nil
 }
 
+// ensureTxnPending rejects an acquire before it writes a lease when its
+// explicitly supplied transaction has already reached a decision. Missing
+// transaction records are valid: enlistment creates them for a new XA flow.
+func (s *Service) ensureTxnPending(ctx context.Context, txnID string) error {
+	rec, _, err := s.loadTxnRecord(ctx, txnID)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) || errors.Is(err, storage.ErrNotImplemented) {
+			return nil
+		}
+		return err
+	}
+	if rec != nil && rec.State != TxnStatePending {
+		return Failure{Code: "txn_decided", Detail: "transaction already decided", HTTPStatus: http.StatusConflict}
+	}
+	return nil
+}
+
 func (s *Service) loadImplicitTxnRecord(ctx context.Context, txnID string) (*TxnRecord, string, error) {
 	obj, err := s.store.GetObject(ctx, implicitTxnNamespace, txnID)
 	if err != nil {

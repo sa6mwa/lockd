@@ -139,7 +139,9 @@ func (s *Service) applyTxnDecisionQueueMessage(ctx context.Context, namespace, q
 }
 
 // applyTxnDecisionQueueState applies a decision to a queue state participant.
-// Commit => delete state document; Rollback => keep state. Both paths clear the state lease meta.
+// Commit removes state once a message is acknowledged. Rollback requeues the
+// message but publishes the state staged by that processing attempt, allowing
+// retries to resume from its workflow progress.
 func (s *Service) applyTxnDecisionQueueState(ctx context.Context, namespace, queueName, messageID, txnID string, commit bool) error {
 	qsvc, ok := s.queueProvider.(*queue.Service)
 	if !ok || qsvc == nil {
@@ -161,6 +163,10 @@ func (s *Service) applyTxnDecisionQueueState(ctx context.Context, namespace, que
 	// Skip if the lease belongs to another transaction (including non-XA leases).
 	if meta != nil && meta.Lease != nil && meta.Lease.TxnID != txnID {
 		return queueMessageLeaseFailure("queue state lease mismatch")
+	}
+
+	if !commit {
+		return s.applyTxnDecisionForMeta(ctx, namespace, relKey, txnID, true, meta, metaETag)
 	}
 
 	if commit {

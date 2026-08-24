@@ -141,8 +141,11 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (res *Acquire
 		if err != nil {
 			return nil, fmt.Errorf("promote implicit transaction: %w", err)
 		}
-		if rec != nil && rec.Implicit && rec.State != TxnStatePending {
+		if rec != nil && rec.State != TxnStatePending {
 			return nil, Failure{Code: "txn_decided", Detail: "transaction already decided", HTTPStatus: http.StatusConflict}
+		}
+		if err := s.ensureTxnPending(ctx, txnID); err != nil {
+			return nil, err
 		}
 	}
 	backoff := newAcquireBackoff()

@@ -387,7 +387,7 @@ func TestPresetStateGetIncludesAttachmentMetadata(t *testing.T) {
 func TestPresetQueryFiltersSharedNamespaceByKind(t *testing.T) {
 	t.Parallel()
 
-	s, _ := newToolTestServer(t)
+	s, cli := newToolTestServer(t)
 	cs, closeFn := connectMCPClientSessionForSurface(t, s, toolSurface{
 		Presets: []presetcfg.Definition{{
 			Name: "memory",
@@ -488,6 +488,17 @@ func TestPresetQueryFiltersSharedNamespaceByKind(t *testing.T) {
 		t.Fatalf("expected wrong-kind state.delete to return tool error, got %+v", wrongDelete)
 	}
 
+	wrongPut, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{
+		Name:      "memory.note.state.put",
+		Arguments: map[string]any{"key": "bookmark-1", "text": "overwrite attempt"},
+	})
+	if err != nil {
+		t.Fatalf("wrong-kind state.put transport error: %v", err)
+	}
+	if !wrongPut.IsError {
+		t.Fatalf("expected wrong-kind state.put to return tool error, got %+v", wrongPut)
+	}
+
 	bookmarkGet, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{
 		Name:      "memory.bookmark.state.get",
 		Arguments: map[string]any{"key": "bookmark-1"},
@@ -497,6 +508,46 @@ func TestPresetQueryFiltersSharedNamespaceByKind(t *testing.T) {
 	}
 	if bookmarkGet.IsError {
 		t.Fatalf("bookmark state.get returned tool error after wrong-kind delete attempt: %+v", bookmarkGet)
+	}
+
+	lease, err := cli.Acquire(ctx, api.AcquireRequest{
+		Namespace:  "agents",
+		Key:        "bookmark-1",
+		TTLSeconds: 30,
+		Owner:      "preset-test",
+		BlockSecs:  api.BlockNoWait,
+	})
+	if err != nil {
+		t.Fatalf("acquire bookmark for attachment: %v", err)
+	}
+	if _, err := cli.Attach(ctx, lockdclient.AttachRequest{
+		Namespace: "agents",
+		Key:       "bookmark-1",
+		LeaseID:   lease.LeaseID,
+		TxnID:     lease.TxnID,
+		Name:      "secret.txt",
+		Body:      strings.NewReader("bookmark attachment"),
+	}); err != nil {
+		t.Fatalf("attach bookmark payload: %v", err)
+	}
+	if _, err := cli.Release(ctx, api.ReleaseRequest{
+		Namespace: "agents",
+		Key:       "bookmark-1",
+		LeaseID:   lease.LeaseID,
+		TxnID:     lease.TxnID,
+	}); err != nil {
+		t.Fatalf("release bookmark attachment lease: %v", err)
+	}
+
+	wrongAttachment, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{
+		Name:      "memory.note.attachments.get",
+		Arguments: map[string]any{"key": "bookmark-1", "name": "secret.txt", "payload_mode": "inline"},
+	})
+	if err != nil {
+		t.Fatalf("wrong-kind attachments.get transport error: %v", err)
+	}
+	if !wrongAttachment.IsError {
+		t.Fatalf("expected wrong-kind attachments.get to return tool error, got %+v", wrongAttachment)
 	}
 }
 

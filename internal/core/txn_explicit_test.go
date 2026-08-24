@@ -309,3 +309,34 @@ func TestReleaseAfterFinalizedImplicitXADecisionPreservesOutcome(t *testing.T) {
 		t.Fatalf("expected stale release to preserve rollback outcome, got %q", decider.last.State)
 	}
 }
+
+func TestAcquireRejectsDecidedExplicitTxnWithoutPersistingLease(t *testing.T) {
+	ctx := context.Background()
+	svc := newTestService(t)
+	txnID := xid.New().String()
+	if _, err := svc.putTxnRecord(ctx, &TxnRecord{
+		TxnID: txnID,
+		State: TxnStateCommit,
+	}, ""); err != nil {
+		t.Fatalf("store decided transaction: %v", err)
+	}
+
+	_, err := svc.Acquire(ctx, AcquireCommand{
+		Namespace: "default", Key: "decided-txn-lease", Owner: "worker", TTLSeconds: 30,
+		BlockSeconds: apiBlockNoWait, TxnID: txnID,
+	})
+	var failure Failure
+	if !errors.As(err, &failure) || failure.Code != "txn_decided" {
+		t.Fatalf("acquire error=%v, want txn_decided failure", err)
+	}
+	if _, err := svc.store.LoadMeta(ctx, "default", "decided-txn-lease"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("decided transaction acquire left metadata behind: %v", err)
+	}
+
+	if _, err := svc.Acquire(ctx, AcquireCommand{
+		Namespace: "default", Key: "decided-txn-lease", Owner: "worker", TTLSeconds: 30,
+		BlockSeconds: apiBlockNoWait,
+	}); err != nil {
+		t.Fatalf("fresh acquire after rejected transaction: %v", err)
+	}
+}

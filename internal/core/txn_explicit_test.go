@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -32,6 +33,13 @@ type promotionBarrierBackend struct {
 	started chan struct{}
 	resume  chan struct{}
 	once    sync.Once
+}
+
+type promotionCASConflictBackend struct {
+	storage.Backend
+	txnID string
+	key   string
+	once  sync.Once
 }
 
 type failingImplicitEnrollmentBackend struct {
@@ -65,6 +73,17 @@ func (b *promotionBarrierBackend) StoreMeta(ctx context.Context, namespace, key 
 		case <-b.resume:
 		case <-ctx.Done():
 			return "", ctx.Err()
+		}
+	}
+	return b.Backend.StoreMeta(ctx, namespace, key, meta, expectedETag)
+}
+
+func (b *promotionCASConflictBackend) StoreMeta(ctx context.Context, namespace, key string, meta *storage.Meta, expectedETag string) (string, error) {
+	if key == b.key && meta != nil && meta.Lease != nil && meta.Lease.TxnID == b.txnID {
+		forced := false
+		b.once.Do(func() { forced = true })
+		if forced {
+			return "", storage.ErrCASMismatch
 		}
 	}
 	return b.Backend.StoreMeta(ctx, namespace, key, meta, expectedETag)
@@ -392,6 +411,98 @@ func TestAcquireRejectsDecidedExplicitTxnWithoutPersistingLease(t *testing.T) {
 		BlockSeconds: apiBlockNoWait,
 	}); err != nil {
 		t.Fatalf("fresh acquire after rejected transaction: %v", err)
+	}
+}
+
+func TestAcquireConflictAfterImplicitPromotionLeavesSeedReleasable(t *testing.T) {
+	ctx := context.Background()
+	svc := newTestService(t)
+
+	seed, err := svc.Acquire(ctx, AcquireCommand{
+		Namespace: "default", Key: "implicit-seed", Owner: "seed", TTLSeconds: 30, BlockSeconds: apiBlockNoWait,
+	})
+	if err != nil {
+		t.Fatalf("acquire seed lease: %v", err)
+	}
+	if _, err := svc.Update(ctx, UpdateCommand{
+		Namespace: seed.Namespace, Key: seed.Key, LeaseID: seed.LeaseID, FencingToken: seed.FencingToken, TxnID: seed.TxnID,
+		Body: strings.NewReader(`{"value":"seed"}`), CompactWriter: func(w io.Writer, r io.Reader, _ int64) error { _, err := io.Copy(w, r); return err },
+	}); err != nil {
+		t.Fatalf("stage seed state: %v", err)
+	}
+
+	occupied, err := svc.Acquire(ctx, AcquireCommand{
+		Namespace: "default", Key: "occupied", Owner: "other", TTLSeconds: 30, BlockSeconds: apiBlockNoWait,
+	})
+	if err != nil {
+		t.Fatalf("acquire occupied lease: %v", err)
+	}
+	defer func() {
+		_, _ = svc.Release(ctx, ReleaseCommand{
+			Namespace: occupied.Namespace, Key: occupied.Key, LeaseID: occupied.LeaseID, FencingToken: occupied.FencingToken, TxnID: occupied.TxnID,
+		})
+	}()
+
+	_, err = svc.Acquire(ctx, AcquireCommand{
+		Namespace: "default", Key: "occupied", Owner: "reuse", TTLSeconds: 30, BlockSeconds: apiBlockNoWait, TxnID: seed.TxnID,
+	})
+	var failure Failure
+	if !errors.As(err, &failure) || failure.Code != "waiting" {
+		t.Fatalf("conflicting follow-up acquire error=%v, want waiting", err)
+	}
+
+	if _, err := svc.Release(ctx, ReleaseCommand{
+		Namespace: seed.Namespace, Key: seed.Key, LeaseID: seed.LeaseID, FencingToken: seed.FencingToken, TxnID: seed.TxnID,
+	}); err != nil {
+		t.Fatalf("release seed after rejected promotion: %v", err)
+	}
+	state, err := svc.Get(ctx, GetCommand{Namespace: seed.Namespace, Key: seed.Key, Public: true})
+	if err != nil {
+		t.Fatalf("get released seed state: %v", err)
+	}
+	if state.NoContent {
+		t.Fatal("rejected promotion discarded seed state")
+	}
+	defer state.Reader.Close()
+	var got map[string]string
+	if err := json.NewDecoder(state.Reader).Decode(&got); err != nil {
+		t.Fatalf("decode released seed state: %v", err)
+	}
+	if got["value"] != "seed" {
+		t.Fatalf("released seed state=%v", got)
+	}
+}
+
+func TestAcquireCASConflictAfterImplicitPromotionRestoresSeed(t *testing.T) {
+	ctx := context.Background()
+	store := &promotionCASConflictBackend{Backend: memory.New(), key: "promotion-cas-conflict"}
+	svc := New(Config{Store: store, BackendHash: "test-backend", DefaultNamespace: "default"})
+
+	seed, err := svc.Acquire(ctx, AcquireCommand{
+		Namespace: "default", Key: "implicit-cas-seed", Owner: "seed", TTLSeconds: 30, BlockSeconds: apiBlockNoWait,
+	})
+	if err != nil {
+		t.Fatalf("acquire seed lease: %v", err)
+	}
+	store.txnID = seed.TxnID
+	if _, err := svc.Update(ctx, UpdateCommand{
+		Namespace: seed.Namespace, Key: seed.Key, LeaseID: seed.LeaseID, FencingToken: seed.FencingToken, TxnID: seed.TxnID,
+		Body: strings.NewReader(`{"value":"seed"}`), CompactWriter: func(w io.Writer, r io.Reader, _ int64) error { _, err := io.Copy(w, r); return err },
+	}); err != nil {
+		t.Fatalf("stage seed state: %v", err)
+	}
+
+	_, err = svc.Acquire(ctx, AcquireCommand{
+		Namespace: "default", Key: store.key, Owner: "reuse", TTLSeconds: 30, BlockSeconds: apiBlockNoWait, IfNotExists: true, TxnID: seed.TxnID,
+	})
+	var failure Failure
+	if !errors.As(err, &failure) || failure.Code != "already_exists" {
+		t.Fatalf("CAS-conflicting follow-up acquire error=%v, want already_exists", err)
+	}
+	if _, err := svc.Release(ctx, ReleaseCommand{
+		Namespace: seed.Namespace, Key: seed.Key, LeaseID: seed.LeaseID, FencingToken: seed.FencingToken, TxnID: seed.TxnID,
+	}); err != nil {
+		t.Fatalf("release seed after CAS-conflicting promotion: %v", err)
 	}
 }
 

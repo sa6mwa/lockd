@@ -317,6 +317,91 @@ func TestPresetStatePutGetAndDeleteRoundTrip(t *testing.T) {
 	}
 }
 
+func TestPresetConcurrentStatePutPreservesKindOwnership(t *testing.T) {
+	t.Parallel()
+
+	s, cli := newToolTestServer(t)
+	surface := toolSurface{Presets: []presetcfg.Definition{{
+		Name: "memory",
+		Kinds: []presetcfg.Kind{
+			{
+				Name: "note", Namespace: "agents",
+				Schema: presetcfg.Schema{Type: "object", Properties: map[string]presetcfg.Schema{
+					"text": {Type: "string"},
+				}, Required: []string{"text"}},
+			},
+			{
+				Name: "bookmark", Namespace: "agents",
+				Schema: presetcfg.Schema{Type: "object", Properties: map[string]presetcfg.Schema{
+					"title": {Type: "string"}, "url": {Type: "string"},
+				}, Required: []string{"title", "url"}},
+			},
+		},
+	}}}
+	noteSession, closeNote := connectMCPClientSessionForSurface(t, s, surface)
+	defer closeNote()
+	bookmarkSession, closeBookmark := connectMCPClientSessionForSurface(t, s, surface)
+	defer closeBookmark()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	type result struct {
+		kind string
+		res  *mcpsdk.CallToolResult
+		err  error
+	}
+	start := make(chan struct{})
+	results := make(chan result, 2)
+	key := fmt.Sprintf("preset-shared-%d", time.Now().UnixNano())
+	go func() {
+		<-start
+		res, err := noteSession.CallTool(ctx, &mcpsdk.CallToolParams{
+			Name: "memory.note.state.put",
+			Arguments: map[string]any{
+				"key": key, "text": "note",
+			},
+		})
+		results <- result{kind: "note", res: res, err: err}
+	}()
+	go func() {
+		<-start
+		res, err := bookmarkSession.CallTool(ctx, &mcpsdk.CallToolParams{
+			Name: "memory.bookmark.state.put",
+			Arguments: map[string]any{
+				"key": key, "title": "bookmark", "url": "https://example.com/shared",
+			},
+		})
+		results <- result{kind: "bookmark", res: res, err: err}
+	}()
+	close(start)
+
+	successes := make([]string, 0, 1)
+	for range 2 {
+		out := <-results
+		if out.err != nil {
+			t.Fatalf("%s state.put transport error: %v", out.kind, out.err)
+		}
+		if !out.res.IsError {
+			successes = append(successes, out.kind)
+		}
+	}
+	if len(successes) != 1 {
+		t.Fatalf("shared-key puts succeeded for %v, want exactly one", successes)
+	}
+
+	stored, err := cli.Get(ctx, key, lockdclient.WithGetNamespace("agents"))
+	if err != nil {
+		t.Fatalf("get shared-key document: %v", err)
+	}
+	document, err := decodeJSONObject(stored.Reader())
+	if err != nil {
+		t.Fatalf("decode shared-key document: %v", err)
+	}
+	if got := document["_lockd_kind"]; got != successes[0] {
+		t.Fatalf("shared-key kind=%v, want successful kind %q", got, successes[0])
+	}
+}
+
 func TestPresetStateGetIncludesAttachmentMetadata(t *testing.T) {
 	t.Parallel()
 

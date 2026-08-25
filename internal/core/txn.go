@@ -419,6 +419,135 @@ func (s *Service) promoteImplicitTxn(ctx context.Context, txnID string) (*TxnRec
 	return active, nil
 }
 
+// rollbackImplicitTxnAcquire restores a server-minted transaction after the
+// acquire that tried to reuse it fails before becoming an enrolled participant.
+// The release barrier remains active until the original seed lease has been
+// made non-explicit and the coordinator record removed.
+func (s *Service) rollbackImplicitTxnAcquire(ctx context.Context, seed *TxnRecord, namespace, key string) error {
+	if seed == nil || !seed.Implicit || !seed.PromotionPending {
+		return nil
+	}
+	if err := s.removePendingImplicitTxnParticipant(ctx, seed.TxnID, namespace, key); err != nil {
+		return fmt.Errorf("remove failed implicit participant: %w", err)
+	}
+
+	active, activeETag, err := s.loadTxnRecord(ctx, seed.TxnID)
+	if errors.Is(err, storage.ErrNotFound) || errors.Is(err, storage.ErrNotImplemented) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !active.Implicit || active.State != TxnStatePending || !active.PromotionPending {
+		return nil
+	}
+	if !sameParticipantSet(active.Participants, seed.Participants) {
+		// Another acquire joined this coordinator while this one was failing.
+		// Its successful enrollment owns the promotion now.
+		return nil
+	}
+
+	seedRecord, seedETag, err := s.loadImplicitTxnRecord(ctx, seed.TxnID)
+	if errors.Is(err, storage.ErrNotFound) {
+		seedRecord = cloneTxnRecord(seed)
+		seedRecord.PromotionPending = false
+		seedRecord.UpdatedAtUnix = s.clock.Now().Unix()
+		if _, err := s.putImplicitTxnRecord(ctx, seedRecord, ""); err != nil && !errors.Is(err, storage.ErrCASMismatch) {
+			return err
+		}
+	} else if err != nil && !errors.Is(err, storage.ErrNotImplemented) {
+		return err
+	} else if seedRecord != nil && (!seedRecord.Implicit || seedRecord.State != TxnStatePending || !sameParticipantSet(seedRecord.Participants, seed.Participants)) {
+		return fmt.Errorf("implicit transaction seed changed during rollback")
+	}
+	_ = seedETag // A retained seed is already valid; it needs no mutation here.
+
+	for _, participant := range seed.Participants {
+		if participant.BackendHash != "" && s.backendHash != "" && participant.BackendHash != s.backendHash {
+			continue
+		}
+		for {
+			metaRes, err := s.store.LoadMeta(ctx, participant.Namespace, participant.Key)
+			if errors.Is(err, storage.ErrNotFound) {
+				break
+			}
+			if err != nil {
+				return err
+			}
+			lease := metaRes.Meta.Lease
+			if lease == nil || lease.TxnID != seed.TxnID || !lease.TxnExplicit {
+				break
+			}
+			metaRes.Meta.Lease.TxnExplicit = false
+			metaRes.Meta.UpdatedAtUnix = s.clock.Now().Unix()
+			if _, err := s.store.StoreMeta(ctx, participant.Namespace, participant.Key, metaRes.Meta, metaRes.ETag); err != nil {
+				if errors.Is(err, storage.ErrCASMismatch) {
+					continue
+				}
+				return err
+			}
+			break
+		}
+	}
+	if err := s.store.DeleteObject(ctx, txnNamespace, seed.TxnID, storage.DeleteObjectOptions{ExpectedETag: activeETag, IgnoreNotFound: true}); err != nil && !errors.Is(err, storage.ErrCASMismatch) {
+		return err
+	}
+	return nil
+}
+
+// removePendingImplicitTxnParticipant removes the failed second acquire from
+// a promotion still behind its enrollment barrier. It never changes an active
+// transaction after another acquire completed the promotion.
+func (s *Service) removePendingImplicitTxnParticipant(ctx context.Context, txnID, namespace, key string) error {
+	p := TxnParticipant{Namespace: namespace, Key: key, BackendHash: s.backendHash}
+	for {
+		rec, etag, err := s.loadTxnRecord(ctx, txnID)
+		if errors.Is(err, storage.ErrNotFound) || errors.Is(err, storage.ErrNotImplemented) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !rec.Implicit || rec.State != TxnStatePending || !rec.PromotionPending {
+			return nil
+		}
+		idx := participantIndex(rec.Participants, p)
+		if idx == -1 {
+			return nil
+		}
+		rec.Participants = append(rec.Participants[:idx], rec.Participants[idx+1:]...)
+		rec.UpdatedAtUnix = s.clock.Now().Unix()
+		if _, err := s.putTxnRecord(ctx, rec, etag); err != nil {
+			if errors.Is(err, storage.ErrCASMismatch) {
+				continue
+			}
+			return err
+		}
+		return nil
+	}
+}
+
+func sameParticipantSet(a, b []TxnParticipant) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for _, participant := range a {
+		if participantIndex(b, participant) == -1 {
+			return false
+		}
+	}
+	return true
+}
+
+func cloneTxnRecord(in *TxnRecord) *TxnRecord {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.Participants = append([]TxnParticipant(nil), in.Participants...)
+	return &out
+}
+
 // pruneImplicitTxnParticipants removes local seed participants whose lease has
 // expired or disappeared. A client can no longer prepare those participants,
 // so retaining them would block any later promotion of the minted XID.

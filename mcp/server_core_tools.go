@@ -185,6 +185,7 @@ type statePutToolInput struct {
 	QueryHidden   *bool  `json:"query_hidden,omitempty" jsonschema:"Optional query-hidden metadata mutation (defaults to false)"`
 	PayloadText   string `json:"payload_text,omitempty" jsonschema:"UTF-8 JSON payload text"`
 	PayloadBase64 string `json:"payload_base64,omitempty" jsonschema:"Base64-encoded JSON payload bytes"`
+	validateLease func(context.Context, *lockdclient.LeaseSession) error
 }
 
 type statePutToolOutput struct {
@@ -251,6 +252,14 @@ func (s *server) handleStatePutTool(ctx context.Context, req *mcpsdk.CallToolReq
 	})
 	if err != nil {
 		return nil, statePutToolOutput{}, err
+	}
+	if input.validateLease != nil {
+		if err := input.validateLease(ctx, lease); err != nil {
+			if _, releaseErr := s.releaseFastPathLease(ctx, lease.Namespace, key, lease, true); releaseErr != nil {
+				return nil, statePutToolOutput{}, fmt.Errorf("validate state.put lease: %w (rollback release failed: %v)", err, releaseErr)
+			}
+			return nil, statePutToolOutput{}, err
+		}
 	}
 
 	queryHidden := input.QueryHidden
@@ -469,15 +478,16 @@ func (s *server) handleStateMetadataTool(ctx context.Context, req *mcpsdk.CallTo
 }
 
 type stateDeleteToolInput struct {
-	Key          string `json:"key" jsonschema:"State key"`
-	Namespace    string `json:"namespace,omitempty" jsonschema:"Namespace (defaults to client default namespace, then server default namespace)"`
-	Owner        string `json:"owner,omitempty" jsonschema:"Lock owner (defaults to oauth client id)"`
-	TTLSeconds   int64  `json:"ttl_seconds,omitempty" jsonschema:"Lease TTL in seconds"`
-	BlockSecond  int64  `json:"block_seconds,omitempty" jsonschema:"Acquire wait: -1 no wait, 0 wait forever, >0 wait seconds"`
-	TxnID        string `json:"txn_id,omitempty" jsonschema:"Optional XA transaction id"`
-	FencingToken *int64 `json:"fencing_token,omitempty" jsonschema:"Optional fencing token override"`
-	IfETag       string `json:"if_etag,omitempty" jsonschema:"Conditional ETag guard"`
-	IfVersion    *int64 `json:"if_version,omitempty" jsonschema:"Conditional version guard"`
+	Key           string `json:"key" jsonschema:"State key"`
+	Namespace     string `json:"namespace,omitempty" jsonschema:"Namespace (defaults to client default namespace, then server default namespace)"`
+	Owner         string `json:"owner,omitempty" jsonschema:"Lock owner (defaults to oauth client id)"`
+	TTLSeconds    int64  `json:"ttl_seconds,omitempty" jsonschema:"Lease TTL in seconds"`
+	BlockSecond   int64  `json:"block_seconds,omitempty" jsonschema:"Acquire wait: -1 no wait, 0 wait forever, >0 wait seconds"`
+	TxnID         string `json:"txn_id,omitempty" jsonschema:"Optional XA transaction id"`
+	FencingToken  *int64 `json:"fencing_token,omitempty" jsonschema:"Optional fencing token override"`
+	IfETag        string `json:"if_etag,omitempty" jsonschema:"Conditional ETag guard"`
+	IfVersion     *int64 `json:"if_version,omitempty" jsonschema:"Conditional version guard"`
+	validateLease func(context.Context, *lockdclient.LeaseSession) error
 }
 
 type stateDeleteToolOutput struct {
@@ -523,6 +533,14 @@ func (s *server) handleStateDeleteTool(ctx context.Context, req *mcpsdk.CallTool
 	})
 	if err != nil {
 		return nil, stateDeleteToolOutput{}, err
+	}
+	if input.validateLease != nil {
+		if err := input.validateLease(ctx, lease); err != nil {
+			if _, releaseErr := s.releaseFastPathLease(ctx, lease.Namespace, key, lease, true); releaseErr != nil {
+				return nil, stateDeleteToolOutput{}, fmt.Errorf("validate state.delete lease: %w (rollback release failed: %v)", err, releaseErr)
+			}
+			return nil, stateDeleteToolOutput{}, err
+		}
 	}
 
 	removeResp, err := s.upstream.Remove(ctx, key, lease.LeaseID, lockdclient.RemoveOptions{

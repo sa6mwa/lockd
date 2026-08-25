@@ -264,9 +264,6 @@ func (s *server) addPresetStatePutTool(srv *mcpsdk.Server, def presetcfg.Definit
 	}
 	mcpsdk.AddTool(srv, tool, withObservedTool(s, name, func(ctx context.Context, req *mcpsdk.CallToolRequest, input map[string]any) (*mcpsdk.CallToolResult, map[string]any, error) {
 		key := mapString(input, "key")
-		if err := s.ensurePresetStateWritable(ctx, rt, key); err != nil {
-			return nil, nil, err
-		}
 		doc := presetStoredDocumentFromInput(rt.kind, input)
 		payload, err := json.Marshal(doc)
 		if err != nil {
@@ -276,6 +273,9 @@ func (s *server) addPresetStatePutTool(srv *mcpsdk.Server, def presetcfg.Definit
 			Key:         key,
 			Namespace:   rt.kind.Namespace,
 			PayloadText: string(payload),
+			validateLease: func(ctx context.Context, lease *lockdclient.LeaseSession) error {
+				return ensurePresetLeaseDocumentKind(ctx, lease, rt, false)
+			},
 		}); err != nil {
 			return nil, nil, err
 		}
@@ -313,12 +313,12 @@ func (s *server) addPresetStateDeleteTool(srv *mcpsdk.Server, def presetcfg.Defi
 	}
 	mcpsdk.AddTool(srv, tool, withObservedTool(s, name, func(ctx context.Context, req *mcpsdk.CallToolRequest, input map[string]any) (*mcpsdk.CallToolResult, map[string]any, error) {
 		key := mapString(input, "key")
-		if _, err := s.loadPresetStoredDocument(ctx, rt, key); err != nil {
-			return nil, nil, err
-		}
 		_, out, err := s.handleStateDeleteTool(ctx, req, stateDeleteToolInput{
 			Key:       key,
 			Namespace: rt.kind.Namespace,
+			validateLease: func(ctx context.Context, lease *lockdclient.LeaseSession) error {
+				return ensurePresetLeaseDocumentKind(ctx, lease, rt, true)
+			},
 		})
 		if err != nil {
 			return nil, nil, err
@@ -384,7 +384,12 @@ func (s *server) addPresetAttachmentsGetTool(srv *mcpsdk.Server, def presetcfg.D
 	}
 	mcpsdk.AddTool(srv, tool, withObservedTool(s, name, func(ctx context.Context, req *mcpsdk.CallToolRequest, input map[string]any) (*mcpsdk.CallToolResult, map[string]any, error) {
 		key := mapString(input, "key")
-		if _, err := s.loadPresetStoredDocument(ctx, rt, key); err != nil {
+		lease, err := s.acquirePresetReadLease(ctx, req, rt, key)
+		if err != nil {
+			return nil, nil, err
+		}
+		defer func() { _ = s.releasePresetReadLease(ctx, lease) }()
+		if err := ensurePresetLeaseDocumentKind(ctx, lease, rt, true); err != nil {
 			return nil, nil, err
 		}
 		_, out, err := s.handleAttachmentGetTool(ctx, req, attachmentGetToolInput{
@@ -469,26 +474,51 @@ func (s *server) loadPresetStoredDocument(ctx context.Context, rt *presetRuntime
 	return document, nil
 }
 
-// ensurePresetStateWritable permits creates, but prevents a preset kind from
-// replacing a document owned by another kind in the same namespace.
-func (s *server) ensurePresetStateWritable(ctx context.Context, rt *presetRuntimeKind, key string) error {
-	resp, err := s.upstream.Get(ctx, key, lockdclient.WithGetNamespace(rt.kind.Namespace))
+// ensurePresetLeaseDocumentKind verifies ownership from the state view guarded
+// by lease. This is deliberately separate from the public-read helper above:
+// a public preflight alone races a different kind's later write.
+func ensurePresetLeaseDocumentKind(ctx context.Context, lease *lockdclient.LeaseSession, rt *presetRuntimeKind, requireState bool) error {
+	state, err := lease.Get(ctx)
 	if err != nil {
 		return err
 	}
-	if !resp.HasState {
+	if state == nil || !state.HasState {
+		if requireState {
+			return fmt.Errorf("preset state %q has no document", lease.Key)
+		}
 		return nil
 	}
-	reader := resp.Reader()
-	defer reader.Close()
+	defer state.Close()
 	var document map[string]any
-	if err := json.NewDecoder(reader).Decode(&document); err != nil {
-		return fmt.Errorf("decode preset state %q: %w", key, err)
+	if err := json.NewDecoder(state.Reader).Decode(&document); err != nil {
+		return fmt.Errorf("decode preset state %q: %w", lease.Key, err)
 	}
 	if kind, _ := document["_lockd_kind"].(string); kind != rt.kind.Name {
-		return fmt.Errorf("preset state %q belongs to kind %q, not %q", key, kind, rt.kind.Name)
+		return fmt.Errorf("preset state %q belongs to kind %q, not %q", lease.Key, kind, rt.kind.Name)
 	}
 	return nil
+}
+
+func (s *server) acquirePresetReadLease(ctx context.Context, req *mcpsdk.CallToolRequest, rt *presetRuntimeKind, key string) (*lockdclient.LeaseSession, error) {
+	clientID := ""
+	if req != nil {
+		clientID = requestClientID(req.Extra)
+	}
+	return s.upstream.Acquire(ctx, api.AcquireRequest{
+		Namespace:  rt.kind.Namespace,
+		Key:        key,
+		TTLSeconds: 30,
+		Owner:      defaultOwner(clientID),
+		BlockSecs:  api.BlockNoWait,
+	})
+}
+
+func (s *server) releasePresetReadLease(ctx context.Context, lease *lockdclient.LeaseSession) error {
+	if lease == nil {
+		return nil
+	}
+	_, err := s.releaseFastPathLease(ctx, lease.Namespace, lease.Key, lease, true)
+	return err
 }
 
 func presetSchemaToJSONSchema(schema presetcfg.Schema) *jsonschema.Schema {

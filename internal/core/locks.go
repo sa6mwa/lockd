@@ -137,19 +137,16 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (res *Acquire
 	if txnID == "" {
 		txnID = xid.New().String()
 	} else {
-		rec, err := s.promoteImplicitTxn(ctx, txnID)
-		if err != nil {
-			return nil, fmt.Errorf("promote implicit transaction: %w", err)
-		}
-		if rec != nil && rec.State != TxnStatePending {
-			return nil, Failure{Code: "txn_decided", Detail: "transaction already decided", HTTPStatus: http.StatusConflict}
-		}
 		if err := s.ensureTxnPending(ctx, txnID); err != nil {
 			return nil, err
 		}
 	}
 	backoff := newAcquireBackoff()
-	triedFastCreate := false
+	// A server-minted XID must first check that its second key is available.
+	// Skipping the create fast path lets the normal path establish that fact
+	// before promotion, and gives it a CAS failure point at which it can restore
+	// the seed if a competing acquire wins the key.
+	triedFastCreate := txnExplicit
 	for {
 		plan := s.newWritePlan(ctx)
 		commitCtx := plan.Context()
@@ -285,6 +282,22 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (res *Acquire
 				HTTPStatus: 409,
 			}
 		}
+		var implicitPromotion *TxnRecord
+		if txnExplicit {
+			implicitPromotion, err = s.promoteImplicitTxn(commitCtx, txnID)
+			if err != nil {
+				if creationMu != nil {
+					creationMu.Unlock()
+				}
+				return nil, plan.Wait(fmt.Errorf("promote implicit transaction: %w", err))
+			}
+			if implicitPromotion != nil && implicitPromotion.State != TxnStatePending {
+				if creationMu != nil {
+					creationMu.Unlock()
+				}
+				return nil, plan.Wait(Failure{Code: "txn_decided", Detail: "transaction already decided", HTTPStatus: http.StatusConflict})
+			}
+		}
 
 		priorMeta := cloneMeta(*meta)
 		expiresAt := now.Add(ttl).Unix()
@@ -306,6 +319,9 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (res *Acquire
 				creationMu.Unlock()
 			}
 			if errors.Is(err, storage.ErrCASMismatch) {
+				if rollbackErr := s.rollbackImplicitTxnAcquire(commitCtx, implicitPromotion, namespace, keyComponent); rollbackErr != nil {
+					return nil, plan.Wait(errors.Join(err, rollbackErr))
+				}
 				if cmd.IfNotExists {
 					return nil, plan.Wait(acquireAlreadyExistsFailure(meta.Version, meta.StateETag))
 				}
@@ -314,6 +330,9 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (res *Acquire
 				}
 				continue
 			}
+			if rollbackErr := s.rollbackImplicitTxnAcquire(commitCtx, implicitPromotion, namespace, keyComponent); rollbackErr != nil {
+				return nil, plan.Wait(errors.Join(err, rollbackErr))
+			}
 			return nil, plan.Wait(fmt.Errorf("store meta: %w", err))
 		}
 		if txnExplicit {
@@ -321,7 +340,11 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (res *Acquire
 				if creationMu != nil {
 					creationMu.Unlock()
 				}
-				return nil, plan.Wait(s.acquireEnrollmentFailure(commitCtx, namespace, keyComponent, &priorMeta, newMetaETag, fmt.Errorf("register txn participant: %w", err)))
+				enrollmentErr := plan.Wait(s.acquireEnrollmentFailure(commitCtx, namespace, keyComponent, &priorMeta, newMetaETag, fmt.Errorf("register txn participant: %w", err)))
+				if rollbackErr := s.rollbackImplicitTxnAcquire(commitCtx, implicitPromotion, namespace, keyComponent); rollbackErr != nil {
+					enrollmentErr = errors.Join(enrollmentErr, rollbackErr)
+				}
+				return nil, enrollmentErr
 			}
 		} else if err := s.registerImplicitTxnParticipant(commitCtx, txnID, namespace, keyComponent, meta.Lease.ExpiresAtUnix); err != nil {
 			if creationMu != nil {

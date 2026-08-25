@@ -21,6 +21,10 @@ type pendingEmptyDecisionTCDecider struct {
 	last TxnRecord
 }
 
+type failingEnlistTCDecider struct {
+	err error
+}
+
 type promotionOrderingBackend struct {
 	storage.Backend
 	txnID                      string
@@ -98,6 +102,14 @@ func (d *pendingEmptyDecisionTCDecider) Decide(_ context.Context, rec TxnRecord)
 	if rec.State == "" {
 		return TxnStatePending, nil
 	}
+	return rec.State, nil
+}
+
+func (d failingEnlistTCDecider) Enlist(context.Context, TxnRecord) error {
+	return d.err
+}
+
+func (failingEnlistTCDecider) Decide(_ context.Context, rec TxnRecord) (TxnState, error) {
 	return rec.State, nil
 }
 
@@ -503,6 +515,41 @@ func TestAcquireCASConflictAfterImplicitPromotionRestoresSeed(t *testing.T) {
 		Namespace: seed.Namespace, Key: seed.Key, LeaseID: seed.LeaseID, FencingToken: seed.FencingToken, TxnID: seed.TxnID,
 	}); err != nil {
 		t.Fatalf("release seed after CAS-conflicting promotion: %v", err)
+	}
+}
+
+func TestImplicitPromotionEnlistFailureRestoresSeedLease(t *testing.T) {
+	ctx := context.Background()
+	svc := newTestService(t)
+	svc.SetTCDecider(failingEnlistTCDecider{err: errors.New("tc unavailable")})
+
+	seed, err := svc.Acquire(ctx, AcquireCommand{
+		Namespace: "default", Key: "enlist-failure-seed", Owner: "seed", TTLSeconds: 30, BlockSeconds: apiBlockNoWait,
+	})
+	if err != nil {
+		t.Fatalf("acquire seed lease: %v", err)
+	}
+	if _, err := svc.Update(ctx, UpdateCommand{
+		Namespace: seed.Namespace, Key: seed.Key, LeaseID: seed.LeaseID, FencingToken: seed.FencingToken, TxnID: seed.TxnID,
+		Body: strings.NewReader(`{"value":"seed"}`), CompactWriter: func(w io.Writer, r io.Reader, _ int64) error { _, err := io.Copy(w, r); return err },
+	}); err != nil {
+		t.Fatalf("stage seed state: %v", err)
+	}
+
+	_, err = svc.Acquire(ctx, AcquireCommand{
+		Namespace: "default", Key: "enlist-failure-second", Owner: "reuse", TTLSeconds: 30, BlockSeconds: apiBlockNoWait, TxnID: seed.TxnID,
+	})
+	if err == nil || !strings.Contains(err.Error(), "tc unavailable") {
+		t.Fatalf("second acquire error=%v, want TC enlist failure", err)
+	}
+	if _, _, err := svc.loadTxnRecord(ctx, seed.TxnID); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("failed promotion left coordinator record: %v", err)
+	}
+
+	if _, err := svc.Release(ctx, ReleaseCommand{
+		Namespace: seed.Namespace, Key: seed.Key, LeaseID: seed.LeaseID, FencingToken: seed.FencingToken, TxnID: seed.TxnID,
+	}); err != nil {
+		t.Fatalf("release seed after failed promotion: %v", err)
 	}
 }
 

@@ -2609,11 +2609,15 @@ func (qr *QueryResponse) Keys() []string {
 			for {
 				row, err := qr.stream.Next()
 				if err == io.EOF {
-					qr.Close()
+					if err := qr.Close(); err != nil {
+						qr.keys = nil
+						return nil
+					}
 					break
 				}
 				if err != nil {
-					qr.Close()
+					_ = qr.Close()
+					qr.keys = nil
 					return nil
 				}
 				keys = append(keys, row.Key)
@@ -2640,8 +2644,11 @@ func (qr *QueryResponse) Keys() []string {
 
 // Close releases the underlying reader when the response streams documents.
 func (qr *QueryResponse) Close() error {
-	if qr == nil || qr.stream == nil {
+	if qr == nil {
 		return nil
+	}
+	if qr.stream == nil {
+		return qr.streamErr
 	}
 	stream := qr.stream
 	qr.stream = nil
@@ -2666,7 +2673,7 @@ func (qr *QueryResponse) ForEach(fn func(QueryRow) error) error {
 		return nil
 	}
 	if qr.stream == nil {
-		return nil
+		return qr.streamErr
 	}
 	for {
 		row, err := qr.stream.Next()

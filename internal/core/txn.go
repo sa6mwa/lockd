@@ -383,6 +383,9 @@ func (s *Service) promoteImplicitTxn(ctx context.Context, txnID string) (*TxnRec
 	}
 	if s.tcDecider != nil {
 		if err := s.tcDecider.Enlist(ctx, *active); err != nil {
+			if rollbackErr := s.rollbackImplicitTxnPromotion(ctx, active); rollbackErr != nil {
+				return nil, errors.Join(err, fmt.Errorf("restore implicit transaction after enlist failure: %w", rollbackErr))
+			}
 			return nil, err
 		}
 	}
@@ -430,7 +433,16 @@ func (s *Service) rollbackImplicitTxnAcquire(ctx context.Context, seed *TxnRecor
 	if err := s.removePendingImplicitTxnParticipant(ctx, seed.TxnID, namespace, key); err != nil {
 		return fmt.Errorf("remove failed implicit participant: %w", err)
 	}
+	return s.rollbackImplicitTxnPromotion(ctx, seed)
+}
 
+// rollbackImplicitTxnPromotion restores a seed after activation but before a
+// second participant was successfully enrolled. It is also used when the
+// transaction coordinator rejects enlistment during promotion itself.
+func (s *Service) rollbackImplicitTxnPromotion(ctx context.Context, seed *TxnRecord) error {
+	if seed == nil || !seed.Implicit || !seed.PromotionPending {
+		return nil
+	}
 	active, activeETag, err := s.loadTxnRecord(ctx, seed.TxnID)
 	if errors.Is(err, storage.ErrNotFound) || errors.Is(err, storage.ErrNotImplemented) {
 		return nil

@@ -62,6 +62,24 @@ func TestQueryResponseStreamKeys(t *testing.T) {
 	}
 }
 
+func TestQueryResponseKeysDiscardPartialResultsOnTrailerError(t *testing.T) {
+	streamErr := errors.New("backend read failed")
+	body := `{"ns":"default","key":"doc-1","doc":{}}
+`
+	resp := newDocumentQueryResponse("default", "", 0, nil, io.NopCloser(strings.NewReader(body)), func() (string, uint64, map[string]string, error) {
+		return "", 0, nil, streamErr
+	})
+	if keys := resp.Keys(); keys != nil {
+		t.Fatalf("keys=%v, want no partial result after trailer error", keys)
+	}
+	if err := resp.Close(); !errors.Is(err, streamErr) {
+		t.Fatalf("close error=%v, want %v", err, streamErr)
+	}
+	if err := resp.ForEach(func(QueryRow) error { return nil }); !errors.Is(err, streamErr) {
+		t.Fatalf("for each after Keys error=%v, want %v", err, streamErr)
+	}
+}
+
 func TestQueryRowDocumentReaderKeysMode(t *testing.T) {
 	resp := newKeyQueryResponse(api.QueryResponse{
 		Namespace: "default",

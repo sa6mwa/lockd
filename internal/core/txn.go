@@ -356,6 +356,49 @@ func (s *Service) removeImplicitTxnParticipant(ctx context.Context, txnID, names
 	}
 }
 
+// removePromotedImplicitTxnParticipant drops an expired participant from the
+// regular coordinator record created when a server-minted transaction was
+// promoted to XA. Unlike an ordinary explicit transaction, this coordinator
+// uses an all-participant release barrier, so retaining an expired lease would
+// leave every surviving participant permanently unable to prepare a decision.
+func (s *Service) removePromotedImplicitTxnParticipant(ctx context.Context, txnID, namespace, key string) error {
+	p := TxnParticipant{Namespace: namespace, Key: key, BackendHash: s.backendHash}
+	for {
+		rec, etag, err := s.loadTxnRecord(ctx, txnID)
+		if errors.Is(err, storage.ErrNotFound) || errors.Is(err, storage.ErrNotImplemented) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !rec.Implicit || rec.State != TxnStatePending {
+			return nil
+		}
+		idx := participantIndex(rec.Participants, p)
+		if idx == -1 {
+			return nil
+		}
+		rec.Participants = append(rec.Participants[:idx], rec.Participants[idx+1:]...)
+		if len(rec.Participants) == 0 {
+			if err := s.store.DeleteObject(ctx, txnNamespace, txnID, storage.DeleteObjectOptions{ExpectedETag: etag, IgnoreNotFound: true}); err != nil {
+				if errors.Is(err, storage.ErrCASMismatch) {
+					continue
+				}
+				return err
+			}
+			return nil
+		}
+		rec.UpdatedAtUnix = s.clock.Now().Unix()
+		if _, err := s.putTxnRecord(ctx, rec, etag); err != nil {
+			if errors.Is(err, storage.ErrCASMismatch) {
+				continue
+			}
+			return err
+		}
+		return nil
+	}
+}
+
 // promoteImplicitTxn upgrades the server-minted participants to XA before a
 // later acquire using the minted XID can be acknowledged. This closes the
 // window in which the first lease could publish staged work independently.

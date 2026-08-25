@@ -32,9 +32,15 @@ func (s *Service) clearExpiredLease(ctx context.Context, namespace, key string, 
 			s.logger.Warn("lease.index.clear_failed", "namespace", namespace, "key", key, "error", err)
 		}
 	}
-	if !expiredLease.TxnExplicit && expiredLease.TxnID != "" {
-		if err := s.removeImplicitTxnParticipant(ctx, expiredLease.TxnID, namespace, key); err != nil && s.logger != nil {
-			s.logger.Warn("txn.implicit.remove_expired_participant_failed", "namespace", namespace, "key", key, "txn_id", expiredLease.TxnID, "error", err)
+	if expiredLease.TxnID != "" {
+		var removeErr error
+		if expiredLease.TxnExplicit {
+			removeErr = s.removePromotedImplicitTxnParticipant(ctx, expiredLease.TxnID, namespace, key)
+		} else {
+			removeErr = s.removeImplicitTxnParticipant(ctx, expiredLease.TxnID, namespace, key)
+		}
+		if removeErr != nil && s.logger != nil {
+			s.logger.Warn("txn.implicit.remove_expired_participant_failed", "namespace", namespace, "key", key, "txn_id", expiredLease.TxnID, "error", removeErr)
 		}
 	}
 	if s.sweeperMetrics != nil {

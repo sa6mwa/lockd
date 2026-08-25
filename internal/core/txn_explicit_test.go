@@ -803,3 +803,64 @@ func TestExpiredImplicitLeaseCleanupRemovesSeedParticipant(t *testing.T) {
 		t.Fatalf("expired lease cleanup retained implicit seed: %v", err)
 	}
 }
+
+func TestExpiredPromotedImplicitLeaseCleanupUnblocksRemainingParticipant(t *testing.T) {
+	ctx := context.Background()
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	clk := clock.NewManual(start)
+	svc := newTestServiceWithClock(t, clk)
+
+	seed, err := svc.Acquire(ctx, AcquireCommand{
+		Namespace: "default", Key: "promoted-expired-seed", Owner: "seed-worker", TTLSeconds: 1, BlockSeconds: apiBlockNoWait,
+	})
+	if err != nil {
+		t.Fatalf("acquire seed lease: %v", err)
+	}
+	participant, err := svc.Acquire(ctx, AcquireCommand{
+		Namespace: "default", Key: "promoted-survivor", Owner: "survivor-worker", TTLSeconds: 30, BlockSeconds: apiBlockNoWait, TxnID: seed.TxnID,
+	})
+	if err != nil {
+		t.Fatalf("acquire promoted participant: %v", err)
+	}
+	if _, err := svc.Update(ctx, UpdateCommand{
+		Namespace: participant.Namespace, Key: participant.Key, LeaseID: participant.LeaseID, FencingToken: participant.FencingToken, TxnID: participant.TxnID,
+		Body: strings.NewReader(`{"value":"committed by survivor"}`), CompactWriter: func(w io.Writer, r io.Reader, _ int64) error { _, err := io.Copy(w, r); return err },
+	}); err != nil {
+		t.Fatalf("stage surviving participant state: %v", err)
+	}
+
+	clk.Advance(2 * time.Second)
+	if _, err := svc.Get(ctx, GetCommand{
+		Namespace: seed.Namespace, Key: seed.Key, LeaseID: seed.LeaseID, FencingToken: seed.FencingToken,
+	}); err == nil {
+		t.Fatal("expected expired seed get to fail")
+	}
+	rec, _, err := svc.loadTxnRecord(ctx, seed.TxnID)
+	if err != nil {
+		t.Fatalf("load promoted transaction after expiry cleanup: %v", err)
+	}
+	if len(rec.Participants) != 1 || rec.Participants[0].Key != participant.Key {
+		t.Fatalf("participants after expired seed cleanup=%+v, want only %q", rec.Participants, participant.Key)
+	}
+
+	if _, err := svc.Release(ctx, ReleaseCommand{
+		Namespace: participant.Namespace, Key: participant.Key, LeaseID: participant.LeaseID, FencingToken: participant.FencingToken, TxnID: participant.TxnID,
+	}); err != nil {
+		t.Fatalf("release surviving participant: %v", err)
+	}
+	state, err := svc.Get(ctx, GetCommand{Namespace: participant.Namespace, Key: participant.Key, Public: true})
+	if err != nil {
+		t.Fatalf("get surviving participant state: %v", err)
+	}
+	if state.NoContent || state.Reader == nil {
+		t.Fatal("surviving participant state remained unpublished")
+	}
+	defer state.Reader.Close()
+	var document map[string]string
+	if err := json.NewDecoder(state.Reader).Decode(&document); err != nil {
+		t.Fatalf("decode surviving participant state: %v", err)
+	}
+	if document["value"] != "committed by survivor" {
+		t.Fatalf("surviving participant document=%v", document)
+	}
+}

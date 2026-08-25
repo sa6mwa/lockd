@@ -245,7 +245,7 @@ func (s *Service) Update(ctx context.Context, cmd UpdateCommand) (*UpdateResult,
 			return nil, plan.Wait(fmt.Errorf("store meta: %w", err))
 		}
 		if txnExplicit(meta) {
-			if _, _, err := s.enlistTxnParticipant(commitCtx, cmd.TxnID, namespace, keyComponent, meta.Lease.ExpiresAtUnix); err != nil {
+			if _, _, err := s.enlistTxnParticipant(commitCtx, cmd.TxnID, namespace, keyComponent, meta.Lease.ExpiresAtUnix, nil); err != nil {
 				return nil, plan.Wait(fmt.Errorf("register txn participant: %w", err))
 			}
 		}
@@ -394,7 +394,7 @@ func (s *Service) Remove(ctx context.Context, cmd RemoveCommand) (*RemoveResult,
 			return nil, plan.Wait(fmt.Errorf("store meta: %w", err))
 		}
 		if txnExplicit(meta) {
-			if _, _, err := s.enlistTxnParticipant(commitCtx, cmd.TxnID, namespace, keyComponent, meta.Lease.ExpiresAtUnix); err != nil {
+			if _, _, err := s.enlistTxnParticipant(commitCtx, cmd.TxnID, namespace, keyComponent, meta.Lease.ExpiresAtUnix, nil); err != nil {
 				return nil, plan.Wait(fmt.Errorf("register txn participant: %w", err))
 			}
 		}
@@ -526,7 +526,7 @@ func (s *Service) Metadata(ctx context.Context, cmd MetadataCommand) (*MetadataR
 			return nil, plan.Wait(fmt.Errorf("store meta: %w", err))
 		}
 		if txnExplicit(meta) {
-			if _, _, err := s.enlistTxnParticipant(commitCtx, cmd.TxnID, namespace, keyComponent, meta.Lease.ExpiresAtUnix); err != nil {
+			if _, _, err := s.enlistTxnParticipant(commitCtx, cmd.TxnID, namespace, keyComponent, meta.Lease.ExpiresAtUnix, nil); err != nil {
 				return nil, plan.Wait(fmt.Errorf("register txn participant: %w", err))
 			}
 		}

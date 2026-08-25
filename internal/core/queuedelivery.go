@@ -494,7 +494,7 @@ func (s *Service) prepareQueueDelivery(ctx context.Context, qsvc *queue.Service,
 
 	if txnID != "" && txnExplicit(&acq.Meta) {
 		relParticipant := relativeKey(namespace, messageKey)
-		if _, _, err := s.enlistTxnParticipant(ctx, txnID, namespace, relParticipant, acq.Response.ExpiresAt); err != nil {
+		if _, _, err := s.enlistTxnParticipant(ctx, txnID, namespace, relParticipant, acq.Response.ExpiresAt, nil); err != nil {
 			releaseMessage()
 			return nil, false, fmt.Errorf("register txn participant: %w", err)
 		}
@@ -663,7 +663,7 @@ func (s *Service) prepareQueueDelivery(ctx context.Context, qsvc *queue.Service,
 		}
 		if txnID != "" && stateOutcome != nil && txnExplicit(&stateOutcome.Meta) {
 			relParticipant := relativeKey(namespace, stateKey)
-			if _, _, err := s.enlistTxnParticipant(ctx, txnID, namespace, relParticipant, stateOutcome.Response.ExpiresAt); err != nil {
+			if _, _, err := s.enlistTxnParticipant(ctx, txnID, namespace, relParticipant, stateOutcome.Response.ExpiresAt, nil); err != nil {
 				releaseState()
 				reader.Close()
 				releaseMessage()

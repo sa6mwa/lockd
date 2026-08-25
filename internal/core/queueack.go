@@ -701,7 +701,7 @@ func (s *Service) Extend(ctx context.Context, cmd QueueExtendCommand) (*QueueExt
 		s.logger.Warn("lease.index.update_failed", "namespace", namespace, "key", messageRel, "error", err)
 	}
 	if checkTxn != "" && txnExplicit(meta) {
-		if _, _, err := s.registerTxnParticipant(commitCtx, checkTxn, namespace, messageRel, meta.Lease.ExpiresAtUnix); err != nil {
+		if _, _, err := s.registerTxnParticipant(commitCtx, checkTxn, namespace, messageRel, meta.Lease.ExpiresAtUnix, nil); err != nil {
 			return nil, plan.Wait(fmt.Errorf("register txn participant: %w", err))
 		}
 	}
@@ -755,7 +755,7 @@ func (s *Service) Extend(ctx context.Context, cmd QueueExtendCommand) (*QueueExt
 		}
 		stateLeaseExpires = stateMeta.Lease.ExpiresAtUnix
 		if checkTxn != "" && txnExplicit(stateMeta) {
-			if _, _, err := s.registerTxnParticipant(commitCtx, checkTxn, namespace, stateRel, stateMeta.Lease.ExpiresAtUnix); err != nil {
+			if _, _, err := s.registerTxnParticipant(commitCtx, checkTxn, namespace, stateRel, stateMeta.Lease.ExpiresAtUnix, nil); err != nil {
 				return nil, plan.Wait(fmt.Errorf("register txn participant: %w", err))
 			}
 		}

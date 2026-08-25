@@ -74,7 +74,12 @@ const headerCorrelationID = "X-Correlation-Id"
 const headerShutdownImminent = "Shutdown-Imminent"
 const contentTypeNDJSON = "application/x-ndjson"
 const maxQueueDequeueBatch = 64
-const queueEnsureTimeoutGrace = 2 * time.Second
+
+// queueEnsureTimeoutGrace preserves enough request budget to acquire and
+// materialize a delivery after the caller's queue wait window has elapsed.
+// Stateful cross-node deliveries can apply a transaction decision and perform
+// several conditional object-store writes before they are ready to return.
+const queueEnsureTimeoutGrace = 10 * time.Second
 const defaultQueryLimit = 100
 const maxQueryLimit = 1000
 const namespaceConfigBodyLimit = 32 << 10

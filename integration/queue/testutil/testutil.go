@@ -1742,7 +1742,7 @@ func RunQueueTxnStatefulDecisionFanoutScenario(t testing.TB, tc, rm *lockd.TestS
 	if probe == nil {
 		probe = cli
 	}
-	ctxRb, cancelRb := context.WithTimeout(context.Background(), 3*time.Second)
+	ctxRb, cancelRb := context.WithTimeout(context.Background(), 15*time.Second)
 	rbMsg, err := probe.DequeueWithState(ctxRb, queueName, lockdclient.DequeueOptions{
 		Owner:        owner + "-rb",
 		BlockSeconds: 1,

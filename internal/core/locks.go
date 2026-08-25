@@ -171,7 +171,7 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (res *Acquire
 			newMetaETag, err := s.store.StoreMeta(commitCtx, namespace, keyComponent, fastMeta, "")
 			if err == nil {
 				if txnExplicit {
-					if _, _, err := s.enlistTxnParticipant(commitCtx, txnID, namespace, keyComponent, fastMeta.Lease.ExpiresAtUnix); err != nil {
+					if _, _, err := s.enlistTxnParticipant(commitCtx, txnID, namespace, keyComponent, fastMeta.Lease.ExpiresAtUnix, nil); err != nil {
 						return nil, plan.Wait(s.acquireEnrollmentFailure(commitCtx, namespace, keyComponent, nil, newMetaETag, fmt.Errorf("register txn participant: %w", err)))
 					}
 				} else if err := s.registerImplicitTxnParticipant(commitCtx, txnID, namespace, keyComponent, fastMeta.Lease.ExpiresAtUnix); err != nil {
@@ -336,7 +336,7 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (res *Acquire
 			return nil, plan.Wait(fmt.Errorf("store meta: %w", err))
 		}
 		if txnExplicit {
-			if _, _, err := s.enlistTxnParticipant(commitCtx, txnID, namespace, keyComponent, meta.Lease.ExpiresAtUnix); err != nil {
+			if _, _, err := s.enlistTxnParticipant(commitCtx, txnID, namespace, keyComponent, meta.Lease.ExpiresAtUnix, implicitPromotion); err != nil {
 				if creationMu != nil {
 					creationMu.Unlock()
 				}
@@ -767,7 +767,7 @@ func (s *Service) Release(ctx context.Context, cmd ReleaseCommand) (res *Release
 				MetaCleared: true,
 			}, nil
 		}
-		if _, _, err := s.registerTxnParticipant(commitCtx, cmd.TxnID, namespace, keyComponent, meta.Lease.ExpiresAtUnix); err != nil {
+		if _, _, err := s.registerTxnParticipant(commitCtx, cmd.TxnID, namespace, keyComponent, meta.Lease.ExpiresAtUnix, nil); err != nil {
 			return nil, plan.Wait(fmt.Errorf("register txn participant: %w", err))
 		}
 		rec, err := s.decideTxn(commitCtx, cmd.TxnID, decision)

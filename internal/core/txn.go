@@ -131,6 +131,7 @@ type TxnRecord struct {
 	TCTerm           uint64           `json:"tc_term,omitempty"`
 	UpdatedAtUnix    int64            `json:"updated_at_unix,omitempty"`
 	CreatedAtUnix    int64            `json:"created_at_unix,omitempty"`
+	etag             string
 }
 
 func (s *Service) loadTxnRecord(ctx context.Context, txnID string) (*TxnRecord, string, error) {
@@ -146,6 +147,7 @@ func (s *Service) loadTxnRecord(ctx context.Context, txnID string) (*TxnRecord, 
 	if rec.TxnID == "" {
 		rec.TxnID = txnID
 	}
+	rec.etag = obj.Info.ETag
 	return &rec, obj.Info.ETag, nil
 }
 
@@ -703,12 +705,14 @@ func (s *Service) activateImplicitTxn(ctx context.Context, seed *TxnRecord) (*Tx
 			rec.ExpiresAtUnix = seed.ExpiresAtUnix
 		}
 		rec.UpdatedAtUnix = s.clock.Now().Unix()
-		if _, err := s.putTxnRecord(ctx, rec, etag); err != nil {
+		newETag, err := s.putTxnRecord(ctx, rec, etag)
+		if err != nil {
 			if errors.Is(err, storage.ErrCASMismatch) {
 				continue
 			}
 			return nil, err
 		}
+		rec.etag = newETag
 		return rec, nil
 	}
 }
@@ -951,18 +955,27 @@ func (s *Service) normalizeTxnRecord(rec TxnRecord) TxnRecord {
 
 // registerTxnParticipant ensures the participant is recorded under the txn id,
 // extending the TTL when provided.
-func (s *Service) registerTxnParticipant(ctx context.Context, txnID, namespace, key string, leaseExpires int64) (*TxnRecord, string, error) {
+func (s *Service) registerTxnParticipant(ctx context.Context, txnID, namespace, key string, leaseExpires int64, initial *TxnRecord) (*TxnRecord, string, error) {
 	p := TxnParticipant{Namespace: namespace, Key: key, BackendHash: s.backendHash}
 	for {
-		rec, etag, err := s.loadTxnRecord(ctx, txnID)
-		if err != nil {
-			if errors.Is(err, storage.ErrNotImplemented) {
-				return &TxnRecord{TxnID: txnID, State: TxnStatePending, Participants: []TxnParticipant{p}}, "", nil
+		var rec *TxnRecord
+		var etag string
+		if initial != nil {
+			rec = cloneTxnRecord(initial)
+			etag = rec.etag
+			initial = nil
+		} else {
+			var err error
+			rec, etag, err = s.loadTxnRecord(ctx, txnID)
+			if err != nil {
+				if errors.Is(err, storage.ErrNotImplemented) {
+					return &TxnRecord{TxnID: txnID, State: TxnStatePending, Participants: []TxnParticipant{p}}, "", nil
+				}
+				if !errors.Is(err, storage.ErrNotFound) {
+					return nil, "", err
+				}
+				rec = nil
 			}
-			if !errors.Is(err, storage.ErrNotFound) {
-				return nil, "", err
-			}
-			rec = nil
 		}
 		now := s.clock.Now().Unix()
 		if rec == nil {
@@ -997,21 +1010,19 @@ func (s *Service) registerTxnParticipant(ctx context.Context, txnID, namespace, 
 			}
 			return nil, "", err
 		}
+		rec.etag = newETag
 		return rec, newETag, nil
 	}
 }
 
 // completeImplicitTxnPromotion lifts the release barrier only after the
 // acquire that reused a server-minted XID has been enrolled in the coordinator.
-func (s *Service) completeImplicitTxnPromotion(ctx context.Context, txnID string) (*TxnRecord, string, error) {
+func (s *Service) completeImplicitTxnPromotion(ctx context.Context, rec *TxnRecord, etag string) (*TxnRecord, string, error) {
+	if rec == nil {
+		return nil, etag, nil
+	}
+	rec = cloneTxnRecord(rec)
 	for {
-		rec, etag, err := s.loadTxnRecord(ctx, txnID)
-		if err != nil {
-			if errors.Is(err, storage.ErrNotImplemented) {
-				return nil, "", nil
-			}
-			return nil, "", err
-		}
 		if !rec.Implicit || !rec.PromotionPending {
 			return rec, etag, nil
 		}
@@ -1022,17 +1033,25 @@ func (s *Service) completeImplicitTxnPromotion(ctx context.Context, txnID string
 		rec.UpdatedAtUnix = s.clock.Now().Unix()
 		newETag, err := s.putTxnRecord(ctx, rec, etag)
 		if errors.Is(err, storage.ErrCASMismatch) {
+			rec, etag, err = s.loadTxnRecord(ctx, rec.TxnID)
+			if errors.Is(err, storage.ErrNotImplemented) {
+				return nil, "", nil
+			}
+			if err != nil {
+				return nil, "", err
+			}
 			continue
 		}
 		if err != nil {
 			return nil, "", err
 		}
+		rec.etag = newETag
 		return rec, newETag, nil
 	}
 }
 
-func (s *Service) enlistTxnParticipant(ctx context.Context, txnID, namespace, key string, leaseExpires int64) (*TxnRecord, string, error) {
-	rec, etag, err := s.registerTxnParticipant(ctx, txnID, namespace, key, leaseExpires)
+func (s *Service) enlistTxnParticipant(ctx context.Context, txnID, namespace, key string, leaseExpires int64, initial *TxnRecord) (*TxnRecord, string, error) {
+	rec, etag, err := s.registerTxnParticipant(ctx, txnID, namespace, key, leaseExpires, initial)
 	if err != nil {
 		return rec, etag, err
 	}
@@ -1055,7 +1074,15 @@ func (s *Service) enlistTxnParticipant(ctx context.Context, txnID, namespace, ke
 			return rec, etag, err
 		}
 	}
-	return s.completeImplicitTxnPromotion(ctx, txnID)
+	// Normal explicit XA enrollment has just written rec through the caller's
+	// write plan. Re-reading it before that plan commits is unsafe for the disk
+	// log store: the pending write is intentionally not yet externally visible.
+	// Only a promoted, server-minted transaction needs the follow-up write that
+	// lifts its promotion barrier.
+	if rec == nil || !rec.Implicit || !rec.PromotionPending {
+		return rec, etag, nil
+	}
+	return s.completeImplicitTxnPromotion(ctx, rec, etag)
 }
 
 // decideTxn records the transaction decision using CAS to avoid races.

@@ -14,6 +14,7 @@ import (
 	"github.com/rs/xid"
 	"pkt.systems/lockd/internal/clock"
 	"pkt.systems/lockd/internal/storage"
+	"pkt.systems/lockd/internal/storage/disk"
 	"pkt.systems/lockd/internal/storage/memory"
 )
 
@@ -111,6 +112,95 @@ func (d failingEnlistTCDecider) Enlist(context.Context, TxnRecord) error {
 
 func (failingEnlistTCDecider) Decide(_ context.Context, rec TxnRecord) (TxnState, error) {
 	return rec.State, nil
+}
+
+func TestExplicitAcquireDiskDoesNotRereadPendingTxnRecord(t *testing.T) {
+	store, err := disk.New(disk.Config{Root: t.TempDir()})
+	if err != nil {
+		t.Fatalf("new disk store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	svc := New(Config{
+		Store:            store,
+		BackendHash:      "test-backend",
+		DefaultNamespace: "default",
+	})
+	txnID := xid.New().String()
+	res, err := svc.Acquire(context.Background(), AcquireCommand{
+		Key:          "explicit-disk-pending-txn",
+		Owner:        "worker",
+		TTLSeconds:   30,
+		BlockSeconds: 0,
+		TxnID:        txnID,
+	})
+	if err != nil {
+		t.Fatalf("explicit acquire: %v", err)
+	}
+	if res.TxnID != txnID {
+		t.Fatalf("transaction id = %q, want %q", res.TxnID, txnID)
+	}
+
+	rec, _, err := svc.loadTxnRecord(context.Background(), txnID)
+	if err != nil {
+		t.Fatalf("load transaction record: %v", err)
+	}
+	if len(rec.Participants) != 1 || rec.Participants[0].Key != "explicit-disk-pending-txn" {
+		t.Fatalf("transaction participants = %+v, want acquired key", rec.Participants)
+	}
+}
+
+func TestImplicitPromotionDiskKeepsFirstReleasePrivate(t *testing.T) {
+	store, err := disk.New(disk.Config{Root: t.TempDir()})
+	if err != nil {
+		t.Fatalf("new disk store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	ctx := context.Background()
+	svc := New(Config{Store: store, BackendHash: "test-backend", DefaultNamespace: "default"})
+	leaseA, err := svc.Acquire(ctx, AcquireCommand{
+		Key: "implicit-disk-a", Owner: "worker-a", TTLSeconds: 30, BlockSeconds: apiBlockNoWait,
+	})
+	if err != nil {
+		t.Fatalf("acquire first lease: %v", err)
+	}
+	leaseB, err := svc.Acquire(ctx, AcquireCommand{
+		Key: "implicit-disk-b", Owner: "worker-b", TTLSeconds: 30, BlockSeconds: apiBlockNoWait, TxnID: leaseA.TxnID,
+	})
+	if err != nil {
+		t.Fatalf("acquire promoted participant: %v", err)
+	}
+	for _, lease := range []*AcquireResult{leaseA, leaseB} {
+		if _, err := svc.Update(ctx, UpdateCommand{
+			Namespace: lease.Namespace, Key: lease.Key, LeaseID: lease.LeaseID, FencingToken: lease.FencingToken, TxnID: lease.TxnID,
+			Body: strings.NewReader(`{"value":"staged"}`), CompactWriter: func(w io.Writer, r io.Reader, _ int64) error { _, err := io.Copy(w, r); return err },
+		}); err != nil {
+			t.Fatalf("stage %s: %v", lease.Key, err)
+		}
+	}
+	if _, err := svc.Release(ctx, ReleaseCommand{
+		Namespace: leaseA.Namespace, Key: leaseA.Key, LeaseID: leaseA.LeaseID, FencingToken: leaseA.FencingToken, TxnID: leaseA.TxnID,
+	}); err != nil {
+		t.Fatalf("release first participant: %v", err)
+	}
+	for _, lease := range []*AcquireResult{leaseA, leaseB} {
+		got, err := svc.Get(ctx, GetCommand{Namespace: lease.Namespace, Key: lease.Key, Public: true})
+		if err != nil {
+			t.Fatalf("public get %s after first release: %v", lease.Key, err)
+		}
+		if got.Reader != nil {
+			_ = got.Reader.Close()
+		}
+		if !got.NoContent {
+			t.Fatalf("first release published staged state for %s", lease.Key)
+		}
+	}
+	if _, err := svc.Release(ctx, ReleaseCommand{
+		Namespace: leaseB.Namespace, Key: leaseB.Key, LeaseID: leaseB.LeaseID, FencingToken: leaseB.FencingToken, TxnID: leaseB.TxnID,
+	}); err != nil {
+		t.Fatalf("release final participant: %v", err)
+	}
 }
 
 func TestServerMintedTxnRegistersImplicitParticipant(t *testing.T) {

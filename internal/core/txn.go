@@ -358,11 +358,11 @@ func (s *Service) removeImplicitTxnParticipant(ctx context.Context, txnID, names
 	}
 }
 
-// removePromotedImplicitTxnParticipant drops an expired participant from the
-// regular coordinator record created when a server-minted transaction was
-// promoted to XA. Unlike an ordinary explicit transaction, this coordinator
-// uses an all-participant release barrier, so retaining an expired lease would
-// leave every surviving participant permanently unable to prepare a decision.
+// removePromotedImplicitTxnParticipant drops an expired, unprepared participant
+// from the regular coordinator record created when a server-minted transaction
+// was promoted to XA. A prepared rollback voter must remain: it no longer
+// blocks the all-participant barrier, and removing it would allow a later
+// commit vote to overwrite the transaction's required rollback outcome.
 func (s *Service) removePromotedImplicitTxnParticipant(ctx context.Context, txnID, namespace, key string) error {
 	p := TxnParticipant{Namespace: namespace, Key: key, BackendHash: s.backendHash}
 	for {
@@ -378,6 +378,9 @@ func (s *Service) removePromotedImplicitTxnParticipant(ctx context.Context, txnI
 		}
 		idx := participantIndex(rec.Participants, p)
 		if idx == -1 {
+			return nil
+		}
+		if rec.Participants[idx].Prepared && rec.Participants[idx].Outcome == TxnStateRollback {
 			return nil
 		}
 		rec.Participants = append(rec.Participants[:idx], rec.Participants[idx+1:]...)

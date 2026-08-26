@@ -954,3 +954,69 @@ func TestExpiredPromotedImplicitLeaseCleanupUnblocksRemainingParticipant(t *test
 		t.Fatalf("surviving participant document=%v", document)
 	}
 }
+
+func TestExpiredPromotedImplicitRollbackVotePreventsCommit(t *testing.T) {
+	ctx := context.Background()
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	clk := clock.NewManual(start)
+	svc := newTestServiceWithClock(t, clk)
+
+	rollbackVoter, err := svc.Acquire(ctx, AcquireCommand{
+		Namespace: "default", Key: "promoted-expired-rollback", Owner: "rollback-worker", TTLSeconds: 1, BlockSeconds: apiBlockNoWait,
+	})
+	if err != nil {
+		t.Fatalf("acquire rollback voter: %v", err)
+	}
+	participant, err := svc.Acquire(ctx, AcquireCommand{
+		Namespace: "default", Key: "promoted-rollback-survivor", Owner: "survivor-worker", TTLSeconds: 30, BlockSeconds: apiBlockNoWait, TxnID: rollbackVoter.TxnID,
+	})
+	if err != nil {
+		t.Fatalf("acquire promoted participant: %v", err)
+	}
+	if _, err := svc.Update(ctx, UpdateCommand{
+		Namespace: participant.Namespace, Key: participant.Key, LeaseID: participant.LeaseID, FencingToken: participant.FencingToken, TxnID: participant.TxnID,
+		Body: strings.NewReader(`{"value":"must not commit"}`), CompactWriter: func(w io.Writer, r io.Reader, _ int64) error { _, err := io.Copy(w, r); return err },
+	}); err != nil {
+		t.Fatalf("stage surviving participant state: %v", err)
+	}
+	if _, err := svc.Release(ctx, ReleaseCommand{
+		Namespace: rollbackVoter.Namespace, Key: rollbackVoter.Key, LeaseID: rollbackVoter.LeaseID, FencingToken: rollbackVoter.FencingToken, TxnID: rollbackVoter.TxnID, Rollback: true,
+	}); err != nil {
+		t.Fatalf("record rollback vote: %v", err)
+	}
+
+	clk.Advance(2 * time.Second)
+	if _, err := svc.Get(ctx, GetCommand{
+		Namespace: rollbackVoter.Namespace, Key: rollbackVoter.Key, LeaseID: rollbackVoter.LeaseID, FencingToken: rollbackVoter.FencingToken,
+	}); err == nil {
+		t.Fatal("expected expired rollback voter get to fail")
+	}
+	rec, _, err := svc.loadTxnRecord(ctx, rollbackVoter.TxnID)
+	if err != nil {
+		t.Fatalf("load promoted transaction after expiry cleanup: %v", err)
+	}
+	if len(rec.Participants) != 2 {
+		t.Fatalf("participants after rollback voter expiry=%+v, want both participants", rec.Participants)
+	}
+	rollbackParticipant := TxnParticipant{Namespace: rollbackVoter.Namespace, Key: rollbackVoter.Key, BackendHash: svc.backendHash}
+	idx := participantIndex(rec.Participants, rollbackParticipant)
+	if idx < 0 || !rec.Participants[idx].Prepared || rec.Participants[idx].Outcome != TxnStateRollback {
+		t.Fatalf("rollback vote after expiry=%+v, want prepared rollback voter", rec.Participants)
+	}
+
+	if _, err := svc.Release(ctx, ReleaseCommand{
+		Namespace: participant.Namespace, Key: participant.Key, LeaseID: participant.LeaseID, FencingToken: participant.FencingToken, TxnID: participant.TxnID,
+	}); err != nil {
+		t.Fatalf("release surviving participant: %v", err)
+	}
+	state, err := svc.Get(ctx, GetCommand{Namespace: participant.Namespace, Key: participant.Key, Public: true})
+	if err != nil {
+		t.Fatalf("get surviving participant state: %v", err)
+	}
+	if state.Reader != nil {
+		defer state.Reader.Close()
+	}
+	if !state.NoContent {
+		t.Fatal("surviving participant state was committed despite rollback vote")
+	}
+}

@@ -92,6 +92,81 @@ func TestDiskStoreRoundTrip(t *testing.T) {
 	}
 }
 
+func TestStoreMetaContinuesAfterPendingCommit(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "store")
+	store, err := New(Config{Root: root})
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	key := "pending-meta"
+	first := &storage.Meta{Version: 1}
+	expectedETag, err := store.StoreMeta(ctx, testNamespace, key, first, "")
+	if err != nil {
+		t.Fatalf("store initial metadata: %v", err)
+	}
+
+	namespace, clean, err := store.normalizeKey(testNamespace, key)
+	if err != nil {
+		t.Fatalf("normalize key: %v", err)
+	}
+	ln, err := store.logstore.namespace(namespace)
+	if err != nil {
+		t.Fatalf("open namespace: %v", err)
+	}
+
+	group := storage.NewCommitGroup()
+	enteredWait := make(chan struct{})
+	finishCommit := make(chan error, 1)
+	group.AddCommitter("test gate", func() <-chan error {
+		close(enteredWait)
+		return finishCommit
+	})
+
+	ln.mu.Lock()
+	ref := ln.metaIndex[clean]
+	if ref == nil {
+		ln.mu.Unlock()
+		t.Fatal("expected initial metadata reference")
+	}
+	ln.pendingMeta[clean] = &pendingRef{ref: ref, group: group}
+	ln.mu.Unlock()
+
+	type result struct {
+		etag string
+		err  error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		etag, err := store.StoreMeta(ctx, testNamespace, key, &storage.Meta{Version: 2}, expectedETag)
+		resultCh <- result{etag: etag, err: err}
+	}()
+
+	select {
+	case <-enteredWait:
+	case <-time.After(5 * time.Second):
+		t.Fatal("StoreMeta did not wait for the pending commit")
+	}
+	ln.mu.Lock()
+	delete(ln.pendingMeta, clean)
+	ln.mu.Unlock()
+	finishCommit <- nil
+
+	select {
+	case got := <-resultCh:
+		if got.err != nil {
+			t.Fatalf("store metadata after pending commit: %v", got.err)
+		}
+		if got.etag == "" {
+			t.Fatal("expected updated metadata etag")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("StoreMeta did not complete after the pending commit")
+	}
+}
+
 func TestAbortStopsWriterPresenceWithoutRemovingMarker(t *testing.T) {
 	t.Parallel()
 

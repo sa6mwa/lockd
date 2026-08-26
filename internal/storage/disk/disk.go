@@ -8,10 +8,10 @@ import (
 	"io"
 	"net/url"
 	"os"
-	"strconv"
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -939,6 +939,7 @@ func (s *Store) StoreMeta(ctx context.Context, namespace, key string, meta *stor
 				return "", err
 			}
 			ln.mu.Lock()
+			current = ln.metaIndex[clean]
 			pending = ln.pendingMeta[clean]
 			ln.mu.Unlock()
 			if pending != nil && !pendingGroupMatch(ctx, pending) {
@@ -946,14 +947,16 @@ func (s *Store) StoreMeta(ctx context.Context, namespace, key string, meta *stor
 				return "", storage.ErrCASMismatch
 			}
 		}
-		if pending != nil && pending.ref.meta.etag != expectedETag {
-			expectedETag = pending.ref.meta.etag
+		if pending != nil {
+			if pending.ref.meta.etag != expectedETag {
+				expectedETag = pending.ref.meta.etag
+			}
+			if isDeleteRecord(pending.ref.recType) || pending.ref.meta.etag != expectedETag {
+				logger.Debug("disk.store_meta.cas_pending_mismatch", "key", key, "expected_etag", expectedETag)
+				return "", storage.ErrCASMismatch
+			}
+			current = pending.ref
 		}
-		if isDeleteRecord(pending.ref.recType) || pending.ref.meta.etag != expectedETag {
-			logger.Debug("disk.store_meta.cas_pending_mismatch", "key", key, "expected_etag", expectedETag)
-			return "", storage.ErrCASMismatch
-		}
-		current = pending.ref
 	}
 	if expectedETag != "" {
 		if current == nil {
@@ -1073,6 +1076,7 @@ func (s *Store) DeleteMeta(ctx context.Context, namespace, key string, expectedE
 				return err
 			}
 			ln.mu.Lock()
+			current = ln.metaIndex[clean]
 			pending = ln.pendingMeta[clean]
 			ln.mu.Unlock()
 			if pending != nil && !pendingGroupMatch(ctx, pending) {
@@ -1080,14 +1084,16 @@ func (s *Store) DeleteMeta(ctx context.Context, namespace, key string, expectedE
 				return storage.ErrCASMismatch
 			}
 		}
-		if pending != nil && pending.ref.meta.etag != expectedETag {
-			expectedETag = pending.ref.meta.etag
+		if pending != nil {
+			if pending.ref.meta.etag != expectedETag {
+				expectedETag = pending.ref.meta.etag
+			}
+			if isDeleteRecord(pending.ref.recType) || pending.ref.meta.etag != expectedETag {
+				logger.Debug("disk.delete_meta.cas_pending_mismatch", "key", key, "expected_etag", expectedETag)
+				return storage.ErrCASMismatch
+			}
+			current = pending.ref
 		}
-		if isDeleteRecord(pending.ref.recType) || pending.ref.meta.etag != expectedETag {
-			logger.Debug("disk.delete_meta.cas_pending_mismatch", "key", key, "expected_etag", expectedETag)
-			return storage.ErrCASMismatch
-		}
-		current = pending.ref
 	}
 	if current == nil {
 		logger.Debug("disk.delete_meta.not_found", "key", key)
@@ -1444,8 +1450,8 @@ func (s *Store) WriteState(ctx context.Context, namespace, key string, body io.R
 				return nil, storage.ErrCASMismatch
 			}
 		}
-		if expectedETag != "" {
-			if pending != nil && pending.ref.meta.etag != expectedETag {
+		if expectedETag != "" && pending != nil {
+			if pending.ref.meta.etag != expectedETag {
 				expectedETag = pending.ref.meta.etag
 			}
 			if isDeleteRecord(pending.ref.recType) || pending.ref.meta.etag != expectedETag {
@@ -1560,6 +1566,7 @@ func (s *Store) Remove(ctx context.Context, namespace, key string, expectedETag 
 				return err
 			}
 			ln.mu.Lock()
+			current = ln.stateIndex[clean]
 			pending = ln.pendingState[clean]
 			ln.mu.Unlock()
 			if pending != nil && !pendingGroupMatch(ctx, pending) {
@@ -1567,14 +1574,16 @@ func (s *Store) Remove(ctx context.Context, namespace, key string, expectedETag 
 				return storage.ErrCASMismatch
 			}
 		}
-		if pending != nil && pending.ref.meta.etag != expectedETag {
-			expectedETag = pending.ref.meta.etag
+		if pending != nil {
+			if pending.ref.meta.etag != expectedETag {
+				expectedETag = pending.ref.meta.etag
+			}
+			if isDeleteRecord(pending.ref.recType) || pending.ref.meta.etag != expectedETag {
+				logger.Debug("disk.remove_state.cas_pending_mismatch", "key", key, "expected_etag", expectedETag)
+				return storage.ErrCASMismatch
+			}
+			current = pending.ref
 		}
-		if isDeleteRecord(pending.ref.recType) || pending.ref.meta.etag != expectedETag {
-			logger.Debug("disk.remove_state.cas_pending_mismatch", "key", key, "expected_etag", expectedETag)
-			return storage.ErrCASMismatch
-		}
-		current = pending.ref
 	}
 	if current == nil {
 		logger.Debug("disk.remove_state.not_found", "key", key)
@@ -1802,8 +1811,8 @@ func (s *Store) PutObject(ctx context.Context, namespace, key string, body io.Re
 				return nil, storage.ErrCASMismatch
 			}
 		}
-		if expectedETag != "" {
-			if pending != nil && pending.ref.meta.etag != expectedETag {
+		if expectedETag != "" && pending != nil {
+			if pending.ref.meta.etag != expectedETag {
 				expectedETag = pending.ref.meta.etag
 			}
 			if isDeleteRecord(pending.ref.recType) || pending.ref.meta.etag != expectedETag {
@@ -1926,6 +1935,7 @@ func (s *Store) DeleteObject(ctx context.Context, namespace, key string, opts st
 				return err
 			}
 			ln.mu.Lock()
+			current = ln.objectIndex[clean]
 			pending = ln.pendingObject[clean]
 			ln.mu.Unlock()
 			if pending != nil && !pendingGroupMatch(ctx, pending) {
@@ -1933,14 +1943,16 @@ func (s *Store) DeleteObject(ctx context.Context, namespace, key string, opts st
 				return storage.ErrCASMismatch
 			}
 		}
-		if pending != nil && pending.ref.meta.etag != expectedETag {
-			expectedETag = pending.ref.meta.etag
+		if pending != nil {
+			if pending.ref.meta.etag != expectedETag {
+				expectedETag = pending.ref.meta.etag
+			}
+			if isDeleteRecord(pending.ref.recType) || pending.ref.meta.etag != expectedETag {
+				verbose.Debug("disk.delete_object.cas_pending_mismatch", "key", key, "expected_etag", expectedETag)
+				return storage.ErrCASMismatch
+			}
+			current = pending.ref
 		}
-		if isDeleteRecord(pending.ref.recType) || pending.ref.meta.etag != expectedETag {
-			verbose.Debug("disk.delete_object.cas_pending_mismatch", "key", key, "expected_etag", expectedETag)
-			return storage.ErrCASMismatch
-		}
-		current = pending.ref
 	}
 	if current == nil {
 		if opts.IgnoreNotFound {

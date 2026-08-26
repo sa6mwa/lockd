@@ -462,6 +462,7 @@ func TestMCPClientIDCompletionRegistered(t *testing.T) {
 		}
 		if cmd == nil {
 			t.Fatalf("expected command for %v", p)
+			return
 		}
 		if cmd.ValidArgsFunction == nil {
 			t.Fatalf("expected positional id completion func on %v", p)

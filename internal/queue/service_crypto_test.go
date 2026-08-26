@@ -58,6 +58,7 @@ func TestQueueEnqueueEncryptsMetadataAndPayload(t *testing.T) {
 	metaInfo := metaObj.Info
 	if metaInfo == nil {
 		t.Fatalf("expected metadata info")
+		return
 	}
 	if metaInfo.ContentType != storage.ContentTypeProtobufEncrypted {
 		t.Fatalf("metadata content type = %s want %s", metaInfo.ContentType, storage.ContentTypeProtobufEncrypted)
@@ -99,6 +100,7 @@ func TestQueueEnqueueEncryptsMetadataAndPayload(t *testing.T) {
 	payloadInfo := payloadObj.Info
 	if payloadInfo == nil {
 		t.Fatalf("expected payload info")
+		return
 	}
 	if payloadInfo.ContentType != storage.ContentTypeOctetStreamEncrypted {
 		t.Fatalf("payload content type = %s want %s", payloadInfo.ContentType, storage.ContentTypeOctetStreamEncrypted)
@@ -153,6 +155,7 @@ func TestQueueEnqueueWithoutCryptoStoresPlaintext(t *testing.T) {
 	metaInfo := metaObj.Info
 	if metaInfo == nil {
 		t.Fatalf("expected metadata info")
+		return
 	}
 	if metaInfo.ContentType != storage.ContentTypeProtobuf {
 		t.Fatalf("metadata content type = %s want %s", metaInfo.ContentType, storage.ContentTypeProtobuf)
@@ -184,6 +187,7 @@ func TestQueueEnqueueWithoutCryptoStoresPlaintext(t *testing.T) {
 	payloadInfo := payloadObj.Info
 	if payloadInfo == nil {
 		t.Fatalf("expected payload info")
+		return
 	}
 	if payloadInfo.ContentType != storage.ContentTypeOctetStream {
 		t.Fatalf("payload content type = %s want %s", payloadInfo.ContentType, storage.ContentTypeOctetStream)

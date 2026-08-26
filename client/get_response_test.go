@@ -22,6 +22,7 @@ func TestGetResponseDocument(t *testing.T) {
 	}
 	if doc == nil {
 		t.Fatal("expected document")
+		return
 	}
 	if doc.Namespace != "default" || doc.Key != "orders/42" || doc.Version != "7" || doc.ETag != "abc123" {
 		t.Fatalf("unexpected doc identity: %+v", doc)

@@ -133,6 +133,7 @@ func TestQueueAckStatefulFlow(t *testing.T) {
 	}
 	if rec == nil {
 		t.Fatalf("expected txn record for %s", acqMsg2.TxnID)
+		return
 	}
 	if rec.ExpiresAtUnix < ext.LeaseExpiresAtUnix {
 		t.Fatalf("expected txn expiry >= lease expiry, got %d want >= %d", rec.ExpiresAtUnix, ext.LeaseExpiresAtUnix)

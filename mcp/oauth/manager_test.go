@@ -915,6 +915,7 @@ func TestAccessTokenSurvivesManagerRestart(t *testing.T) {
 	}
 	if info == nil {
 		t.Fatalf("verify token after restart returned nil info")
+		return
 	}
 	if info.UserID != boot.ClientID {
 		t.Fatalf("token user_id=%q want %q", info.UserID, boot.ClientID)

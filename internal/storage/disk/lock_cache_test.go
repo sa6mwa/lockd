@@ -10,6 +10,7 @@ func TestLockFileCacheEvictsIdle(t *testing.T) {
 	cache := newLockFileCache(1)
 	if cache == nil {
 		t.Fatal("expected cache")
+		return
 	}
 	pathA := filepath.Join(dir, "a.lock")
 	pathB := filepath.Join(dir, "b.lock")

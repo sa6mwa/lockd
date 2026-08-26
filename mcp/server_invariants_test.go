@@ -16,6 +16,7 @@ import (
 	lockdclient "pkt.systems/lockd/client"
 	mcpadmin "pkt.systems/lockd/mcp/admin"
 	mcpoauth "pkt.systems/lockd/mcp/oauth"
+	presetcfg "pkt.systems/lockd/mcp/preset"
 	"pkt.systems/pslog"
 )
 
@@ -603,6 +604,46 @@ func TestHandleInitializedAutoSubscribesDefaultQueue(t *testing.T) {
 			t.Fatal("timed out waiting for auto-subscription")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestPresetOnlySurfaceDoesNotAutoSubscribeDefaultQueue(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	transportServer := mcpsdk.NewServer(&mcpsdk.Implementation{Name: "test-server", Version: "0.0.1"}, nil)
+	t1, _ := mcpsdk.NewInMemoryTransports()
+	ss, err := transportServer.Connect(ctx, t1, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	defer ss.Close()
+
+	logger := pslog.NewStructured(context.Background(), io.Discard)
+	manager := newSubscriptionManager(&fakeQueueWatcher{}, logger)
+	defer manager.Close()
+
+	s := &server{
+		cfg:           Config{DefaultNamespace: "mcp", AgentBusQueue: "lockd.agent.bus"},
+		subscriptions: manager,
+		subscribeLog:  logger,
+	}
+	s.handleInitializedForSurface(toolSurface{
+		Presets: []presetcfg.Definition{testMemoryPresetDefinition()},
+	})(ctx, &mcpsdk.InitializedRequest{
+		Session: ss,
+		Extra: &mcpsdk.RequestExtra{TokenInfo: &mcpauth.TokenInfo{
+			UserID: "preset-client",
+		}},
+	})
+
+	manager.mu.Lock()
+	count := len(manager.subs)
+	manager.mu.Unlock()
+	if count != 0 {
+		t.Fatalf("preset-only surface created %d default queue subscriptions", count)
 	}
 }
 

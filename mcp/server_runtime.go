@@ -34,6 +34,15 @@ func (s *server) handleInitialized(ctx context.Context, req *mcpsdk.InitializedR
 	)
 }
 
+func (s *server) handleInitializedForSurface(surface toolSurface) func(context.Context, *mcpsdk.InitializedRequest) {
+	return func(ctx context.Context, req *mcpsdk.InitializedRequest) {
+		if !surface.Lockd {
+			return
+		}
+		s.handleInitialized(ctx, req)
+	}
+}
+
 func (s *server) resolveNamespace(raw string, extra *mcpsdk.RequestExtra) string {
 	ns := strings.TrimSpace(raw)
 	if ns != "" {

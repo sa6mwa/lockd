@@ -3,7 +3,6 @@ package mcp
 import (
 	"bufio"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -13,7 +12,6 @@ import (
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	mcpoauth "pkt.systems/lockd/mcp/oauth"
 	"pkt.systems/pslog"
 )
 
@@ -261,7 +259,7 @@ func withToolObservability[In, Out any](s *server, toolName string, h mcpsdk.Too
 				realIP = realIPFromHeaders(req.Extra.Header)
 			}
 		}
-		if err := s.ensureRequestClientActive(clientID); err != nil {
+		if err := s.ensureRequestClientAuthorizedForTool(clientID, toolName); err != nil {
 			var zero Out
 			toolLog.Warn("mcp.tool.invoke",
 				"tool", toolName,
@@ -305,16 +303,17 @@ func withObservedTool[In, Out any](s *server, toolName string, h mcpsdk.ToolHand
 	return withStructuredToolErrors(withToolObservability(s, toolName, h))
 }
 
-func (s *server) ensureRequestClientActive(clientID string) error {
+func (s *server) ensureRequestClientAuthorizedForTool(clientID, toolName string) error {
 	clientID = strings.TrimSpace(clientID)
 	if clientID == "" || s.oauthManager == nil {
 		return nil
 	}
-	if err := s.oauthManager.EnsureClientActive(clientID); err != nil {
-		if errors.Is(err, mcpoauth.ErrClientInactive) {
-			return err
-		}
-		return fmt.Errorf("check oauth client activity: %w", err)
+	surface, err := s.toolSurfaceForClient(clientID)
+	if err != nil {
+		return err
+	}
+	if !surface.allowsTool(toolName) {
+		return fmt.Errorf("tool %q is not enabled for oauth client %q", toolName, clientID)
 	}
 	return nil
 }

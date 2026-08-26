@@ -13,6 +13,7 @@ import (
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	mcpoauth "pkt.systems/lockd/mcp/oauth"
+	presetcfg "pkt.systems/lockd/mcp/preset"
 	mcpstate "pkt.systems/lockd/mcp/state"
 	"pkt.systems/pslog"
 )
@@ -191,6 +192,62 @@ func TestToolObservabilityWarnsForInactiveOAuthClient(t *testing.T) {
 	}
 	if !strings.Contains(out, `"real_ip":"198.51.100.25"`) {
 		t.Fatalf("expected real ip from X-Real-IP, got %q", out)
+	}
+}
+
+func TestToolObservabilityRevalidatesOAuthClientSurface(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "mcp.pem")
+	tokenStorePath := filepath.Join(dir, "mcp-token-store.enc.json")
+	boot, err := mcpstate.Bootstrap(mcpstate.BootstrapRequest{
+		Path:              statePath,
+		Issuer:            "https://127.0.0.1:19341",
+		InitialClientName: "default",
+	})
+	if err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	manager, err := mcpoauth.NewManager(mcpoauth.ManagerConfig{
+		StatePath:  statePath,
+		TokenStore: tokenStorePath,
+	})
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+
+	s := &server{oauthManager: manager, transportLog: pslog.NoopLogger()}
+	calls := 0
+	handler := withToolObservability(s, "lockd.query", func(_ context.Context, _ *mcpsdk.CallToolRequest, _ struct{}) (*mcpsdk.CallToolResult, struct{}, error) {
+		calls++
+		return nil, struct{}{}, nil
+	})
+	req := &mcpsdk.CallToolRequest{Extra: &mcpsdk.RequestExtra{
+		TokenInfo: &mcpauth.TokenInfo{UserID: boot.ClientID},
+	}}
+	if _, _, err := handler(context.Background(), req, struct{}{}); err != nil {
+		t.Fatalf("initial authorized tool call: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("handler calls=%d want 1", calls)
+	}
+
+	lockdPreset := false
+	if err := manager.UpdateClient(mcpoauth.UpdateClientRequest{
+		ClientID:    boot.ClientID,
+		LockdPreset: &lockdPreset,
+		Presets:     []presetcfg.Definition{testMemoryPresetDefinition()},
+		PresetsSet:  true,
+	}); err != nil {
+		t.Fatalf("update client surface: %v", err)
+	}
+
+	if _, _, err := handler(context.Background(), req, struct{}{}); err == nil || !strings.Contains(err.Error(), "unauthorized") {
+		t.Fatalf("expected unauthorized after surface update, got %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("handler calls=%d want 1 after denied request", calls)
 	}
 }
 

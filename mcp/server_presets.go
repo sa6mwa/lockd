@@ -36,18 +36,52 @@ func (s *server) toolSurfaceForRequest(r *http.Request) toolSurface {
 	if tokenInfo == nil || strings.TrimSpace(tokenInfo.UserID) == "" {
 		return defaultToolSurface()
 	}
+	surface, err := s.toolSurfaceForClient(tokenInfo.UserID)
+	if err != nil {
+		return defaultToolSurface()
+	}
+	return surface
+}
+
+// toolSurfaceForClient returns the current tool surface for an active OAuth
+// client. It reloads OAuth state before reading the snapshot so stateful MCP
+// sessions lose access immediately when their client surface is reduced.
+func (s *server) toolSurfaceForClient(clientID string) (toolSurface, error) {
+	clientID = strings.TrimSpace(clientID)
+	if s.oauthManager == nil || clientID == "" {
+		return defaultToolSurface(), nil
+	}
+	if err := s.oauthManager.EnsureClientActive(clientID); err != nil {
+		return toolSurface{}, fmt.Errorf("check oauth client activity: %w", err)
+	}
 	snapshot := s.oauthManager.Snapshot()
 	if snapshot == nil {
-		return defaultToolSurface()
+		return toolSurface{}, fmt.Errorf("load oauth client %q: no state", clientID)
 	}
-	client, ok := snapshot.Clients[strings.TrimSpace(tokenInfo.UserID)]
+	client, ok := snapshot.Clients[clientID]
 	if !ok || client.Revoked {
-		return defaultToolSurface()
+		return toolSurface{}, fmt.Errorf("oauth client %q is inactive", clientID)
 	}
-	return toolSurface{
-		Lockd:   client.LockdPreset,
-		Presets: client.Presets,
+	return toolSurface{Lockd: client.LockdPreset, Presets: client.Presets}, nil
+}
+
+func (surface toolSurface) allowsTool(toolName string) bool {
+	if surface.Lockd && strings.HasPrefix(toolName, "lockd.") {
+		return true
 	}
+	for _, definition := range surface.Presets {
+		if toolName == definition.Name+".help" {
+			return true
+		}
+		for _, kind := range definition.Kinds {
+			for _, operation := range kind.Operations {
+				if toolName == definition.Name+"."+kind.Name+"."+string(operation) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func (s *server) newMCPServerForSurface(surface toolSurface) *mcpsdk.Server {
@@ -56,7 +90,7 @@ func (s *server) newMCPServerForSurface(surface toolSurface) *mcpsdk.Server {
 		Version: "0.1.0",
 	}, &mcpsdk.ServerOptions{
 		Instructions:       defaultServerInstructions(s.cfg),
-		InitializedHandler: s.handleInitialized,
+		InitializedHandler: s.handleInitializedForSurface(surface),
 	})
 	s.registerResources(mcpSrv)
 	s.registerToolsForSurface(mcpSrv, surface)

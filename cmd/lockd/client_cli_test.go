@@ -1548,6 +1548,53 @@ func TestCLIClientUpdateMapsEmptyJSONFileToNull(t *testing.T) {
 	}
 }
 
+func TestCLIClientUpdateRejectsMalformedStreamedJSON(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "auto"},
+		{name: "json", args: []string{"--type", "json"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("LOCKD_CONFIG", "")
+			viper.Reset()
+			t.Cleanup(viper.Reset)
+
+			bodyRead := make(chan error, 1)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, err := io.Copy(io.Discard, r.Body)
+				bodyRead <- err
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"new_version":2,"new_state_etag":"unexpected","bytes":1}`))
+			}))
+			t.Cleanup(srv.Close)
+
+			statePath := filepath.Join(t.TempDir(), "malformed.json")
+			if err := os.WriteFile(statePath, []byte(`{"unterminated":`), 0o600); err != nil {
+				t.Fatalf("write malformed state: %v", err)
+			}
+			args := []string{
+				"client", "--server", srv.URL, "--disable-mtls", "update",
+				"--key", "orders", "--lease", xid.New().String(), "--txn-id", xid.New().String(), "--fencing-token", "7",
+			}
+			args = append(args, tc.args...)
+			args = append(args, statePath)
+			if err := runCLICommandExpectError(t, args...); err == nil {
+				t.Fatal("malformed JSON update unexpectedly succeeded")
+			}
+			select {
+			case err := <-bodyRead:
+				if err == nil {
+					t.Fatal("server received a complete malformed JSON request body")
+				}
+			default:
+				// The client may reject before opening a request; that is also valid.
+			}
+		})
+	}
+}
+
 func TestCLIClientAcquireGeneratesKeyAndCommits(t *testing.T) {
 	t.Setenv("LOCKD_CONFIG", "")
 	viper.Reset()

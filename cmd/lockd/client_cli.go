@@ -21,6 +21,7 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 
+	"pkt.systems/jpact"
 	"pkt.systems/lockd"
 	"pkt.systems/lockd/api"
 	lockdclient "pkt.systems/lockd/client"
@@ -1888,7 +1889,9 @@ func newClientUpdateCommand(cfg *clientCLIConfig) *cobra.Command {
 				if closer != nil {
 					defer closer.Close()
 				}
-				updated, err := cli.UpdateStream(ctx, key, lease, newEmptyJSONAsNullReader(reader), opts)
+				validated := newValidatedJSONStream(reader)
+				defer validated.Close()
+				updated, err := cli.UpdateStream(ctx, key, lease, validated, opts)
 				if err != nil {
 					return err
 				}
@@ -2633,6 +2636,19 @@ func newEmptyJSONAsNullReader(r io.Reader) io.Reader {
 		return strings.NewReader("null")
 	}
 	return &emptyJSONAsNullReader{r: r}
+}
+
+// newValidatedJSONStream compacts and validates a JSON update while it is read
+// by the HTTP transport. The pipe bounds buffering to the stream parser and
+// propagates malformed or trailing JSON as a request-body error before the
+// transport can complete the request successfully.
+func newValidatedJSONStream(r io.Reader) *io.PipeReader {
+	reader, writer := io.Pipe()
+	go func() {
+		err := jpact.CompactWriter(writer, newEmptyJSONAsNullReader(r), 0)
+		_ = writer.CloseWithError(err)
+	}()
+	return reader
 }
 
 func (r *emptyJSONAsNullReader) Read(p []byte) (int, error) {

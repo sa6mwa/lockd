@@ -234,11 +234,28 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCommand) (res *Acquire
 			creationMu = s.creationMutex(storageKey)
 			creationMu.Lock()
 		}
-		oldExpires := int64(0)
 		if meta.Lease != nil && meta.Lease.ExpiresAtUnix <= now.Unix() {
-			oldExpires = meta.Lease.ExpiresAtUnix
-			meta.Lease = nil
+			if _, _, err := s.clearExpiredLease(commitCtx, namespace, keyComponent, meta, metaETag, now, sweepModeTransparent, true); err != nil {
+				if creationMu != nil {
+					creationMu.Unlock()
+				}
+				if errors.Is(err, storage.ErrCASMismatch) {
+					if waitErr := plan.Wait(nil); waitErr != nil {
+						return nil, waitErr
+					}
+					continue
+				}
+				return nil, plan.Wait(err)
+			}
+			if creationMu != nil {
+				creationMu.Unlock()
+			}
+			if waitErr := plan.Wait(nil); waitErr != nil {
+				return nil, waitErr
+			}
+			continue
 		}
+		oldExpires := int64(0)
 		// If the lease is gone but staging remains, roll it back before granting
 		// a new lease to avoid resurfacing stale staged payloads after restarts.
 		if meta.Lease == nil && meta.StagedTxnID != "" {
